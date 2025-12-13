@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Rust build outputs
+rust_router/target/
+
+# Compiled Python modules
+*.pyd
+*.so
+
+# KiCad outputs (routed files, backups, project files)
+routed_*.kicad_pcb
+routed_*.kicad_pro
+*-bak
+*.kicad_prl
+*.kicad_pro
+fp-info-cache
+
+# Visualization outputs
+route_viz_*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

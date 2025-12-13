@@ -1,0 +1,17 @@
+[package]
+name = "grid_router"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "grid_router"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+rustc-hash = "2.1"  # Fast hash for integer keys
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

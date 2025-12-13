@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PCB Routing Algorithm: Final Version</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+
+        .container { display: flex; gap: 40px; margin-top: 20px; flex-wrap: wrap; justify-content: center; }
+        .view-box { text-align: center; }
+
+        canvas { background: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); cursor: crosshair; }
+        #graphCanvas { cursor: default; }
+
+        .controls {
+            margin-top: 20px; padding: 20px; background: white; border-radius: 12px;
+            display: flex; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); align-items: center;
+        }
+
+        button {
+            padding: 10px 15px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 6px; font-weight: 600; font-size: 14px;
+        }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button.reset { background: #dc3545; }
+
+        /* FIXED CSS FOR STATUS PANEL */
+        #status-panel {
+            width: 720px;
+            min-height: 50px;
+            margin-top: 15px;
+            padding: 15px;
+            background: #222;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            border-radius: 6px;
+            text-align: center; /* Use standard text alignment instead of flexbox */
+            line-height: 1.5;
+            font-size: 14px;
+        }
+
+        .label { font-weight: bold; margin-bottom: 10px; display: block; color: #555; font-size: 18px;}
+    </style>
+</head>
+<body>
+
+    <h2>Algorithm Traversal Visualization</h2>
+
+    <div class="container">
+        <div class="view-box">
+            <span class="label">1. Physical View (The PCB)</span>
+            <canvas id="pcbCanvas" width="350" height="350"></canvas>
+        </div>
+
+        <div class="view-box">
+            <span class="label">2. Logical View (The Graph)</span>
+            <canvas id="graphCanvas" width="350" height="350"></canvas>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="btnGraph" onclick="buildGraph()">Step 1: Convert to Graph</button>
+        <button id="btnSolve" onclick="runMicroStep()" disabled>Step 2: Run Micro-Step</button>
+        <button class="reset" onclick="reset()">Reset</button>
+    </div>
+
+    <div id="status-panel">Draw intersecting nets on the PCB (Left), then click Step 1.</div>
+
+<script>
+    const pcbCanvas = document.getElementById('pcbCanvas');
+    const graphCanvas = document.getElementById('graphCanvas');
+    const ctxPcb = pcbCanvas.getContext('2d');
+    const ctxGraph = graphCanvas.getContext('2d');
+    const status = document.getElementById('status-panel');
+    const btnGraph = document.getElementById('btnGraph');
+    const btnSolve = document.getElementById('btnSolve');
+
+    const CENTER = 175;
+    const RADIUS = 130;
+
+    let pins = [];
+    let nets = [];
+    let conflicts = [];
+    let selectedPin = null;
+    let graphNodes = [];
+
+    // Initialize Pins
+    for(let i=0; i<16; i++) {
+        let ang = (i/16)*Math.PI*2 - Math.PI/2;
+        pins.push({x: CENTER + RADIUS*Math.cos(ang), y: CENTER + RADIUS*Math.sin(ang), id: i});
+    }
+
+    function draw() {
+        // --- PCB DRAW ---
+        ctxPcb.clearRect(0,0,350,350);
+        ctxPcb.strokeStyle = '#ddd'; ctxPcb.beginPath(); ctxPcb.arc(CENTER,CENTER,RADIUS,0,Math.PI*2); ctxPcb.stroke();
+
+        nets.forEach((n, i) => {
+            let p1 = pins[n.start], p2 = pins[n.end];
+            ctxPcb.beginPath(); ctxPcb.moveTo(p1.x, p1.y); ctxPcb.lineTo(p2.x, p2.y);
+            ctxPcb.lineWidth = 3;
+            if(n.state === 'winner') ctxPcb.strokeStyle = '#28a745'; // Green
+            else if(n.state === 'loser') { ctxPcb.strokeStyle = '#dc3545'; ctxPcb.setLineDash([5,5]); } // Red
+            else ctxPcb.strokeStyle = '#666'; // Gray
+            ctxPcb.stroke(); ctxPcb.setLineDash([]);
+
+            ctxPcb.fillStyle = 'black';
+            ctxPcb.font = '12px Arial';
+            ctxPcb.fillText(String.fromCharCode(65+i), (p1.x+p2.x)/2, (p1.y+p2.y)/2 - 5);
+        });
+
+        pins.forEach((p, i) => {
+            ctxPcb.beginPath(); ctxPcb.arc(p.x, p.y, 5, 0, Math.PI*2);
+            ctxPcb.fillStyle = (selectedPin===i)? '#f0ad4e' : '#007bff'; ctxPcb.fill();
+        });
+
+        // --- GRAPH DRAW ---
+        ctxGraph.clearRect(0,0,350,350);
+        if(graphNodes.length > 0) {
+            conflicts.forEach(pair => {
+                let n1 = graphNodes[pair[0]], n2 = graphNodes[pair[1]];
+                ctxGraph.beginPath(); ctxGraph.moveTo(n1.x, n1.y); ctxGraph.lineTo(n2.x, n2.y);
+                ctxGraph.strokeStyle = '#ccc'; ctxGraph.lineWidth = 1; ctxGraph.stroke();
+            });
+
+            graphNodes.forEach((n, i) => {
+                ctxGraph.beginPath(); ctxGraph.arc(n.x, n.y, 18, 0, Math.PI*2);
+
+                if(nets[i].state === 'winner') ctxGraph.fillStyle = '#28a745';
+                else if(nets[i].state === 'loser') ctxGraph.fillStyle = '#dc3545';
+                else if(nets[i].state === 'evaluating') ctxGraph.fillStyle = '#ffc107';
+                else ctxGraph.fillStyle = '#007bff';
+
+                ctxGraph.fill();
+                ctxGraph.fillStyle = 'white'; ctxGraph.font = "bold 14px Arial";
+                ctxGraph.textAlign = "center"; ctxGraph.textBaseline = "middle";
+                ctxGraph.fillText(String.fromCharCode(65+i), n.x, n.y);
+
+                if(nets[i].state === 'unknown') {
+                    let deg = getDegree(i);
+                    ctxGraph.fillStyle = '#000'; ctxGraph.font = "10px Arial";
+                    ctxGraph.fillText(deg + " conflicts", n.x, n.y - 25);
+                }
+            });
+        } else {
+            ctxGraph.fillStyle = '#999'; ctxGraph.font = "14px Arial"; ctxGraph.textAlign = "center";
+            ctxGraph.fillText("Graph will appear here", 175, 175);
+        }
+    }
+
+    function buildGraph() {
+        if(nets.length < 2) { status.innerText = "Draw at least 2 crossing nets first."; return; }
+
+        graphNodes = []; conflicts = [];
+
+        for(let i=0; i<nets.length; i++) {
+            let ang = (i/nets.length)*Math.PI*2 - Math.PI/2;
+            graphNodes.push({x: CENTER + 80*Math.cos(ang), y: CENTER + 80*Math.sin(ang)});
+        }
+
+        for(let i=0; i<nets.length; i++) {
+            for(let j=i+1; j<nets.length; j++) {
+                if(isIntersect(nets[i], nets[j])) {
+                    conflicts.push([i, j]);
+                }
+            }
+        }
+
+        status.innerHTML = "Graph Built. Numbers show 'Conflict Score'.<br>Click 'Run Micro-Step' to see the Greedy Algorithm decide.";
+        btnGraph.disabled = true;
+        btnSolve.disabled = false;
+        draw();
+    }
+
+    function runMicroStep() {
+        // Remove 'evaluating' highlight from previous step
+        nets.forEach(n => { if(n.state==='evaluating') n.state='unknown'; });
+
+        let candidates = nets.map((n, i) => ({idx: i, score: getDegree(i), state: n.state}))
+                             .filter(c => c.state === 'unknown');
+
+        if(candidates.length === 0) {
+            status.innerHTML = "Algorithm Finished.<br><span style='color:#28a745'>Green = Layer 1</span> | <span style='color:#dc3545'>Red = Layer 2</span>";
+            btnSolve.disabled = true;
+            return;
+        }
+
+        candidates.sort((a,b) => a.score - b.score);
+        let best = candidates[0];
+
+        // Highlight current
+        nets[best.idx].state = 'winner';
+
+        let killed = [];
+        conflicts.forEach(pair => {
+            let target = -1;
+            if(pair[0] === best.idx) target = pair[1];
+            if(pair[1] === best.idx) target = pair[0];
+
+            if(target !== -1 && nets[target].state === 'unknown') {
+                nets[target].state = 'loser';
+                killed.push(String.fromCharCode(65+target));
+            }
+        });
+
+        let msg = `Analyzing <b>${String.fromCharCode(65+best.idx)}</b> (Conflicts: ${best.score}). <br>It has the fewest conflicts, so it wins Layer 1.`;
+        if(killed.length > 0) {
+            msg += `<br>This forces neighbors [<b>${killed.join(', ')}</b>] to Layer 2.`;
+        } else {
+            msg += `<br>It has no active conflicts.`;
+        }
+        status.innerHTML = msg;
+        draw();
+    }
+
+    // --- LOGIC FIX: Normalized Intersection ---
+    function isIntersect(n1, n2) {
+        let a = n1, b = n2;
+        // Normalize: 'a' must start before 'b'
+        if(n1.start > n2.start) { a = n2; b = n1; }
+        // Check if endpoints alternate (A... B... A... B)
+        return (a.start < b.start && b.start < a.end && a.end < b.end);
+    }
+
+    function getDegree(idx) {
+        let count = 0;
+        conflicts.forEach(pair => {
+            let neighbor = -1;
+            if(pair[0] === idx) neighbor = pair[1];
+            if(pair[1] === idx) neighbor = pair[0];
+            if(neighbor !== -1 && nets[neighbor].state === 'unknown') count++;
+        });
+        return count;
+    }
+
+    pcbCanvas.addEventListener('mousedown', e => {
+        if(graphNodes.length > 0) return;
+        let rect = pcbCanvas.getBoundingClientRect();
+        let x = e.clientX - rect.left, y = e.clientY - rect.top;
+
+        let hit = pins.findIndex(p => Math.hypot(p.x-x, p.y-y) < 15);
+        if(hit === -1) return;
+
+        if(selectedPin === null) selectedPin = hit;
+        else if(selectedPin !== hit) {
+            let p1 = Math.min(selectedPin, hit), p2 = Math.max(selectedPin, hit);
+            if(!nets.find(n => n.start===p1 && n.end===p2)) {
+                nets.push({start: p1, end: p2, id: nets.length, state: 'unknown'});
+            }
+            selectedPin = null;
+        }
+        draw();
+    });
+
+    function reset() {
+        nets = []; graphNodes = []; conflicts = []; selectedPin = null;
+        btnGraph.disabled = false; btnSolve.disabled = true;
+        status.innerText = "Draw intersecting nets on the PCB (Left), then click Step 1.";
+        draw();
+    }
+
+    draw();
+</script>
+</body>
+</html>

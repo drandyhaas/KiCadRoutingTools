@@ -1,0 +1,434 @@
+"""
+DRC Checker - Find overlapping tracks and vias between different nets.
+"""
+
+import sys
+import argparse
+import math
+import fnmatch
+from typing import List, Tuple, Set, Optional
+from kicad_parser import parse_kicad_pcb, Segment, Via
+
+
+def matches_any_pattern(name: str, patterns: List[str]) -> bool:
+    """Check if a net name matches any of the given patterns (fnmatch style)."""
+    for pattern in patterns:
+        if fnmatch.fnmatch(name, pattern):
+            return True
+    return False
+
+
+def point_to_segment_distance(px: float, py: float,
+                               x1: float, y1: float,
+                               x2: float, y2: float) -> float:
+    """Calculate minimum distance from point (px, py) to segment (x1,y1)-(x2,y2)."""
+    dx = x2 - x1
+    dy = y2 - y1
+
+    if dx == 0 and dy == 0:
+        return math.sqrt((px - x1)**2 + (py - y1)**2)
+
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+
+    return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+
+
+def segment_to_segment_distance(seg1: Segment, seg2: Segment) -> float:
+    """Calculate minimum distance between two segments."""
+    # Check all endpoint-to-segment distances
+    d1 = point_to_segment_distance(seg1.start_x, seg1.start_y,
+                                    seg2.start_x, seg2.start_y,
+                                    seg2.end_x, seg2.end_y)
+    d2 = point_to_segment_distance(seg1.end_x, seg1.end_y,
+                                    seg2.start_x, seg2.start_y,
+                                    seg2.end_x, seg2.end_y)
+    d3 = point_to_segment_distance(seg2.start_x, seg2.start_y,
+                                    seg1.start_x, seg1.start_y,
+                                    seg1.end_x, seg1.end_y)
+    d4 = point_to_segment_distance(seg2.end_x, seg2.end_y,
+                                    seg1.start_x, seg1.start_y,
+                                    seg1.end_x, seg1.end_y)
+
+    return min(d1, d2, d3, d4)
+
+
+def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tuple[bool, Optional[Tuple[float, float]]]:
+    """Check if two segments on the same layer cross each other.
+
+    Returns (True, intersection_point) if they cross, (False, None) otherwise.
+    Segments that share an endpoint are not considered crossing.
+    """
+    if seg1.layer != seg2.layer:
+        return False, None
+
+    x1, y1 = seg1.start_x, seg1.start_y
+    x2, y2 = seg1.end_x, seg1.end_y
+    x3, y3 = seg2.start_x, seg2.start_y
+    x4, y4 = seg2.end_x, seg2.end_y
+
+    # Check if segments share an endpoint (not a crossing)
+    def points_equal(ax, ay, bx, by):
+        return abs(ax - bx) < tolerance and abs(ay - by) < tolerance
+
+    if (points_equal(x1, y1, x3, y3) or points_equal(x1, y1, x4, y4) or
+        points_equal(x2, y2, x3, y3) or points_equal(x2, y2, x4, y4)):
+        return False, None
+
+    # Direction vectors
+    dx1, dy1 = x2 - x1, y2 - y1
+    dx2, dy2 = x4 - x3, y4 - y3
+
+    # Cross product of direction vectors
+    cross = dx1 * dy2 - dy1 * dx2
+
+    if abs(cross) < 1e-10:
+        # Parallel segments - no crossing
+        return False, None
+
+    # Solve for parameters t and u where:
+    # (x1, y1) + t * (dx1, dy1) = (x3, y3) + u * (dx2, dy2)
+    dx3, dy3 = x3 - x1, y3 - y1
+    t = (dx3 * dy2 - dy3 * dx2) / cross
+    u = (dx3 * dy1 - dy3 * dx1) / cross
+
+    # Check if intersection is within both segments (exclusive of endpoints)
+    eps = 0.001  # Small margin to exclude near-endpoint intersections
+    if eps < t < 1 - eps and eps < u < 1 - eps:
+        # Calculate intersection point
+        ix = x1 + t * dx1
+        iy = y1 + t * dy1
+        return True, (ix, iy)
+
+    return False, None
+
+
+def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, tolerance: float = 0.001) -> Tuple[bool, float]:
+    """Check if two segments on the same layer violate clearance.
+
+    Args:
+        tolerance: Ignore violations smaller than this (mm). Default 0.001mm (1 micron).
+    """
+    if seg1.layer != seg2.layer:
+        return False, 0.0
+
+    # Required distance is half-widths plus clearance
+    required_dist = seg1.width / 2 + seg2.width / 2 + clearance
+    actual_dist = segment_to_segment_distance(seg1, seg2)
+    overlap = required_dist - actual_dist
+
+    if overlap > tolerance:
+        return True, overlap
+    return False, 0.0
+
+
+def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, tolerance: float = 0.001) -> Tuple[bool, float]:
+    """Check if a via overlaps with a segment on any common layer.
+
+    Args:
+        tolerance: Ignore violations smaller than this (mm). Default 0.001mm (1 micron).
+    """
+    # Check if they share a layer
+    via_layers = set(via.layers) if via.layers else {'F.Cu', 'B.Cu'}
+    if seg.layer not in via_layers:
+        return False, 0.0
+
+    required_dist = via.size / 2 + seg.width / 2 + clearance
+    actual_dist = point_to_segment_distance(via.x, via.y,
+                                            seg.start_x, seg.start_y,
+                                            seg.end_x, seg.end_y)
+    overlap = required_dist - actual_dist
+
+    if overlap > tolerance:
+        return True, overlap
+    return False, 0.0
+
+
+def check_via_via_overlap(via1: Via, via2: Via, clearance: float, tolerance: float = 0.001) -> Tuple[bool, float]:
+    """Check if two vias overlap.
+
+    Args:
+        tolerance: Ignore violations smaller than this (mm). Default 0.001mm (1 micron).
+    """
+    # All vias are through-hole, so they always potentially conflict
+    required_dist = via1.size / 2 + via2.size / 2 + clearance
+    actual_dist = math.sqrt((via1.x - via2.x)**2 + (via1.y - via2.y)**2)
+    overlap = required_dist - actual_dist
+
+    if overlap > tolerance:
+        return True, overlap
+    return False, 0.0
+
+
+def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None):
+    """Run DRC checks on the PCB file.
+
+    Args:
+        pcb_file: Path to the KiCad PCB file
+        clearance: Minimum clearance in mm
+        net_patterns: Optional list of net name patterns (fnmatch style) to focus on.
+                     If provided, only checks involving at least one matching net are reported.
+    """
+    print(f"Loading {pcb_file}...")
+    pcb_data = parse_kicad_pcb(pcb_file)
+
+    print(f"Found {len(pcb_data.segments)} segments and {len(pcb_data.vias)} vias")
+
+    # Helper to check if a net_id matches the filter patterns
+    def net_matches_filter(net_id: int) -> bool:
+        if net_patterns is None:
+            return True  # No filter, include all
+        net_info = pcb_data.nets.get(net_id, None)
+        if net_info is None:
+            return False
+        return matches_any_pattern(net_info.name, net_patterns)
+
+    # Helper to check if a violation involves at least one matching net
+    def violation_matches_filter(net1_str: str, net2_str: str) -> bool:
+        if net_patterns is None:
+            return True
+        return matches_any_pattern(net1_str, net_patterns) or matches_any_pattern(net2_str, net_patterns)
+
+    if net_patterns:
+        print(f"Filtering to nets matching: {net_patterns}")
+
+    # Group segments and vias by net
+    segments_by_net = {}
+    for seg in pcb_data.segments:
+        if seg.net_id not in segments_by_net:
+            segments_by_net[seg.net_id] = []
+        segments_by_net[seg.net_id].append(seg)
+
+    vias_by_net = {}
+    for via in pcb_data.vias:
+        if via.net_id not in vias_by_net:
+            vias_by_net[via.net_id] = []
+        vias_by_net[via.net_id].append(via)
+
+    violations = []
+
+    # Check segment-to-segment violations (different nets only)
+    print("\nChecking segment-to-segment clearances...")
+    net_ids = list(segments_by_net.keys())
+
+    # If filtering, only check pairs where at least one net matches
+    if net_patterns:
+        matching_seg_nets = [n for n in net_ids if net_matches_filter(n)]
+        print(f"  Found {len(matching_seg_nets)} matching segment nets out of {len(net_ids)}")
+    else:
+        matching_seg_nets = None
+
+    for i, net1 in enumerate(net_ids):
+        net1_matches = matching_seg_nets is None or net1 in matching_seg_nets
+        for net2 in net_ids[i+1:]:
+            if net1 == net2:
+                continue
+            # Skip if neither net matches the filter
+            net2_matches = matching_seg_nets is None or net2 in matching_seg_nets
+            if not net1_matches and not net2_matches:
+                continue
+            for seg1 in segments_by_net[net1]:
+                for seg2 in segments_by_net[net2]:
+                    has_violation, overlap = check_segment_overlap(seg1, seg2, clearance)
+                    if has_violation:
+                        net1_name = pcb_data.nets.get(net1, None)
+                        net2_name = pcb_data.nets.get(net2, None)
+                        net1_str = net1_name.name if net1_name else f"net_{net1}"
+                        net2_str = net2_name.name if net2_name else f"net_{net2}"
+                        violations.append({
+                            'type': 'segment-segment',
+                            'net1': net1_str,
+                            'net2': net2_str,
+                            'layer': seg1.layer,
+                            'overlap_mm': overlap,
+                            'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
+                            'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
+                        })
+                    # Also check for segment crossings (different nets)
+                    crosses, cross_point = segments_cross(seg1, seg2)
+                    if crosses:
+                        net1_name = pcb_data.nets.get(net1, None)
+                        net2_name = pcb_data.nets.get(net2, None)
+                        net1_str = net1_name.name if net1_name else f"net_{net1}"
+                        net2_str = net2_name.name if net2_name else f"net_{net2}"
+                        violations.append({
+                            'type': 'segment-crossing',
+                            'net1': net1_str,
+                            'net2': net2_str,
+                            'layer': seg1.layer,
+                            'cross_point': cross_point,
+                            'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
+                            'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
+                        })
+
+    # Check for same-net segment crossings (self-intersections)
+    print("Checking for same-net segment crossings...")
+    for net_id in net_ids:
+        if matching_seg_nets is not None and net_id not in matching_seg_nets:
+            continue
+        segs = segments_by_net[net_id]
+        for i in range(len(segs)):
+            for j in range(i + 1, len(segs)):
+                seg1, seg2 = segs[i], segs[j]
+                crosses, cross_point = segments_cross(seg1, seg2)
+                if crosses:
+                    net_name = pcb_data.nets.get(net_id, None)
+                    net_str = net_name.name if net_name else f"net_{net_id}"
+                    violations.append({
+                        'type': 'segment-crossing-same-net',
+                        'net1': net_str,
+                        'net2': net_str,
+                        'layer': seg1.layer,
+                        'cross_point': cross_point,
+                        'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
+                        'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
+                    })
+
+    # Check via-to-segment violations (different nets only)
+    print("Checking via-to-segment clearances...")
+    via_net_ids = list(vias_by_net.keys())
+
+    # Pre-compute matching via nets
+    if net_patterns:
+        matching_via_nets = set(n for n in via_net_ids if net_matches_filter(n))
+        matching_seg_net_set = set(matching_seg_nets) if matching_seg_nets else set()
+        print(f"  Found {len(matching_via_nets)} matching via nets out of {len(via_net_ids)}")
+    else:
+        matching_via_nets = None
+        matching_seg_net_set = None
+
+    for via_net in via_net_ids:
+        via_net_matches = matching_via_nets is None or via_net in matching_via_nets
+        for seg_net in net_ids:
+            if via_net == seg_net:
+                continue
+            # Skip if neither net matches
+            seg_net_matches = matching_seg_net_set is None or seg_net in matching_seg_net_set
+            if not via_net_matches and not seg_net_matches:
+                continue
+            for via in vias_by_net[via_net]:
+                for seg in segments_by_net.get(seg_net, []):
+                    has_violation, overlap = check_via_segment_overlap(via, seg, clearance)
+                    if has_violation:
+                        via_net_name = pcb_data.nets.get(via_net, None)
+                        seg_net_name = pcb_data.nets.get(seg_net, None)
+                        via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
+                        seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
+                        violations.append({
+                            'type': 'via-segment',
+                            'net1': via_net_str,
+                            'net2': seg_net_str,
+                            'layer': seg.layer,
+                            'overlap_mm': overlap,
+                            'via_loc': (via.x, via.y),
+                            'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                        })
+
+    # Check via-to-via violations (all nets, including same-net)
+    print("Checking via-to-via clearances...")
+    for i, net1 in enumerate(via_net_ids):
+        net1_matches = matching_via_nets is None or net1 in matching_via_nets
+        for net2 in via_net_ids[i+1:]:
+            # Skip if neither net matches
+            net2_matches = matching_via_nets is None or net2 in matching_via_nets
+            if not net1_matches and not net2_matches:
+                continue
+            for via1 in vias_by_net[net1]:
+                for via2 in vias_by_net[net2]:
+                    # Skip if same via (can happen with same-net checking)
+                    if via1 is via2:
+                        continue
+                    has_violation, overlap = check_via_via_overlap(via1, via2, clearance)
+                    if has_violation:
+                        net1_name = pcb_data.nets.get(net1, None)
+                        net2_name = pcb_data.nets.get(net2, None)
+                        net1_str = net1_name.name if net1_name else f"net_{net1}"
+                        net2_str = net2_name.name if net2_name else f"net_{net2}"
+                        violations.append({
+                            'type': 'via-via' if net1 != net2 else 'via-via-same-net',
+                            'net1': net1_str,
+                            'net2': net2_str,
+                            'overlap_mm': overlap,
+                            'loc1': (via1.x, via1.y),
+                            'loc2': (via2.x, via2.y),
+                        })
+        # Also check same-net via pairs (only if this net matches filter)
+        if net1_matches and net1 in vias_by_net:
+            vias_list = vias_by_net[net1]
+            for j in range(len(vias_list)):
+                for k in range(j + 1, len(vias_list)):
+                    via1 = vias_list[j]
+                    via2 = vias_list[k]
+                    has_violation, overlap = check_via_via_overlap(via1, via2, clearance)
+                    if has_violation:
+                        net1_name = pcb_data.nets.get(net1, None)
+                        net1_str = net1_name.name if net1_name else f"net_{net1}"
+                        violations.append({
+                            'type': 'via-via-same-net',
+                            'net1': net1_str,
+                            'net2': net1_str,
+                            'overlap_mm': overlap,
+                            'loc1': (via1.x, via1.y),
+                            'loc2': (via2.x, via2.y),
+                        })
+
+    # Report violations
+    print("\n" + "=" * 60)
+    if violations:
+        print(f"FOUND {len(violations)} DRC VIOLATIONS:\n")
+
+        # Group by type
+        by_type = {}
+        for v in violations:
+            t = v['type']
+            if t not in by_type:
+                by_type[t] = []
+            by_type[t].append(v)
+
+        for vtype, vlist in by_type.items():
+            print(f"\n{vtype.upper()} violations ({len(vlist)}):")
+            print("-" * 40)
+            for v in vlist[:20]:  # Show first 20 of each type
+                if vtype == 'segment-segment':
+                    print(f"  {v['net1']} <-> {v['net2']}")
+                    print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                    print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
+                    print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
+                elif vtype == 'via-segment':
+                    print(f"  Via:{v['net1']} <-> Seg:{v['net2']}")
+                    print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                    print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                elif vtype == 'via-via':
+                    print(f"  {v['net1']} <-> {v['net2']}")
+                    print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                    print(f"    Via1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})")
+                    print(f"    Via2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})")
+                elif vtype in ('segment-crossing', 'segment-crossing-same-net'):
+                    print(f"  {v['net1']} <-> {v['net2']}")
+                    print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
+                    print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
+                    print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
+
+            if len(vlist) > 20:
+                print(f"  ... and {len(vlist) - 20} more")
+    else:
+        print("NO DRC VIOLATIONS FOUND!")
+
+    print("=" * 60)
+    return violations
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Check PCB for DRC violations (clearance errors)')
+    parser.add_argument('pcb', help='Input PCB file')
+    parser.add_argument('--clearance', '-c', type=float, default=0.1,
+                        help='Minimum clearance in mm (default: 0.1)')
+    parser.add_argument('--nets', '-n', nargs='+', default=None,
+                        help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
+
+    args = parser.parse_args()
+
+    run_drc(args.pcb, args.clearance, args.nets)
