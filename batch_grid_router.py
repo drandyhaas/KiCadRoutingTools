@@ -2262,6 +2262,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Calculate where each path should start/end based on stub positions + stub direction
     connector_length = turn_length_mm  # Distance from stub to turn point
     connector_spread = 0.05  # Spread connector endpoints by this fraction to add clearance margin
+    min_track_clearance = config.track_width + config.clearance  # Min center-to-center distance
+
     if p_float_path and n_float_path and len(p_float_path) >= 2:
         # Calculate P-N offset vectors at source and target
         src_pn_dx = (n_src_x - p_src_x) / 2  # Half-offset from centerline to each track
@@ -2279,14 +2281,49 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                           n_float_path[0][2])
 
         # Replace last points with positions directly in front of each target stub
-        # tgt_dir points away from stubs toward centerline, so add it
-        # Spread outward slightly to add clearance margin at transition to centerline
         p_float_path[-1] = (p_tgt_x + tgt_dir_x * connector_length - tgt_pn_dx * connector_spread,
                            p_tgt_y + tgt_dir_y * connector_length - tgt_pn_dy * connector_spread,
                            p_float_path[-1][2])
         n_float_path[-1] = (n_tgt_x + tgt_dir_x * connector_length + tgt_pn_dx * connector_spread,
                            n_tgt_y + tgt_dir_y * connector_length + tgt_pn_dy * connector_spread,
                            n_float_path[-1][2])
+
+        # Check connector endpoints against opposite track and shorten if too close
+        def point_to_path_dist(px, py, path):
+            """Min distance from point to any segment in path (skipping endpoints)."""
+            min_dist = float('inf')
+            for i in range(1, len(path) - 1):
+                x1, y1, _ = path[i]
+                x2, y2, _ = path[i + 1]
+                seg_len_sq = (x2 - x1)**2 + (y2 - y1)**2
+                if seg_len_sq > 0.0001:
+                    t = max(0, min(1, ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / seg_len_sq))
+                    dist = math.sqrt((px - x1 - t * (x2 - x1))**2 + (py - y1 - t * (y2 - y1))**2)
+                    min_dist = min(min_dist, dist)
+            return min_dist
+
+        def check_and_shorten_connectors(p_path, n_path, p_idx, n_idx,
+                                         p_base, n_base, dir_x, dir_y, pn_dx, pn_dy):
+            """Check clearance and shorten connector if needed. Returns True if shortened."""
+            p_x, p_y, p_layer = p_path[p_idx]
+            n_x, n_y, n_layer = n_path[n_idx]
+            min_dist = min(point_to_path_dist(p_x, p_y, n_path),
+                          point_to_path_dist(n_x, n_y, p_path))
+            deficit = min_track_clearance - min_dist
+            if deficit > 0.001:
+                new_len = max(0.01, connector_length - deficit * 3)
+                p_path[p_idx] = (p_base[0] + dir_x * new_len - pn_dx * connector_spread,
+                                p_base[1] + dir_y * new_len - pn_dy * connector_spread, p_layer)
+                n_path[n_idx] = (n_base[0] + dir_x * new_len + pn_dx * connector_spread,
+                                n_base[1] + dir_y * new_len + pn_dy * connector_spread, n_layer)
+
+        # Check source and target connectors
+        check_and_shorten_connectors(p_float_path, n_float_path, 0, 0,
+                                     (p_src_x, p_src_y), (n_src_x, n_src_y),
+                                     src_dir_x, src_dir_y, src_pn_dx, src_pn_dy)
+        check_and_shorten_connectors(p_float_path, n_float_path, -1, -1,
+                                     (p_tgt_x, p_tgt_y), (n_tgt_x, n_tgt_y),
+                                     tgt_dir_x, tgt_dir_y, tgt_pn_dx, tgt_pn_dy)
 
     # Fix via positions at layer changes to be perpendicular to centerline direction
     # This ensures P and N vias form a line perpendicular to the centerline path
