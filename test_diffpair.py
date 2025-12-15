@@ -362,7 +362,11 @@ Examples:
 
             # If no pattern matched but "violation" mentioned (and not "no violations" or "0")
             if error_count == 0 and "violation" in output.lower():
-                if "no violation" not in output.lower() and "0 violation" not in output.lower():
+                # Check for explicit "no violations" messages (check_drc.py outputs "NO DRC VIOLATIONS FOUND!")
+                no_violations = ("no drc violations" in output.lower() or
+                                 "no violation" in output.lower() or
+                                 "0 violation" in output.lower())
+                if not no_violations:
                     # Count individual violation lines as fallback
                     violation_lines = re.findall(r'violation|error', output, re.IGNORECASE)
                     error_count = len(violation_lines) if violation_lines else 1
