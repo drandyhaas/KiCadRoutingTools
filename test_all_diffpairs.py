@@ -17,7 +17,8 @@ from batch_grid_router import find_differential_pairs
 
 def run_test(diff_pair_name, verbose=False):
     """Run test_diffpair.py for a single diff pair and return results."""
-    cmd = [sys.executable, "test_diffpair.py", diff_pair_name]
+    # Use wildcard prefix to match full path (e.g., /fpga_adc/lvds_rx4_1)
+    cmd = [sys.executable, "test_diffpair.py", f"*{diff_pair_name}"]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
