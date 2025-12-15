@@ -49,3 +49,6 @@ route_viz_*.png
 .DS_Store
 Thumbs.db
 /.claude/settings.local.json
+/fanout_output.kicad_pcb
+/test_batch_diffpair.kicad_pcb
+/~routed_output.kicad_pcb.lck
