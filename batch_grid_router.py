@@ -2091,8 +2091,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
                 # Use larger spacing for vias if needed to meet:
                 # 1. Minimum via-via clearance
-                # 2. Track-to-opposite-via clearance (with 10% safety margin for diagonal segments)
-                track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.1
+                # 2. Track-to-opposite-via clearance (with 15% safety margin for diagonal segments)
+                track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.15
                 min_via_spacing_for_track = track_via_clearance - spacing_mm
                 via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
 
@@ -2409,6 +2409,57 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     # i+3: (p_exit_x, p_exit_y, layer2) - the exit position (short segment from via)
                     # i+4: (p_cont_x, p_cont_y, layer2) - the continuation point
                     
+                    # Check if the segment from last arc point to p_cont passes too close to N via
+                    p_cont_was_extended = False
+                    orig_p_cont_x, orig_p_cont_y = p_cont_x, p_cont_y  # Save original before potential extension
+                    if len(arc_points) > 0:
+                        last_arc_x, last_arc_y = arc_points[-1]
+                        # Calculate minimum distance from N via to segment (last_arc -> p_cont)
+                        seg_dx = p_cont_x - last_arc_x
+                        seg_dy = p_cont_y - last_arc_y
+                        seg_len_sq = seg_dx**2 + seg_dy**2
+                        if seg_len_sq > 0.001:
+                            # Project N via onto segment
+                            t = max(0, min(1, ((n_via_pos_x - last_arc_x) * seg_dx + (n_via_pos_y - last_arc_y) * seg_dy) / seg_len_sq))
+                            closest_x = last_arc_x + t * seg_dx
+                            closest_y = last_arc_y + t * seg_dy
+                            dist_to_nvia = math.sqrt((closest_x - n_via_pos_x)**2 + (closest_y - n_via_pos_y)**2)
+                            if dist_to_nvia < track_via_clearance:
+                                # Segment passes too close to N via, extend p_cont away from N via
+                                shortfall = track_via_clearance - dist_to_nvia + 0.05  # Extra margin
+                                # Move p_cont perpendicular to segment, away from N via
+                                pcont_to_nvia_x = p_cont_x - n_via_pos_x
+                                pcont_to_nvia_y = p_cont_y - n_via_pos_y
+                                pcont_nvia_dist = math.sqrt(pcont_to_nvia_x**2 + pcont_to_nvia_y**2)
+                                if pcont_nvia_dist > 0.001:
+                                    away_x = pcont_to_nvia_x / pcont_nvia_dist
+                                    away_y = pcont_to_nvia_y / pcont_nvia_dist
+                                    p_cont_x += away_x * shortfall
+                                    p_cont_y += away_y * shortfall
+                                    p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
+                                    p_cont_was_extended = True
+                                    print(f"  Extended p_cont for N via clearance (segment was {dist_to_nvia:.3f}mm from via, need {track_via_clearance:.3f}mm)")
+
+                    # If p_cont was extended, add a return point to bring P back parallel to N
+                    return_point = None
+                    if p_cont_was_extended:
+                        # Calculate target position: on the original P track line
+                        # The original P track goes through orig_p_cont in direction p_cont_dir
+
+                        # Distance along P continuation from orig_p_cont to extended p_cont (projected)
+                        pcont_to_orig_x = p_cont_x - orig_p_cont_x
+                        pcont_to_orig_y = p_cont_y - orig_p_cont_y
+                        proj_dist = pcont_to_orig_x * p_cont_dir_x + pcont_to_orig_y * p_cont_dir_y
+                        # Add a bit more distance to ensure we're past the extended section
+                        return_along_dist = proj_dist + track_via_clearance
+
+                        # Return point: on original P line at return_along_dist from orig_p_cont
+                        return_x = orig_p_cont_x + p_cont_dir_x * return_along_dist
+                        return_y = orig_p_cont_y + p_cont_dir_y * return_along_dist
+
+                        return_point = (return_x, return_y, p_cont_layer)
+                        print(f"  Adding return point at ({return_x:.3f}, {return_y:.3f}) to restore parallel tracks")
+
                     # Check if the segment from last arc point to p_cont would violate N track clearance
                     # If so, extend p_cont further along the P continuation direction
                     if len(arc_points) > 0:
@@ -2463,6 +2514,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     insert_idx = i + 4
                     for j, (ax, ay) in enumerate(arc_points[1:]):
                         p_float_path.insert(insert_idx + j, (ax, ay, layer2))
+
+                    # Insert return point after p_cont if we extended it
+                    if return_point is not None:
+                        # p_cont is now at index i + 4 + len(arc_points) - 1 = i + 3 + len(arc_points)
+                        # Insert return point after p_cont
+                        return_insert_idx = i + 4 + len(arc_points)
+                        p_float_path.insert(return_insert_idx, return_point)
 
                     # Update the continuation point if we found an intersection
                     if final_target_x != p_cont_x or final_target_y != p_cont_y:
