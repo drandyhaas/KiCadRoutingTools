@@ -15766,6 +15766,14 @@
 		(net 302)
 		(uuid "2675985f-364e-4640-b75b-745681d21b78")
 	)
+	(via
+		(at 200.2 100.6)
+		(size 0.3)
+		(drill 0.2)
+		(layers "F.Cu" "B.Cu")
+		(net 302)
+		(uuid "c81ee3e5-076f-4c68-bd5a-0cb9c618a0ed")
+	)
 	(segment
 		(start 200.2 100.6)
 		(end 200.6 100.2)

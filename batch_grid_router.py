@@ -1406,12 +1406,241 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     }
 
 
+def _segments_cross(seg1: Segment, seg2: Segment) -> Optional[Tuple[float, float]]:
+    """Check if two segments cross (not just touch at endpoints). Returns crossing point or None."""
+    # Line 1: P1 + t*(P2-P1), Line 2: P3 + u*(P4-P3)
+    x1, y1 = seg1.start_x, seg1.start_y
+    x2, y2 = seg1.end_x, seg1.end_y
+    x3, y3 = seg2.start_x, seg2.start_y
+    x4, y4 = seg2.end_x, seg2.end_y
+
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-10:
+        return None  # Parallel
+
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+
+    # Check if intersection is strictly inside both segments (not at endpoints)
+    eps = 0.001  # Small margin to exclude endpoint touches
+    if eps < t < (1 - eps) and eps < u < (1 - eps):
+        cross_x = x1 + t * (x2 - x1)
+        cross_y = y1 + t * (y2 - y1)
+        return (cross_x, cross_y)
+    return None
+
+
+def fix_self_intersections(segments: List[Segment], existing_segments: List[Segment] = None,
+                           max_short_length: float = 0.2) -> List[Segment]:
+    """Fix self-intersections by moving endpoints of short connector segments.
+
+    When a short connector segment crosses a longer segment (either new or existing),
+    we move the endpoint of the short segment to eliminate the crossing.
+
+    Args:
+        segments: New segments from routing
+        existing_segments: Existing segments of the same net to check crossings against
+        max_short_length: Maximum length for a segment to be considered "short"
+    """
+    if not segments:
+        return segments
+
+    # Combine existing segments by layer for cross-checking
+    existing_by_layer = {}
+    if existing_segments:
+        for seg in existing_segments:
+            if seg.layer not in existing_by_layer:
+                existing_by_layer[seg.layer] = []
+            existing_by_layer[seg.layer].append(seg)
+
+    # Process each layer separately
+    layer_segments = {}
+    for seg in segments:
+        if seg.layer not in layer_segments:
+            layer_segments[seg.layer] = []
+        layer_segments[seg.layer].append(seg)
+
+    result_segments = []
+
+    for layer, layer_segs in layer_segments.items():
+        # Get existing segments on this layer
+        existing_on_layer = existing_by_layer.get(layer, [])
+
+        # Find all crossings involving short NEW segments
+        # Map: new segment index -> (existing segment, crossing point)
+        segments_to_modify = {}
+
+        for i, seg in enumerate(layer_segs):
+            seg_len = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+            if seg_len > max_short_length:
+                continue
+
+            # This is a short new segment - check if it crosses any EXISTING segment
+            for existing in existing_on_layer:
+                cross_pt = _segments_cross(seg, existing)
+                if cross_pt:
+                    segments_to_modify[i] = (existing, cross_pt)
+                    break
+
+        # Process segments - modify short segments that cross existing ones
+        for i, seg in enumerate(layer_segs):
+            if i in segments_to_modify:
+                existing, cross_pt = segments_to_modify[i]
+
+                # Move the short segment's endpoint to an ENDPOINT of the existing segment
+                # (not the crossing point, which would create a gap)
+                # Choose the existing endpoint closest to the crossing point
+                dist_cross_to_ex_start = math.sqrt((cross_pt[0] - existing.start_x)**2 +
+                                                    (cross_pt[1] - existing.start_y)**2)
+                dist_cross_to_ex_end = math.sqrt((cross_pt[0] - existing.end_x)**2 +
+                                                  (cross_pt[1] - existing.end_y)**2)
+
+                if dist_cross_to_ex_end < dist_cross_to_ex_start:
+                    snap_x, snap_y = existing.end_x, existing.end_y
+                else:
+                    snap_x, snap_y = existing.start_x, existing.start_y
+
+                # Determine which endpoint of the short seg to move (the one closer to crossing)
+                dist_start_to_cross = math.sqrt((seg.start_x - cross_pt[0])**2 + (seg.start_y - cross_pt[1])**2)
+                dist_end_to_cross = math.sqrt((seg.end_x - cross_pt[0])**2 + (seg.end_y - cross_pt[1])**2)
+
+                if dist_start_to_cross < dist_end_to_cross:
+                    # Move start to existing endpoint
+                    new_seg = Segment(
+                        start_x=snap_x, start_y=snap_y,
+                        end_x=seg.end_x, end_y=seg.end_y,
+                        width=seg.width, layer=seg.layer, net_id=seg.net_id
+                    )
+                else:
+                    # Move end to existing endpoint
+                    new_seg = Segment(
+                        start_x=seg.start_x, start_y=seg.start_y,
+                        end_x=snap_x, end_y=snap_y,
+                        width=seg.width, layer=seg.layer, net_id=seg.net_id
+                    )
+                result_segments.append(new_seg)
+            else:
+                result_segments.append(seg)
+
+    return result_segments
+
+
+def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
+                        max_appendix_length: float = 0.2) -> List[Segment]:
+    """Collapse short appendix segments by moving dead-end vertices to junction points.
+
+    An appendix is a short segment where one endpoint is a dead-end (degree 1) and
+    the other endpoint is a junction (degree >= 2). We collapse it by moving the
+    dead-end to nearly coincide with the junction (offset by 0.001mm).
+
+    Only collapses segments where the dead-end doesn't connect to existing segments.
+    Also fixes self-intersections where new segments cross existing segments.
+    """
+    if not segments:
+        return segments
+
+    # First fix self-intersections with existing segments
+    segments = fix_self_intersections(segments, existing_segments, max_appendix_length)
+
+    # Build map of existing segment endpoints by layer
+    existing_endpoints = {}
+    if existing_segments:
+        for seg in existing_segments:
+            if seg.layer not in existing_endpoints:
+                existing_endpoints[seg.layer] = set()
+            existing_endpoints[seg.layer].add((round(seg.start_x, 4), round(seg.start_y, 4)))
+            existing_endpoints[seg.layer].add((round(seg.end_x, 4), round(seg.end_y, 4)))
+
+    # Process each layer separately
+    layer_segments = {}
+    for seg in segments:
+        if seg.layer not in layer_segments:
+            layer_segments[seg.layer] = []
+        layer_segments[seg.layer].append(seg)
+
+    result_segments = []
+
+    for layer, layer_segs in layer_segments.items():
+        layer_existing = existing_endpoints.get(layer, set())
+
+        # Build endpoint degree map from NEW segments only
+        endpoint_counts = {}
+        for seg in layer_segs:
+            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
+            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
+            endpoint_counts[start_key] = endpoint_counts.get(start_key, 0) + 1
+            endpoint_counts[end_key] = endpoint_counts.get(end_key, 0) + 1
+
+        # Find and collapse appendices
+        for seg in layer_segs:
+            length = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+
+            if length > max_appendix_length:
+                result_segments.append(seg)
+                continue
+
+            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
+            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
+            start_degree = endpoint_counts.get(start_key, 0)
+            end_degree = endpoint_counts.get(end_key, 0)
+
+            # Check if endpoints connect to existing segments
+            start_connects_existing = start_key in layer_existing
+            end_connects_existing = end_key in layer_existing
+
+            # Appendix: one end is dead-end (degree 1, not connected to existing),
+            # other is junction (degree >= 2 OR connected to existing)
+            if (start_degree == 1 and not start_connects_existing and
+                (end_degree >= 2 or end_connects_existing)):
+                # Collapse: move start to nearly coincide with end (junction point)
+                new_seg = Segment(
+                    start_x=seg.end_x + 0.001,
+                    start_y=seg.end_y,
+                    end_x=seg.end_x,
+                    end_y=seg.end_y,
+                    width=seg.width,
+                    layer=seg.layer,
+                    net_id=seg.net_id
+                )
+                result_segments.append(new_seg)
+            elif (end_degree == 1 and not end_connects_existing and
+                  (start_degree >= 2 or start_connects_existing)):
+                # Collapse: move end to nearly coincide with start (junction point)
+                new_seg = Segment(
+                    start_x=seg.start_x,
+                    start_y=seg.start_y,
+                    end_x=seg.start_x + 0.001,
+                    end_y=seg.start_y,
+                    width=seg.width,
+                    layer=seg.layer,
+                    net_id=seg.net_id
+                )
+                result_segments.append(new_seg)
+            else:
+                # Not an appendix or connects to existing - keep as is
+                result_segments.append(seg)
+
+    return result_segments
+
+
 def add_route_to_pcb_data(pcb_data: PCBData, result: dict) -> None:
     """Add routed segments and vias to PCB data for subsequent routes to see."""
-    for seg in result['new_segments']:
+    new_segments = result['new_segments']
+    if not new_segments:
+        return
+
+    # Get net_id from new segments to find existing segments of the same net
+    net_id = new_segments[0].net_id
+    existing_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+
+    # Collapse appendices and fix self-intersections with existing segments
+    cleaned_segments = collapse_appendices(new_segments, existing_segments)
+    for seg in cleaned_segments:
         pcb_data.segments.append(seg)
     for via in result['new_vias']:
         pcb_data.vias.append(via)
+    # Update result so output file also gets cleaned segments
+    result['new_segments'] = cleaned_segments
 
 
 def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
