@@ -77,7 +77,8 @@ class GridRouteConfig:
     direction_order: str = "forward"
     # Differential pair routing parameters
     diff_pair_gap: float = 0.1  # mm - gap between P and N traces (center-to-center = track_width + gap)
-    diff_pair_centerline_setback: float = 0.4  # mm - distance in front of stubs to start centerline route
+    min_diff_pair_centerline_setback: float = 0.4  # mm - minimum distance in front of stubs to start centerline route
+    max_diff_pair_centerline_setback: float = 0.4  # mm - maximum distance (searches in range min to max)
 
 
 class GridCoord:
@@ -1757,38 +1758,72 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
 
-    # Apply setback - move centerline start/end in front of stubs
-    setback = config.diff_pair_centerline_setback
-    if src_dir_len > 0:
-        center_src_x += src_dir_x * setback
-        center_src_y += src_dir_y * setback
-    if tgt_dir_len > 0:
-        center_tgt_x += tgt_dir_x * setback
-        center_tgt_y += tgt_dir_y * setback
+    # Get setback range
+    min_setback = config.min_diff_pair_centerline_setback
+    max_setback = config.max_diff_pair_centerline_setback
 
-    # Convert to grid coordinates
-    center_src_gx, center_src_gy = coord.to_grid(center_src_x, center_src_y)
-    center_tgt_gx, center_tgt_gy = coord.to_grid(center_tgt_x, center_tgt_y)
-
-    print(f"  Centerline setback: {setback}mm")
+    print(f"  Centerline setback: {min_setback}mm to {max_setback}mm")
     print(f"  Source direction: ({src_dir_x:.2f}, {src_dir_y:.2f}), target direction: ({tgt_dir_x:.2f}, {tgt_dir_y:.2f})")
 
-    # Add source and target positions as allowed cells (around centerline)
-    allow_radius = 15
-    for dx in range(-allow_radius, allow_radius + 1):
-        for dy in range(-allow_radius, allow_radius + 1):
-            obstacles.add_allowed_cell(center_src_gx + dx, center_src_gy + dy)
-            obstacles.add_allowed_cell(center_tgt_gx + dx, center_tgt_gy + dy)
+    # Generate candidate points along the setback line (from min to max distance)
+    # Sample at grid_step intervals
+    num_samples = max(1, int((max_setback - min_setback) / config.grid_step) + 1)
 
-    obstacles.add_source_target_cell(center_src_gx, center_src_gy, src_layer)
-    obstacles.add_source_target_cell(center_tgt_gx, center_tgt_gy, tgt_layer)
+    center_sources = []
+    center_targets = []
+
+    allow_radius = 2
+    for i in range(num_samples):
+        if num_samples > 1:
+            setback = min_setback + (max_setback - min_setback) * i / (num_samples - 1)
+        else:
+            setback = min_setback
+
+        # Calculate source candidate
+        if src_dir_len > 0:
+            src_x = center_src_x + src_dir_x * setback
+            src_y = center_src_y + src_dir_y * setback
+            src_gx, src_gy = coord.to_grid(src_x, src_y)
+
+            # Check if blocked
+            if not obstacles.is_blocked(src_gx, src_gy, src_layer):
+                center_sources.append((src_gx, src_gy, src_layer))
+                # Add allowed cells around this point
+                for dx in range(-allow_radius, allow_radius + 1):
+                    for dy in range(-allow_radius, allow_radius + 1):
+                        obstacles.add_allowed_cell(src_gx + dx, src_gy + dy)
+                obstacles.add_source_target_cell(src_gx, src_gy, src_layer)
+
+        # Calculate target candidate
+        if tgt_dir_len > 0:
+            tgt_x = center_tgt_x + tgt_dir_x * setback
+            tgt_y = center_tgt_y + tgt_dir_y * setback
+            tgt_gx, tgt_gy = coord.to_grid(tgt_x, tgt_y)
+
+            # Check if blocked
+            if not obstacles.is_blocked(tgt_gx, tgt_gy, tgt_layer):
+                center_targets.append((tgt_gx, tgt_gy, tgt_layer))
+                # Add allowed cells around this point
+                for dx in range(-allow_radius, allow_radius + 1):
+                    for dy in range(-allow_radius, allow_radius + 1):
+                        obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
+                obstacles.add_source_target_cell(tgt_gx, tgt_gy, tgt_layer)
+
+    # Remove duplicate grid coordinates
+    center_sources = list(dict.fromkeys(center_sources))
+    center_targets = list(dict.fromkeys(center_targets))
+
+    if not center_sources:
+        print(f"  No valid source candidates found (all blocked in setback range)")
+        return {'failed': True, 'iterations': 0}
+    if not center_targets:
+        print(f"  No valid target candidates found (all blocked in setback range)")
+        return {'failed': True, 'iterations': 0}
+
+    print(f"  Found {len(center_sources)} source candidates, {len(center_targets)} target candidates")
 
     # Create router for centerline
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
-
-    # Route centerline
-    center_sources = [(center_src_gx, center_src_gy, src_layer)]
-    center_targets = [(center_tgt_gx, center_tgt_gy, tgt_layer)]
 
     path, iterations = router.route_multi(obstacles, center_sources, center_targets, config.max_iterations)
     total_iterations = iterations
@@ -2531,7 +2566,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 stub_proximity_cost: float = 3.0,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
-                diff_pair_centerline_setback: float = 0.4) -> Tuple[int, int, float]:
+                min_diff_pair_centerline_setback: float = 0.4,
+                max_diff_pair_centerline_setback: float = 0.4) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
 
@@ -2600,7 +2636,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_radius=stub_proximity_radius,
         stub_proximity_cost=stub_proximity_cost,
         diff_pair_gap=diff_pair_gap,
-        diff_pair_centerline_setback=diff_pair_centerline_setback,
+        min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
+        max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -3016,8 +3053,10 @@ Differential pair routing:
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
     parser.add_argument("--diff-pair-gap", type=float, default=0.1,
                         help="Gap between P and N traces of differential pairs in mm (default: 0.1)")
-    parser.add_argument("--diff-pair-centerline-setback", type=float, default=0.4,
-                        help="Distance in front of stubs to start centerline route in mm (default: 0.4)")
+    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=0.4,
+                        help="Minimum distance in front of stubs to start centerline route in mm (default: 0.4)")
+    parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=0.4,
+                        help="Maximum distance in front of stubs to start centerline route in mm (default: 0.4)")
 
     args = parser.parse_args()
 
@@ -3049,4 +3088,5 @@ Differential pair routing:
                 stub_proximity_cost=args.stub_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
-                diff_pair_centerline_setback=args.diff_pair_centerline_setback)
+                min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
+                max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback)
