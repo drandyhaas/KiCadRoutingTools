@@ -459,6 +459,34 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig) -
     return [], [], f"Cannot determine endpoints: {len(net_segments)} segments, {len(net_pads)} pads"
 
 
+def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
+    """
+    Find all net IDs in the PCB that have unrouted stubs (multiple disconnected segment groups).
+    These are nets that have partial routing but aren't fully connected.
+    """
+    unrouted_ids = []
+
+    # Group segments by net ID
+    net_segments: Dict[int, List[Segment]] = {}
+    for seg in pcb_data.segments:
+        if seg.net_id not in net_segments:
+            net_segments[seg.net_id] = []
+        net_segments[seg.net_id].append(seg)
+
+    # Check each net for multiple disconnected groups
+    for net_id, segments in net_segments.items():
+        if net_id == 0:  # Skip unassigned net
+            continue
+        if len(segments) < 2:
+            continue
+        groups = find_connected_groups(segments)
+        if len(groups) >= 2:
+            # Net has multiple disconnected stub groups = unrouted
+            unrouted_ids.append(net_id)
+
+    return unrouted_ids
+
+
 def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[float, float]]:
     """Get centroid positions of unrouted net stubs for proximity avoidance."""
     stubs = []
@@ -1840,6 +1868,17 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         print(f"No route found after {total_iterations} iterations (both directions)")
         return {'failed': True, 'iterations': total_iterations}
 
+    # Count layer transitions (via changes) in the path
+    layer_transitions = 0
+    for i in range(1, len(path)):
+        if path[i][2] != path[i-1][2]:
+            layer_transitions += 1
+
+    # Limit to single via transition for diff pairs
+    if layer_transitions > 1:
+        print(f"Route found but has {layer_transitions} layer transitions (max 1 allowed for diff pairs)")
+        return {'failed': True, 'iterations': total_iterations}
+
     # Simplify path by removing collinear points
     simplified_path = simplify_path(path)
     print(f"Route found in {total_iterations} iterations, path: {len(path)} -> {len(simplified_path)} points")
@@ -2794,6 +2833,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_net_ids = []
     remaining_net_ids = list(all_net_ids_to_route)
 
+    # Get ALL unrouted nets in the PCB for stub proximity costs
+    # (not just the ones we're routing in this batch)
+    all_unrouted_net_ids = set(get_all_unrouted_net_ids(pcb_data))
+    print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
+
     route_index = 0
 
     # Route differential pairs first (they're more constrained)
@@ -2823,8 +2867,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
             add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
 
-        # Add stub proximity costs for remaining unrouted nets
-        unrouted_stubs = get_stub_endpoints(pcb_data, other_unrouted)
+        # Add stub proximity costs for ALL unrouted nets in PCB (not just current batch)
+        stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                   if nid != pair.p_net_id and nid != pair.n_net_id
+                                   and nid not in routed_net_ids]
+        unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
 
@@ -2879,8 +2926,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config)
             add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
 
-        # Add stub proximity costs for remaining unrouted nets
-        unrouted_stubs = get_stub_endpoints(pcb_data, other_unrouted)
+        # Add stub proximity costs for ALL unrouted nets in PCB (not just current batch)
+        stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                   if nid != net_id and nid not in routed_net_ids]
+        unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
 
