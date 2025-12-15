@@ -2089,8 +2089,12 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 else:
                     perp_x, perp_y = 1.0, 0.0
 
-                # Use larger spacing for vias if needed to meet minimum via-via clearance
-                via_spacing = max(spacing_mm, min_via_spacing / 2)
+                # Use larger spacing for vias if needed to meet:
+                # 1. Minimum via-via clearance
+                # 2. Track-to-opposite-via clearance (with 10% safety margin for diagonal segments)
+                track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.1
+                min_via_spacing_for_track = track_via_clearance - spacing_mm
+                via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
 
                 # Calculate P and N via positions along the via-via axis (at wider spacing)
                 # These are at TARGET polarity positions initially
