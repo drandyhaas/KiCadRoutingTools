@@ -311,9 +311,17 @@ def get_stub_direction(segments: List[Segment], stub_x: float, stub_y: float, st
     return (0, 0)
 
 
-def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig) -> Tuple[List, List, str]:
+def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                      use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """
     Find source and target endpoints for a net, considering segments, pads, and existing vias.
+
+    Args:
+        pcb_data: PCB data
+        net_id: Net ID to find endpoints for
+        config: Grid routing configuration
+        use_stub_free_ends: If True, use only stub free ends (for diff pairs).
+                           If False, use all segment endpoints (for single-ended).
 
     Returns:
         (sources, targets, error_message)
@@ -328,7 +336,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig) -
     net_pads = pcb_data.pads_by_net.get(net_id, [])
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
-    # Case 1: Multiple segment groups - use all segment endpoints
+    # Case 1: Multiple segment groups
     if len(net_segments) >= 2:
         groups = find_connected_groups(net_segments)
         if len(groups) >= 2:
@@ -336,26 +344,45 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig) -
             source_segs = groups[0]
             target_segs = groups[1]
 
-            # Use all segment endpoints as potential source/target points
-            sources = []
-            for seg in source_segs:
-                layer_idx = layer_map.get(seg.layer)
-                if layer_idx is not None:
-                    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                    sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                    if (gx1, gy1) != (gx2, gy2):
-                        sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+            if use_stub_free_ends:
+                # For diff pairs: use only stub free ends (tips not connected to pads)
+                source_free_ends = find_stub_free_ends(source_segs, net_pads)
+                target_free_ends = find_stub_free_ends(target_segs, net_pads)
 
-            targets = []
-            for seg in target_segs:
-                layer_idx = layer_map.get(seg.layer)
-                if layer_idx is not None:
-                    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                    targets.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                    if (gx1, gy1) != (gx2, gy2):
-                        targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                sources = []
+                for x, y, layer in source_free_ends:
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is not None:
+                        gx, gy = coord.to_grid(x, y)
+                        sources.append((gx, gy, layer_idx, x, y))
+
+                targets = []
+                for x, y, layer in target_free_ends:
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is not None:
+                        gx, gy = coord.to_grid(x, y)
+                        targets.append((gx, gy, layer_idx, x, y))
+            else:
+                # For single-ended: use all segment endpoints
+                sources = []
+                for seg in source_segs:
+                    layer_idx = layer_map.get(seg.layer)
+                    if layer_idx is not None:
+                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                        sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                        if (gx1, gy1) != (gx2, gy2):
+                            sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+
+                targets = []
+                for seg in target_segs:
+                    layer_idx = layer_map.get(seg.layer)
+                    if layer_idx is not None:
+                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                        targets.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                        if (gx1, gy1) != (gx2, gy2):
+                            targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
 
             if sources and targets:
                 return sources, targets, None
@@ -1658,8 +1685,9 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     layer_map = {name: idx for idx, name in enumerate(config.layers)}
 
     # Get endpoints for P and N nets separately
-    p_sources, p_targets, p_error = get_net_endpoints(pcb_data, p_net_id, config)
-    n_sources, n_targets, n_error = get_net_endpoints(pcb_data, n_net_id, config)
+    # Use stub free ends for diff pairs to get the actual stub tips
+    p_sources, p_targets, p_error = get_net_endpoints(pcb_data, p_net_id, config, use_stub_free_ends=True)
+    n_sources, n_targets, n_error = get_net_endpoints(pcb_data, n_net_id, config, use_stub_free_ends=True)
 
     if p_error:
         return [], [], f"P net: {p_error}"
