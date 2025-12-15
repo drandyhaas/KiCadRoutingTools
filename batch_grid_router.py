@@ -2142,8 +2142,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                             inner_via_x, inner_via_y = n_via_x, n_via_y
                         print(f"  Flipped inner_is_p for polarity swap: inner_is_p={inner_is_p}")
 
-                    # Track-via clearance distance
-                    track_via_clearance = config.clearance + config.track_width / 2 + config.via_size / 2
+                    # track_via_clearance already calculated above with 10% safety margin
                     diff_pair_spacing = spacing_mm * 2
 
                     # Calculate direction from inner via to outer via (for correct perpendicular sign)
