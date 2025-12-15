@@ -2,22 +2,22 @@
 # Run in Windows powershell like: .\apply_fanouts.ps1
 
 # Remaining FTDI nets (the DATA ones are already in the fanout_starting_point file, so we check-for-previous)
-python bga_fanout.py fanout_starting_point.kicad_pcb --component U3 --output routed_output.kicad_pcb --nets "*U2A*" --primary-escape horizontal --check-for-previous --force-escape-direction
+python bga_fanout.py fanout_starting_point.kicad_pcb --component U3 --output fanout_output.kicad_pcb --nets "*U2A*" --primary-escape horizontal --check-for-previous --force-escape-direction
 
 # LVDS from ADC
-python bga_fanout.py routed_output.kicad_pcb --component IC1 --output routed_output.kicad_pcb --nets "*lvds_rx*" --diff-pairs "*lvds_rx*" --primary-escape vertical
+python bga_fanout.py fanout_output.kicad_pcb --component IC1 --output fanout_output.kicad_pcb --nets "*lvds_rx*" --diff-pairs "*lvds_rx*" --primary-escape vertical
 
 # LVDS on FPGA
-python bga_fanout.py routed_output.kicad_pcb --component U3 --output routed_output.kicad_pcb --nets "*lvds_rx*" --diff-pairs "*lvds_rx*" --primary-escape vertical
+python bga_fanout.py fanout_output.kicad_pcb --component U3 --output fanout_output.kicad_pcb --nets "*lvds_rx*" --diff-pairs "*lvds_rx*" --primary-escape vertical
 
 # DDR on FPGA
-python bga_fanout.py routed_output.kicad_pcb --component U3 --output routed_output.kicad_pcb --nets "*U1A*" --primary-escape horizontal
+python bga_fanout.py fanout_output.kicad_pcb --component U3 --output fanout_output.kicad_pcb --nets "*U1A*" --primary-escape horizontal
 
 # DDR on DDR chip
-python bga_fanout.py routed_output.kicad_pcb --component U1 --output routed_output.kicad_pcb --nets "*U1A*" --primary-escape horizontal
+python bga_fanout.py fanout_output.kicad_pcb --component U1 --output fanout_output.kicad_pcb --nets "*U1A*" --primary-escape horizontal
 
 # Route the FTDI tracks, letting them sneak into the BGA for now
-python .\batch_grid_router.py routed_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" --no-bga-zone
+python .\batch_grid_router.py fanout_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" --no-bga-zone --max-iterations 500000
 
 # Check for errors
 python.exe .\check_drc.py .\routed_output.kicad_pcb

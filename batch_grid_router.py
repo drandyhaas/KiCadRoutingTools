@@ -328,7 +328,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig) -
     net_pads = pcb_data.pads_by_net.get(net_id, [])
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
-    # Case 1: Multiple segment groups - find free ends of each group
+    # Case 1: Multiple segment groups - use all segment endpoints
     if len(net_segments) >= 2:
         groups = find_connected_groups(net_segments)
         if len(groups) >= 2:
@@ -336,23 +336,26 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig) -
             source_segs = groups[0]
             target_segs = groups[1]
 
-            # Find free ends (endpoints not connected to other segments or pads)
-            source_free_ends = find_stub_free_ends(source_segs, net_pads)
-            target_free_ends = find_stub_free_ends(target_segs, net_pads)
-
+            # Use all segment endpoints as potential source/target points
             sources = []
-            for x, y, layer in source_free_ends:
-                layer_idx = layer_map.get(layer)
+            for seg in source_segs:
+                layer_idx = layer_map.get(seg.layer)
                 if layer_idx is not None:
-                    gx, gy = coord.to_grid(x, y)
-                    sources.append((gx, gy, layer_idx, x, y))
+                    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                    sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                    if (gx1, gy1) != (gx2, gy2):
+                        sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
 
             targets = []
-            for x, y, layer in target_free_ends:
-                layer_idx = layer_map.get(layer)
+            for seg in target_segs:
+                layer_idx = layer_map.get(seg.layer)
                 if layer_idx is not None:
-                    gx, gy = coord.to_grid(x, y)
-                    targets.append((gx, gy, layer_idx, x, y))
+                    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                    targets.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                    if (gx1, gy1) != (gx2, gy2):
+                        targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
 
             if sources and targets:
                 return sources, targets, None
@@ -381,14 +384,16 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig) -
                     unconnected_pads.append(pad)
 
             if unconnected_pads:
-                # Use free ends of segment group as source, unconnected pad(s) as target
-                source_free_ends = find_stub_free_ends(seg_group, net_pads)
+                # Use all segment endpoints as source, unconnected pad(s) as target
                 sources = []
-                for x, y, layer in source_free_ends:
-                    layer_idx = layer_map.get(layer)
+                for seg in seg_group:
+                    layer_idx = layer_map.get(seg.layer)
                     if layer_idx is not None:
-                        gx, gy = coord.to_grid(x, y)
-                        sources.append((gx, gy, layer_idx, x, y))
+                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                        sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                        if (gx1, gy1) != (gx2, gy2):
+                            sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
 
                 targets = []
                 for pad in unconnected_pads:

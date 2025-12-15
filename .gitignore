@@ -48,3 +48,4 @@ route_viz_*.png
 # OS
 .DS_Store
 Thumbs.db
+/.claude/settings.local.json
