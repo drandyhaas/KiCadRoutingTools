@@ -19,6 +19,21 @@ def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 	)'''
 
 
+def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
+                           width: float, layer: str) -> str:
+    """Generate KiCad S-expression for a graphic line (for non-copper layers)."""
+    return f'''	(gr_line
+		(start {start[0]:.6f} {start[1]:.6f})
+		(end {end[0]:.6f} {end[1]:.6f})
+		(stroke
+			(width {width})
+			(type solid)
+		)
+		(layer "{layer}")
+		(uuid "{uuid.uuid4()}")
+	)'''
+
+
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int) -> str:
     """Generate KiCad S-expression for a via."""
