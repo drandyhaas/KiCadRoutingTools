@@ -30,9 +30,11 @@ from routing_utils import (
 )
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
-    add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs
+    add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
+    build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
+    VisualizationData
 )
-from single_ended_routing import route_net, route_net_with_obstacles
+from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles
 
 # Add rust_router directory to path for importing the compiled module
@@ -73,7 +75,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 diff_pair_gap: float = 0.1,
                 min_diff_pair_centerline_setback: float = 0.4,
                 max_diff_pair_centerline_setback: float = 0.4,
-                debug_layers: bool = False) -> Tuple[int, int, float]:
+                debug_layers: bool = False,
+                vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
 
@@ -103,10 +106,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         diff_pair_patterns: Glob patterns for nets to route as differential pairs
         diff_pair_gap: Gap between P and N traces in differential pairs (default: 0.1mm)
         debug_layers: Output raw A* path on User.9, simplified path on User.8
+        vis_callback: Optional visualization callback (implements VisualizationCallback protocol)
 
     Returns:
         (successful_count, failed_count, total_time)
     """
+    visualize = vis_callback is not None
     print(f"Loading {input_file}...")
     pcb_data = parse_kicad_pcb(input_file)
 
@@ -285,7 +290,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     all_net_ids_to_route = [nid for _, nid in net_ids]
     print("Building base obstacle map...")
     base_start = time.time()
-    base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route)
+
+    # Use visualization-aware building if callback is provided
+    base_vis_data = None
+    if visualize:
+        base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(pcb_data, config, all_net_ids_to_route)
+        # Set bounds for visualization
+        base_vis_data.bounds = get_net_bounds(pcb_data, all_net_ids_to_route, padding=5.0)
+    else:
+        base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route)
+
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
 
@@ -297,6 +311,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route, diff_pair_extra_clearance)
     dp_base_elapsed = time.time() - dp_base_start
     print(f"Diff pair obstacle map built in {dp_base_elapsed:.2f}s")
+
+    # Notify visualization callback that routing is starting
+    if visualize:
+        vis_callback.on_routing_start(total_routes, layers, grid_step)
 
     # Track which nets have been routed (their segments/vias are now in pcb_data)
     routed_net_ids = []
@@ -372,7 +390,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             total_iterations += iterations
 
     # Route single-ended nets
+    user_quit = False
     for net_name, net_id in single_ended_nets:
+        if user_quit:
+            break
+
         route_index += 1
         print(f"\n[{route_index}/{total_routes}] Routing {net_name} (id={net_id})")
         print("-" * 40)
@@ -382,18 +404,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Clone base obstacles
         obstacles = base_obstacles.clone()
 
+        # Build visualization data if needed
+        vis_data = None
+        if visualize:
+            # Clone the base vis data
+            vis_data = VisualizationData(
+                blocked_cells=[set(s) for s in base_vis_data.blocked_cells],
+                blocked_vias=set(base_vis_data.blocked_vias),
+                bga_zones_grid=list(base_vis_data.bga_zones_grid),
+                bounds=base_vis_data.bounds
+            )
+
         # Add previously routed nets' segments/vias/pads as obstacles (from pcb_data)
         for routed_id in routed_net_ids:
-            add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
-            add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config)
-            add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config)
+            if visualize:
+                add_net_obstacles_with_vis(obstacles, pcb_data, routed_id, config, 0.0,
+                                            vis_data.blocked_cells, vis_data.blocked_vias)
+            else:
+                add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
+                add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config)
+                add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config)
 
         # Add other unrouted nets' stubs, vias, and pads as obstacles (not the current net)
         other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
         for other_net_id in other_unrouted:
-            add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
-            add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config)
-            add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
+            if visualize:
+                add_net_obstacles_with_vis(obstacles, pcb_data, other_net_id, config, 0.0,
+                                            vis_data.blocked_cells, vis_data.blocked_vias)
+            else:
+                add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
+                add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config)
+                add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
 
         # Add stub proximity costs for ALL unrouted nets in PCB (not just current batch)
         stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
@@ -406,7 +447,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
 
         # Route the net using the prepared obstacles
-        result = route_net_with_obstacles(pcb_data, net_id, config, obstacles)
+        if visualize:
+            # Get source/target grid coords for visualization
+            from routing_utils import get_net_endpoints
+            sources, targets, _ = get_net_endpoints(pcb_data, net_id, config)
+            sources_grid = [(s[0], s[1], s[2]) for s in sources] if sources else []
+            targets_grid = [(t[0], t[1], t[2]) for t in targets] if targets else []
+
+            # Notify visualizer that net routing is starting
+            vis_callback.on_net_start(net_name, route_index, net_id,
+                                       sources_grid, targets_grid, obstacles, vis_data)
+
+            # Route with visualization
+            result = route_net_with_visualization(pcb_data, net_id, config, obstacles, vis_callback)
+
+            # Notify visualizer that net routing is complete
+            if result is None:
+                # User quit during routing
+                user_quit = True
+                break
+
+            path = result.get('path') if result and not result.get('failed') else None
+            direction = result.get('direction', 'forward') if result else 'forward'
+            iterations = result.get('iterations', 0) if result else 0
+            success = result is not None and not result.get('failed')
+
+            if not vis_callback.on_net_complete(net_name, success, path, iterations, direction):
+                user_quit = True
+                break
+        else:
+            result = route_net_with_obstacles(pcb_data, net_id, config, obstacles)
+
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -423,6 +494,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             failed += 1
             total_iterations += iterations
+
+    # Notify visualization callback that all routing is complete
+    if visualize:
+        vis_callback.on_routing_complete(successful, failed, total_iterations)
 
     print("\n" + "=" * 60)
     print(f"Routing complete: {successful} successful, {failed} failed")
@@ -608,6 +683,14 @@ Differential pair routing:
     parser.add_argument("--debug-layers", action="store_true",
                         help="Output raw A* path on User.9, simplified path on User.8 for debugging")
 
+    # Visualization options
+    parser.add_argument("--visualize", "-V", action="store_true",
+                        help="Show real-time visualization of the routing (requires pygame)")
+    parser.add_argument("--auto", action="store_true",
+                        help="Auto-advance to next net without waiting (with --visualize)")
+    parser.add_argument("--display-time", type=float, default=0.0,
+                        help="Seconds to display completed route before advancing (with --visualize --auto)")
+
     args = parser.parse_args()
 
     # Load PCB to expand wildcards
@@ -620,6 +703,21 @@ Differential pair routing:
         sys.exit(1)
 
     print(f"Routing {len(net_names)} nets: {net_names[:5]}{'...' if len(net_names) > 5 else ''}")
+
+    # Create visualization callback if requested
+    vis_callback = None
+    if args.visualize:
+        try:
+            from pygame_visualizer.pygame_callback import create_pygame_callback
+            vis_callback = create_pygame_callback(
+                layers=args.layers,
+                auto_advance=args.auto,
+                display_time=args.display_time
+            )
+        except ImportError as e:
+            print(f"Warning: Could not import pygame visualizer: {e}")
+            print("Install pygame with: pip install pygame-ce")
+            print("Continuing without visualization...")
 
     batch_route(args.input_file, args.output_file, net_names,
                 direction_order=args.direction,
@@ -640,4 +738,5 @@ Differential pair routing:
                 diff_pair_gap=args.diff_pair_gap,
                 min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
                 max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
-                debug_layers=args.debug_layers)
+                debug_layers=args.debug_layers,
+                vis_callback=vis_callback)
