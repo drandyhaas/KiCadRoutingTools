@@ -21,3 +21,7 @@ python .\batch_grid_router.py fanout_output.kicad_pcb routed_output.kicad_pcb "N
 
 # Check for errors
 python.exe .\check_drc.py .\routed_output.kicad_pcb
+
+# Check connections
+python .\check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
+
