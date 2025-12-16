@@ -516,18 +516,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_float_path = create_parallel_path_float(simplified_path, coord, sign=n_sign, spacing_mm=spacing_mm,
                                                start_dir=start_stub_dir, end_dir=end_stub_dir)
 
-    # Mark turn segment points with debug layer -4 (In4.Cu) for visualization (only if debug_layers enabled)
-    # Segment layer is determined by the START point of each segment
-    # First turn segment: point[0] to point[1] - mark point[0]
-    # Last turn segment: point[-2] to point[-1] - mark point[-2]
-    if config.debug_layers and p_float_path and n_float_path and len(p_float_path) >= 3:
-        # Mark first point (start of first turn segment) with layer -4
-        p_float_path[0] = (p_float_path[0][0], p_float_path[0][1], -4)
-        n_float_path[0] = (n_float_path[0][0], n_float_path[0][1], -4)
-        # Mark second-to-last point (start of last turn segment) with layer -4
-        p_float_path[-2] = (p_float_path[-2][0], p_float_path[-2][1], -4)
-        n_float_path[-2] = (n_float_path[-2][0], n_float_path[-2][1], -4)
-
     # Process via positions (simplified - no polarity swap handling)
     p_float_path, n_float_path = _process_via_positions(
         simplified_path, p_float_path, n_float_path, coord, config,
@@ -542,19 +530,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         """Convert floating-point path (x, y, layer) to segments and vias."""
         segs = []
         vias = []
-
-        def get_layer_name(layer_idx):
-            """Get layer name, handling special debug indices."""
-            if layer_idx == -4:
-                return 'In4.Cu'
-            elif layer_idx == -5:
-                return 'In5.Cu'
-            elif layer_idx == -6:
-                return 'In6.Cu'
-            elif layer_idx == -7:
-                return 'In7.Cu'
-            else:
-                return layer_names[layer_idx]
+        num_segments = len(float_path) - 1
 
         # Add connecting segment from original start if needed
         if original_start and len(float_path) > 0:
@@ -562,7 +538,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             orig_x, orig_y = original_start
             if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
                 # Use In5.Cu for debug visualization, otherwise use actual layer
-                conn_layer = 'In5.Cu' if config.debug_layers else get_layer_name(first_layer if first_layer >= 0 else src_layer)
+                conn_layer = 'In5.Cu' if config.debug_layers else layer_names[first_layer]
                 segs.append(Segment(
                     start_x=orig_x, start_y=orig_y,
                     end_x=first_x, end_y=first_y,
@@ -571,25 +547,28 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     net_id=net_id
                 ))
 
-        # Convert path
-        for i in range(len(float_path) - 1):
+        # Convert path segments
+        for i in range(num_segments):
             x1, y1, layer1 = float_path[i]
             x2, y2, layer2 = float_path[i + 1]
 
-            # Check if this is a real layer change (not debug layer transition)
-            real_layer1 = layer1 if layer1 >= 0 else 1  # Map debug layers to In1.Cu for via logic
-            real_layer2 = layer2 if layer2 >= 0 else 1
-
-            if real_layer1 != real_layer2:
+            if layer1 != layer2:
+                # Layer change - add via
                 vias.append(Via(
                     x=x1, y=y1,
                     size=config.via_size,
                     drill=config.via_drill,
-                    layers=[get_layer_name(layer1), get_layer_name(layer2)],
+                    layers=[layer_names[layer1], layer_names[layer2]],
                     net_id=net_id
                 ))
             elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
-                seg_layer = get_layer_name(layer1)
+                # Determine layer for this segment
+                # Turn segments (first and last) go on In4.Cu if debug_layers enabled
+                is_turn_segment = (i == 0 or i == num_segments - 1)
+                if config.debug_layers and is_turn_segment:
+                    seg_layer = 'In4.Cu'
+                else:
+                    seg_layer = layer_names[layer1]
                 segs.append(Segment(
                     start_x=x1, start_y=y1,
                     end_x=x2, end_y=y2,
@@ -604,7 +583,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             orig_x, orig_y = original_end
             if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
                 # Use In5.Cu for debug visualization, otherwise use actual layer
-                conn_layer = 'In5.Cu' if config.debug_layers else get_layer_name(last_layer if last_layer >= 0 else tgt_layer)
+                conn_layer = 'In5.Cu' if config.debug_layers else layer_names[last_layer]
                 segs.append(Segment(
                     start_x=last_x, start_y=last_y,
                     end_x=orig_x, end_y=orig_y,
