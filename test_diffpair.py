@@ -141,6 +141,8 @@ Examples:
                         help='Show which diff pairs would be routed without actually routing')
     parser.add_argument('--skip-drc', action='store_true',
                         help='Skip DRC checks after routing')
+    parser.add_argument('--skip-connectivity', action='store_true',
+                        help='Skip connectivity checks after routing')
     parser.add_argument('--input', default='routed_output.kicad_pcb',
                         help='Input PCB file (default: routed_output.kicad_pcb)')
     parser.add_argument('--output', default='test_batch_diffpair.kicad_pcb',
@@ -374,6 +376,40 @@ Examples:
             passed = result.returncode == 0 and error_count == 0
             drc_results[diff_pair] = (passed, error_count)
 
+    # Step 4: Run connectivity check only on successfully routed pairs (unless skipped)
+    connectivity_results = {}  # diff_pair -> (passed, disconnected_count)
+
+    if args.skip_connectivity:
+        print("\nSkipping connectivity checks (--skip-connectivity)")
+    else:
+        for diff_pair in routed_pairs:
+            net_pattern = f"*{diff_pair}_*"
+            result = run_command(
+                [sys.executable, "check_connected.py", output_pcb, "--nets", net_pattern],
+                f"Step 4: Connectivity check for {diff_pair}",
+                capture_output=True
+            )
+
+            # Parse connectivity output to count issues
+            output = result.stdout if result.stdout else ""
+            issue_count = 0
+
+            # Look for issue counts in output
+            # Format: "FOUND X CONNECTIVITY ISSUES" or "ALL NETS FULLY CONNECTED!"
+            patterns = [
+                r'FOUND\s+(\d+)\s+CONNECTIVITY\s+ISSUE',  # "FOUND 2 CONNECTIVITY ISSUES"
+                r'(\d+)\s+connectivity\s+issue',          # "2 connectivity issues"
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, output, re.IGNORECASE)
+                if match:
+                    issue_count = int(match.group(1))
+                    break
+
+            passed = result.returncode == 0 and issue_count == 0
+            connectivity_results[diff_pair] = (passed, issue_count)
+
     # Print summary
     print(f"\n{'='*60}")
     print("SUMMARY")
@@ -414,13 +450,36 @@ Examples:
     elif args.skip_drc:
         print(f"\nDRC: skipped")
 
+    # Connectivity summary (only for routed pairs, and only if connectivity check was run)
+    if routed_pairs and not args.skip_connectivity:
+        conn_passed = [p for p, (ok, _) in connectivity_results.items() if ok]
+        conn_failed = [p for p, (ok, _) in connectivity_results.items() if not ok]
+
+        print(f"\nConnectivity (of {len(routed_pairs)} routed):")
+        print(f"  Passed: {len(conn_passed)}/{len(routed_pairs)}")
+
+        if conn_passed:
+            print(f"  OK:")
+            for pair in conn_passed:
+                print(f"    {pair}")
+
+        if conn_failed:
+            print(f"  FAILED:")
+            for pair in conn_failed:
+                _, issue_count = connectivity_results[pair]
+                print(f"    {pair} ({issue_count} disconnected net{'s' if issue_count != 1 else ''})")
+    elif args.skip_connectivity:
+        print(f"\nConnectivity: skipped")
+
     print(f"\nOutput file: {output_pcb}")
     print(f"{'='*60}")
 
-    # Return error if any routing failures, or DRC failures (if DRC was run)
+    # Return error if any routing failures, DRC failures (if DRC was run), or connectivity failures
     has_failures = bool(failed_routing_pairs)
     if not args.skip_drc:
         has_failures = has_failures or any(not ok for ok, _ in drc_results.values())
+    if not args.skip_connectivity:
+        has_failures = has_failures or any(not ok for ok, _ in connectivity_results.values())
     return 1 if has_failures else 0
 
 

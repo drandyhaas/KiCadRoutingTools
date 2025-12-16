@@ -46,6 +46,7 @@ For manual building, see [rust_router/README.md](rust_router/README.md).
 | `kicad_parser.py` | Parses .kicad_pcb files into Python data structures (handles pad rotation) |
 | `kicad_writer.py` | Generates KiCad S-expressions for segments and vias |
 | `check_drc.py` | DRC checker for detecting clearance violations |
+| `check_connected.py` | Connectivity checker for verifying routes connect all pads |
 | `test_diffpair.py` | Test script for single differential pair routing |
 | `test_all_diffpairs.py` | Batch test script for all differential pairs |
 | `bga_fanout.py` | BGA fanout stub generation for differential pairs |
@@ -654,6 +655,55 @@ The checker reports:
 - **Via-to-via** violations (vias too close together)
 
 Note: Pre-existing differential pair routing (e.g., LVDS signals) may intentionally have tight spacing and will show as violations.
+
+## Connectivity Checking
+
+The `check_connected.py` script verifies that routed tracks form fully connected paths from source to target pads.
+
+### Usage
+
+```bash
+python check_connected.py input.kicad_pcb [OPTIONS]
+```
+
+### Command-Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `pcb` | (required) | Input PCB file to check |
+| `--nets`, `-n` | (all) | Net patterns to check (fnmatch wildcards supported) |
+| `--tolerance`, `-t` | `0.01` | Connection tolerance in mm |
+
+### Examples
+
+```bash
+# Check all routed nets
+python check_connected.py routed_output.kicad_pcb
+
+# Check only specific nets
+python check_connected.py routed_output.kicad_pcb --nets "*lvds_rx3_10*"
+
+# Check multiple net patterns
+python check_connected.py routed_output.kicad_pcb --nets "*DATA*" "*CLK*"
+```
+
+### How It Works
+
+The connectivity checker uses a Union-Find data structure to determine if all pads on a net are connected:
+
+1. **Collect all points**: Segment endpoints, via locations, and pad locations
+2. **Size-based matching**: Points are considered connected if within `max(size1, size2) / 4`:
+   - Track endpoints: uses track width / 4
+   - Vias: uses via diameter / 4
+   - Pads: uses a default pad connection tolerance
+3. **Via layer expansion**: Through-hole vias (F.Cu + B.Cu) are expanded to connect all copper layers
+4. **Union-Find merge**: Connected points are merged into the same component
+5. **Connectivity check**: All pads on a net should be in the same connected component
+
+The checker reports:
+- **Connected nets**: All pads reachable through tracks and vias
+- **Disconnected components**: Number of isolated groups of pads
+- **Disconnected pads**: Specific pad locations not connected to the main group
 
 ## Real-Time Visualizer
 

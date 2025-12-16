@@ -1566,14 +1566,14 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 
 
 def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
-                        max_appendix_length: float = 1.0) -> List[Segment]:
+                        max_appendix_length: float = 1.0, vias: List[Via] = None) -> List[Segment]:
     """Collapse short appendix segments by moving dead-end vertices to junction points.
 
     An appendix is a short segment where one endpoint is a dead-end (degree 1) and
     the other endpoint is a junction (degree >= 2). We collapse it by moving the
     dead-end to nearly coincide with the junction (offset by 0.001mm).
 
-    Only collapses segments where the dead-end doesn't connect to existing segments.
+    Only collapses segments where the dead-end doesn't connect to existing segments or vias.
     Also fixes self-intersections where new segments cross existing segments.
     """
     if not segments:
@@ -1582,14 +1582,32 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     # First fix self-intersections with existing segments
     segments = fix_self_intersections(segments, existing_segments, max_appendix_length)
 
-    # Build map of existing segment endpoints by layer
+    # Build map of existing segment endpoints by layer (store actual coordinates for proximity check)
     existing_endpoints = {}
     if existing_segments:
         for seg in existing_segments:
             if seg.layer not in existing_endpoints:
-                existing_endpoints[seg.layer] = set()
-            existing_endpoints[seg.layer].add((round(seg.start_x, 4), round(seg.start_y, 4)))
-            existing_endpoints[seg.layer].add((round(seg.end_x, 4), round(seg.end_y, 4)))
+                existing_endpoints[seg.layer] = []
+            existing_endpoints[seg.layer].append((seg.start_x, seg.start_y))
+            existing_endpoints[seg.layer].append((seg.end_x, seg.end_y))
+
+    # Build map of via locations by layer (store actual coordinates and size for proximity check)
+    via_locations = {}
+    if vias:
+        all_copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+        for via in vias:
+            # Through-hole vias connect all layers
+            if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
+                via_layers = all_copper_layers
+            elif via.layers:
+                via_layers = via.layers
+            else:
+                via_layers = all_copper_layers
+            via_size = getattr(via, 'size', 0.6)  # Default via size if not available
+            for layer in via_layers:
+                if layer not in via_locations:
+                    via_locations[layer] = []
+                via_locations[layer].append((via.x, via.y, via_size))
 
     # Process each layer separately
     layer_segments = {}
@@ -1600,8 +1618,24 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
     result_segments = []
 
+    def point_near_any(px, py, points_list, tolerance):
+        """Check if point is within tolerance of any point in list."""
+        for ex, ey in points_list:
+            if math.sqrt((px - ex)**2 + (py - ey)**2) < tolerance:
+                return True
+        return False
+
+    def point_near_any_via(px, py, vias_list):
+        """Check if point is within via_size/4 of any via in list."""
+        for vx, vy, via_size in vias_list:
+            tolerance = via_size / 4
+            if math.sqrt((px - vx)**2 + (py - vy)**2) < tolerance:
+                return True
+        return False
+
     for layer, layer_segs in layer_segments.items():
-        layer_existing = existing_endpoints.get(layer, set())
+        layer_existing = existing_endpoints.get(layer, [])
+        layer_vias = via_locations.get(layer, [])
 
         # Build endpoint degree map from NEW segments only
         endpoint_counts = {}
@@ -1624,12 +1658,14 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
             start_degree = endpoint_counts.get(start_key, 0)
             end_degree = endpoint_counts.get(end_key, 0)
 
-            # Check if endpoints connect to existing segments
-            start_connects_existing = start_key in layer_existing
-            end_connects_existing = end_key in layer_existing
+            # Check if endpoints connect to existing segments (with proximity tolerance) or vias
+            # Use track width / 4 as proximity tolerance for segments, via size / 4 for vias
+            proximity_tol = seg.width / 4
+            start_connects_existing = point_near_any(seg.start_x, seg.start_y, layer_existing, proximity_tol) or point_near_any_via(seg.start_x, seg.start_y, layer_vias)
+            end_connects_existing = point_near_any(seg.end_x, seg.end_y, layer_existing, proximity_tol) or point_near_any_via(seg.end_x, seg.end_y, layer_vias)
 
-            # Appendix: one end is dead-end (degree 1, not connected to existing),
-            # other is junction (degree >= 2 OR connected to existing)
+            # Appendix: one end is dead-end (degree 1, not connected to existing/vias),
+            # other is junction (degree >= 2 OR connected to existing/vias)
             if (start_degree == 1 and not start_connects_existing and
                 (end_degree >= 2 or end_connects_existing)):
                 # Collapse: move start to nearly coincide with end (junction point)
@@ -1753,12 +1789,18 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict) -> None:
     # Get all unique net_ids from new segments
     net_ids = set(s.net_id for s in new_segments)
 
+    # Get new vias for appendix checking
+    new_vias = result.get('new_vias', [])
+
     # Process each net separately for same-net cleanup
     cleaned_segments = []
     for net_id in net_ids:
         net_segs = [s for s in new_segments if s.net_id == net_id]
         existing_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-        cleaned = collapse_appendices(net_segs, existing_segments)
+        # Include both new vias and existing vias for this net
+        net_vias = [v for v in new_vias if v.net_id == net_id]
+        net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
+        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias)
         cleaned_segments.extend(cleaned)
 
     # For diff pairs (2 nets), also fix P-N clearance
