@@ -1458,7 +1458,7 @@ def _segments_cross(seg1: Segment, seg2: Segment) -> Optional[Tuple[float, float
 
 
 def fix_self_intersections(segments: List[Segment], existing_segments: List[Segment] = None,
-                           max_short_length: float = 0.2) -> List[Segment]:
+                           max_short_length: float = 1.0) -> List[Segment]:
     """Fix self-intersections by moving endpoints of short connector segments.
 
     When a short connector segment crosses a longer segment (either new or existing),
@@ -1494,7 +1494,7 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
         existing_on_layer = existing_by_layer.get(layer, [])
 
         # Find all crossings involving short NEW segments
-        # Map: new segment index -> (existing segment, crossing point)
+        # Map: new segment index -> (other segment, crossing point)
         segments_to_modify = {}
 
         for i, seg in enumerate(layer_segs):
@@ -1508,6 +1508,19 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
                 if cross_pt:
                     segments_to_modify[i] = (existing, cross_pt)
                     break
+
+            # Also check crossings with LONG new segments on the same layer
+            if i not in segments_to_modify:
+                for j, other in enumerate(layer_segs):
+                    if i == j:
+                        continue
+                    other_len = math.sqrt((other.end_x - other.start_x)**2 + (other.end_y - other.start_y)**2)
+                    if other_len <= max_short_length:
+                        continue  # Only check against longer segments
+                    cross_pt = _segments_cross(seg, other)
+                    if cross_pt:
+                        segments_to_modify[i] = (other, cross_pt)
+                        break
 
         # Process segments - modify short segments that cross existing ones
         for i, seg in enumerate(layer_segs):
@@ -1553,7 +1566,7 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 
 
 def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
-                        max_appendix_length: float = 0.2) -> List[Segment]:
+                        max_appendix_length: float = 1.0) -> List[Segment]:
     """Collapse short appendix segments by moving dead-end vertices to junction points.
 
     An appendix is a short segment where one endpoint is a dead-end (degree 1) and
@@ -1650,18 +1663,122 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     return result_segments
 
 
+def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment],
+                             clearance: float = 0.1, track_width: float = 0.1) -> Tuple[List[Segment], List[Segment]]:
+    """Fix P-N clearance violations by shifting connector segments perpendicular.
+
+    When P and N connector segments are too close, shift them perpendicular to their
+    direction to increase clearance while maintaining connectivity.
+    """
+    if not p_segments or not n_segments:
+        return p_segments, n_segments
+
+    min_center_dist = clearance + track_width  # Center-to-center distance needed
+
+    def point_to_segment_dist(px, py, s):
+        """Distance from point to segment, returns (distance, closest_x, closest_y)."""
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        len_sq = dx * dx + dy * dy
+        if len_sq < 0.0001:
+            return math.sqrt((px - s.start_x)**2 + (py - s.start_y)**2), s.start_x, s.start_y
+        t = max(0, min(1, ((px - s.start_x) * dx + (py - s.start_y) * dy) / len_sq))
+        cx = s.start_x + t * dx
+        cy = s.start_y + t * dy
+        return math.sqrt((px - cx)**2 + (py - cy)**2), cx, cy
+
+    def segment_min_dist_info(s1, s2):
+        """Find min distance and the closest points on each segment."""
+        min_d = float('inf')
+        best_t1, best_x2, best_y2 = 0.5, 0, 0
+        for t1 in [i * 0.1 for i in range(11)]:
+            x1 = s1.start_x + t1 * (s1.end_x - s1.start_x)
+            y1 = s1.start_y + t1 * (s1.end_y - s1.start_y)
+            d, cx, cy = point_to_segment_dist(x1, y1, s2)
+            if d < min_d:
+                min_d = d
+                best_t1, best_x2, best_y2 = t1, cx, cy
+        return min_d, best_t1, best_x2, best_y2
+
+    # Group segments by layer
+    p_by_layer = {}
+    n_by_layer = {}
+    for s in p_segments:
+        p_by_layer.setdefault(s.layer, []).append(s)
+    for s in n_segments:
+        n_by_layer.setdefault(s.layer, []).append(s)
+
+    # Find and fix clearance violations on short connector segments
+    for layer in set(p_by_layer.keys()) & set(n_by_layer.keys()):
+        p_layer = p_by_layer[layer]
+        n_layer = n_by_layer[layer]
+
+        # Check segments and shift them perpendicular if they violate clearance
+        for seg_list, other_list in [(p_layer, n_layer), (n_layer, p_layer)]:
+            for seg in seg_list:
+                seg_len = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+                if seg_len > 2.0 or seg_len < 0.02:
+                    continue
+
+                for other in other_list:
+                    dist, t_closest, other_x, other_y = segment_min_dist_info(seg, other)
+                    deficit = min_center_dist - dist
+                    if deficit > 0.001:  # Fix any real violation
+                        # Compute direction from closest point on other to our segment
+                        closest_x = seg.start_x + t_closest * (seg.end_x - seg.start_x)
+                        closest_y = seg.start_y + t_closest * (seg.end_y - seg.start_y)
+                        # Vector from other segment's closest point to our closest point
+                        away_dx = closest_x - other_x
+                        away_dy = closest_y - other_y
+                        away_len = math.sqrt(away_dx**2 + away_dy**2)
+                        if away_len > 0.001:
+                            # Normalize and compute shift amount
+                            away_dx /= away_len
+                            away_dy /= away_len
+                            shift = deficit + 0.02  # Extra margin
+                            # Shift entire segment perpendicular (away from other)
+                            seg.start_x += away_dx * shift
+                            seg.start_y += away_dy * shift
+                            seg.end_x += away_dx * shift
+                            seg.end_y += away_dy * shift
+
+    return p_segments, n_segments
+
+
 def add_route_to_pcb_data(pcb_data: PCBData, result: dict) -> None:
     """Add routed segments and vias to PCB data for subsequent routes to see."""
     new_segments = result['new_segments']
     if not new_segments:
         return
 
-    # Get net_id from new segments to find existing segments of the same net
-    net_id = new_segments[0].net_id
-    existing_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    # Get all unique net_ids from new segments
+    net_ids = set(s.net_id for s in new_segments)
 
-    # Collapse appendices and fix self-intersections with existing segments
-    cleaned_segments = collapse_appendices(new_segments, existing_segments)
+    # Process each net separately for same-net cleanup
+    cleaned_segments = []
+    for net_id in net_ids:
+        net_segs = [s for s in new_segments if s.net_id == net_id]
+        existing_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+        cleaned = collapse_appendices(net_segs, existing_segments)
+        cleaned_segments.extend(cleaned)
+
+    # For diff pairs (2 nets), also fix P-N clearance
+    if len(net_ids) == 2:
+        net_list = list(net_ids)
+        p_segs = [s for s in cleaned_segments if s.net_id == net_list[0]]
+        n_segs = [s for s in cleaned_segments if s.net_id == net_list[1]]
+        p_segs, n_segs = fix_diff_pair_clearance(p_segs, n_segs)
+        # Re-run self-intersection fix since P-N clearance shift may create same-net crossings
+        p_existing = [s for s in pcb_data.segments if s.net_id == net_list[0]]
+        n_existing = [s for s in pcb_data.segments if s.net_id == net_list[1]]
+        p_segs = fix_self_intersections(p_segs, p_existing)
+        n_segs = fix_self_intersections(n_segs, n_existing)
+        cleaned_segments = p_segs + n_segs
+
+    # Filter out very short (degenerate) segments
+    def seg_len(s):
+        return math.sqrt((s.end_x - s.start_x)**2 + (s.end_y - s.start_y)**2)
+    cleaned_segments = [s for s in cleaned_segments if seg_len(s) > 0.01]
+
     for seg in cleaned_segments:
         pcb_data.segments.append(seg)
     for via in result['new_vias']:
