@@ -184,6 +184,8 @@ Examples:
                               help='Gap between P/N traces in mm (default: 0.1)')
     router_group.add_argument('--diff-pair-centerline-setback', type=float, default=1.5,
                               help='Distance in front of stubs to start route in mm (default: 1.5)')
+    router_group.add_argument('--debug-layers', action='store_true',
+                              help='Output debug geometry on In4.Cu (turn segments), In5.Cu (connectors), User.8/9 (centerline)')
 
     args = parser.parse_args()
 
@@ -282,6 +284,8 @@ Examples:
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
     router_cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
+    if args.debug_layers:
+        router_cmd.append("--debug-layers")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(

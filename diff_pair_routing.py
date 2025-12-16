@@ -516,15 +516,17 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_float_path = create_parallel_path_float(simplified_path, coord, sign=n_sign, spacing_mm=spacing_mm,
                                                start_dir=start_stub_dir, end_dir=end_stub_dir)
 
-    # Mark turn segment points with debug layer -4 (In4.Cu) for visualization
-    # Turn segments are the first and last points of the parallel paths
-    if p_float_path and n_float_path and len(p_float_path) >= 2:
-        # Mark first point (start turn segment) with layer -4
+    # Mark turn segment points with debug layer -4 (In4.Cu) for visualization (only if debug_layers enabled)
+    # Segment layer is determined by the START point of each segment
+    # First turn segment: point[0] to point[1] - mark point[0]
+    # Last turn segment: point[-2] to point[-1] - mark point[-2]
+    if config.debug_layers and p_float_path and n_float_path and len(p_float_path) >= 3:
+        # Mark first point (start of first turn segment) with layer -4
         p_float_path[0] = (p_float_path[0][0], p_float_path[0][1], -4)
         n_float_path[0] = (n_float_path[0][0], n_float_path[0][1], -4)
-        # Mark last point (end turn segment) with layer -4
-        p_float_path[-1] = (p_float_path[-1][0], p_float_path[-1][1], -4)
-        n_float_path[-1] = (n_float_path[-1][0], n_float_path[-1][1], -4)
+        # Mark second-to-last point (start of last turn segment) with layer -4
+        p_float_path[-2] = (p_float_path[-2][0], p_float_path[-2][1], -4)
+        n_float_path[-2] = (n_float_path[-2][0], n_float_path[-2][1], -4)
 
     # Process via positions (simplified - no polarity swap handling)
     p_float_path, n_float_path = _process_via_positions(
@@ -554,16 +556,18 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             else:
                 return layer_names[layer_idx]
 
-        # Add connecting segment from original start if needed (on In5.Cu for debug)
+        # Add connecting segment from original start if needed
         if original_start and len(float_path) > 0:
             first_x, first_y, first_layer = float_path[0]
             orig_x, orig_y = original_start
             if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
+                # Use In5.Cu for debug visualization, otherwise use actual layer
+                conn_layer = 'In5.Cu' if config.debug_layers else get_layer_name(first_layer if first_layer >= 0 else src_layer)
                 segs.append(Segment(
                     start_x=orig_x, start_y=orig_y,
                     end_x=first_x, end_y=first_y,
                     width=config.track_width,
-                    layer='In5.Cu',  # Debug layer for connectors
+                    layer=conn_layer,
                     net_id=net_id
                 ))
 
@@ -594,16 +598,18 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     net_id=net_id
                 ))
 
-        # Add connecting segment to original end if needed (on In5.Cu for debug)
+        # Add connecting segment to original end if needed
         if original_end and len(float_path) > 0:
             last_x, last_y, last_layer = float_path[-1]
             orig_x, orig_y = original_end
             if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
+                # Use In5.Cu for debug visualization, otherwise use actual layer
+                conn_layer = 'In5.Cu' if config.debug_layers else get_layer_name(last_layer if last_layer >= 0 else tgt_layer)
                 segs.append(Segment(
                     start_x=last_x, start_y=last_y,
                     end_x=orig_x, end_y=orig_y,
                     width=config.track_width,
-                    layer='In5.Cu',  # Debug layer for connectors
+                    layer=conn_layer,
                     net_id=net_id
                 ))
 
