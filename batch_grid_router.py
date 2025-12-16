@@ -23,7 +23,7 @@ from kicad_parser import (
     parse_kicad_pcb, PCBData, Segment, Via, Pad,
     auto_detect_bga_exclusion_zones, find_components_by_type, detect_package_type
 )
-from kicad_writer import generate_segment_sexpr, generate_via_sexpr
+from kicad_writer import generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr
 
 
 @dataclass
@@ -79,6 +79,7 @@ class GridRouteConfig:
     diff_pair_gap: float = 0.1  # mm - gap between P and N traces (center-to-center = track_width + gap)
     min_diff_pair_centerline_setback: float = 0.4  # mm - minimum distance in front of stubs to start centerline route
     max_diff_pair_centerline_setback: float = 0.4  # mm - maximum distance (searches in range min to max)
+    debug_layers: bool = False  # Output raw A* path on User.9, simplified path on User.8
 
 
 class GridCoord:
@@ -2328,6 +2329,12 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     simplified_path = simplify_path(path)
     print(f"Route found in {total_iterations} iterations, path: {len(path)} -> {len(simplified_path)} points")
 
+    # Store paths for debug output (converted to float coordinates)
+    raw_astar_path = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], layer)
+                      for gx, gy, layer in path]
+    simplified_path_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], layer)
+                             for gx, gy, layer in simplified_path]
+
     # Add turn segments at start and end to face the connector stubs
     # This makes the centerline turn to align with stub direction before connecting
     # Use a shorter turn length to reduce connector segment length
@@ -2861,6 +2868,25 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                             n_float_path.insert(i + 4, (jog_x, jog_y, layer2))
                             print(f"  Added N jog at ({jog_x:.2f},{jog_y:.2f}) to clear P via (polarity swap)")
 
+                            # After jog insertion, check if subsequent N path points pass too close to P via
+                            # The jog is at i+4, original continuation is now at i+5
+                            n_indices_to_remove = []
+                            n_check_start_idx = i + 5
+
+                            for n_check_idx in range(n_check_start_idx, min(n_check_start_idx + 5, len(n_float_path))):
+                                nx, ny, nlayer = n_float_path[n_check_idx]
+                                dist_to_pvia = math.sqrt((nx - p_via_x)**2 + (ny - p_via_y)**2)
+                                if dist_to_pvia < track_via_clearance:
+                                    n_indices_to_remove.append(n_check_idx)
+                                    print(f"  Removing N path point at ({nx:.3f},{ny:.3f}) - too close to P via (dist={dist_to_pvia:.3f}mm)")
+
+                            # Remove problematic points in reverse order
+                            for idx in reversed(n_indices_to_remove):
+                                n_float_path.pop(idx)
+
+                            if n_indices_to_remove:
+                                print(f"  Removed {len(n_indices_to_remove)} N path points that were too close to P via")
+
                 # For polarity swap: P needs to detour around N via
                 # First segment goes at 45 deg towards incoming side and towards N via,
                 # until one track_via_clearance below the N via
@@ -2917,22 +2943,43 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     # This prevents messy post-hoc geometry fixes
                     pcont_to_nvia_dist = math.sqrt((p_cont_x - n_via_pos_x)**2 + (p_cont_y - n_via_pos_y)**2)
                     if pcont_to_nvia_dist < track_via_clearance:
-                        # Need to extend p_cont. First get P continuation direction from next point.
+                        # Need to extend p_cont. Get P continuation direction using lookahead.
+                        min_ext_lookahead = arc_radius * 2
+                        ext_dir_x, ext_dir_y = out_dir_x, out_dir_y  # Default fallback
+
                         if i + 5 < len(p_float_path):
-                            p_next_x, p_next_y, _ = p_float_path[i + 5]
-                            ext_dx = p_next_x - p_cont_x
-                            ext_dy = p_next_y - p_cont_y
-                            ext_len = math.sqrt(ext_dx*ext_dx + ext_dy*ext_dy)
-                            if ext_len > 0.001:
-                                ext_dir_x = ext_dx / ext_len
-                                ext_dir_y = ext_dy / ext_len
-                                # Move p_cont along this direction until it has clearance from N via
-                                # Use via diameter as extra margin so it scales with design
-                                shortfall = track_via_clearance - pcont_to_nvia_dist + config.via_size
-                                p_cont_x += ext_dir_x * shortfall
-                                p_cont_y += ext_dir_y * shortfall
-                                p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
-                                print(f"  Pre-adjusted p_cont for N via clearance: moved by {shortfall:.3f}mm along continuation")
+                            # Walk along path to get averaged direction
+                            total_dx, total_dy = 0.0, 0.0
+                            accumulated_dist = 0.0
+                            curr_x, curr_y = p_cont_x, p_cont_y
+
+                            for j in range(i + 5, len(p_float_path)):
+                                next_x, next_y, _ = p_float_path[j]
+                                seg_dx = next_x - curr_x
+                                seg_dy = next_y - curr_y
+                                seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy)
+
+                                if seg_len > 0.001:
+                                    total_dx += seg_dx
+                                    total_dy += seg_dy
+                                    accumulated_dist += seg_len
+                                    curr_x, curr_y = next_x, next_y
+
+                                if accumulated_dist >= min_ext_lookahead:
+                                    break
+
+                            total_len = math.sqrt(total_dx*total_dx + total_dy*total_dy)
+                            if total_len > 0.001:
+                                ext_dir_x = total_dx / total_len
+                                ext_dir_y = total_dy / total_len
+
+                        # Move p_cont along this direction until it has clearance from N via
+                        # Use via diameter as extra margin so it scales with design
+                        shortfall = track_via_clearance - pcont_to_nvia_dist + config.via_size
+                        p_cont_x += ext_dir_x * shortfall
+                        p_cont_y += ext_dir_y * shortfall
+                        p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
+                        print(f"  Pre-adjusted p_cont for N via clearance: moved by {shortfall:.3f}mm along continuation")
 
                     # N continuation direction (for distance check)
                     n_cont_dx = n_cont_x - n_exit_x
@@ -2945,20 +2992,38 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                         n_cont_dir_x, n_cont_dir_y = out_dir_x, out_dir_y
 
                     # P continuation direction (for intersection check)
+                    # Use averaged direction over a minimum lookahead distance to avoid
+                    # sensitivity to tiny path segments near the via
+                    min_lookahead = arc_radius * 2  # At least 2x arc radius
+                    p_cont_dir_x, p_cont_dir_y = n_cont_dir_x, n_cont_dir_y  # Default fallback
+
                     if i + 5 < len(p_float_path):
-                        p_cont2_x, p_cont2_y, _ = p_float_path[i + 5]
-                        p_cont_dx = p_cont2_x - p_cont_x
-                        p_cont_dy = p_cont2_y - p_cont_y
-                    else:
-                        # Use n_cont_dir as fallback
-                        p_cont_dx = n_cont_dir_x
-                        p_cont_dy = n_cont_dir_y
-                    p_cont_line_len = math.sqrt(p_cont_dx*p_cont_dx + p_cont_dy*p_cont_dy)
-                    if p_cont_line_len > 0.001:
-                        p_cont_dir_x = p_cont_dx / p_cont_line_len
-                        p_cont_dir_y = p_cont_dy / p_cont_line_len
-                    else:
-                        p_cont_dir_x, p_cont_dir_y = n_cont_dir_x, n_cont_dir_y
+                        # Walk along path accumulating displacement until we've traveled min_lookahead
+                        total_dx = 0.0
+                        total_dy = 0.0
+                        accumulated_dist = 0.0
+                        curr_x, curr_y = p_cont_x, p_cont_y
+
+                        for j in range(i + 5, len(p_float_path)):
+                            next_x, next_y, _ = p_float_path[j]
+                            seg_dx = next_x - curr_x
+                            seg_dy = next_y - curr_y
+                            seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy)
+
+                            if seg_len > 0.001:
+                                total_dx += seg_dx
+                                total_dy += seg_dy
+                                accumulated_dist += seg_len
+                                curr_x, curr_y = next_x, next_y
+
+                            if accumulated_dist >= min_lookahead:
+                                break
+
+                        # Use total displacement as direction
+                        total_len = math.sqrt(total_dx*total_dx + total_dy*total_dy)
+                        if total_len > 0.001:
+                            p_cont_dir_x = total_dx / total_len
+                            p_cont_dir_y = total_dy / total_len
 
                     # Starting angle: direction from N via to P via
                     start_angle = math.atan2(p_via_y - n_via_pos_y, p_via_x - n_via_pos_x)
@@ -3153,25 +3218,22 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                         
                         if pcont_dot > 0 and pcont_dist < track_track_clearance:
                             # p_cont is too close to N track, need to extend it along P continuation
-                            # Project p_cont along p_cont_dir until it has proper clearance
-                            # We need to move p_cont by distance d such that new position has dist >= track_track_clearance
-                            # Since p_cont_dir might not be perpendicular to n_cont_dir, calculate properly
-                            
-                            # Move p_cont along p_cont_dir by enough to reach track_track_clearance from N line
-                            # Rate of distance change as we move in p_cont_dir
-                            dist_rate = p_cont_dir_x * n_cont_dir_y - p_cont_dir_y * n_cont_dir_x
-                            if abs(dist_rate) > 0.001:
-                                # Find how far to move to reach track_track_clearance
-                                # We want: pcont_dist + d * dist_rate = track_track_clearance (with correct sign)
-                                target_dist = track_track_clearance if pcont_dist > 0 else -track_track_clearance
-                                # But actually we want to move away from N track, so:
-                                d = (track_track_clearance - pcont_dist) / abs(dist_rate)
-                                if d > 0:
-                                    new_pcont_x = p_cont_x + d * p_cont_dir_x
-                                    new_pcont_y = p_cont_y + d * p_cont_dir_y
-                                    print(f"  Extended p_cont from ({p_cont_x:.3f},{p_cont_y:.3f}) to ({new_pcont_x:.3f},{new_pcont_y:.3f}) for N track clearance")
-                                    p_cont_x, p_cont_y = new_pcont_x, new_pcont_y
-                                    p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
+                            # Move perpendicular to N track for clearance (more reliable than along p_cont_dir)
+                            shortfall = track_track_clearance - pcont_dist + 0.05  # Small margin
+
+                            # Perpendicular to n_cont_dir, pointing away from N track
+                            # Determine which perpendicular direction to use based on current p_cont position
+                            n_perp_x, n_perp_y = -n_cont_dir_y, n_cont_dir_x
+                            # Check if this perpendicular points away from N track (same side as p_cont relative to N line)
+                            test_dot = pcont_to_nexit_x * n_perp_x + pcont_to_nexit_y * n_perp_y
+                            if test_dot < 0:
+                                n_perp_x, n_perp_y = -n_perp_x, -n_perp_y
+
+                            new_pcont_x = p_cont_x + shortfall * n_perp_x
+                            new_pcont_y = p_cont_y + shortfall * n_perp_y
+                            print(f"  Extended p_cont from ({p_cont_x:.3f},{p_cont_y:.3f}) to ({new_pcont_x:.3f},{new_pcont_y:.3f}) for N track clearance (moved {shortfall:.3f}mm)")
+                            p_cont_x, p_cont_y = new_pcont_x, new_pcont_y
+                            p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
 
                     # We want to replace i+3 (exit) with: arc_start, then arc points, then final_target
                     # The segment from p_via to arc_start goes toward N via
@@ -3208,6 +3270,30 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                         pass
 
                     print(f"  Circular arc detour: {len(arc_points)} points around N via at radius {arc_radius:.3f}mm")
+
+                    # After arc insertion, check if any subsequent path points pass too close to N via
+                    # These are remnants of the original path that may have zigzagged through the via area
+                    # p_cont is now at index i + 3 + len(arc_points) - 1 = i + 2 + len(arc_points)
+                    p_cont_idx = i + 2 + len(arc_points)
+
+                    # Check points after p_cont for N via clearance violations
+                    # Keep track of indices to remove (points that are too close to N via)
+                    indices_to_remove = []
+                    check_start_idx = p_cont_idx + 1
+
+                    for check_idx in range(check_start_idx, min(check_start_idx + 5, len(p_float_path))):
+                        px, py, player = p_float_path[check_idx]
+                        dist_to_nvia = math.sqrt((px - n_via_pos_x)**2 + (py - n_via_pos_y)**2)
+                        if dist_to_nvia < track_via_clearance:
+                            indices_to_remove.append(check_idx)
+                            print(f"  Removing path point at ({px:.3f},{py:.3f}) - too close to N via (dist={dist_to_nvia:.3f}mm)")
+
+                    # Remove problematic points in reverse order to maintain correct indices
+                    for idx in reversed(indices_to_remove):
+                        p_float_path.pop(idx)
+
+                    if indices_to_remove:
+                        print(f"  Removed {len(indices_to_remove)} path points that were too close to N via")
 
                     # Path already updated in arc detour code above
 
@@ -3324,6 +3410,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         'path_length': len(simplified_path),
         'p_path': p_path,
         'n_path': n_path,
+        'raw_astar_path': raw_astar_path,
+        'simplified_path': simplified_path_float,
     }
 
 
@@ -3346,7 +3434,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
                 min_diff_pair_centerline_setback: float = 0.4,
-                max_diff_pair_centerline_setback: float = 0.4) -> Tuple[int, int, float]:
+                max_diff_pair_centerline_setback: float = 0.4,
+                debug_layers: bool = False) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
 
@@ -3375,6 +3464,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 3.0)
         diff_pair_patterns: Glob patterns for nets to route as differential pairs
         diff_pair_gap: Gap between P and N traces in differential pairs (default: 0.1mm)
+        debug_layers: Output raw A* path on User.9, simplified path on User.8
 
     Returns:
         (successful_count, failed_count, total_time)
@@ -3417,6 +3507,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         diff_pair_gap=diff_pair_gap,
         min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
         max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
+        debug_layers=debug_layers,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -3718,6 +3809,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     via.layers, via.net_id
                 ) + "\n"
 
+        # Add debug paths if enabled (using gr_line for User layers)
+        if debug_layers:
+            print("Adding debug paths to User.8 (simplified) and User.9 (raw A*)")
+            for result in results:
+                # Raw A* path on User.9
+                raw_path = result.get('raw_astar_path', [])
+                if len(raw_path) >= 2:
+                    for i in range(len(raw_path) - 1):
+                        x1, y1, _ = raw_path[i]
+                        x2, y2, _ = raw_path[i + 1]
+                        if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
+                            routing_text += generate_gr_line_sexpr(
+                                (x1, y1), (x2, y2),
+                                0.05, "User.9"  # Thin line
+                            ) + "\n"
+
+                # Simplified path on User.8
+                simplified_path = result.get('simplified_path', [])
+                if len(simplified_path) >= 2:
+                    for i in range(len(simplified_path) - 1):
+                        x1, y1, _ = simplified_path[i]
+                        x2, y2, _ = simplified_path[i + 1]
+                        if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
+                            routing_text += generate_gr_line_sexpr(
+                                (x1, y1), (x2, y2),
+                                0.15, "User.8"  # Thicker line
+                            ) + "\n"
+
         last_paren = content.rfind(')')
         new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
 
@@ -3847,6 +3966,10 @@ Differential pair routing:
     parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=0.4,
                         help="Maximum distance in front of stubs to start centerline route in mm (default: 0.4)")
 
+    # Debug options
+    parser.add_argument("--debug-layers", action="store_true",
+                        help="Output raw A* path on User.9, simplified path on User.8 for debugging")
+
     args = parser.parse_args()
 
     # Load PCB to expand wildcards
@@ -3878,4 +4001,5 @@ Differential pair routing:
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
                 min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
-                max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback)
+                max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
+                debug_layers=args.debug_layers)
