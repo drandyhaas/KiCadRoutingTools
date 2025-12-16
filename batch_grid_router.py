@@ -2680,6 +2680,58 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 p_float_path.insert(i + 3, (p_exit_x, p_exit_y, layer2))
                 n_float_path.insert(i + 3, (n_exit_x, n_exit_y, layer2))
 
+                # Check if continuation points (i+4) are too close to the opposite via
+                # For non-polarity-swap: if P is outer, check P_cont vs N via; if N is outer, check N_cont vs P via
+                if in_dir_x is not None and out_dir_x is not None and not polarity_swap_needed:
+                    p_cont_x, p_cont_y, p_cont_layer = p_float_path[i + 4]
+                    n_cont_x, n_cont_y, n_cont_layer = n_float_path[i + 4]
+
+                    # Get continuation direction from next point
+                    if i + 5 < len(p_float_path):
+                        p_next_x, p_next_y, _ = p_float_path[i + 5]
+                        ext_dx = p_next_x - p_cont_x
+                        ext_dy = p_next_y - p_cont_y
+                        ext_len = math.sqrt(ext_dx*ext_dx + ext_dy*ext_dy)
+                        if ext_len > 0.001:
+                            p_cont_dir_x = ext_dx / ext_len
+                            p_cont_dir_y = ext_dy / ext_len
+                        else:
+                            p_cont_dir_x, p_cont_dir_y = out_dir_x, out_dir_y
+                    else:
+                        p_cont_dir_x, p_cont_dir_y = out_dir_x, out_dir_y
+
+                    if not inner_is_p:
+                        # N is inner, P is outer - check if P continuation is too close to N via
+                        p_cont_to_nvia_dist = math.sqrt((p_cont_x - n_via_x)**2 + (p_cont_y - n_via_y)**2)
+                        if p_cont_to_nvia_dist < track_via_clearance:
+                            shortfall = track_via_clearance - p_cont_to_nvia_dist + config.via_size
+                            p_cont_x += p_cont_dir_x * shortfall
+                            p_cont_y += p_cont_dir_y * shortfall
+                            p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
+                            print(f"  Pre-adjusted P cont for N via clearance: moved by {shortfall:.3f}mm")
+                    else:
+                        # P is inner, N is outer - check if N continuation is too close to P via
+                        n_cont_to_pvia_dist = math.sqrt((n_cont_x - p_via_x)**2 + (n_cont_y - p_via_y)**2)
+                        if n_cont_to_pvia_dist < track_via_clearance:
+                            # Get N continuation direction
+                            if i + 5 < len(n_float_path):
+                                n_next_x, n_next_y, _ = n_float_path[i + 5]
+                                n_ext_dx = n_next_x - n_cont_x
+                                n_ext_dy = n_next_y - n_cont_y
+                                n_ext_len = math.sqrt(n_ext_dx*n_ext_dx + n_ext_dy*n_ext_dy)
+                                if n_ext_len > 0.001:
+                                    n_cont_dir_x = n_ext_dx / n_ext_len
+                                    n_cont_dir_y = n_ext_dy / n_ext_len
+                                else:
+                                    n_cont_dir_x, n_cont_dir_y = out_dir_x, out_dir_y
+                            else:
+                                n_cont_dir_x, n_cont_dir_y = out_dir_x, out_dir_y
+                            shortfall = track_via_clearance - n_cont_to_pvia_dist + config.via_size
+                            n_cont_x += n_cont_dir_x * shortfall
+                            n_cont_y += n_cont_dir_y * shortfall
+                            n_float_path[i + 4] = (n_cont_x, n_cont_y, n_cont_layer)
+                            print(f"  Pre-adjusted N cont for P via clearance: moved by {shortfall:.3f}mm")
+
                 # For polarity swap: P needs to detour around N via
                 # First segment goes at 45 deg towards incoming side and towards N via,
                 # until one track_via_clearance below the N via
