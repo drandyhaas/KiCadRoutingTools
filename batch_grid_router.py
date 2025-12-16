@@ -1710,6 +1710,7 @@ def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment]
         return p_segments, n_segments
 
     min_center_dist = clearance + track_width  # Center-to-center distance needed
+    eps = 0.001  # Tolerance for coordinate matching
 
     def point_to_segment_dist(px, py, s):
         """Distance from point to segment, returns (distance, closest_x, closest_y)."""
@@ -1734,6 +1735,18 @@ def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment]
                 min_d = d
                 best_t1, best_x2, best_y2 = t1, cx, cy
         return min_d, best_t1, best_x2, best_y2
+
+    def points_match(x1, y1, x2, y2):
+        """Check if two points are the same within tolerance."""
+        return abs(x1 - x2) < eps and abs(y1 - y2) < eps
+
+    def update_connected_endpoints(seg_list, old_x, old_y, new_x, new_y):
+        """Update endpoints of segments that were connected to (old_x, old_y)."""
+        for s in seg_list:
+            if points_match(s.start_x, s.start_y, old_x, old_y):
+                s.start_x, s.start_y = new_x, new_y
+            if points_match(s.end_x, s.end_y, old_x, old_y):
+                s.end_x, s.end_y = new_x, new_y
 
     # Group segments by layer
     p_by_layer = {}
@@ -1771,11 +1784,22 @@ def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment]
                             away_dx /= away_len
                             away_dy /= away_len
                             shift = deficit + 0.02  # Extra margin
+
+                            # Save old endpoints
+                            old_start_x, old_start_y = seg.start_x, seg.start_y
+                            old_end_x, old_end_y = seg.end_x, seg.end_y
+
                             # Shift entire segment perpendicular (away from other)
                             seg.start_x += away_dx * shift
                             seg.start_y += away_dy * shift
                             seg.end_x += away_dx * shift
                             seg.end_y += away_dy * shift
+
+                            # Update connected segments to maintain connectivity
+                            update_connected_endpoints(seg_list, old_start_x, old_start_y,
+                                                      seg.start_x, seg.start_y)
+                            update_connected_endpoints(seg_list, old_end_x, old_end_y,
+                                                      seg.end_x, seg.end_y)
 
     return p_segments, n_segments
 
