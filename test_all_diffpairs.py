@@ -15,10 +15,52 @@ from kicad_parser import parse_kicad_pcb
 from batch_grid_router import find_differential_pairs
 
 
-def run_test(diff_pair_name, verbose=False):
+def run_test(diff_pair_name, args, verbose=False):
     """Run test_diffpair.py for a single diff pair and return results."""
     # Use wildcard prefix to match full path (e.g., /fpga_adc/lvds_rx4_1)
     cmd = [sys.executable, "test_diffpair.py", f"*{diff_pair_name}"]
+
+    # Add pass-through arguments
+    if args.build:
+        cmd.append("--build")
+    if args.skip_drc:
+        cmd.append("--skip-drc")
+    if args.skip_connectivity:
+        cmd.append("--skip-connectivity")
+    if args.input != 'routed_output.kicad_pcb':
+        cmd.extend(["--input", args.input])
+    if args.no_bga_zones and not args.bga_zones:
+        cmd.append("--no-bga-zones")
+    if args.ordering:
+        cmd.extend(["--ordering", args.ordering])
+    if args.direction:
+        cmd.extend(["--direction", args.direction])
+    if args.layers:
+        cmd.extend(["--layers"] + args.layers)
+    if args.track_width is not None:
+        cmd.extend(["--track-width", str(args.track_width)])
+    if args.clearance is not None:
+        cmd.extend(["--clearance", str(args.clearance)])
+    if args.via_size is not None:
+        cmd.extend(["--via-size", str(args.via_size)])
+    if args.via_drill is not None:
+        cmd.extend(["--via-drill", str(args.via_drill)])
+    if args.grid_step is not None:
+        cmd.extend(["--grid-step", str(args.grid_step)])
+    if args.via_cost is not None:
+        cmd.extend(["--via-cost", str(args.via_cost)])
+    if args.max_iterations is not None:
+        cmd.extend(["--max-iterations", str(args.max_iterations)])
+    if args.heuristic_weight is not None:
+        cmd.extend(["--heuristic-weight", str(args.heuristic_weight)])
+    if args.stub_proximity_radius is not None:
+        cmd.extend(["--stub-proximity-radius", str(args.stub_proximity_radius)])
+    if args.stub_proximity_cost is not None:
+        cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
+    if args.diff_pair_gap is not None:
+        cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
+    cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
+    cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -66,13 +108,63 @@ def main():
                         help='Show detailed output for each test')
     parser.add_argument('--stop-on-error', '-s', action='store_true',
                         help='Stop on first error')
+
+    # Test script options (pass-through to test_diffpair.py)
+    parser.add_argument('--build', action='store_true',
+                        help='Build the Rust router before running')
+    parser.add_argument('--skip-drc', action='store_true',
+                        help='Skip DRC checks after routing')
+    parser.add_argument('--skip-connectivity', action='store_true',
+                        help='Skip connectivity checks after routing')
+    parser.add_argument('--input', default='routed_output.kicad_pcb',
+                        help='Input PCB file (default: routed_output.kicad_pcb)')
+
+    # Router options (pass-through to batch_grid_router.py)
+    router_group = parser.add_argument_group('Router options (passed to batch_grid_router.py)')
+    router_group.add_argument('--ordering', '-o', choices=['inside_out', 'mps', 'original'],
+                              help='Net ordering strategy (default: mps)')
+    router_group.add_argument('--direction', '-d', choices=['forward', 'backwards', 'random'],
+                              help='Direction search order')
+    router_group.add_argument('--no-bga-zones', action='store_true', default=True,
+                              help='Disable BGA exclusion zones (default: enabled)')
+    router_group.add_argument('--bga-zones', action='store_true',
+                              help='Enable BGA exclusion zones')
+    router_group.add_argument('--layers', '-l', nargs='+',
+                              help='Routing layers (default: F.Cu In1.Cu In2.Cu B.Cu)')
+    router_group.add_argument('--track-width', type=float,
+                              help='Track width in mm (default: 0.1)')
+    router_group.add_argument('--clearance', type=float,
+                              help='Clearance in mm (default: 0.1)')
+    router_group.add_argument('--via-size', type=float,
+                              help='Via outer diameter in mm (default: 0.3)')
+    router_group.add_argument('--via-drill', type=float,
+                              help='Via drill size in mm (default: 0.2)')
+    router_group.add_argument('--grid-step', type=float,
+                              help='Grid resolution in mm (default: 0.1)')
+    router_group.add_argument('--via-cost', type=float,
+                              help='Via cost penalty in grid steps (default: 25)')
+    router_group.add_argument('--max-iterations', type=int,
+                              help='Max A* iterations (default: 100000)')
+    router_group.add_argument('--heuristic-weight', type=float,
+                              help='A* heuristic weight (default: 1.5)')
+    router_group.add_argument('--stub-proximity-radius', type=float,
+                              help='Radius around stubs to penalize in mm (default: 1.5)')
+    router_group.add_argument('--stub-proximity-cost', type=float,
+                              help='Cost penalty near stubs in mm equivalent (default: 2.0)')
+    router_group.add_argument('--diff-pair-gap', type=float,
+                              help='Gap between P/N traces in mm (default: 0.1)')
+    router_group.add_argument('--min-diff-pair-centerline-setback', type=float, default=1.5,
+                              help='Min distance in front of stubs to start route in mm (default: 1.5)')
+    router_group.add_argument('--max-diff-pair-centerline-setback', type=float, default=3.0,
+                              help='Max distance in front of stubs to start route in mm (default: 3.0)')
+
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
 
     # Load PCB and find diff pairs
-    input_pcb = "routed_output.kicad_pcb"
+    input_pcb = args.input
     print(f"Loading {input_pcb} to find differential pairs...")
     pcb_data = parse_kicad_pcb(input_pcb)
 
@@ -101,7 +193,7 @@ def main():
     for i, name in enumerate(short_names):
         print(f"\n[{i+1}/{len(short_names)}] Testing {name}...")
 
-        result = run_test(name, args.verbose)
+        result = run_test(name, args, args.verbose)
         results.append(result)
 
         if result['routing_success'] and result['drc_success']:
