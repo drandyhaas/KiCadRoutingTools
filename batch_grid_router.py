@@ -2732,6 +2732,27 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     p_cont_x, p_cont_y, p_cont_layer = p_float_path[i + 4]
                     n_cont_x, n_cont_y, _ = n_float_path[i + 4]
 
+                    # Pre-check: if p_cont is too close to N via, move it along P continuation direction
+                    # This prevents messy post-hoc geometry fixes
+                    pcont_to_nvia_dist = math.sqrt((p_cont_x - n_via_pos_x)**2 + (p_cont_y - n_via_pos_y)**2)
+                    if pcont_to_nvia_dist < track_via_clearance:
+                        # Need to extend p_cont. First get P continuation direction from next point.
+                        if i + 5 < len(p_float_path):
+                            p_next_x, p_next_y, _ = p_float_path[i + 5]
+                            ext_dx = p_next_x - p_cont_x
+                            ext_dy = p_next_y - p_cont_y
+                            ext_len = math.sqrt(ext_dx*ext_dx + ext_dy*ext_dy)
+                            if ext_len > 0.001:
+                                ext_dir_x = ext_dx / ext_len
+                                ext_dir_y = ext_dy / ext_len
+                                # Move p_cont along this direction until it has clearance from N via
+                                # Use via diameter as extra margin so it scales with design
+                                shortfall = track_via_clearance - pcont_to_nvia_dist + config.via_size
+                                p_cont_x += ext_dir_x * shortfall
+                                p_cont_y += ext_dir_y * shortfall
+                                p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
+                                print(f"  Pre-adjusted p_cont for N via clearance: moved by {shortfall:.3f}mm along continuation")
+
                     # N continuation direction (for distance check)
                     n_cont_dx = n_cont_x - n_exit_x
                     n_cont_dy = n_cont_y - n_exit_y
@@ -2760,6 +2781,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
                     # Starting angle: direction from N via to P via
                     start_angle = math.atan2(p_via_y - n_via_pos_y, p_via_x - n_via_pos_x)
+
 
                     # Determine rotation direction based on via_perp
                     # via_perp points away from continuation, so we rotate TOWARD continuation
@@ -2812,22 +2834,40 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                             t = dist_last / (dist_last - dist_curr)
                             intersect_x = last_x + t * (arc_x - last_x)
                             intersect_y = last_y + t * (arc_y - last_y)
-                            
-                            # Check if intersection is far enough from N track
-                            int_to_nexit_x = intersect_x - n_exit_x
-                            int_to_nexit_y = intersect_y - n_exit_y
-                            int_dot = int_to_nexit_x * n_cont_dir_x + int_to_nexit_y * n_cont_dir_y
-                            int_dist = abs(int_to_nexit_x * n_cont_dir_y - int_to_nexit_y * n_cont_dir_x)
-                            
-                            # Only stop if intersection is on opposite side of n_exit OR far enough from N track
-                            if int_dot <= 0 or int_dist >= track_track_clearance:
-                                arc_points.append((intersect_x, intersect_y))
-                                final_target_x, final_target_y = intersect_x, intersect_y
-                                print(f"  Arc stopped at P continuation intersection after {seg_idx} segments")
-                                break
+
+                            # Check if intersection is "ahead" of arc start in P continuation direction
+                            # This prevents false crossings when arc starts very close to the P cont line
+                            int_to_start_x = intersect_x - arc_start_x
+                            int_to_start_y = intersect_y - arc_start_y
+                            ahead_dist = int_to_start_x * p_cont_dir_x + int_to_start_y * p_cont_dir_y
+
+                            # Also check if intersection is ahead of p_cont (the continuation point)
+                            int_to_pcont_x = intersect_x - p_cont_x
+                            int_to_pcont_y = intersect_y - p_cont_y
+                            ahead_of_pcont = int_to_pcont_x * p_cont_dir_x + int_to_pcont_y * p_cont_dir_y
+
+                            # Need intersection to be meaningfully ahead (not just barely past start)
+                            # and roughly aligned with p_cont (not way behind it)
+                            min_ahead_dist = arc_radius * 0.5  # Must be at least half arc_radius ahead
+                            if ahead_dist < min_ahead_dist or ahead_of_pcont < -arc_radius * 2:
+                                # Intersection is too close to start or behind p_cont - ignore this crossing
+                                pass  # Will fall through to add arc point normally
                             else:
-                                # Intersection too close to N track, continue arc
-                                print(f"  P continuation intersection at ({intersect_x:.3f},{intersect_y:.3f}) too close to N track (dist={int_dist:.3f}mm), continuing arc")
+                                # Valid crossing - check if far enough from N track
+                                int_to_nexit_x = intersect_x - n_exit_x
+                                int_to_nexit_y = intersect_y - n_exit_y
+                                int_dot = int_to_nexit_x * n_cont_dir_x + int_to_nexit_y * n_cont_dir_y
+                                int_dist = abs(int_to_nexit_x * n_cont_dir_y - int_to_nexit_y * n_cont_dir_x)
+
+                                # Only stop if intersection is on opposite side of n_exit OR far enough from N track
+                                if int_dot <= 0 or int_dist >= track_track_clearance:
+                                    arc_points.append((intersect_x, intersect_y))
+                                    final_target_x, final_target_y = intersect_x, intersect_y
+                                    print(f"  Arc stopped at P continuation intersection after {seg_idx} segments")
+                                    break
+                                else:
+                                    # Intersection too close to N track, continue arc
+                                    print(f"  P continuation intersection at ({intersect_x:.3f},{intersect_y:.3f}) too close to N track (dist={int_dist:.3f}mm), continuing arc")
 
                         # Condition 2: Check if we're within diff_pair_spacing of N track
                         # N track goes from n_exit in direction n_cont_dir
