@@ -34,13 +34,13 @@ def run_test(diff_pair_name, verbose=False):
     # Extract any DRC violations
     violations = []
     if "DRC VIOLATIONS" in output:
-        # Find violation details
+        # Find violation details - count lines with '<->' which are the actual violation headers
         lines = output.split('\n')
         in_violations = False
         for line in lines:
             if "DRC VIOLATIONS" in line:
                 in_violations = True
-            elif in_violations and line.strip().startswith(('/', 'Via:', 'Seg')):
+            elif in_violations and '<->' in line:
                 violations.append(line.strip())
             elif in_violations and "=" * 20 in line:
                 in_violations = False
