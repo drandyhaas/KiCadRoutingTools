@@ -2690,7 +2690,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
                     # Check P exit->cont segment vs N via (when N is inner)
                     if not inner_is_p:
-                        # Calculate min distance from N via to segment (p_exit -> p_cont)
                         seg_dx = p_cont_x - p_exit_x
                         seg_dy = p_cont_y - p_exit_y
                         seg_len_sq = seg_dx**2 + seg_dy**2
@@ -2702,16 +2701,12 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
                             if dist_to_nvia < track_via_clearance:
                                 # Need jog: go in outgoing direction past the N via, then back to continuation
-                                # Calculate how far to go in out_dir to clear N via
                                 exit_to_nvia_x = n_via_x - p_exit_x
                                 exit_to_nvia_y = n_via_y - p_exit_y
-                                # Project N via onto outgoing direction
                                 proj_dist = exit_to_nvia_x * out_dir_x + exit_to_nvia_y * out_dir_y
-                                # Perpendicular distance from out_dir line to N via
                                 perp_dist = abs(exit_to_nvia_x * out_dir_y - exit_to_nvia_y * out_dir_x)
 
                                 if perp_dist < track_via_clearance:
-                                    # Need to go past the projection point
                                     extra_dist = math.sqrt(track_via_clearance**2 - perp_dist**2)
                                     jog_dist = proj_dist + extra_dist + config.via_size
                                 else:
@@ -2808,6 +2803,39 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                             n_cont_y += n_cont_dir_y * shortfall
                             n_float_path[n_cont_idx] = (n_cont_x, n_cont_y, n_cont_layer)
                             print(f"  Pre-adjusted N cont for P via clearance: moved by {shortfall:.3f}mm")
+
+                # For polarity swap: check if N exit->cont passes too close to P via
+                # N doesn't do the arc detour, so add a jog if needed
+                if polarity_swap_needed and in_dir_x is not None and out_dir_x is not None:
+                    n_cont_x_check, n_cont_y_check, n_cont_layer_check = n_float_path[i + 4]
+
+                    # Check N exit->cont segment vs P via
+                    seg_dx = n_cont_x_check - n_exit_x
+                    seg_dy = n_cont_y_check - n_exit_y
+                    seg_len_sq = seg_dx**2 + seg_dy**2
+                    if seg_len_sq > 0.001:
+                        t = max(0, min(1, ((p_via_x - n_exit_x) * seg_dx + (p_via_y - n_exit_y) * seg_dy) / seg_len_sq))
+                        closest_x = n_exit_x + t * seg_dx
+                        closest_y = n_exit_y + t * seg_dy
+                        dist_to_pvia = math.sqrt((closest_x - p_via_x)**2 + (closest_y - p_via_y)**2)
+
+                        if dist_to_pvia < track_via_clearance:
+                            # Need jog for N: go in outgoing direction past P via
+                            exit_to_pvia_x = p_via_x - n_exit_x
+                            exit_to_pvia_y = p_via_y - n_exit_y
+                            proj_dist = exit_to_pvia_x * out_dir_x + exit_to_pvia_y * out_dir_y
+                            perp_dist = abs(exit_to_pvia_x * out_dir_y - exit_to_pvia_y * out_dir_x)
+
+                            if perp_dist < track_via_clearance:
+                                extra_dist = math.sqrt(track_via_clearance**2 - perp_dist**2)
+                                jog_dist = proj_dist + extra_dist + config.via_size
+                            else:
+                                jog_dist = track_via_clearance
+
+                            jog_x = n_exit_x + out_dir_x * jog_dist
+                            jog_y = n_exit_y + out_dir_y * jog_dist
+                            n_float_path.insert(i + 4, (jog_x, jog_y, layer2))
+                            print(f"  Added N jog at ({jog_x:.2f},{jog_y:.2f}) to clear P via (polarity swap)")
 
                 # For polarity swap: P needs to detour around N via
                 # First segment goes at 45 deg towards incoming side and towards N via,
