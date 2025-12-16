@@ -170,57 +170,6 @@ def simplify_path(path):
     return result
 
 
-def smooth_path_for_diffpair(path, min_segment_length=3):
-    """
-    Smooth a path by removing short zigzag segments that cause diff pair crossing.
-
-    For differential pairs, short alternating segments (e.g., diagonal-horizontal-diagonal)
-    cause perpendicular offsets to swing wildly. This function removes intermediate points
-    that create very short segments.
-
-    Args:
-        path: List of (gx, gy, layer) grid coordinates (already simplified)
-        min_segment_length: Minimum segment length in grid units to keep
-
-    Returns:
-        Smoothed path with short zigzag segments removed
-    """
-    if len(path) <= 2:
-        return list(path)
-
-    result = [path[0]]
-
-    i = 1
-    while i < len(path) - 1:
-        curr = path[i]
-
-        # Check segment lengths
-        prev = result[-1]
-        next_pt = path[i + 1]
-
-        # Distance from previous kept point to current
-        dist_prev = math.sqrt((curr[0] - prev[0])**2 + (curr[1] - prev[1])**2)
-
-        # Distance from current to next
-        dist_next = math.sqrt((next_pt[0] - curr[0])**2 + (next_pt[1] - curr[1])**2)
-
-        # Keep if layer changes
-        if prev[2] != curr[2] or curr[2] != next_pt[2]:
-            result.append(curr)
-            i += 1
-            continue
-
-        # Skip if both segments are short (part of a zigzag)
-        if dist_prev < min_segment_length and dist_next < min_segment_length:
-            # Skip this point, let it connect directly
-            i += 1
-            continue
-
-        result.append(curr)
-        i += 1
-
-    result.append(path[-1])
-    return result
 
 
 def create_parallel_path_float(centerline_path, coord, sign, spacing_mm=0.1, start_dir=None, end_dir=None):
@@ -403,69 +352,33 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
 
-    # Get setback range
-    min_setback = config.min_diff_pair_centerline_setback
-    max_setback = config.max_diff_pair_centerline_setback
+    # Get single fixed setback
+    setback = config.diff_pair_centerline_setback
 
-    print(f"  Centerline setback: {min_setback}mm to {max_setback}mm")
+    print(f"  Centerline setback: {setback}mm")
     print(f"  Source direction: ({src_dir_x:.2f}, {src_dir_y:.2f}), target direction: ({tgt_dir_x:.2f}, {tgt_dir_y:.2f})")
 
-    # Generate candidate points along the setback line (from min to max distance)
-    # Sample at grid_step intervals
-    num_samples = max(1, int((max_setback - min_setback) / config.grid_step) + 1)
-
-    center_sources = []
-    center_targets = []
-
+    # Calculate single source and target centerline points
     allow_radius = 2
-    for i in range(num_samples):
-        if num_samples > 1:
-            setback = min_setback + (max_setback - min_setback) * i / (num_samples - 1)
-        else:
-            setback = min_setback
 
-        # Calculate source candidate
-        if src_dir_len > 0:
-            src_x = center_src_x + src_dir_x * setback
-            src_y = center_src_y + src_dir_y * setback
-            src_gx, src_gy = coord.to_grid(src_x, src_y)
+    src_x = center_src_x + src_dir_x * setback
+    src_y = center_src_y + src_dir_y * setback
+    src_gx, src_gy = coord.to_grid(src_x, src_y)
 
-            # Check if blocked
-            if not obstacles.is_blocked(src_gx, src_gy, src_layer):
-                center_sources.append((src_gx, src_gy, src_layer))
-                # Add allowed cells around this point
-                for dx in range(-allow_radius, allow_radius + 1):
-                    for dy in range(-allow_radius, allow_radius + 1):
-                        obstacles.add_allowed_cell(src_gx + dx, src_gy + dy)
-                obstacles.add_source_target_cell(src_gx, src_gy, src_layer)
+    tgt_x = center_tgt_x + tgt_dir_x * setback
+    tgt_y = center_tgt_y + tgt_dir_y * setback
+    tgt_gx, tgt_gy = coord.to_grid(tgt_x, tgt_y)
 
-        # Calculate target candidate
-        if tgt_dir_len > 0:
-            tgt_x = center_tgt_x + tgt_dir_x * setback
-            tgt_y = center_tgt_y + tgt_dir_y * setback
-            tgt_gx, tgt_gy = coord.to_grid(tgt_x, tgt_y)
+    # Add allowed cells around source and target
+    for dx in range(-allow_radius, allow_radius + 1):
+        for dy in range(-allow_radius, allow_radius + 1):
+            obstacles.add_allowed_cell(src_gx + dx, src_gy + dy)
+            obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
+    obstacles.add_source_target_cell(src_gx, src_gy, src_layer)
+    obstacles.add_source_target_cell(tgt_gx, tgt_gy, tgt_layer)
 
-            # Check if blocked
-            if not obstacles.is_blocked(tgt_gx, tgt_gy, tgt_layer):
-                center_targets.append((tgt_gx, tgt_gy, tgt_layer))
-                # Add allowed cells around this point
-                for dx in range(-allow_radius, allow_radius + 1):
-                    for dy in range(-allow_radius, allow_radius + 1):
-                        obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
-                obstacles.add_source_target_cell(tgt_gx, tgt_gy, tgt_layer)
-
-    # Remove duplicate grid coordinates
-    center_sources = list(dict.fromkeys(center_sources))
-    center_targets = list(dict.fromkeys(center_targets))
-
-    if not center_sources:
-        print(f"  No valid source candidates found (all blocked in setback range)")
-        return {'failed': True, 'iterations': 0}
-    if not center_targets:
-        print(f"  No valid target candidates found (all blocked in setback range)")
-        return {'failed': True, 'iterations': 0}
-
-    print(f"  Found {len(center_sources)} source candidates, {len(center_targets)} target candidates")
+    center_sources = [(src_gx, src_gy, src_layer)]
+    center_targets = [(tgt_gx, tgt_gy, tgt_layer)]
 
     # Create router for centerline
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
@@ -578,7 +491,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     tgt_cross = tgt_path_dir_x * tgt_to_p_dy - tgt_path_dir_y * tgt_to_p_dx
     tgt_p_sign = +1 if tgt_cross >= 0 else -1
 
-    # Check if polarity differs between source and target
+    # Check if polarity differs between source and target (for informational purposes)
     polarity_swap_needed = (src_p_sign != tgt_p_sign)
 
     # Check if path has layer changes (vias)
@@ -588,24 +501,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             has_layer_change = True
             break
 
-    # Choose polarity based on whether we have vias for the swap
-    if polarity_swap_needed and has_layer_change:
-        # Use TARGET polarity - the swap happens on the source/approach side (F.Cu)
-        # This keeps the target/exit side (In1.Cu) clean with no crossover needed
-        p_sign = tgt_p_sign
-        print(f"  Polarity swap with vias: using TARGET polarity p_sign={p_sign}")
-    elif polarity_swap_needed and not has_layer_change:
-        # WARNING: Polarity swap needed but no layer change (no vias) to perform the swap
-        # This will result in crossing tracks on the same layer
-        p_sign = src_p_sign
-        print(f"  WARNING: Polarity swap needed but no vias - tracks will cross!")
-    else:
-        # Use source polarity (no swap needed)
-        p_sign = src_p_sign
-        print(f"  Source polarity: p_sign={p_sign}")
-
-    if polarity_swap_needed:
-        print(f"  (src_p_sign={src_p_sign}, tgt_p_sign={tgt_p_sign}, has_vias={has_layer_change})")
+    # Always use source polarity (no swap handling)
+    p_sign = src_p_sign
+    print(f"  Polarity: src_p_sign={src_p_sign}, tgt_p_sign={tgt_p_sign}, swap_needed={polarity_swap_needed}, has_vias={has_layer_change}")
 
     n_sign = -p_sign
 
@@ -618,78 +516,20 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_float_path = create_parallel_path_float(simplified_path, coord, sign=n_sign, spacing_mm=spacing_mm,
                                                start_dir=start_stub_dir, end_dir=end_stub_dir)
 
-    # Fix the first/last points to align with actual stub positions
-    # This ensures connectors are parallel (same direction) rather than converging
-    # Calculate where each path should start/end based on stub positions + stub direction
-    connector_length = turn_length_mm  # Distance from stub to turn point
-    connector_spread = 0.05  # Spread connector endpoints by this fraction to add clearance margin
-    min_track_clearance = config.track_width + config.clearance  # Min center-to-center distance
-
+    # Mark turn segment points with debug layer -4 (In4.Cu) for visualization
+    # Turn segments are the first and last points of the parallel paths
     if p_float_path and n_float_path and len(p_float_path) >= 2:
-        # Calculate P-N offset vectors at source and target
-        src_pn_dx = (n_src_x - p_src_x) / 2  # Half-offset from centerline to each track
-        src_pn_dy = (n_src_y - p_src_y) / 2
-        tgt_pn_dx = (n_tgt_x - p_tgt_x) / 2
-        tgt_pn_dy = (n_tgt_y - p_tgt_y) / 2
+        # Mark first point (start turn segment) with layer -4
+        p_float_path[0] = (p_float_path[0][0], p_float_path[0][1], -4)
+        n_float_path[0] = (n_float_path[0][0], n_float_path[0][1], -4)
+        # Mark last point (end turn segment) with layer -4
+        p_float_path[-1] = (p_float_path[-1][0], p_float_path[-1][1], -4)
+        n_float_path[-1] = (n_float_path[-1][0], n_float_path[-1][1], -4)
 
-        # Replace first points with positions directly in front of each stub
-        # Spread outward slightly to add clearance margin at transition to centerline
-        p_float_path[0] = (p_src_x + src_dir_x * connector_length - src_pn_dx * connector_spread,
-                          p_src_y + src_dir_y * connector_length - src_pn_dy * connector_spread,
-                          p_float_path[0][2])
-        n_float_path[0] = (n_src_x + src_dir_x * connector_length + src_pn_dx * connector_spread,
-                          n_src_y + src_dir_y * connector_length + src_pn_dy * connector_spread,
-                          n_float_path[0][2])
-
-        # Replace last points with positions directly in front of each target stub
-        p_float_path[-1] = (p_tgt_x + tgt_dir_x * connector_length - tgt_pn_dx * connector_spread,
-                           p_tgt_y + tgt_dir_y * connector_length - tgt_pn_dy * connector_spread,
-                           p_float_path[-1][2])
-        n_float_path[-1] = (n_tgt_x + tgt_dir_x * connector_length + tgt_pn_dx * connector_spread,
-                           n_tgt_y + tgt_dir_y * connector_length + tgt_pn_dy * connector_spread,
-                           n_float_path[-1][2])
-
-        # Check connector endpoints against opposite track and shorten if too close
-        def point_to_path_dist(px, py, path):
-            """Min distance from point to any segment in path (skipping endpoints)."""
-            min_dist = float('inf')
-            for i in range(1, len(path) - 1):
-                x1, y1, _ = path[i]
-                x2, y2, _ = path[i + 1]
-                seg_len_sq = (x2 - x1)**2 + (y2 - y1)**2
-                if seg_len_sq > 0.0001:
-                    t = max(0, min(1, ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / seg_len_sq))
-                    dist = math.sqrt((px - x1 - t * (x2 - x1))**2 + (py - y1 - t * (y2 - y1))**2)
-                    min_dist = min(min_dist, dist)
-            return min_dist
-
-        def check_and_shorten_connectors(p_path, n_path, p_idx, n_idx,
-                                         p_base, n_base, dir_x, dir_y, pn_dx, pn_dy):
-            """Check clearance and shorten connector if needed. Returns True if shortened."""
-            p_x, p_y, p_layer = p_path[p_idx]
-            n_x, n_y, n_layer = n_path[n_idx]
-            min_dist = min(point_to_path_dist(p_x, p_y, n_path),
-                          point_to_path_dist(n_x, n_y, p_path))
-            deficit = min_track_clearance - min_dist
-            if deficit > 0.001:
-                new_len = max(0.01, connector_length - deficit * 3)
-                p_path[p_idx] = (p_base[0] + dir_x * new_len - pn_dx * connector_spread,
-                                p_base[1] + dir_y * new_len - pn_dy * connector_spread, p_layer)
-                n_path[n_idx] = (n_base[0] + dir_x * new_len + pn_dx * connector_spread,
-                                n_base[1] + dir_y * new_len + pn_dy * connector_spread, n_layer)
-
-        # Check source and target connectors
-        check_and_shorten_connectors(p_float_path, n_float_path, 0, 0,
-                                     (p_src_x, p_src_y), (n_src_x, n_src_y),
-                                     src_dir_x, src_dir_y, src_pn_dx, src_pn_dy)
-        check_and_shorten_connectors(p_float_path, n_float_path, -1, -1,
-                                     (p_tgt_x, p_tgt_y), (n_tgt_x, n_tgt_y),
-                                     tgt_dir_x, tgt_dir_y, tgt_pn_dx, tgt_pn_dy)
-
-    # Process via positions and polarity swaps if needed
+    # Process via positions (simplified - no polarity swap handling)
     p_float_path, n_float_path = _process_via_positions(
         simplified_path, p_float_path, n_float_path, coord, config,
-        p_sign, n_sign, spacing_mm, polarity_swap_needed
+        p_sign, n_sign, spacing_mm
     )
 
     # Convert floating-point paths to segments and vias
@@ -714,17 +554,16 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             else:
                 return layer_names[layer_idx]
 
-        # Add connecting segment from original start if needed
+        # Add connecting segment from original start if needed (on In5.Cu for debug)
         if original_start and len(float_path) > 0:
             first_x, first_y, first_layer = float_path[0]
             orig_x, orig_y = original_start
             if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
-                seg_layer = get_layer_name(first_layer)
                 segs.append(Segment(
                     start_x=orig_x, start_y=orig_y,
                     end_x=first_x, end_y=first_y,
                     width=config.track_width,
-                    layer=seg_layer,
+                    layer='In5.Cu',  # Debug layer for connectors
                     net_id=net_id
                 ))
 
@@ -755,17 +594,16 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     net_id=net_id
                 ))
 
-        # Add connecting segment to original end if needed
+        # Add connecting segment to original end if needed (on In5.Cu for debug)
         if original_end and len(float_path) > 0:
             last_x, last_y, last_layer = float_path[-1]
             orig_x, orig_y = original_end
             if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
-                seg_layer = layer_names[last_layer]
                 segs.append(Segment(
                     start_x=last_x, start_y=last_y,
                     end_x=orig_x, end_y=orig_y,
                     width=config.track_width,
-                    layer=seg_layer,
+                    layer='In5.Cu',  # Debug layer for connectors
                     net_id=net_id
                 ))
 
@@ -806,15 +644,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
 
 def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, config,
-                           p_sign, n_sign, spacing_mm, polarity_swap_needed):
+                           p_sign, n_sign, spacing_mm):
     """
     Process via positions at layer changes to be perpendicular to centerline direction.
 
-    This ensures P and N vias form a line perpendicular to the centerline path and
-    handles polarity swaps when needed.
+    Simplified version - just places P and N vias perpendicular to the centerline path.
     """
     min_via_spacing = config.via_size + config.clearance  # Minimum center-to-center distance
-    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.15
 
     if not p_float_path or not n_float_path or len(simplified_path) < 2:
         return p_float_path, n_float_path
@@ -838,254 +674,28 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
                 else:
                     in_dir_x, in_dir_y = 1.0, 0.0
             else:
-                in_dir_x, in_dir_y = None, None
+                in_dir_x, in_dir_y = 1.0, 0.0
 
-            # Get outgoing direction (from via to next point after layer change)
-            if i + 2 < len(simplified_path):
-                next_gx, next_gy, _ = simplified_path[i + 2]
-                next_x, next_y = coord.to_float(next_gx, next_gy)
-                out_dir_x, out_dir_y = next_x - cx, next_y - cy
-                out_len = math.sqrt(out_dir_x**2 + out_dir_y**2)
-                if out_len > 0.001:
-                    out_dir_x, out_dir_y = out_dir_x / out_len, out_dir_y / out_len
-                else:
-                    out_dir_x, out_dir_y = None, None
-            else:
-                out_dir_x, out_dir_y = None, None
-
-            # Calculate perpendicular direction for via-via axis
-            if in_dir_x is not None and out_dir_x is not None:
-                perp_x = (-in_dir_y + -out_dir_y) / 2
-                perp_y = (in_dir_x + out_dir_x) / 2
-                perp_len = math.sqrt(perp_x**2 + perp_y**2)
-                if perp_len > 0.001:
-                    perp_x, perp_y = perp_x / perp_len, perp_y / perp_len
-                else:
-                    perp_x, perp_y = -in_dir_y, in_dir_x
-            elif in_dir_x is not None:
-                perp_x, perp_y = -in_dir_y, in_dir_x
-            elif out_dir_x is not None:
-                perp_x, perp_y = -out_dir_y, out_dir_x
-            else:
-                perp_x, perp_y = 1.0, 0.0
+            # Calculate perpendicular direction for via placement
+            perp_x, perp_y = -in_dir_y, in_dir_x
 
             # Use larger spacing for vias if needed
-            min_via_spacing_for_track = track_via_clearance - spacing_mm
-            via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
+            via_spacing = max(spacing_mm, min_via_spacing / 2)
 
-            # Calculate P and N via positions along the via-via axis
+            # Calculate P and N via positions perpendicular to centerline
             p_via_x = cx + perp_x * p_sign * via_spacing
             p_via_y = cy + perp_y * p_sign * via_spacing
             n_via_x = cx + perp_x * n_sign * via_spacing
             n_via_y = cy + perp_y * n_sign * via_spacing
 
-            # For polarity swap: swap via positions
-            if polarity_swap_needed:
-                p_via_x, n_via_x = n_via_x, p_via_x
-                p_via_y, n_via_y = n_via_y, p_via_y
+            # Update position at index i to via position on layer1
+            p_float_path[i] = (p_via_x, p_via_y, layer1)
+            n_float_path[i] = (n_via_x, n_via_y, layer1)
 
-            # Calculate approach and exit positions
-            diff_pair_spacing = spacing_mm * 2
-
-            if in_dir_x is not None and out_dir_x is not None:
-                in_perp_x, in_perp_y = -in_dir_y, in_dir_x
-                out_perp_x, out_perp_y = -out_dir_y, out_dir_x
-
-                # Determine inner via
-                cross = in_dir_x * out_dir_y - in_dir_y * out_dir_x
-                if cross < 0:
-                    inner_via_x = p_via_x if p_sign < 0 else n_via_x
-                    inner_via_y = p_via_y if p_sign < 0 else n_via_y
-                    inner_is_p = (p_sign < 0)
-                else:
-                    inner_via_x = p_via_x if p_sign > 0 else n_via_x
-                    inner_via_y = p_via_y if p_sign > 0 else n_via_y
-                    inner_is_p = (p_sign > 0)
-
-                if polarity_swap_needed:
-                    inner_is_p = not inner_is_p
-                    if inner_is_p:
-                        inner_via_x, inner_via_y = p_via_x, p_via_y
-                    else:
-                        inner_via_x, inner_via_y = n_via_x, n_via_y
-
-                if inner_is_p:
-                    outer_via_x, outer_via_y = n_via_x, n_via_y
-                else:
-                    outer_via_x, outer_via_y = p_via_x, p_via_y
-                inner_to_outer_x = outer_via_x - inner_via_x
-                inner_to_outer_y = outer_via_y - inner_via_y
-
-                perp_dot = inner_to_outer_x * in_perp_x + inner_to_outer_y * in_perp_y
-                perp_sign = 1 if perp_dot >= 0 else -1
-
-                if inner_is_p:
-                    n_old_x = inner_via_x + in_perp_x * perp_sign * track_via_clearance
-                    n_old_y = inner_via_y + in_perp_y * perp_sign * track_via_clearance
-                    p_old_x = n_old_x - in_perp_x * perp_sign * diff_pair_spacing
-                    p_old_y = n_old_y - in_perp_y * perp_sign * diff_pair_spacing
-                else:
-                    p_old_x = inner_via_x + in_perp_x * perp_sign * track_via_clearance
-                    p_old_y = inner_via_y + in_perp_y * perp_sign * track_via_clearance
-                    n_old_x = p_old_x - in_perp_x * perp_sign * diff_pair_spacing
-                    n_old_y = p_old_y - in_perp_y * perp_sign * diff_pair_spacing
-
-                out_perp_dot = inner_to_outer_x * out_perp_x + inner_to_outer_y * out_perp_y
-                out_perp_sign = 1 if out_perp_dot >= 0 else -1
-
-                if inner_is_p:
-                    n_exit_x = inner_via_x + out_perp_x * out_perp_sign * track_via_clearance
-                    n_exit_y = inner_via_y + out_perp_y * out_perp_sign * track_via_clearance
-                    p_exit_x = n_exit_x - out_perp_x * out_perp_sign * diff_pair_spacing
-                    p_exit_y = n_exit_y - out_perp_y * out_perp_sign * diff_pair_spacing
-                else:
-                    p_exit_x = inner_via_x + out_perp_x * out_perp_sign * track_via_clearance
-                    p_exit_y = inner_via_y + out_perp_y * out_perp_sign * track_via_clearance
-                    n_exit_x = p_exit_x - out_perp_x * out_perp_sign * diff_pair_spacing
-                    n_exit_y = p_exit_y - out_perp_y * out_perp_sign * diff_pair_spacing
-            else:
-                p_old_x = cx + perp_x * p_sign * spacing_mm
-                p_old_y = cy + perp_y * p_sign * spacing_mm
-                n_old_x = cx + perp_x * n_sign * spacing_mm
-                n_old_y = cy + perp_y * n_sign * spacing_mm
-                p_exit_x, p_exit_y = p_old_x, p_old_y
-                n_exit_x, n_exit_y = n_old_x, n_old_y
-
-            # Update position at index i to approach position
-            p_float_path[i] = (p_old_x, p_old_y, layer1)
-            n_float_path[i] = (n_old_x, n_old_y, layer1)
-
-            # Insert via position after old position
-            p_float_path.insert(i + 1, (p_via_x, p_via_y, layer1))
-            n_float_path.insert(i + 1, (n_via_x, n_via_y, layer1))
-
-            # Update what was i+1 (now i+2) to via position on layer2
-            p_float_path[i + 2] = (p_via_x, p_via_y, layer2)
-            n_float_path[i + 2] = (n_via_x, n_via_y, layer2)
-
-            # Insert exit position after via on layer2
-            p_float_path.insert(i + 3, (p_exit_x, p_exit_y, layer2))
-            n_float_path.insert(i + 3, (n_exit_x, n_exit_y, layer2))
-
-            # Handle polarity swap detour if needed
-            if polarity_swap_needed and in_dir_x is not None and out_dir_x is not None:
-                p_float_path, n_float_path = _handle_polarity_swap_detour(
-                    p_float_path, n_float_path, i, layer2, coord, config,
-                    p_via_x, p_via_y, n_via_x, n_via_y,
-                    out_dir_x, out_dir_y, track_via_clearance, diff_pair_spacing
-                )
+            # Update position at index i+1 to via position on layer2
+            p_float_path[i + 1] = (p_via_x, p_via_y, layer2)
+            n_float_path[i + 1] = (n_via_x, n_via_y, layer2)
 
             break  # Only process first layer change
-
-    return p_float_path, n_float_path
-
-
-def _handle_polarity_swap_detour(p_float_path, n_float_path, i, layer2, coord, config,
-                                  p_via_x, p_via_y, n_via_x, n_via_y,
-                                  out_dir_x, out_dir_y, track_via_clearance, diff_pair_spacing):
-    """Handle the circular arc detour for polarity swap around via."""
-    arc_radius = 1.25 * track_via_clearance
-    num_arc_segments = 20
-
-    # Get P continuation info
-    p_cont_x, p_cont_y, p_cont_layer = p_float_path[i + 4]
-    n_cont_x, n_cont_y, _ = n_float_path[i + 4]
-
-    # N via is the one we need to go around
-    n_via_pos_x, n_via_pos_y = n_via_x, n_via_y
-
-    # Via axis
-    to_n_x = n_via_pos_x - p_via_x
-    to_n_y = n_via_pos_y - p_via_y
-    via_axis_len = math.sqrt(to_n_x*to_n_x + to_n_y*to_n_y)
-    if via_axis_len > 0.001:
-        via_axis_x = to_n_x / via_axis_len
-        via_axis_y = to_n_y / via_axis_len
-    else:
-        via_axis_x, via_axis_y = 1, 0
-
-    # Perpendicular options
-    perp1_x, perp1_y = via_axis_y, -via_axis_x
-    perp2_x, perp2_y = -via_axis_y, via_axis_x
-
-    # Choose perpendicular away from continuation
-    to_cont_x = p_cont_x - p_via_x
-    to_cont_y = p_cont_y - p_via_y
-    dot1 = perp1_x * to_cont_x + perp1_y * to_cont_y
-    if dot1 < 0:
-        via_perp_x, via_perp_y = perp1_x, perp1_y
-    else:
-        via_perp_x, via_perp_y = perp2_x, perp2_y
-
-    # Starting angle
-    start_angle = math.atan2(p_via_y - n_via_pos_y, p_via_x - n_via_pos_x)
-
-    # Rotation direction
-    cross_sign = via_axis_x * via_perp_y - via_axis_y * via_perp_x
-    if cross_sign > 0:
-        angle_step = -2 * math.pi / num_arc_segments
-    else:
-        angle_step = 2 * math.pi / num_arc_segments
-
-    # Arc start
-    arc_start_x = n_via_pos_x + arc_radius * math.cos(start_angle)
-    arc_start_y = n_via_pos_y + arc_radius * math.sin(start_angle)
-
-    arc_points = [(arc_start_x, arc_start_y)]
-
-    # N continuation direction
-    n_exit_x, n_exit_y, _ = n_float_path[i + 3]
-    n_cont_dx = n_cont_x - n_exit_x
-    n_cont_dy = n_cont_y - n_exit_y
-    n_cont_len = math.sqrt(n_cont_dx*n_cont_dx + n_cont_dy*n_cont_dy)
-    if n_cont_len > 0.001:
-        n_cont_dir_x = n_cont_dx / n_cont_len
-        n_cont_dir_y = n_cont_dy / n_cont_len
-    else:
-        n_cont_dir_x, n_cont_dir_y = out_dir_x, out_dir_y
-
-    # P continuation direction
-    p_cont_dir_x, p_cont_dir_y = n_cont_dir_x, n_cont_dir_y
-
-    for seg_idx in range(1, num_arc_segments + 1):
-        angle = start_angle + seg_idx * angle_step
-        arc_x = n_via_pos_x + arc_radius * math.cos(angle)
-        arc_y = n_via_pos_y + arc_radius * math.sin(angle)
-
-        last_x, last_y = arc_points[-1]
-
-        # Check for P continuation line crossing
-        to_last_x = last_x - p_cont_x
-        to_last_y = last_y - p_cont_y
-        to_curr_x = arc_x - p_cont_x
-        to_curr_y = arc_y - p_cont_y
-        dist_last = to_last_x * p_cont_dir_y - to_last_y * p_cont_dir_x
-        dist_curr = to_curr_x * p_cont_dir_y - to_curr_y * p_cont_dir_x
-
-        if dist_last * dist_curr < 0:
-            t = dist_last / (dist_last - dist_curr)
-            intersect_x = last_x + t * (arc_x - last_x)
-            intersect_y = last_y + t * (arc_y - last_y)
-            arc_points.append((intersect_x, intersect_y))
-            break
-
-        # Check diff pair spacing
-        arc_to_nexit_x = arc_x - n_exit_x
-        arc_to_nexit_y = arc_y - n_exit_y
-        dot_to_n_cont = arc_to_nexit_x * n_cont_dir_x + arc_to_nexit_y * n_cont_dir_y
-
-        if dot_to_n_cont > 0:
-            dist_to_n_track = abs(arc_to_nexit_x * n_cont_dir_y - arc_to_nexit_y * n_cont_dir_x)
-            if dist_to_n_track < diff_pair_spacing:
-                break
-
-        arc_points.append((arc_x, arc_y))
-
-    # Update P path with arc
-    p_float_path[i + 3] = (arc_points[0][0], arc_points[0][1], layer2)
-
-    insert_idx = i + 4
-    for j, (ax, ay) in enumerate(arc_points[1:]):
-        p_float_path.insert(insert_idx + j, (ax, ay, layer2))
 
     return p_float_path, n_float_path

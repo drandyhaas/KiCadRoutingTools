@@ -41,8 +41,7 @@ class GridRouteConfig:
     direction_order: str = "forward"
     # Differential pair routing parameters
     diff_pair_gap: float = 0.1  # mm - gap between P and N traces (center-to-center = track_width + gap)
-    min_diff_pair_centerline_setback: float = 0.4  # mm - minimum distance in front of stubs to start centerline route
-    max_diff_pair_centerline_setback: float = 0.4  # mm - maximum distance (searches in range min to max)
+    diff_pair_centerline_setback: float = 0.4  # mm - distance in front of stubs to start centerline route
     debug_layers: bool = False  # Output raw A* path on User.9, simplified path on User.8
 
 

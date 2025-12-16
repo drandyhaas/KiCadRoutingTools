@@ -59,8 +59,7 @@ def run_test(diff_pair_name, args, verbose=False):
         cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
     if args.diff_pair_gap is not None:
         cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-    cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
-    cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
+    cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -153,10 +152,8 @@ def main():
                               help='Cost penalty near stubs in mm equivalent (default: 2.0)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
-    router_group.add_argument('--min-diff-pair-centerline-setback', type=float, default=1.5,
-                              help='Min distance in front of stubs to start route in mm (default: 1.5)')
-    router_group.add_argument('--max-diff-pair-centerline-setback', type=float, default=3.0,
-                              help='Max distance in front of stubs to start route in mm (default: 3.0)')
+    router_group.add_argument('--diff-pair-centerline-setback', type=float, default=1.5,
+                              help='Distance in front of stubs to start route in mm (default: 1.5)')
 
     args = parser.parse_args()
 

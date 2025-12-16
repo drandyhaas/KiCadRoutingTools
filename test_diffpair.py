@@ -182,10 +182,8 @@ Examples:
                               help='Cost penalty near stubs in mm equivalent (default: 2.0)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
-    router_group.add_argument('--min-diff-pair-centerline-setback', type=float, default=1.5,
-                              help='Min distance in front of stubs to start route in mm (default: 1.5)')
-    router_group.add_argument('--max-diff-pair-centerline-setback', type=float, default=3.0,
-                              help='Max distance in front of stubs to start route in mm (default: 3.0)')
+    router_group.add_argument('--diff-pair-centerline-setback', type=float, default=1.5,
+                              help='Distance in front of stubs to start route in mm (default: 1.5)')
 
     args = parser.parse_args()
 
@@ -283,8 +281,7 @@ Examples:
         router_cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-    router_cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
-    router_cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
+    router_cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(
