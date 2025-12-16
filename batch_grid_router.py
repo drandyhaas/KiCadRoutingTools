@@ -2680,15 +2680,91 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 p_float_path.insert(i + 3, (p_exit_x, p_exit_y, layer2))
                 n_float_path.insert(i + 3, (n_exit_x, n_exit_y, layer2))
 
-                # Check if continuation points (i+4) are too close to the opposite via
-                # For non-polarity-swap: if P is outer, check P_cont vs N via; if N is outer, check N_cont vs P via
+                # Check if segment from exit to continuation passes too close to opposite via
+                # If so, add a jog point: go further in outgoing direction, then back to continuation
+                p_jog_added = False
+                n_jog_added = False
                 if in_dir_x is not None and out_dir_x is not None and not polarity_swap_needed:
                     p_cont_x, p_cont_y, p_cont_layer = p_float_path[i + 4]
                     n_cont_x, n_cont_y, n_cont_layer = n_float_path[i + 4]
 
+                    # Check P exit->cont segment vs N via (when N is inner)
+                    if not inner_is_p:
+                        # Calculate min distance from N via to segment (p_exit -> p_cont)
+                        seg_dx = p_cont_x - p_exit_x
+                        seg_dy = p_cont_y - p_exit_y
+                        seg_len_sq = seg_dx**2 + seg_dy**2
+                        if seg_len_sq > 0.001:
+                            t = max(0, min(1, ((n_via_x - p_exit_x) * seg_dx + (n_via_y - p_exit_y) * seg_dy) / seg_len_sq))
+                            closest_x = p_exit_x + t * seg_dx
+                            closest_y = p_exit_y + t * seg_dy
+                            dist_to_nvia = math.sqrt((closest_x - n_via_x)**2 + (closest_y - n_via_y)**2)
+
+                            if dist_to_nvia < track_via_clearance:
+                                # Need jog: go in outgoing direction past the N via, then back to continuation
+                                # Calculate how far to go in out_dir to clear N via
+                                exit_to_nvia_x = n_via_x - p_exit_x
+                                exit_to_nvia_y = n_via_y - p_exit_y
+                                # Project N via onto outgoing direction
+                                proj_dist = exit_to_nvia_x * out_dir_x + exit_to_nvia_y * out_dir_y
+                                # Perpendicular distance from out_dir line to N via
+                                perp_dist = abs(exit_to_nvia_x * out_dir_y - exit_to_nvia_y * out_dir_x)
+
+                                if perp_dist < track_via_clearance:
+                                    # Need to go past the projection point
+                                    extra_dist = math.sqrt(track_via_clearance**2 - perp_dist**2)
+                                    jog_dist = proj_dist + extra_dist + config.via_size
+                                else:
+                                    jog_dist = track_via_clearance
+
+                                jog_x = p_exit_x + out_dir_x * jog_dist
+                                jog_y = p_exit_y + out_dir_y * jog_dist
+                                p_float_path.insert(i + 4, (jog_x, jog_y, layer2))
+                                p_jog_added = True
+                                print(f"  Added P jog at ({jog_x:.2f},{jog_y:.2f}) to clear N via")
+
+                    # Check N exit->cont segment vs P via (when P is inner)
+                    else:
+                        seg_dx = n_cont_x - n_exit_x
+                        seg_dy = n_cont_y - n_exit_y
+                        seg_len_sq = seg_dx**2 + seg_dy**2
+                        if seg_len_sq > 0.001:
+                            t = max(0, min(1, ((p_via_x - n_exit_x) * seg_dx + (p_via_y - n_exit_y) * seg_dy) / seg_len_sq))
+                            closest_x = n_exit_x + t * seg_dx
+                            closest_y = n_exit_y + t * seg_dy
+                            dist_to_pvia = math.sqrt((closest_x - p_via_x)**2 + (closest_y - p_via_y)**2)
+
+                            if dist_to_pvia < track_via_clearance:
+                                exit_to_pvia_x = p_via_x - n_exit_x
+                                exit_to_pvia_y = p_via_y - n_exit_y
+                                proj_dist = exit_to_pvia_x * out_dir_x + exit_to_pvia_y * out_dir_y
+                                perp_dist = abs(exit_to_pvia_x * out_dir_y - exit_to_pvia_y * out_dir_x)
+
+                                if perp_dist < track_via_clearance:
+                                    extra_dist = math.sqrt(track_via_clearance**2 - perp_dist**2)
+                                    jog_dist = proj_dist + extra_dist + config.via_size
+                                else:
+                                    jog_dist = track_via_clearance
+
+                                jog_x = n_exit_x + out_dir_x * jog_dist
+                                jog_y = n_exit_y + out_dir_y * jog_dist
+                                n_float_path.insert(i + 4, (jog_x, jog_y, layer2))
+                                n_jog_added = True
+                                print(f"  Added N jog at ({jog_x:.2f},{jog_y:.2f}) to clear P via")
+
+                # Check if continuation points are too close to the opposite via
+                # Account for jog insertion: continuation is at i+5 if jog added, else i+4
+                # For non-polarity-swap: if P is outer, check P_cont vs N via; if N is outer, check N_cont vs P via
+                if in_dir_x is not None and out_dir_x is not None and not polarity_swap_needed:
+                    p_cont_idx = i + 5 if p_jog_added else i + 4
+                    n_cont_idx = i + 5 if n_jog_added else i + 4
+                    p_cont_x, p_cont_y, p_cont_layer = p_float_path[p_cont_idx]
+                    n_cont_x, n_cont_y, n_cont_layer = n_float_path[n_cont_idx]
+
                     # Get continuation direction from next point
-                    if i + 5 < len(p_float_path):
-                        p_next_x, p_next_y, _ = p_float_path[i + 5]
+                    p_next_idx = p_cont_idx + 1
+                    if p_next_idx < len(p_float_path):
+                        p_next_x, p_next_y, _ = p_float_path[p_next_idx]
                         ext_dx = p_next_x - p_cont_x
                         ext_dy = p_next_y - p_cont_y
                         ext_len = math.sqrt(ext_dx*ext_dx + ext_dy*ext_dy)
@@ -2707,15 +2783,16 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                             shortfall = track_via_clearance - p_cont_to_nvia_dist + config.via_size
                             p_cont_x += p_cont_dir_x * shortfall
                             p_cont_y += p_cont_dir_y * shortfall
-                            p_float_path[i + 4] = (p_cont_x, p_cont_y, p_cont_layer)
+                            p_float_path[p_cont_idx] = (p_cont_x, p_cont_y, p_cont_layer)
                             print(f"  Pre-adjusted P cont for N via clearance: moved by {shortfall:.3f}mm")
                     else:
                         # P is inner, N is outer - check if N continuation is too close to P via
                         n_cont_to_pvia_dist = math.sqrt((n_cont_x - p_via_x)**2 + (n_cont_y - p_via_y)**2)
                         if n_cont_to_pvia_dist < track_via_clearance:
                             # Get N continuation direction
-                            if i + 5 < len(n_float_path):
-                                n_next_x, n_next_y, _ = n_float_path[i + 5]
+                            n_next_idx = n_cont_idx + 1
+                            if n_next_idx < len(n_float_path):
+                                n_next_x, n_next_y, _ = n_float_path[n_next_idx]
                                 n_ext_dx = n_next_x - n_cont_x
                                 n_ext_dy = n_next_y - n_cont_y
                                 n_ext_len = math.sqrt(n_ext_dx*n_ext_dx + n_ext_dy*n_ext_dy)
@@ -2729,7 +2806,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                             shortfall = track_via_clearance - n_cont_to_pvia_dist + config.via_size
                             n_cont_x += n_cont_dir_x * shortfall
                             n_cont_y += n_cont_dir_y * shortfall
-                            n_float_path[i + 4] = (n_cont_x, n_cont_y, n_cont_layer)
+                            n_float_path[n_cont_idx] = (n_cont_x, n_cont_y, n_cont_layer)
                             print(f"  Pre-adjusted N cont for P via clearance: moved by {shortfall:.3f}mm")
 
                 # For polarity swap: P needs to detour around N via
