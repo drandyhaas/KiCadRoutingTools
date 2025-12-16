@@ -1,0 +1,1136 @@
+"""
+Shared utility functions for PCB routing.
+
+Includes connectivity analysis, endpoint finding, MPS ordering, and segment cleanup.
+"""
+
+import math
+import fnmatch
+from typing import List, Optional, Tuple, Dict
+
+from kicad_parser import PCBData, Segment, Via, Pad
+from routing_config import GridRouteConfig, GridCoord, DiffPair
+
+
+def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
+    """
+    Extract differential pair base name and polarity from net name.
+
+    Looks for common differential pair naming conventions:
+    - name_P / name_N
+    - nameP / nameN
+    - name+ / name-
+
+    Returns (base_name, is_positive) or None if not a diff pair.
+    """
+    if not net_name:
+        return None
+
+    # Try _P/_N suffix (most common for LVDS)
+    if net_name.endswith('_P'):
+        return (net_name[:-2], True)
+    if net_name.endswith('_N'):
+        return (net_name[:-2], False)
+
+    # Try P/N suffix without underscore
+    if net_name.endswith('P') and len(net_name) > 1:
+        # Check it's not just ending in P as part of name
+        if net_name[-2] in '0123456789_':
+            return (net_name[:-1], True)
+    if net_name.endswith('N') and len(net_name) > 1:
+        if net_name[-2] in '0123456789_':
+            return (net_name[:-1], False)
+
+    # Try +/- suffix
+    if net_name.endswith('+'):
+        return (net_name[:-1], True)
+    if net_name.endswith('-'):
+        return (net_name[:-1], False)
+
+    return None
+
+
+def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str, DiffPair]:
+    """
+    Find all differential pairs in the PCB matching the given glob patterns.
+
+    Args:
+        pcb_data: PCB data with net information
+        patterns: Glob patterns for nets to treat as diff pairs (e.g., '*lvds*')
+
+    Returns:
+        Dict mapping base_name to DiffPair with complete P/N pairs
+    """
+    pairs: Dict[str, DiffPair] = {}
+
+    # Collect all net names from pcb_data
+    for net_id, net in pcb_data.nets.items():
+        net_name = net.name
+        if not net_name or net_id == 0:
+            continue
+
+        # Check if this net matches any diff pair pattern
+        matched = any(fnmatch.fnmatch(net_name, pattern) for pattern in patterns)
+        if not matched:
+            continue
+
+        # Try to extract diff pair info
+        result = extract_diff_pair_base(net_name)
+        if result is None:
+            continue
+
+        base_name, is_p = result
+
+        if base_name not in pairs:
+            pairs[base_name] = DiffPair(base_name=base_name)
+
+        if is_p:
+            pairs[base_name].p_net_id = net_id
+            pairs[base_name].p_net_name = net_name
+        else:
+            pairs[base_name].n_net_id = net_id
+            pairs[base_name].n_net_name = net_name
+
+    # Filter to only complete pairs
+    complete_pairs = {k: v for k, v in pairs.items() if v.is_complete}
+
+    return complete_pairs
+
+
+def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> List[List[Segment]]:
+    """Find groups of connected segments using union-find."""
+    if not segments:
+        return []
+
+    n = len(segments)
+    parent = list(range(n))
+
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    # Check all pairs for shared endpoints
+    for i in range(n):
+        for j in range(i + 1, n):
+            si, sj = segments[i], segments[j]
+            pts_i = [(si.start_x, si.start_y), (si.end_x, si.end_y)]
+            pts_j = [(sj.start_x, sj.start_y), (sj.end_x, sj.end_y)]
+            for pi in pts_i:
+                for pj in pts_j:
+                    if abs(pi[0] - pj[0]) < tolerance and abs(pi[1] - pj[1]) < tolerance:
+                        union(i, j)
+                        break
+
+    # Group segments by their root
+    groups: Dict[int, List[Segment]] = {}
+    for i in range(n):
+        root = find(i)
+        if root not in groups:
+            groups[root] = []
+        groups[root].append(segments[i])
+
+    return list(groups.values())
+
+
+def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: float = 0.05) -> List[Tuple[float, float, str]]:
+    """
+    Find the free ends of a segment group (endpoints not connected to other segments or pads).
+
+    Args:
+        segments: Connected group of segments
+        pads: Pads that might be connected to the segments
+        tolerance: Distance tolerance for considering points as connected
+
+    Returns:
+        List of (x, y, layer) tuples for free endpoints
+    """
+    if not segments:
+        return []
+
+    # Count how many times each endpoint appears
+    endpoint_counts: Dict[Tuple[float, float, str], int] = {}
+    for seg in segments:
+        key_start = (round(seg.start_x, 3), round(seg.start_y, 3), seg.layer)
+        key_end = (round(seg.end_x, 3), round(seg.end_y, 3), seg.layer)
+        endpoint_counts[key_start] = endpoint_counts.get(key_start, 0) + 1
+        endpoint_counts[key_end] = endpoint_counts.get(key_end, 0) + 1
+
+    # Get pad positions
+    pad_positions = [(round(p.global_x, 3), round(p.global_y, 3)) for p in pads]
+
+    # Free ends are endpoints that appear only once AND are not near a pad
+    free_ends = []
+    for (x, y, layer), count in endpoint_counts.items():
+        if count == 1:
+            # Check if near a pad
+            near_pad = False
+            for px, py in pad_positions:
+                if abs(x - px) < tolerance and abs(y - py) < tolerance:
+                    near_pad = True
+                    break
+            if not near_pad:
+                free_ends.append((x, y, layer))
+
+    return free_ends
+
+
+def get_stub_direction(segments: List[Segment], stub_x: float, stub_y: float, stub_layer: str,
+                       tolerance: float = 0.05) -> Tuple[float, float]:
+    """
+    Find the direction a stub is pointing (from pad toward free end).
+
+    Args:
+        segments: List of segments for the net
+        stub_x, stub_y: Position of the stub free end
+        stub_layer: Layer of the stub
+        tolerance: Distance tolerance for matching endpoints
+
+    Returns:
+        (dx, dy): Normalized direction vector pointing in the stub direction
+    """
+    # Find the segment that has this stub endpoint
+    for seg in segments:
+        if seg.layer != stub_layer:
+            continue
+
+        # Check if start matches stub position
+        if abs(seg.start_x - stub_x) < tolerance and abs(seg.start_y - stub_y) < tolerance:
+            # Direction from end to start (toward the free end)
+            dx = seg.start_x - seg.end_x
+            dy = seg.start_y - seg.end_y
+            length = math.sqrt(dx*dx + dy*dy)
+            if length > 0:
+                return (dx / length, dy / length)
+            return (0, 0)
+
+        # Check if end matches stub position
+        if abs(seg.end_x - stub_x) < tolerance and abs(seg.end_y - stub_y) < tolerance:
+            # Direction from start to end (toward the free end)
+            dx = seg.end_x - seg.start_x
+            dy = seg.end_y - seg.start_y
+            length = math.sqrt(dx*dx + dy*dy)
+            if length > 0:
+                return (dx / length, dy / length)
+            return (0, 0)
+
+    # Fallback - no matching segment found
+    return (0, 0)
+
+
+def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                      use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
+    """
+    Find source and target endpoints for a net, considering segments, pads, and existing vias.
+
+    Args:
+        pcb_data: PCB data
+        net_id: Net ID to find endpoints for
+        config: Grid routing configuration
+        use_stub_free_ends: If True, use only stub free ends (for diff pairs).
+                           If False, use all segment endpoints (for single-ended).
+
+    Returns:
+        (sources, targets, error_message)
+        - sources: List of (gx, gy, layer_idx, orig_x, orig_y)
+        - targets: List of (gx, gy, layer_idx, orig_x, orig_y)
+        - error_message: None if successful, otherwise describes why routing can't proceed
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+
+    # Case 1: Multiple segment groups
+    if len(net_segments) >= 2:
+        groups = find_connected_groups(net_segments)
+        if len(groups) >= 2:
+            groups.sort(key=len, reverse=True)
+            source_segs = groups[0]
+            target_segs = groups[1]
+
+            if use_stub_free_ends:
+                # For diff pairs: use only stub free ends (tips not connected to pads)
+                source_free_ends = find_stub_free_ends(source_segs, net_pads)
+                target_free_ends = find_stub_free_ends(target_segs, net_pads)
+
+                sources = []
+                for x, y, layer in source_free_ends:
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is not None:
+                        gx, gy = coord.to_grid(x, y)
+                        sources.append((gx, gy, layer_idx, x, y))
+
+                targets = []
+                for x, y, layer in target_free_ends:
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is not None:
+                        gx, gy = coord.to_grid(x, y)
+                        targets.append((gx, gy, layer_idx, x, y))
+            else:
+                # For single-ended: use all segment endpoints
+                sources = []
+                for seg in source_segs:
+                    layer_idx = layer_map.get(seg.layer)
+                    if layer_idx is not None:
+                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                        sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                        if (gx1, gy1) != (gx2, gy2):
+                            sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+
+                targets = []
+                for seg in target_segs:
+                    layer_idx = layer_map.get(seg.layer)
+                    if layer_idx is not None:
+                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                        targets.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                        if (gx1, gy1) != (gx2, gy2):
+                            targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+
+            if sources and targets:
+                return sources, targets, None
+
+    # Case 2: One segment group + unconnected pads
+    if len(net_segments) >= 1 and len(net_pads) >= 1:
+        groups = find_connected_groups(net_segments)
+        if len(groups) == 1:
+            # Check if any pad is NOT connected to the segment group
+            seg_group = groups[0]
+            seg_points = set()
+            for seg in seg_group:
+                seg_points.add((round(seg.start_x, 3), round(seg.start_y, 3)))
+                seg_points.add((round(seg.end_x, 3), round(seg.end_y, 3)))
+
+            unconnected_pads = []
+            for pad in net_pads:
+                pad_pos = (round(pad.global_x, 3), round(pad.global_y, 3))
+                # Check if pad is near any segment point
+                connected = False
+                for sp in seg_points:
+                    if abs(pad_pos[0] - sp[0]) < 0.05 and abs(pad_pos[1] - sp[1]) < 0.05:
+                        connected = True
+                        break
+                if not connected:
+                    unconnected_pads.append(pad)
+
+            if unconnected_pads:
+                # Use all segment endpoints as source, unconnected pad(s) as target
+                sources = []
+                for seg in seg_group:
+                    layer_idx = layer_map.get(seg.layer)
+                    if layer_idx is not None:
+                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                        sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                        if (gx1, gy1) != (gx2, gy2):
+                            sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+
+                targets = []
+                for pad in unconnected_pads:
+                    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                    for layer in pad.layers:
+                        layer_idx = layer_map.get(layer)
+                        if layer_idx is not None:
+                            targets.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
+
+                # Add existing vias as endpoints - they can be routed to on any layer
+                # Determine if via is near stub (add to sources) or near unconnected pads (add to targets)
+                # Note: All vias are through-hole, connecting ALL routing layers
+                for via in net_vias:
+                    gx, gy = coord.to_grid(via.x, via.y)
+                    # Check if via is near any unconnected pad
+                    near_unconnected = False
+                    for pad in unconnected_pads:
+                        if abs(via.x - pad.global_x) < 0.1 and abs(via.y - pad.global_y) < 0.1:
+                            near_unconnected = True
+                            break
+                    # Add via as endpoint on ALL routing layers (vias are through-hole)
+                    for layer in config.layers:
+                        layer_idx = layer_map.get(layer)
+                        if layer_idx is not None:
+                            if near_unconnected:
+                                targets.append((gx, gy, layer_idx, via.x, via.y))
+                            else:
+                                sources.append((gx, gy, layer_idx, via.x, via.y))
+
+                if sources and targets:
+                    return sources, targets, None
+
+    # Case 3: No segments, just pads - route between pads
+    if len(net_segments) == 0 and len(net_pads) >= 2:
+        # Use first pad as source, rest as targets
+        sources = []
+        pad = net_pads[0]
+        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+        for layer in pad.layers:
+            layer_idx = layer_map.get(layer)
+            if layer_idx is not None:
+                sources.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
+
+        targets = []
+        for pad in net_pads[1:]:
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            for layer in pad.layers:
+                layer_idx = layer_map.get(layer)
+                if layer_idx is not None:
+                    targets.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
+
+        if sources and targets:
+            return sources, targets, None
+
+    # Case 4: Single segment, check if it connects two pads already
+    if len(net_segments) == 1 and len(net_pads) >= 2:
+        # Segment already connects pads - nothing to route
+        return [], [], "Net has 1 segment connecting pads - already routed"
+
+    # Determine why we can't route
+    if len(net_segments) == 0 and len(net_pads) < 2:
+        return [], [], f"Net has no segments and only {len(net_pads)} pad(s) - need at least 2 endpoints"
+    if len(net_segments) >= 1:
+        groups = find_connected_groups(net_segments)
+        if len(groups) == 1:
+            return [], [], "Net segments are already connected (single group) with no unconnected pads"
+
+    return [], [], f"Cannot determine endpoints: {len(net_segments)} segments, {len(net_pads)} pads"
+
+
+def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
+    """
+    Find all net IDs in the PCB that have unrouted stubs (multiple disconnected segment groups).
+    These are nets that have partial routing but aren't fully connected.
+    """
+    unrouted_ids = []
+
+    # Group segments by net ID
+    net_segments: Dict[int, List[Segment]] = {}
+    for seg in pcb_data.segments:
+        if seg.net_id not in net_segments:
+            net_segments[seg.net_id] = []
+        net_segments[seg.net_id].append(seg)
+
+    # Check each net for multiple disconnected groups
+    for net_id, segments in net_segments.items():
+        if net_id == 0:  # Skip unassigned net
+            continue
+        if len(segments) < 2:
+            continue
+        groups = find_connected_groups(segments)
+        if len(groups) >= 2:
+            # Net has multiple disconnected stub groups = unrouted
+            unrouted_ids.append(net_id)
+
+    return unrouted_ids
+
+
+def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[float, float]]:
+    """Get centroid positions of unrouted net stubs for proximity avoidance."""
+    stubs = []
+    for net_id in net_ids:
+        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+        if len(net_segments) < 2:
+            continue
+        groups = find_connected_groups(net_segments)
+        if len(groups) < 2:
+            continue
+        for group in groups:
+            points = []
+            for seg in group:
+                points.append((seg.start_x, seg.start_y))
+                points.append((seg.end_x, seg.end_y))
+            if points:
+                cx = sum(p[0] for p in points) / len(points)
+                cy = sum(p[1] for p in points) / len(points)
+                stubs.append((cx, cy))
+    return stubs
+
+
+def get_net_stub_centroids(pcb_data: PCBData, net_id: int) -> List[Tuple[float, float]]:
+    """
+    Get centroids of each connected stub group for a net.
+    Returns list of (x, y) centroids, typically 2 for a 2-point net.
+    """
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    if len(net_segments) < 2:
+        return []
+    groups = find_connected_groups(net_segments)
+    if len(groups) < 2:
+        return []
+
+    centroids = []
+    for group in groups:
+        points = []
+        for seg in group:
+            points.append((seg.start_x, seg.start_y))
+            points.append((seg.end_x, seg.end_y))
+        if points:
+            cx = sum(p[0] for p in points) / len(points)
+            cy = sum(p[1] for p in points) / len(points)
+            centroids.append((cx, cy))
+    return centroids
+
+
+def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[float, float]]:
+    """
+    Get the two routing endpoints for a net, for MPS conflict detection.
+
+    This handles multiple cases:
+    1. Two stub groups -> use stub centroids
+    2. One stub group + unconnected pads -> use stub centroid + pad centroid
+    3. No stubs, just pads -> use pad positions
+
+    Returns list of (x, y) positions, typically 2 for source and target.
+    """
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+    # Case 1: Multiple stub groups - use their centroids
+    if len(net_segments) >= 2:
+        groups = find_connected_groups(net_segments)
+        if len(groups) >= 2:
+            centroids = []
+            for group in groups:
+                points = []
+                for seg in group:
+                    points.append((seg.start_x, seg.start_y))
+                    points.append((seg.end_x, seg.end_y))
+                if points:
+                    cx = sum(p[0] for p in points) / len(points)
+                    cy = sum(p[1] for p in points) / len(points)
+                    centroids.append((cx, cy))
+            return centroids[:2]
+
+    # Case 2: One stub group + pads - find unconnected pads
+    if len(net_segments) >= 1 and len(net_pads) >= 1:
+        groups = find_connected_groups(net_segments)
+        if len(groups) == 1:
+            # Get stub centroid
+            group = groups[0]
+            seg_points = set()
+            for seg in group:
+                seg_points.add((round(seg.start_x, 3), round(seg.start_y, 3)))
+                seg_points.add((round(seg.end_x, 3), round(seg.end_y, 3)))
+
+            stub_pts = []
+            for seg in group:
+                stub_pts.append((seg.start_x, seg.start_y))
+                stub_pts.append((seg.end_x, seg.end_y))
+            stub_cx = sum(p[0] for p in stub_pts) / len(stub_pts)
+            stub_cy = sum(p[1] for p in stub_pts) / len(stub_pts)
+
+            # Find unconnected pads
+            unconnected_pads = []
+            for pad in net_pads:
+                pad_pos = (round(pad.global_x, 3), round(pad.global_y, 3))
+                connected = False
+                for sp in seg_points:
+                    if abs(pad_pos[0] - sp[0]) < 0.05 and abs(pad_pos[1] - sp[1]) < 0.05:
+                        connected = True
+                        break
+                if not connected:
+                    unconnected_pads.append(pad)
+
+            if unconnected_pads:
+                # Compute centroid of unconnected pads
+                pad_cx = sum(p.global_x for p in unconnected_pads) / len(unconnected_pads)
+                pad_cy = sum(p.global_y for p in unconnected_pads) / len(unconnected_pads)
+                return [(stub_cx, stub_cy), (pad_cx, pad_cy)]
+
+    # Case 3: No stubs, just pads - use first pad and centroid of rest
+    if len(net_segments) == 0 and len(net_pads) >= 2:
+        first_pad = net_pads[0]
+        other_pads = net_pads[1:]
+        other_cx = sum(p.global_x for p in other_pads) / len(other_pads)
+        other_cy = sum(p.global_y for p in other_pads) / len(other_pads)
+        return [(first_pad.global_x, first_pad.global_y), (other_cx, other_cy)]
+
+    return []
+
+
+def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
+                              center: Tuple[float, float] = None) -> List[int]:
+    """
+    Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
+
+    The MPS approach identifies crossing conflicts between nets and orders them
+    so that non-conflicting nets are routed first. This reduces routing failures
+    caused by earlier routes blocking later ones.
+
+    Algorithm:
+    1. For each net, find its two stub endpoint centroids
+    2. Project all endpoints onto a circular boundary centered on the routing region
+    3. Assign each endpoint an angular position on the boundary
+    4. Detect crossing conflicts: nets A and B cross if their endpoints alternate
+       on the boundary (A1, B1, A2, B2 or B1, A1, B2, A2 ordering)
+    5. Build a conflict graph where edges connect crossing nets
+    6. Use greedy algorithm: repeatedly select net with fewest active conflicts,
+       add to result, and remove its neighbors from consideration for this round
+    7. Continue until all nets are ordered (multiple rounds/layers)
+
+    Args:
+        pcb_data: PCB data with segments
+        net_ids: List of net IDs to order
+        center: Optional center point for angular projection (auto-computed if None)
+
+    Returns:
+        Ordered list of net IDs, with least-conflicting nets first
+    """
+    # Step 1: Get routing endpoints for each net (stubs, pads, or both)
+    net_endpoints = {}  # net_id -> [(x1, y1), (x2, y2)]
+    for net_id in net_ids:
+        endpoints = get_net_routing_endpoints(pcb_data, net_id)
+        if len(endpoints) >= 2:
+            # Take the first two endpoints (source and target)
+            net_endpoints[net_id] = endpoints[:2]
+
+    if not net_endpoints:
+        print("MPS: No nets with valid routing endpoints found")
+        return list(net_ids)
+
+    # Step 2: Compute center if not provided (centroid of all endpoints)
+    if center is None:
+        all_points = []
+        for endpoints in net_endpoints.values():
+            all_points.extend(endpoints)
+        if all_points:
+            center = (
+                sum(p[0] for p in all_points) / len(all_points),
+                sum(p[1] for p in all_points) / len(all_points)
+            )
+        else:
+            center = (0, 0)
+
+    # Step 3: Compute angular position for each endpoint
+    def angle_from_center(point: Tuple[float, float]) -> float:
+        """Compute angle from center to point in radians [0, 2*pi)."""
+        dx = point[0] - center[0]
+        dy = point[1] - center[1]
+        ang = math.atan2(dy, dx)
+        if ang < 0:
+            ang += 2 * math.pi
+        return ang
+
+    # For each net, get angles of both endpoints and normalize order
+    net_angles = {}  # net_id -> (angle1, angle2) where angle1 < angle2
+    for net_id, endpoints in net_endpoints.items():
+        a1 = angle_from_center(endpoints[0])
+        a2 = angle_from_center(endpoints[1])
+        # Normalize: always store with smaller angle first
+        if a1 > a2:
+            a1, a2 = a2, a1
+        net_angles[net_id] = (a1, a2)
+
+    # Step 4: Detect crossing conflicts
+    # Two nets cross if their intervals on the circle interleave
+    # Net A with (a1, a2) and Net B with (b1, b2) cross if:
+    #   a1 < b1 < a2 < b2  OR  b1 < a1 < b2 < a2
+    def nets_cross(net_a: int, net_b: int) -> bool:
+        """Check if two nets have crossing paths on the circular boundary."""
+        a1, a2 = net_angles[net_a]
+        b1, b2 = net_angles[net_b]
+
+        # Check interleaving: one net's interval partially overlaps the other's
+        # a1 < b1 < a2 < b2 means A starts, B starts, A ends, B ends = crossing
+        if a1 < b1 < a2 < b2:
+            return True
+        if b1 < a1 < b2 < a2:
+            return True
+        return False
+
+    # Build conflict graph
+    net_list = list(net_angles.keys())
+    conflicts = {net_id: set() for net_id in net_list}
+
+    for i, net_a in enumerate(net_list):
+        for net_b in net_list[i+1:]:
+            if nets_cross(net_a, net_b):
+                conflicts[net_a].add(net_b)
+                conflicts[net_b].add(net_a)
+
+    # Count total conflicts for reporting
+    total_conflicts = sum(len(c) for c in conflicts.values()) // 2
+    print(f"MPS: {len(net_list)} nets with {total_conflicts} crossing conflicts detected")
+
+    # Step 5: Greedy ordering - repeatedly pick net with fewest active conflicts
+    ordered = []
+    remaining = set(net_list)
+    round_num = 0
+
+    while remaining:
+        round_num += 1
+        round_winners = []
+        round_losers = set()
+        active_conflicts = {net_id: len(conflicts[net_id] & remaining)
+                           for net_id in remaining}
+
+        # Process this round: pick nets with minimal conflicts
+        round_remaining = set(remaining)
+        while round_remaining:
+            # Find net with minimum active conflicts among round_remaining
+            min_conflicts = float('inf')
+            best_net = None
+            for net_id in round_remaining:
+                # Active conflicts = conflicts with nets still in round_remaining
+                active = len(conflicts[net_id] & round_remaining)
+                if active < min_conflicts:
+                    min_conflicts = active
+                    best_net = net_id
+
+            if best_net is None:
+                break
+
+            # This net wins this round
+            round_winners.append(best_net)
+            round_remaining.discard(best_net)
+
+            # All its conflicting neighbors in round_remaining become losers
+            for loser in conflicts[best_net] & round_remaining:
+                round_losers.add(loser)
+                round_remaining.discard(loser)
+
+        # Add winners to ordered list, then losers go to next round
+        ordered.extend(round_winners)
+        remaining = round_losers
+
+        if round_winners:
+            net_names = [pcb_data.nets[nid].name for nid in round_winners[:3]]
+            suffix = f"... (+{len(round_winners)-3} more)" if len(round_winners) > 3 else ""
+            print(f"MPS Round {round_num}: {len(round_winners)} nets selected "
+                  f"({', '.join(net_names)}{suffix})")
+
+    # Add any nets that weren't in net_angles (no valid endpoints) at the end
+    # These are nets we couldn't determine routing endpoints for
+    nets_without_endpoints = [nid for nid in net_ids if nid not in net_angles]
+    if nets_without_endpoints:
+        print(f"MPS: {len(nets_without_endpoints)} nets without valid endpoints appended at end")
+        ordered.extend(nets_without_endpoints)
+
+    return ordered
+
+
+def _segments_cross(seg1: Segment, seg2: Segment) -> Optional[Tuple[float, float]]:
+    """Check if two segments cross (not just touch at endpoints). Returns crossing point or None."""
+    # Line 1: P1 + t*(P2-P1), Line 2: P3 + u*(P4-P3)
+    x1, y1 = seg1.start_x, seg1.start_y
+    x2, y2 = seg1.end_x, seg1.end_y
+    x3, y3 = seg2.start_x, seg2.start_y
+    x4, y4 = seg2.end_x, seg2.end_y
+
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-10:
+        return None  # Parallel
+
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+
+    # Check if intersection is strictly inside both segments (not at endpoints)
+    eps = 0.001  # Small margin to exclude endpoint touches
+    if eps < t < (1 - eps) and eps < u < (1 - eps):
+        cross_x = x1 + t * (x2 - x1)
+        cross_y = y1 + t * (y2 - y1)
+        return (cross_x, cross_y)
+    return None
+
+
+def fix_self_intersections(segments: List[Segment], existing_segments: List[Segment] = None,
+                           max_short_length: float = 1.0) -> List[Segment]:
+    """Fix self-intersections by moving endpoints of short connector segments.
+
+    When a short connector segment crosses a longer segment (either new or existing),
+    we move the endpoint of the short segment to eliminate the crossing.
+
+    Args:
+        segments: New segments from routing
+        existing_segments: Existing segments of the same net to check crossings against
+        max_short_length: Maximum length for a segment to be considered "short"
+    """
+    if not segments:
+        return segments
+
+    # Combine existing segments by layer for cross-checking
+    existing_by_layer = {}
+    if existing_segments:
+        for seg in existing_segments:
+            if seg.layer not in existing_by_layer:
+                existing_by_layer[seg.layer] = []
+            existing_by_layer[seg.layer].append(seg)
+
+    # Process each layer separately
+    layer_segments = {}
+    for seg in segments:
+        if seg.layer not in layer_segments:
+            layer_segments[seg.layer] = []
+        layer_segments[seg.layer].append(seg)
+
+    result_segments = []
+
+    for layer, layer_segs in layer_segments.items():
+        # Get existing segments on this layer
+        existing_on_layer = existing_by_layer.get(layer, [])
+
+        # Find all crossings involving short NEW segments
+        # Map: new segment index -> (other segment, crossing point)
+        segments_to_modify = {}
+
+        for i, seg in enumerate(layer_segs):
+            seg_len = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+            if seg_len > max_short_length:
+                continue
+
+            # This is a short new segment - check if it crosses any EXISTING segment
+            for existing in existing_on_layer:
+                cross_pt = _segments_cross(seg, existing)
+                if cross_pt:
+                    segments_to_modify[i] = (existing, cross_pt)
+                    break
+
+            # Also check crossings with LONG new segments on the same layer
+            if i not in segments_to_modify:
+                for j, other in enumerate(layer_segs):
+                    if i == j:
+                        continue
+                    other_len = math.sqrt((other.end_x - other.start_x)**2 + (other.end_y - other.start_y)**2)
+                    if other_len <= max_short_length:
+                        continue  # Only check against longer segments
+                    cross_pt = _segments_cross(seg, other)
+                    if cross_pt:
+                        segments_to_modify[i] = (other, cross_pt)
+                        break
+
+        # Process segments - modify short segments that cross existing ones
+        for i, seg in enumerate(layer_segs):
+            if i in segments_to_modify:
+                existing, cross_pt = segments_to_modify[i]
+
+                # Move the short segment's endpoint to an ENDPOINT of the existing segment
+                # (not the crossing point, which would create a gap)
+                # Choose the existing endpoint closest to the crossing point
+                dist_cross_to_ex_start = math.sqrt((cross_pt[0] - existing.start_x)**2 +
+                                                    (cross_pt[1] - existing.start_y)**2)
+                dist_cross_to_ex_end = math.sqrt((cross_pt[0] - existing.end_x)**2 +
+                                                  (cross_pt[1] - existing.end_y)**2)
+
+                if dist_cross_to_ex_end < dist_cross_to_ex_start:
+                    snap_x, snap_y = existing.end_x, existing.end_y
+                else:
+                    snap_x, snap_y = existing.start_x, existing.start_y
+
+                # Determine which endpoint of the short seg to move (the one closer to crossing)
+                dist_start_to_cross = math.sqrt((seg.start_x - cross_pt[0])**2 + (seg.start_y - cross_pt[1])**2)
+                dist_end_to_cross = math.sqrt((seg.end_x - cross_pt[0])**2 + (seg.end_y - cross_pt[1])**2)
+
+                if dist_start_to_cross < dist_end_to_cross:
+                    # Move start to existing endpoint
+                    new_seg = Segment(
+                        start_x=snap_x, start_y=snap_y,
+                        end_x=seg.end_x, end_y=seg.end_y,
+                        width=seg.width, layer=seg.layer, net_id=seg.net_id
+                    )
+                else:
+                    # Move end to existing endpoint
+                    new_seg = Segment(
+                        start_x=seg.start_x, start_y=seg.start_y,
+                        end_x=snap_x, end_y=snap_y,
+                        width=seg.width, layer=seg.layer, net_id=seg.net_id
+                    )
+                result_segments.append(new_seg)
+            else:
+                result_segments.append(seg)
+
+    return result_segments
+
+
+def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
+                        max_appendix_length: float = 1.0, vias: List[Via] = None) -> List[Segment]:
+    """Collapse short appendix segments by moving dead-end vertices to junction points.
+
+    An appendix is a short segment where one endpoint is a dead-end (degree 1) and
+    the other endpoint is a junction (degree >= 2). We collapse it by moving the
+    dead-end to nearly coincide with the junction (offset by 0.001mm).
+
+    Only collapses segments where the dead-end doesn't connect to existing segments or vias.
+    Also fixes self-intersections where new segments cross existing segments.
+    """
+    if not segments:
+        return segments
+
+    # First fix self-intersections with existing segments
+    segments = fix_self_intersections(segments, existing_segments, max_appendix_length)
+
+    # Build map of existing segment endpoints by layer (store actual coordinates for proximity check)
+    existing_endpoints = {}
+    if existing_segments:
+        for seg in existing_segments:
+            if seg.layer not in existing_endpoints:
+                existing_endpoints[seg.layer] = []
+            existing_endpoints[seg.layer].append((seg.start_x, seg.start_y))
+            existing_endpoints[seg.layer].append((seg.end_x, seg.end_y))
+
+    # Build map of via locations by layer (store actual coordinates and size for proximity check)
+    via_locations = {}
+    if vias:
+        all_copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+        for via in vias:
+            # Through-hole vias connect all layers
+            if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
+                via_layers = all_copper_layers
+            elif via.layers:
+                via_layers = via.layers
+            else:
+                via_layers = all_copper_layers
+            via_size = getattr(via, 'size', 0.6)  # Default via size if not available
+            for layer in via_layers:
+                if layer not in via_locations:
+                    via_locations[layer] = []
+                via_locations[layer].append((via.x, via.y, via_size))
+
+    # Process each layer separately
+    layer_segments = {}
+    for seg in segments:
+        if seg.layer not in layer_segments:
+            layer_segments[seg.layer] = []
+        layer_segments[seg.layer].append(seg)
+
+    result_segments = []
+
+    def point_near_any(px, py, points_list, tolerance):
+        """Check if point is within tolerance of any point in list."""
+        for ex, ey in points_list:
+            if math.sqrt((px - ex)**2 + (py - ey)**2) < tolerance:
+                return True
+        return False
+
+    def point_near_any_via(px, py, vias_list):
+        """Check if point is within via_size/4 of any via in list."""
+        for vx, vy, via_size in vias_list:
+            tolerance = via_size / 4
+            if math.sqrt((px - vx)**2 + (py - vy)**2) < tolerance:
+                return True
+        return False
+
+    for layer, layer_segs in layer_segments.items():
+        layer_existing = existing_endpoints.get(layer, [])
+        layer_vias = via_locations.get(layer, [])
+
+        # Build endpoint degree map from NEW segments only
+        endpoint_counts = {}
+        for seg in layer_segs:
+            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
+            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
+            endpoint_counts[start_key] = endpoint_counts.get(start_key, 0) + 1
+            endpoint_counts[end_key] = endpoint_counts.get(end_key, 0) + 1
+
+        # Find and collapse appendices
+        for seg in layer_segs:
+            length = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+
+            if length > max_appendix_length:
+                result_segments.append(seg)
+                continue
+
+            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
+            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
+            start_degree = endpoint_counts.get(start_key, 0)
+            end_degree = endpoint_counts.get(end_key, 0)
+
+            # Check if endpoints connect to existing segments (with proximity tolerance) or vias
+            # Use track width / 4 as proximity tolerance for segments, via size / 4 for vias
+            proximity_tol = seg.width / 4
+            start_connects_existing = point_near_any(seg.start_x, seg.start_y, layer_existing, proximity_tol) or point_near_any_via(seg.start_x, seg.start_y, layer_vias)
+            end_connects_existing = point_near_any(seg.end_x, seg.end_y, layer_existing, proximity_tol) or point_near_any_via(seg.end_x, seg.end_y, layer_vias)
+
+            # Appendix: one end is dead-end (degree 1, not connected to existing/vias),
+            # other is junction (degree >= 2 OR connected to existing/vias)
+            if (start_degree == 1 and not start_connects_existing and
+                (end_degree >= 2 or end_connects_existing)):
+                # Collapse: move start to nearly coincide with end (junction point)
+                new_seg = Segment(
+                    start_x=seg.end_x + 0.001,
+                    start_y=seg.end_y,
+                    end_x=seg.end_x,
+                    end_y=seg.end_y,
+                    width=seg.width,
+                    layer=seg.layer,
+                    net_id=seg.net_id
+                )
+                result_segments.append(new_seg)
+            elif (end_degree == 1 and not end_connects_existing and
+                  (start_degree >= 2 or start_connects_existing)):
+                # Collapse: move end to nearly coincide with start (junction point)
+                new_seg = Segment(
+                    start_x=seg.start_x,
+                    start_y=seg.start_y,
+                    end_x=seg.start_x + 0.001,
+                    end_y=seg.start_y,
+                    width=seg.width,
+                    layer=seg.layer,
+                    net_id=seg.net_id
+                )
+                result_segments.append(new_seg)
+            else:
+                # Not an appendix or connects to existing - keep as is
+                result_segments.append(seg)
+
+    return result_segments
+
+
+def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment],
+                             clearance: float = 0.1, track_width: float = 0.1) -> Tuple[List[Segment], List[Segment]]:
+    """Fix P-N clearance violations by shifting connector segments perpendicular.
+
+    When P and N connector segments are too close, shift them perpendicular to their
+    direction to increase clearance while maintaining connectivity.
+    """
+    if not p_segments or not n_segments:
+        return p_segments, n_segments
+
+    min_center_dist = clearance + track_width  # Center-to-center distance needed
+    eps = 0.001  # Tolerance for coordinate matching
+
+    def point_to_segment_dist(px, py, s):
+        """Distance from point to segment, returns (distance, closest_x, closest_y)."""
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        len_sq = dx * dx + dy * dy
+        if len_sq < 0.0001:
+            return math.sqrt((px - s.start_x)**2 + (py - s.start_y)**2), s.start_x, s.start_y
+        t = max(0, min(1, ((px - s.start_x) * dx + (py - s.start_y) * dy) / len_sq))
+        cx = s.start_x + t * dx
+        cy = s.start_y + t * dy
+        return math.sqrt((px - cx)**2 + (py - cy)**2), cx, cy
+
+    def segment_min_dist_info(s1, s2):
+        """Find min distance and the closest points on each segment."""
+        min_d = float('inf')
+        best_t1, best_x2, best_y2 = 0.5, 0, 0
+        for t1 in [i * 0.1 for i in range(11)]:
+            x1 = s1.start_x + t1 * (s1.end_x - s1.start_x)
+            y1 = s1.start_y + t1 * (s1.end_y - s1.start_y)
+            d, cx, cy = point_to_segment_dist(x1, y1, s2)
+            if d < min_d:
+                min_d = d
+                best_t1, best_x2, best_y2 = t1, cx, cy
+        return min_d, best_t1, best_x2, best_y2
+
+    def points_match(x1, y1, x2, y2):
+        """Check if two points are the same within tolerance."""
+        return abs(x1 - x2) < eps and abs(y1 - y2) < eps
+
+    def update_connected_endpoints(seg_list, old_x, old_y, new_x, new_y):
+        """Update endpoints of segments that were connected to (old_x, old_y)."""
+        for s in seg_list:
+            if points_match(s.start_x, s.start_y, old_x, old_y):
+                s.start_x, s.start_y = new_x, new_y
+            if points_match(s.end_x, s.end_y, old_x, old_y):
+                s.end_x, s.end_y = new_x, new_y
+
+    # Group segments by layer
+    p_by_layer = {}
+    n_by_layer = {}
+    for s in p_segments:
+        p_by_layer.setdefault(s.layer, []).append(s)
+    for s in n_segments:
+        n_by_layer.setdefault(s.layer, []).append(s)
+
+    # Find and fix clearance violations on short connector segments
+    for layer in set(p_by_layer.keys()) & set(n_by_layer.keys()):
+        p_layer = p_by_layer[layer]
+        n_layer = n_by_layer[layer]
+
+        # Check segments and shift them perpendicular if they violate clearance
+        for seg_list, other_list in [(p_layer, n_layer), (n_layer, p_layer)]:
+            for seg in seg_list:
+                seg_len = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+                if seg_len > 2.0 or seg_len < 0.02:
+                    continue
+
+                for other in other_list:
+                    dist, t_closest, other_x, other_y = segment_min_dist_info(seg, other)
+                    deficit = min_center_dist - dist
+                    if deficit > 0.001:  # Fix any real violation
+                        # Compute direction from closest point on other to our segment
+                        closest_x = seg.start_x + t_closest * (seg.end_x - seg.start_x)
+                        closest_y = seg.start_y + t_closest * (seg.end_y - seg.start_y)
+                        # Vector from other segment's closest point to our closest point
+                        away_dx = closest_x - other_x
+                        away_dy = closest_y - other_y
+                        away_len = math.sqrt(away_dx**2 + away_dy**2)
+                        if away_len > 0.001:
+                            # Normalize and compute shift amount
+                            away_dx /= away_len
+                            away_dy /= away_len
+                            shift = deficit + 0.02  # Extra margin
+
+                            # Save old endpoints
+                            old_start_x, old_start_y = seg.start_x, seg.start_y
+                            old_end_x, old_end_y = seg.end_x, seg.end_y
+
+                            # Shift entire segment perpendicular (away from other)
+                            seg.start_x += away_dx * shift
+                            seg.start_y += away_dy * shift
+                            seg.end_x += away_dx * shift
+                            seg.end_y += away_dy * shift
+
+                            # Update connected segments to maintain connectivity
+                            update_connected_endpoints(seg_list, old_start_x, old_start_y,
+                                                      seg.start_x, seg.start_y)
+                            update_connected_endpoints(seg_list, old_end_x, old_end_y,
+                                                      seg.end_x, seg.end_y)
+
+    return p_segments, n_segments
+
+
+def add_route_to_pcb_data(pcb_data: PCBData, result: dict) -> None:
+    """Add routed segments and vias to PCB data for subsequent routes to see."""
+    new_segments = result['new_segments']
+    if not new_segments:
+        return
+
+    # Get all unique net_ids from new segments
+    net_ids = set(s.net_id for s in new_segments)
+
+    # Get new vias for appendix checking
+    new_vias = result.get('new_vias', [])
+
+    # Process each net separately for same-net cleanup
+    cleaned_segments = []
+    for net_id in net_ids:
+        net_segs = [s for s in new_segments if s.net_id == net_id]
+        existing_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+        # Include both new vias and existing vias for this net
+        net_vias = [v for v in new_vias if v.net_id == net_id]
+        net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
+        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias)
+        cleaned_segments.extend(cleaned)
+
+    # For diff pairs (2 nets), also fix P-N clearance
+    if len(net_ids) == 2:
+        net_list = list(net_ids)
+        p_segs = [s for s in cleaned_segments if s.net_id == net_list[0]]
+        n_segs = [s for s in cleaned_segments if s.net_id == net_list[1]]
+        p_segs, n_segs = fix_diff_pair_clearance(p_segs, n_segs)
+        # Re-run self-intersection fix since P-N clearance shift may create same-net crossings
+        p_existing = [s for s in pcb_data.segments if s.net_id == net_list[0]]
+        n_existing = [s for s in pcb_data.segments if s.net_id == net_list[1]]
+        p_segs = fix_self_intersections(p_segs, p_existing)
+        n_segs = fix_self_intersections(n_segs, n_existing)
+        cleaned_segments = p_segs + n_segs
+
+    # Filter out very short (degenerate) segments
+    def seg_len(s):
+        return math.sqrt((s.end_x - s.start_x)**2 + (s.end_y - s.start_y)**2)
+    cleaned_segments = [s for s in cleaned_segments if seg_len(s) > 0.01]
+
+    for seg in cleaned_segments:
+        pcb_data.segments.append(seg)
+    for via in result['new_vias']:
+        pcb_data.vias.append(via)
+    # Update result so output file also gets cleaned segments
+    result['new_segments'] = cleaned_segments
