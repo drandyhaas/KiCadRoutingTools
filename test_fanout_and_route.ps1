@@ -1,3 +1,5 @@
+alias python=python3
+
 # Test fanning out BGA chips
 # Run in Windows powershell like: .\apply_fanouts.ps1
 
@@ -17,11 +19,11 @@ python bga_fanout.py fanout_output.kicad_pcb --component U3 --output fanout_outp
 python bga_fanout.py fanout_output.kicad_pcb --component U1 --output fanout_output.kicad_pcb --nets "*U1A*" --primary-escape horizontal
 
 # Route the FTDI tracks, letting them sneak into the BGA for now
-python .\batch_grid_router.py fanout_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" --no-bga-zone #--max-iterations 500000
+python batch_grid_router.py fanout_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" --no-bga-zone #--max-iterations 500000
 
 # Check for errors
-python.exe .\check_drc.py .\routed_output.kicad_pcb
+python.exe check_drc.py routed_output.kicad_pcb
 
 # Check connections
-python .\check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
+python check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
 
