@@ -424,20 +424,31 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Use a shorter turn length to reduce connector segment length
     turn_length_mm = setback * 0.3  # Length of the turn segment in mm
     turn_length_grid = int(turn_length_mm / config.grid_step)
+    # When there's a via at start/end, use longer turn to clear via approach area
+    via_turn_multiplier = 1.15  # Minimum ~1.1, use 1.15 for safety margin
 
     if len(simplified_path) >= 2 and turn_length_grid > 0:
+        # Check if there's a via at the start (layer change between first two points)
+        has_via_at_start = (len(simplified_path) >= 2 and
+                           simplified_path[0][2] != simplified_path[1][2])
+        # Check if there's a via at the end (layer change between last two points)
+        has_via_at_end = (len(simplified_path) >= 2 and
+                         simplified_path[-1][2] != simplified_path[-2][2])
+
         # Add turn segment at start (facing source stubs)
+        # If there's a via at start, use longer turn to clear the via approach area
         first_gx, first_gy, first_layer = simplified_path[0]
-        # Move backward along stub direction to create turn point
-        turn_start_gx = first_gx - int(src_dir_x * turn_length_grid)
-        turn_start_gy = first_gy - int(src_dir_y * turn_length_grid)
+        start_turn_mult = via_turn_multiplier if has_via_at_start else 1.0
+        turn_start_gx = first_gx - int(src_dir_x * turn_length_grid * start_turn_mult)
+        turn_start_gy = first_gy - int(src_dir_y * turn_length_grid * start_turn_mult)
         simplified_path.insert(0, (turn_start_gx, turn_start_gy, first_layer))
 
         # Add turn segment at end (facing target stubs)
+        # If there's a via at end, use longer turn to clear the via approach area
         last_gx, last_gy, last_layer = simplified_path[-1]
-        # Move toward stubs (opposite of tgt_dir which points outward from stubs)
-        turn_end_gx = last_gx - int(tgt_dir_x * turn_length_grid)
-        turn_end_gy = last_gy - int(tgt_dir_y * turn_length_grid)
+        end_turn_mult = via_turn_multiplier if has_via_at_end else 1.0
+        turn_end_gx = last_gx - int(tgt_dir_x * turn_length_grid * end_turn_mult)
+        turn_end_gy = last_gy - int(tgt_dir_y * turn_length_grid * end_turn_mult)
         simplified_path.append((turn_end_gx, turn_end_gy, last_layer))
 
         print(f"  Added turn segments: path now {len(simplified_path)} points")
