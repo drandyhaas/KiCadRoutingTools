@@ -398,17 +398,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         print(f"No route found after {total_iterations} iterations (both directions)")
         return {'failed': True, 'iterations': total_iterations}
 
-    # Count layer transitions (via changes) in the path
-    layer_transitions = 0
-    for i in range(1, len(path)):
-        if path[i][2] != path[i-1][2]:
-            layer_transitions += 1
-
-    # Limit to single via transition for diff pairs
-    if layer_transitions > 1:
-        print(f"Route found but has {layer_transitions} layer transitions (max 1 allowed for diff pairs)")
-        return {'failed': True, 'iterations': total_iterations}
-
     # Simplify path by removing collinear points
     simplified_path = simplify_path(path)
     print(f"Route found in {total_iterations} iterations, path: {len(path)} -> {len(simplified_path)} points")
@@ -676,6 +665,7 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
     Process via positions at layer changes to be perpendicular to centerline direction.
 
     Adds approach and exit tracks to keep main P/N tracks parallel while routing to vias.
+    Handles multiple layer changes by processing in reverse order.
     """
     min_via_spacing = config.via_size + config.clearance  # Minimum center-to-center distance
     track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.15
@@ -683,127 +673,131 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
     if not p_float_path or not n_float_path or len(simplified_path) < 2:
         return p_float_path, n_float_path
 
+    # Find all layer change indices first
+    layer_change_indices = []
     for i in range(len(simplified_path) - 1):
+        if simplified_path[i][2] != simplified_path[i + 1][2]:
+            layer_change_indices.append(i)
+
+    # Process in reverse order so insertions don't affect earlier indices
+    for i in reversed(layer_change_indices):
         gx1, gy1, layer1 = simplified_path[i]
         gx2, gy2, layer2 = simplified_path[i + 1]
 
-        if layer1 != layer2:
-            # Layer change detected - calculate centerline position
-            cx, cy = coord.to_float(gx1, gy1)
+        # Layer change detected - calculate centerline position
+        cx, cy = coord.to_float(gx1, gy1)
 
-            # Get incoming direction (from previous point to via)
-            if i > 0:
-                prev_gx, prev_gy, _ = simplified_path[i - 1]
-                prev_x, prev_y = coord.to_float(prev_gx, prev_gy)
-                in_dir_x, in_dir_y = cx - prev_x, cy - prev_y
-                in_len = math.sqrt(in_dir_x**2 + in_dir_y**2)
-                if in_len > 0.001:
-                    in_dir_x, in_dir_y = in_dir_x / in_len, in_dir_y / in_len
-                else:
-                    in_dir_x, in_dir_y = 1.0, 0.0
+        # Get incoming direction (from previous point to via)
+        if i > 0:
+            prev_gx, prev_gy, _ = simplified_path[i - 1]
+            prev_x, prev_y = coord.to_float(prev_gx, prev_gy)
+            in_dir_x, in_dir_y = cx - prev_x, cy - prev_y
+            in_len = math.sqrt(in_dir_x**2 + in_dir_y**2)
+            if in_len > 0.001:
+                in_dir_x, in_dir_y = in_dir_x / in_len, in_dir_y / in_len
             else:
                 in_dir_x, in_dir_y = 1.0, 0.0
+        else:
+            in_dir_x, in_dir_y = 1.0, 0.0
 
-            # Get outgoing direction (from via to next point after layer change)
-            if i + 2 < len(simplified_path):
-                next_gx, next_gy, _ = simplified_path[i + 2]
-                next_x, next_y = coord.to_float(next_gx, next_gy)
-                out_dir_x, out_dir_y = next_x - cx, next_y - cy
-                out_len = math.sqrt(out_dir_x**2 + out_dir_y**2)
-                if out_len > 0.001:
-                    out_dir_x, out_dir_y = out_dir_x / out_len, out_dir_y / out_len
-                else:
-                    out_dir_x, out_dir_y = in_dir_x, in_dir_y
+        # Get outgoing direction (from via to next point after layer change)
+        if i + 2 < len(simplified_path):
+            next_gx, next_gy, _ = simplified_path[i + 2]
+            next_x, next_y = coord.to_float(next_gx, next_gy)
+            out_dir_x, out_dir_y = next_x - cx, next_y - cy
+            out_len = math.sqrt(out_dir_x**2 + out_dir_y**2)
+            if out_len > 0.001:
+                out_dir_x, out_dir_y = out_dir_x / out_len, out_dir_y / out_len
             else:
                 out_dir_x, out_dir_y = in_dir_x, in_dir_y
+        else:
+            out_dir_x, out_dir_y = in_dir_x, in_dir_y
 
-            # Calculate perpendicular direction for via-via axis (average of in/out perpendiculars)
-            perp_x = (-in_dir_y + -out_dir_y) / 2
-            perp_y = (in_dir_x + out_dir_x) / 2
-            perp_len = math.sqrt(perp_x**2 + perp_y**2)
-            if perp_len > 0.001:
-                perp_x, perp_y = perp_x / perp_len, perp_y / perp_len
-            else:
-                perp_x, perp_y = -in_dir_y, in_dir_x
+        # Calculate perpendicular direction for via-via axis (average of in/out perpendiculars)
+        perp_x = (-in_dir_y + -out_dir_y) / 2
+        perp_y = (in_dir_x + out_dir_x) / 2
+        perp_len = math.sqrt(perp_x**2 + perp_y**2)
+        if perp_len > 0.001:
+            perp_x, perp_y = perp_x / perp_len, perp_y / perp_len
+        else:
+            perp_x, perp_y = -in_dir_y, in_dir_x
 
-            # Use larger spacing for vias if needed
-            min_via_spacing_for_track = track_via_clearance - spacing_mm
-            via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
+        # Use larger spacing for vias if needed
+        min_via_spacing_for_track = track_via_clearance - spacing_mm
+        via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
 
-            # Calculate P and N via positions perpendicular to centerline
-            p_via_x = cx + perp_x * p_sign * via_spacing
-            p_via_y = cy + perp_y * p_sign * via_spacing
-            n_via_x = cx + perp_x * n_sign * via_spacing
-            n_via_y = cy + perp_y * n_sign * via_spacing
+        # Calculate P and N via positions perpendicular to centerline
+        p_via_x = cx + perp_x * p_sign * via_spacing
+        p_via_y = cy + perp_y * p_sign * via_spacing
+        n_via_x = cx + perp_x * n_sign * via_spacing
+        n_via_y = cy + perp_y * n_sign * via_spacing
 
-            # Calculate approach and exit positions to keep main tracks parallel
-            diff_pair_spacing = spacing_mm * 2
-            in_perp_x, in_perp_y = -in_dir_y, in_dir_x
-            out_perp_x, out_perp_y = -out_dir_y, out_dir_x
+        # Calculate approach and exit positions to keep main tracks parallel
+        diff_pair_spacing = spacing_mm * 2
+        in_perp_x, in_perp_y = -in_dir_y, in_dir_x
+        out_perp_x, out_perp_y = -out_dir_y, out_dir_x
 
-            # Determine which via is on the "inner" side of a turn (if any)
-            cross = in_dir_x * out_dir_y - in_dir_y * out_dir_x
-            if cross < 0:
-                inner_is_p = (p_sign < 0)
-            else:
-                inner_is_p = (p_sign > 0)
+        # Determine which via is on the "inner" side of a turn (if any)
+        cross = in_dir_x * out_dir_y - in_dir_y * out_dir_x
+        if cross < 0:
+            inner_is_p = (p_sign < 0)
+        else:
+            inner_is_p = (p_sign > 0)
 
-            if inner_is_p:
-                inner_via_x, inner_via_y = p_via_x, p_via_y
-                outer_via_x, outer_via_y = n_via_x, n_via_y
-            else:
-                inner_via_x, inner_via_y = n_via_x, n_via_y
-                outer_via_x, outer_via_y = p_via_x, p_via_y
+        if inner_is_p:
+            inner_via_x, inner_via_y = p_via_x, p_via_y
+            outer_via_x, outer_via_y = n_via_x, n_via_y
+        else:
+            inner_via_x, inner_via_y = n_via_x, n_via_y
+            outer_via_x, outer_via_y = p_via_x, p_via_y
 
-            inner_to_outer_x = outer_via_x - inner_via_x
-            inner_to_outer_y = outer_via_y - inner_via_y
+        inner_to_outer_x = outer_via_x - inner_via_x
+        inner_to_outer_y = outer_via_y - inner_via_y
 
-            # Calculate approach positions (before via, on layer1)
-            perp_dot = inner_to_outer_x * in_perp_x + inner_to_outer_y * in_perp_y
-            perp_sign = 1 if perp_dot >= 0 else -1
+        # Calculate approach positions (before via, on layer1)
+        perp_dot = inner_to_outer_x * in_perp_x + inner_to_outer_y * in_perp_y
+        perp_sign = 1 if perp_dot >= 0 else -1
 
-            if inner_is_p:
-                n_approach_x = inner_via_x + in_perp_x * perp_sign * track_via_clearance
-                n_approach_y = inner_via_y + in_perp_y * perp_sign * track_via_clearance
-                p_approach_x = n_approach_x - in_perp_x * perp_sign * diff_pair_spacing
-                p_approach_y = n_approach_y - in_perp_y * perp_sign * diff_pair_spacing
-            else:
-                p_approach_x = inner_via_x + in_perp_x * perp_sign * track_via_clearance
-                p_approach_y = inner_via_y + in_perp_y * perp_sign * track_via_clearance
-                n_approach_x = p_approach_x - in_perp_x * perp_sign * diff_pair_spacing
-                n_approach_y = p_approach_y - in_perp_y * perp_sign * diff_pair_spacing
+        if inner_is_p:
+            n_approach_x = inner_via_x + in_perp_x * perp_sign * track_via_clearance
+            n_approach_y = inner_via_y + in_perp_y * perp_sign * track_via_clearance
+            p_approach_x = n_approach_x - in_perp_x * perp_sign * diff_pair_spacing
+            p_approach_y = n_approach_y - in_perp_y * perp_sign * diff_pair_spacing
+        else:
+            p_approach_x = inner_via_x + in_perp_x * perp_sign * track_via_clearance
+            p_approach_y = inner_via_y + in_perp_y * perp_sign * track_via_clearance
+            n_approach_x = p_approach_x - in_perp_x * perp_sign * diff_pair_spacing
+            n_approach_y = p_approach_y - in_perp_y * perp_sign * diff_pair_spacing
 
-            # Calculate exit positions (after via, on layer2)
-            out_perp_dot = inner_to_outer_x * out_perp_x + inner_to_outer_y * out_perp_y
-            out_perp_sign = 1 if out_perp_dot >= 0 else -1
+        # Calculate exit positions (after via, on layer2)
+        out_perp_dot = inner_to_outer_x * out_perp_x + inner_to_outer_y * out_perp_y
+        out_perp_sign = 1 if out_perp_dot >= 0 else -1
 
-            if inner_is_p:
-                n_exit_x = inner_via_x + out_perp_x * out_perp_sign * track_via_clearance
-                n_exit_y = inner_via_y + out_perp_y * out_perp_sign * track_via_clearance
-                p_exit_x = n_exit_x - out_perp_x * out_perp_sign * diff_pair_spacing
-                p_exit_y = n_exit_y - out_perp_y * out_perp_sign * diff_pair_spacing
-            else:
-                p_exit_x = inner_via_x + out_perp_x * out_perp_sign * track_via_clearance
-                p_exit_y = inner_via_y + out_perp_y * out_perp_sign * track_via_clearance
-                n_exit_x = p_exit_x - out_perp_x * out_perp_sign * diff_pair_spacing
-                n_exit_y = p_exit_y - out_perp_y * out_perp_sign * diff_pair_spacing
+        if inner_is_p:
+            n_exit_x = inner_via_x + out_perp_x * out_perp_sign * track_via_clearance
+            n_exit_y = inner_via_y + out_perp_y * out_perp_sign * track_via_clearance
+            p_exit_x = n_exit_x - out_perp_x * out_perp_sign * diff_pair_spacing
+            p_exit_y = n_exit_y - out_perp_y * out_perp_sign * diff_pair_spacing
+        else:
+            p_exit_x = inner_via_x + out_perp_x * out_perp_sign * track_via_clearance
+            p_exit_y = inner_via_y + out_perp_y * out_perp_sign * track_via_clearance
+            n_exit_x = p_exit_x - out_perp_x * out_perp_sign * diff_pair_spacing
+            n_exit_y = p_exit_y - out_perp_y * out_perp_sign * diff_pair_spacing
 
-            # Update position at index i to approach position
-            p_float_path[i] = (p_approach_x, p_approach_y, layer1)
-            n_float_path[i] = (n_approach_x, n_approach_y, layer1)
+        # Update position at index i to approach position
+        p_float_path[i] = (p_approach_x, p_approach_y, layer1)
+        n_float_path[i] = (n_approach_x, n_approach_y, layer1)
 
-            # Insert via position after approach position
-            p_float_path.insert(i + 1, (p_via_x, p_via_y, layer1))
-            n_float_path.insert(i + 1, (n_via_x, n_via_y, layer1))
+        # Insert via position after approach position
+        p_float_path.insert(i + 1, (p_via_x, p_via_y, layer1))
+        n_float_path.insert(i + 1, (n_via_x, n_via_y, layer1))
 
-            # Update what was i+1 (now i+2) to via position on layer2
-            p_float_path[i + 2] = (p_via_x, p_via_y, layer2)
-            n_float_path[i + 2] = (n_via_x, n_via_y, layer2)
+        # Update what was i+1 (now i+2) to via position on layer2
+        p_float_path[i + 2] = (p_via_x, p_via_y, layer2)
+        n_float_path[i + 2] = (n_via_x, n_via_y, layer2)
 
-            # Insert exit position after via on layer2
-            p_float_path.insert(i + 3, (p_exit_x, p_exit_y, layer2))
-            n_float_path.insert(i + 3, (n_exit_x, n_exit_y, layer2))
-
-            break  # Only process first layer change
+        # Insert exit position after via on layer2
+        p_float_path.insert(i + 3, (p_exit_x, p_exit_y, layer2))
+        n_float_path.insert(i + 3, (n_exit_x, n_exit_y, layer2))
 
     return p_float_path, n_float_path

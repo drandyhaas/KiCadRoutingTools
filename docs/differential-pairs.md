@@ -215,8 +215,7 @@ This helps visualize the routing structure without affecting the actual routed l
 
 ## Limitations
 
-1. **Single via transition** - Currently limited to at most one layer change per diff pair route
-2. **Polarity swap requires --fix-polarity** - Polarity swaps are detected; use `--fix-polarity` to automatically swap target pads
-3. **No length matching** - P and N paths may have slightly different lengths
-4. **Fixed spacing** - Spacing is constant along the route (no tapering)
-5. **Grid snapping** - Centerline endpoints snap to grid
+1. **Polarity swap requires --fix-polarity** - Polarity swaps are detected; use `--fix-polarity` to automatically swap target pads
+2. **No length matching** - P and N paths may have slightly different lengths
+3. **Fixed spacing** - Spacing is constant along the route (no tapering)
+4. **Grid snapping** - Centerline endpoints snap to grid
