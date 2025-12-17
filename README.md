@@ -60,7 +60,7 @@ python check_connected.py output.kicad_pcb --nets "*DATA*"
 
 ```
 KiCadRoutingTools/
-├── route.py      # Main CLI - batch routing orchestration
+├── route.py                  # Main CLI - batch routing orchestration
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_utils.py          # Shared utilities (connectivity, MPS, cleanup)
 ├── obstacle_map.py           # Obstacle map building functions
@@ -74,6 +74,8 @@ KiCadRoutingTools/
 ├── qfn_fanout.py             # QFN/QFP fanout generator
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
+├── test_diffpair.py          # Test single/multiple diff pairs with DRC
+├── test_all_diffpairs.py     # Batch test all diff pairs (parallel)
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
 └── docs/                     # Documentation
@@ -94,10 +96,9 @@ KiCadRoutingTools/
 
 | Metric | Value |
 |--------|-------|
-| 32 DATA nets | ~3.5 seconds |
-| Success rate | 100% |
+| 56 LVDS diff pairs | 100% with `--fix-polarity` |
+| Parallel testing | 14 threads default |
 | Speedup vs Python | ~10x |
-| DRC violations | 0 |
 
 ## Common Options
 

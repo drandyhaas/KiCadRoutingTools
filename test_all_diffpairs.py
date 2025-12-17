@@ -11,6 +11,7 @@ import sys
 import os
 import argparse
 import re
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from kicad_parser import parse_kicad_pcb
 from route import find_differential_pairs
@@ -18,89 +19,99 @@ from route import find_differential_pairs
 
 def run_test(diff_pair_name, args, verbose=False):
     """Run test_diffpair.py for a single diff pair and return results."""
-    # Use wildcard prefix to match full path (e.g., /fpga_adc/lvds_rx4_1)
-    cmd = [sys.executable, "test_diffpair.py", f"*{diff_pair_name}"]
+    # Create a unique temp output file for this test
+    temp_fd, temp_output = tempfile.mkstemp(suffix='.kicad_pcb', prefix=f'test_{diff_pair_name}_')
+    os.close(temp_fd)
 
-    # Add pass-through arguments
-    if args.build:
-        cmd.append("--build")
-    if args.skip_drc:
-        cmd.append("--skip-drc")
-    if args.skip_connectivity:
-        cmd.append("--skip-connectivity")
-    if args.input != 'routed_output.kicad_pcb':
-        cmd.extend(["--input", args.input])
-    if args.no_bga_zones and not args.bga_zones:
-        cmd.append("--no-bga-zones")
-    if args.ordering:
-        cmd.extend(["--ordering", args.ordering])
-    if args.direction:
-        cmd.extend(["--direction", args.direction])
-    if args.layers:
-        cmd.extend(["--layers"] + args.layers)
-    if args.track_width is not None:
-        cmd.extend(["--track-width", str(args.track_width)])
-    if args.clearance is not None:
-        cmd.extend(["--clearance", str(args.clearance)])
-    if args.via_size is not None:
-        cmd.extend(["--via-size", str(args.via_size)])
-    if args.via_drill is not None:
-        cmd.extend(["--via-drill", str(args.via_drill)])
-    if args.grid_step is not None:
-        cmd.extend(["--grid-step", str(args.grid_step)])
-    if args.via_cost is not None:
-        cmd.extend(["--via-cost", str(args.via_cost)])
-    if args.max_iterations is not None:
-        cmd.extend(["--max-iterations", str(args.max_iterations)])
-    if args.heuristic_weight is not None:
-        cmd.extend(["--heuristic-weight", str(args.heuristic_weight)])
-    if args.stub_proximity_radius is not None:
-        cmd.extend(["--stub-proximity-radius", str(args.stub_proximity_radius)])
-    if args.stub_proximity_cost is not None:
-        cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
-    if args.diff_pair_gap is not None:
-        cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-    if args.diff_pair_centerline_setback is not None:
-        cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
-    if args.fix_polarity:
-        cmd.append("--fix-polarity")
+    try:
+        # Use wildcard prefix to match full path (e.g., /fpga_adc/lvds_rx4_1)
+        cmd = [sys.executable, "test_diffpair.py", f"*{diff_pair_name}"]
+        cmd.extend(["--output", temp_output])
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+        # Add pass-through arguments
+        if args.build:
+            cmd.append("--build")
+        if args.skip_drc:
+            cmd.append("--skip-drc")
+        if args.skip_connectivity:
+            cmd.append("--skip-connectivity")
+        if args.input != 'routed_output.kicad_pcb':
+            cmd.extend(["--input", args.input])
+        if args.no_bga_zones and not args.bga_zones:
+            cmd.append("--no-bga-zones")
+        if args.ordering:
+            cmd.extend(["--ordering", args.ordering])
+        if args.direction:
+            cmd.extend(["--direction", args.direction])
+        if args.layers:
+            cmd.extend(["--layers"] + args.layers)
+        if args.track_width is not None:
+            cmd.extend(["--track-width", str(args.track_width)])
+        if args.clearance is not None:
+            cmd.extend(["--clearance", str(args.clearance)])
+        if args.via_size is not None:
+            cmd.extend(["--via-size", str(args.via_size)])
+        if args.via_drill is not None:
+            cmd.extend(["--via-drill", str(args.via_drill)])
+        if args.grid_step is not None:
+            cmd.extend(["--grid-step", str(args.grid_step)])
+        if args.via_cost is not None:
+            cmd.extend(["--via-cost", str(args.via_cost)])
+        if args.max_iterations is not None:
+            cmd.extend(["--max-iterations", str(args.max_iterations)])
+        if args.heuristic_weight is not None:
+            cmd.extend(["--heuristic-weight", str(args.heuristic_weight)])
+        if args.stub_proximity_radius is not None:
+            cmd.extend(["--stub-proximity-radius", str(args.stub_proximity_radius)])
+        if args.stub_proximity_cost is not None:
+            cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
+        if args.diff_pair_gap is not None:
+            cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
+        if args.diff_pair_centerline_setback is not None:
+            cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
+        if args.fix_polarity:
+            cmd.append("--fix-polarity")
 
-    # Parse output for success/failure
-    output = result.stdout + result.stderr
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
-    success = "NO DRC VIOLATIONS FOUND!" in output
-    routing_success = "SUCCESS:" in output
+        # Parse output for success/failure
+        output = result.stdout + result.stderr
 
-    # Check for polarity swap without vias warning (known limitation)
-    polarity_no_vias = "WARNING: Polarity swap needed but no vias" in output
+        success = "NO DRC VIOLATIONS FOUND!" in output
+        routing_success = "SUCCESS:" in output
 
-    # Extract any DRC violations
-    violations = []
-    if "DRC VIOLATIONS" in output:
-        # Find violation details - count lines with '<->' which are the actual violation headers
-        lines = output.split('\n')
-        in_violations = False
-        for line in lines:
-            if "DRC VIOLATIONS" in line:
-                in_violations = True
-            elif in_violations and '<->' in line:
-                violations.append(line.strip())
-            elif in_violations and "=" * 20 in line:
-                in_violations = False
+        # Check for polarity swap without vias warning (known limitation)
+        polarity_no_vias = "WARNING: Polarity swap needed but no vias" in output
 
-    # Check for routing failure
-    routing_failed = "Routing failed" in output or "No route found" in output
+        # Extract any DRC violations
+        violations = []
+        if "DRC VIOLATIONS" in output:
+            # Find violation details - count lines with '<->' which are the actual violation headers
+            lines = output.split('\n')
+            in_violations = False
+            for line in lines:
+                if "DRC VIOLATIONS" in line:
+                    in_violations = True
+                elif in_violations and '<->' in line:
+                    violations.append(line.strip())
+                elif in_violations and "=" * 20 in line:
+                    in_violations = False
 
-    return {
-        'name': diff_pair_name,
-        'routing_success': routing_success and not routing_failed,
-        'drc_success': success,
-        'polarity_no_vias': polarity_no_vias,
-        'violations': violations,
-        'output': output if verbose else None
-    }
+        # Check for routing failure
+        routing_failed = "Routing failed" in output or "No route found" in output
+
+        return {
+            'name': diff_pair_name,
+            'routing_success': routing_success and not routing_failed,
+            'drc_success': success,
+            'polarity_no_vias': polarity_no_vias,
+            'violations': violations,
+            'output': output if verbose else None
+        }
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
 
 
 def main():

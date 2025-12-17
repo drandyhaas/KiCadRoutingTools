@@ -274,6 +274,111 @@ python extract_board_data.py board.kicad_pcb --nets "*DATA*" --output data_nets.
 }
 ```
 
+## Test Scripts
+
+### Single Diff Pair Tester (`test_diffpair.py`)
+
+Routes one or more differential pairs and runs DRC/connectivity checks.
+
+#### Usage
+
+```bash
+python test_diffpair.py [PATTERNS...] [OPTIONS]
+
+Options:
+  --build              Build the Rust router before running
+  --list               List all available diff pairs and exit
+  --dry-run            Show which pairs would be routed without routing
+  --skip-drc           Skip DRC checks after routing
+  --skip-connectivity  Skip connectivity checks after routing
+  --input FILE         Input PCB file (default: routed_output.kicad_pcb)
+  --output FILE        Output PCB file (default: test_batch_diffpair.kicad_pcb)
+```
+
+#### Examples
+
+```bash
+# Route a single diff pair
+python test_diffpair.py lvds_rx4_1
+
+# Route using wildcard patterns
+python test_diffpair.py lvds_rx1_?           # lvds_rx1_0 through lvds_rx1_9
+python test_diffpair.py lvds_rx*_9           # All rx channel 9s
+python test_diffpair.py 'lvds_rx1_*' 'lvds_rx2_*'  # Multiple patterns
+
+# List available diff pairs
+python test_diffpair.py --list
+
+# Route with custom parameters
+python test_diffpair.py lvds_rx2_? --stub-proximity-radius 2.0
+```
+
+### Batch Diff Pair Tester (`test_all_diffpairs.py`)
+
+Tests all differential pairs in parallel with configurable thread count.
+
+#### Usage
+
+```bash
+python test_all_diffpairs.py [OPTIONS]
+
+Options:
+  --pattern, -p PATTERN  Pattern to filter diff pairs (default: *lvds*)
+  --threads, -t N        Number of parallel threads (default: 14)
+  --verbose, -v          Show detailed output for each test
+  --stop-on-error, -s    Stop on first error
+  --build                Build the Rust router before running
+  --skip-drc             Skip DRC checks after routing
+  --skip-connectivity    Skip connectivity checks after routing
+  --input FILE           Input PCB file (default: routed_output.kicad_pcb)
+```
+
+#### Examples
+
+```bash
+# Test all LVDS diff pairs with 14 threads (default)
+python test_all_diffpairs.py
+
+# Test with 8 threads
+python test_all_diffpairs.py -t 8
+
+# Test specific pattern
+python test_all_diffpairs.py -p '*rx1*'
+
+# Sequential execution (like single-threaded)
+python test_all_diffpairs.py --threads 1
+
+# Stop on first failure
+python test_all_diffpairs.py --stop-on-error
+```
+
+#### Output
+
+```
+Loading routed_output.kicad_pcb to find differential pairs...
+Found 56 differential pairs to test
+Running with 14 threads
+============================================================
+[1/56] lvds_rx1_11: PASS
+[2/56] lvds_rx1_13: PASS
+...
+[56/56] lvds_rx_top_clkin3: PASS
+
+============================================================
+SUMMARY
+============================================================
+Total:              56
+Passed:             56
+Known limitations:  0
+Routing failed:     0
+DRC failed:         0
+
+All tests passed!
+```
+
+Use `--fix-polarity` to automatically swap target pad assignments when polarity
+swap is needed, achieving 100% pass rate.
+
 ## Common Workflows
 
 ### Route and Verify
