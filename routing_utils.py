@@ -1001,16 +1001,22 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
 
 def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment],
-                             clearance: float = 0.1, track_width: float = 0.1) -> Tuple[List[Segment], List[Segment]]:
+                             clearance: float = 0.1, track_width: float = 0.1,
+                             via_size: float = 0.3,
+                             p_vias: List[Via] = None, n_vias: List[Via] = None) -> Tuple[List[Segment], List[Segment]]:
     """Fix P-N clearance violations by shifting connector segments perpendicular.
 
-    When P and N connector segments are too close, shift them perpendicular to their
-    direction to increase clearance while maintaining connectivity.
+    When P and N connector segments are too close, or P/N vias are too close to
+    N/P segments, shift segments perpendicular to increase clearance.
     """
     if not p_segments or not n_segments:
         return p_segments, n_segments
 
+    p_vias = p_vias or []
+    n_vias = n_vias or []
+
     min_center_dist = clearance + track_width  # Center-to-center distance needed
+    min_via_seg_dist = clearance + via_size / 2 + track_width / 2  # Via edge to segment center
     eps = 0.001  # Tolerance for coordinate matching
 
     def point_to_segment_dist(px, py, s):
@@ -1073,8 +1079,6 @@ def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment]
                     dist, t_closest, other_x, other_y = segment_min_dist_info(seg, other)
                     deficit = min_center_dist - dist
                     if deficit > 0.001:  # Fix any real violation
-                        # Debug: show what we're shifting
-                        print(f"  SHIFTING seg ({seg.start_x:.3f}, {seg.start_y:.3f})->({seg.end_x:.3f}, {seg.end_y:.3f}) on {seg.layer}, deficit={deficit:.3f}")
                         # Compute direction from closest point on other to our segment
                         closest_x = seg.start_x + t_closest * (seg.end_x - seg.start_x)
                         closest_y = seg.start_y + t_closest * (seg.end_y - seg.start_y)
@@ -1110,6 +1114,41 @@ def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment]
                             update_connected_endpoints(n_segments, old_end_x, old_end_y,
                                                       seg.end_x, seg.end_y)
 
+    # Also check via-to-segment clearance (P vias vs N segments, N vias vs P segments)
+    for vias, seg_list, other_segs in [(p_vias, n_segments, p_segments), (n_vias, p_segments, n_segments)]:
+        for via in vias:
+            for seg in seg_list:
+                # Check if via is on same layer as segment
+                via_layers = via.layers if via.layers else ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+                if seg.layer not in via_layers:
+                    continue
+
+                dist, closest_x, closest_y = point_to_segment_dist(via.x, via.y, seg)
+                deficit = min_via_seg_dist - dist
+                if deficit > 0.001:
+                    # Compute shift direction (away from via)
+                    away_dx = closest_x - via.x
+                    away_dy = closest_y - via.y
+                    away_len = math.sqrt(away_dx**2 + away_dy**2)
+                    if away_len > 0.001:
+                        away_dx /= away_len
+                        away_dy /= away_len
+                        shift = deficit + 0.02  # Extra margin
+
+                        old_start_x, old_start_y = seg.start_x, seg.start_y
+                        old_end_x, old_end_y = seg.end_x, seg.end_y
+
+                        seg.start_x += away_dx * shift
+                        seg.start_y += away_dy * shift
+                        seg.end_x += away_dx * shift
+                        seg.end_y += away_dy * shift
+
+                        # Update connected segments
+                        update_connected_endpoints(seg_list, old_start_x, old_start_y, seg.start_x, seg.start_y)
+                        update_connected_endpoints(seg_list, old_end_x, old_end_y, seg.end_x, seg.end_y)
+                        update_connected_endpoints(other_segs, old_start_x, old_start_y, seg.start_x, seg.start_y)
+                        update_connected_endpoints(other_segs, old_end_x, old_end_y, seg.end_x, seg.end_y)
+
     return p_segments, n_segments
 
 
@@ -1141,7 +1180,9 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_layers: bool = 
         net_list = list(net_ids)
         p_segs = [s for s in cleaned_segments if s.net_id == net_list[0]]
         n_segs = [s for s in cleaned_segments if s.net_id == net_list[1]]
-        p_segs, n_segs = fix_diff_pair_clearance(p_segs, n_segs)
+        p_vias = [v for v in new_vias if v.net_id == net_list[0]]
+        n_vias = [v for v in new_vias if v.net_id == net_list[1]]
+        p_segs, n_segs = fix_diff_pair_clearance(p_segs, n_segs, p_vias=p_vias, n_vias=n_vias)
         # Re-run self-intersection fix since P-N clearance shift may create same-net crossings
         p_existing = [s for s in pcb_data.segments if s.net_id == net_list[0]]
         n_existing = [s for s in pcb_data.segments if s.net_id == net_list[1]]
