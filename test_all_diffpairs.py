@@ -59,7 +59,10 @@ def run_test(diff_pair_name, args, verbose=False):
         cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
     if args.diff_pair_gap is not None:
         cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-    cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
+    if args.diff_pair_centerline_setback is not None:
+        cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
+    if args.fix_polarity:
+        cmd.append("--fix-polarity")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -152,8 +155,10 @@ def main():
                               help='Cost penalty near stubs in mm equivalent (default: 2.0)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
-    router_group.add_argument('--diff-pair-centerline-setback', type=float, default=1.5,
+    router_group.add_argument('--diff-pair-centerline-setback', type=float,
                               help='Distance in front of stubs to start route in mm (default: 1.5)')
+    router_group.add_argument('--fix-polarity', action='store_true',
+                              help='Automatically fix P/N polarity swaps by swapping target pads')
 
     args = parser.parse_args()
 
