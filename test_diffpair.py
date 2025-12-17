@@ -383,9 +383,13 @@ Examples:
 
     # Step 4: Run connectivity check only on successfully routed pairs (unless skipped)
     connectivity_results = {}  # diff_pair -> (passed, disconnected_count)
+    skip_connectivity = args.skip_connectivity or args.debug_layers
 
-    if args.skip_connectivity:
-        print("\nSkipping connectivity checks (--skip-connectivity)")
+    if skip_connectivity:
+        if args.debug_layers:
+            print("\nSkipping connectivity checks (--debug-layers puts segments on different layers)")
+        else:
+            print("\nSkipping connectivity checks (--skip-connectivity)")
     else:
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
@@ -456,7 +460,7 @@ Examples:
         print(f"\nDRC: skipped")
 
     # Connectivity summary (only for routed pairs, and only if connectivity check was run)
-    if routed_pairs and not args.skip_connectivity:
+    if routed_pairs and not skip_connectivity:
         conn_passed = [p for p, (ok, _) in connectivity_results.items() if ok]
         conn_failed = [p for p, (ok, _) in connectivity_results.items() if not ok]
 
@@ -473,7 +477,7 @@ Examples:
             for pair in conn_failed:
                 _, issue_count = connectivity_results[pair]
                 print(f"    {pair} ({issue_count} disconnected net{'s' if issue_count != 1 else ''})")
-    elif args.skip_connectivity:
+    elif skip_connectivity:
         print(f"\nConnectivity: skipped")
 
     print(f"\nOutput file: {output_pcb}")
@@ -483,7 +487,7 @@ Examples:
     has_failures = bool(failed_routing_pairs)
     if not args.skip_drc:
         has_failures = has_failures or any(not ok for ok, _ in drc_results.values())
-    if not args.skip_connectivity:
+    if not skip_connectivity:
         has_failures = has_failures or any(not ok for ok, _ in connectivity_results.values())
     return 1 if has_failures else 0
 

@@ -849,7 +849,8 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 
 
 def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
-                        max_appendix_length: float = 1.0, vias: List[Via] = None) -> List[Segment]:
+                        max_appendix_length: float = 1.0, vias: List[Via] = None,
+                        debug_layers: bool = False) -> List[Segment]:
     """Collapse short appendix segments by moving dead-end vertices to junction points.
 
     An appendix is a short segment where one endpoint is a dead-end (degree 1) and
@@ -858,6 +859,9 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
     Only collapses segments where the dead-end doesn't connect to existing segments or vias.
     Also fixes self-intersections where new segments cross existing segments.
+
+    If debug_layers is True, endpoint degrees are counted across all layers (since
+    debug_layers mode puts turn segments on different layers but they still connect).
     """
     if not segments:
         return segments
@@ -916,17 +920,30 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
                 return True
         return False
 
+    # When debug_layers is enabled, build endpoint degree map across ALL layers
+    # because debug_layers puts turn segments on different layers but they still connect
+    global_endpoint_counts = None
+    if debug_layers:
+        global_endpoint_counts = {}
+        for seg in segments:
+            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
+            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
+            global_endpoint_counts[start_key] = global_endpoint_counts.get(start_key, 0) + 1
+            global_endpoint_counts[end_key] = global_endpoint_counts.get(end_key, 0) + 1
+
     for layer, layer_segs in layer_segments.items():
         layer_existing = existing_endpoints.get(layer, [])
         layer_vias = via_locations.get(layer, [])
 
-        # Build endpoint degree map from NEW segments only
-        endpoint_counts = {}
-        for seg in layer_segs:
-            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
-            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-            endpoint_counts[start_key] = endpoint_counts.get(start_key, 0) + 1
-            endpoint_counts[end_key] = endpoint_counts.get(end_key, 0) + 1
+        # Build per-layer endpoint counts (used when not in debug_layers mode)
+        layer_endpoint_counts = None
+        if not debug_layers:
+            layer_endpoint_counts = {}
+            for seg in layer_segs:
+                start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
+                end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
+                layer_endpoint_counts[start_key] = layer_endpoint_counts.get(start_key, 0) + 1
+                layer_endpoint_counts[end_key] = layer_endpoint_counts.get(end_key, 0) + 1
 
         # Find and collapse appendices
         for seg in layer_segs:
@@ -938,6 +955,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
             start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
             end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
+            endpoint_counts = global_endpoint_counts if debug_layers else layer_endpoint_counts
             start_degree = endpoint_counts.get(start_key, 0)
             end_degree = endpoint_counts.get(end_key, 0)
 
@@ -1055,6 +1073,8 @@ def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment]
                     dist, t_closest, other_x, other_y = segment_min_dist_info(seg, other)
                     deficit = min_center_dist - dist
                     if deficit > 0.001:  # Fix any real violation
+                        # Debug: show what we're shifting
+                        print(f"  SHIFTING seg ({seg.start_x:.3f}, {seg.start_y:.3f})->({seg.end_x:.3f}, {seg.end_y:.3f}) on {seg.layer}, deficit={deficit:.3f}")
                         # Compute direction from closest point on other to our segment
                         closest_x = seg.start_x + t_closest * (seg.end_x - seg.start_x)
                         closest_y = seg.start_y + t_closest * (seg.end_y - seg.start_y)
@@ -1079,15 +1099,21 @@ def fix_diff_pair_clearance(p_segments: List[Segment], n_segments: List[Segment]
                             seg.end_y += away_dy * shift
 
                             # Update connected segments to maintain connectivity
-                            update_connected_endpoints(seg_list, old_start_x, old_start_y,
+                            # Must update across ALL layers (not just seg_list) because
+                            # debug_layers mode puts turn segments on different layers
+                            update_connected_endpoints(p_segments, old_start_x, old_start_y,
                                                       seg.start_x, seg.start_y)
-                            update_connected_endpoints(seg_list, old_end_x, old_end_y,
+                            update_connected_endpoints(p_segments, old_end_x, old_end_y,
+                                                      seg.end_x, seg.end_y)
+                            update_connected_endpoints(n_segments, old_start_x, old_start_y,
+                                                      seg.start_x, seg.start_y)
+                            update_connected_endpoints(n_segments, old_end_x, old_end_y,
                                                       seg.end_x, seg.end_y)
 
     return p_segments, n_segments
 
 
-def add_route_to_pcb_data(pcb_data: PCBData, result: dict) -> None:
+def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_layers: bool = False) -> None:
     """Add routed segments and vias to PCB data for subsequent routes to see."""
     new_segments = result['new_segments']
     if not new_segments:
@@ -1107,7 +1133,7 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict) -> None:
         # Include both new vias and existing vias for this net
         net_vias = [v for v in new_vias if v.net_id == net_id]
         net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
-        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias)
+        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias, debug_layers=debug_layers)
         cleaned_segments.extend(cleaned)
 
     # For diff pairs (2 nets), also fix P-N clearance

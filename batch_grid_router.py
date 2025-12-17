@@ -391,7 +391,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
-            add_route_to_pcb_data(pcb_data, result)
+            add_route_to_pcb_data(pcb_data, result, debug_layers=config.debug_layers)
 
             # Check if polarity was fixed - need to swap target pad and stub nets
             if result.get('polarity_fixed') and result.get('swap_target_pads'):
@@ -529,7 +529,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
-            add_route_to_pcb_data(pcb_data, result)
+            add_route_to_pcb_data(pcb_data, result, debug_layers=config.debug_layers)
             remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
         else:
