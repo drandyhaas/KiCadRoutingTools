@@ -17,16 +17,20 @@ import fnmatch
 from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import (
-    parse_kicad_pcb, PCBData,
+    parse_kicad_pcb, PCBData, Pad,
     auto_detect_bga_exclusion_zones, find_components_by_type
 )
-from kicad_writer import generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr
+from kicad_writer import (
+    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
+    swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content
+)
 
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord, DiffPair
 from routing_utils import (
     find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints,
-    compute_mps_net_ordering, add_route_to_pcb_data
+    compute_mps_net_ordering, add_route_to_pcb_data,
+    find_pad_nearest_to_position, find_connected_segment_positions
 )
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
@@ -36,6 +40,7 @@ from obstacle_map import (
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles
+import re
 
 # Add rust_router directory to path for importing the compiled module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
@@ -53,6 +58,15 @@ except ImportError as e:
     print("  cp target/release/grid_router.dll grid_router.pyd  # Windows")
     print("  cp target/release/libgrid_router.so grid_router.so  # Linux")
     sys.exit(1)
+
+
+def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float = 0.01) -> Optional[Pad]:
+    """Find a pad at the given position within tolerance."""
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if abs(pad.global_x - x) < tolerance and abs(pad.global_y - y) < tolerance:
+                return pad
+    return None
 
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
@@ -75,6 +89,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 diff_pair_gap: float = 0.1,
                 diff_pair_centerline_setback: float = 0.4,
                 debug_layers: bool = False,
+                fix_polarity: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -149,6 +164,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         debug_layers=debug_layers,
+        fix_polarity=fix_polarity,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -279,6 +295,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print("=" * 60)
 
     results = []
+    pad_swaps = []  # List of (pad1, pad2) tuples for nets that need swapping
     successful = 0
     failed = 0
     total_time = 0
@@ -375,6 +392,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             successful += 1
             total_iterations += result['iterations']
             add_route_to_pcb_data(pcb_data, result)
+
+            # Check if polarity was fixed - need to swap target pad and stub nets
+            if result.get('polarity_fixed') and result.get('swap_target_pads'):
+                swap_info = result['swap_target_pads']
+                p_pos = swap_info['p_pos']  # Original P target stub position
+                n_pos = swap_info['n_pos']  # Original N target stub position
+                p_net_id = swap_info['p_net_id']
+                n_net_id = swap_info['n_net_id']
+
+                # Find the target pads by net ID and proximity to stub positions
+                pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_pos[0], p_pos[1])
+                pad_n = find_pad_nearest_to_position(pcb_data, n_net_id, n_pos[0], n_pos[1])
+
+                if pad_p and pad_n:
+                    pad_swaps.append({
+                        'pad_p': pad_p,
+                        'pad_n': pad_n,
+                        'p_net_id': p_net_id,
+                        'n_net_id': n_net_id,
+                    })
+                    print(f"  Polarity fixed: will swap nets of {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
+                else:
+                    print(f"  WARNING: Could not find target pads to swap for polarity fix")
+                    if not pad_p:
+                        print(f"    Missing P pad (net {p_net_id}) near {p_pos}")
+                    if not pad_n:
+                        print(f"    Missing N pad (net {n_net_id}) near {n_pos}")
+
             if pair.p_net_id in remaining_net_ids:
                 remaining_net_ids.remove(pair.p_net_id)
             if pair.n_net_id in remaining_net_ids:
@@ -506,6 +551,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
+
+        # Apply pad and stub net swaps for polarity fixes
+        if pad_swaps:
+            print(f"Applying {len(pad_swaps)} polarity fix(es) (swapping target pads and stubs)...")
+            for swap in pad_swaps:
+                pad_p = swap['pad_p']
+                pad_n = swap['pad_n']
+                p_net_id = swap['p_net_id']
+                n_net_id = swap['n_net_id']
+
+                # Swap pad nets
+                content = swap_pad_nets_in_content(content, pad_p, pad_n)
+                print(f"  Pads: {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
+
+                # Find all connected segment positions for each stub chain (BFS traversal)
+                p_positions = find_connected_segment_positions(pcb_data, pad_p.global_x, pad_p.global_y, p_net_id)
+                n_positions = find_connected_segment_positions(pcb_data, pad_n.global_x, pad_n.global_y, n_net_id)
+
+                # Swap entire stub chains - all segments connected to each pad
+                content, p_seg_count = swap_segment_nets_at_positions(content, p_positions, p_net_id, n_net_id)
+                content, n_seg_count = swap_segment_nets_at_positions(content, n_positions, n_net_id, p_net_id)
+
+                # Also swap vias at the same positions
+                content, p_via_count = swap_via_nets_at_positions(content, p_positions, p_net_id, n_net_id)
+                content, n_via_count = swap_via_nets_at_positions(content, n_positions, n_net_id, p_net_id)
+                print(f"  Stubs: swapped {p_seg_count}+{n_seg_count} segments, {p_via_count}+{n_via_count} vias")
 
         routing_text = ""
         for result in results:
@@ -674,6 +745,8 @@ Differential pair routing:
                         help="Gap between P and N traces of differential pairs in mm (default: 0.1)")
     parser.add_argument("--diff-pair-centerline-setback", type=float, default=0.4,
                         help="Distance in front of stubs to start centerline route in mm (default: 0.4)")
+    parser.add_argument("--fix-polarity", action="store_true",
+                        help="Swap target pad net assignments if polarity swap is needed")
 
     # Debug options
     parser.add_argument("--debug-layers", action="store_true",
@@ -734,4 +807,5 @@ Differential pair routing:
                 diff_pair_gap=args.diff_pair_gap,
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,
                 debug_layers=args.debug_layers,
+                fix_polarity=args.fix_polarity,
                 vis_callback=vis_callback)

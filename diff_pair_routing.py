@@ -491,7 +491,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     tgt_cross = tgt_path_dir_x * tgt_to_p_dy - tgt_path_dir_y * tgt_to_p_dx
     tgt_p_sign = +1 if tgt_cross >= 0 else -1
 
-    # Check if polarity differs between source and target (for informational purposes)
+    # Check if polarity differs between source and target
     polarity_swap_needed = (src_p_sign != tgt_p_sign)
 
     # Check if path has layer changes (vias)
@@ -501,7 +501,15 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             has_layer_change = True
             break
 
-    # Always use source polarity (no swap handling)
+    # Handle polarity fix - mark for pad/stub net swap in output file
+    # We DON'T swap coordinates here - instead we'll swap target pad and stub nets
+    # This preserves the P→P, N→N geometry and fixes polarity at the schematic level
+    polarity_fixed = False
+    if polarity_swap_needed and config.fix_polarity:
+        print(f"  Polarity swap needed - will swap target pad and stub nets in output")
+        polarity_fixed = True
+
+    # Always use source polarity
     p_sign = src_p_sign
     print(f"  Polarity: src_p_sign={src_p_sign}, tgt_p_sign={tgt_p_sign}, swap_needed={polarity_swap_needed}, has_vias={has_layer_change}")
 
@@ -595,10 +603,16 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         return segs, vias
 
     # Get original coordinates for P and N nets
-    p_start = (sources[0][5], sources[0][6]) if sources else None
-    p_end = (targets[0][5], targets[0][6]) if targets else None
-    n_start = (sources[0][7], sources[0][8]) if sources else None
-    n_end = (targets[0][7], targets[0][8]) if targets else None
+    p_start = (p_src_x, p_src_y)
+    n_start = (n_src_x, n_src_y)
+    # Swap target coordinates if polarity was fixed - routes go to opposite stub positions
+    # After output file swap, the stub at n_tgt will have P net, stub at p_tgt will have N net
+    if polarity_fixed:
+        p_end = (n_tgt_x, n_tgt_y)  # P route goes to original N position (will be P after swap)
+        n_end = (p_tgt_x, p_tgt_y)  # N route goes to original P position (will be N after swap)
+    else:
+        p_end = (p_tgt_x, p_tgt_y)
+        n_end = (n_tgt_x, n_tgt_y)
 
     # Convert P path
     p_segs, p_vias = float_path_to_geometry(p_float_path, p_net_id, p_start, p_end)
@@ -616,7 +630,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_path = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
               for x, y, layer in n_float_path]
 
-    return {
+    # Build result with polarity fix info
+    result = {
         'new_segments': new_segments,
         'new_vias': new_vias,
         'iterations': total_iterations,
@@ -626,6 +641,22 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         'raw_astar_path': raw_astar_path,
         'simplified_path': simplified_path_float,
     }
+
+    # If polarity was fixed, include info about which target pads need net swaps
+    if polarity_fixed:
+        result['polarity_fixed'] = True
+        # Original target positions (before swap) - these pads need their nets swapped
+        # Include net IDs so we can find the correct pads
+        orig_p_tgt = (targets[0][5], targets[0][6])
+        orig_n_tgt = (targets[0][7], targets[0][8])
+        result['swap_target_pads'] = {
+            'p_pos': orig_p_tgt,  # Original P target stub position
+            'n_pos': orig_n_tgt,  # Original N target stub position
+            'p_net_id': p_net_id,  # P net ID to find target pad
+            'n_net_id': n_net_id,  # N net ID to find target pad
+        }
+
+    return result
 
 
 def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, config,

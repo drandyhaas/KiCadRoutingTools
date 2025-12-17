@@ -1134,3 +1134,63 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict) -> None:
         pcb_data.vias.append(via)
     # Update result so output file also gets cleaned segments
     result['new_segments'] = cleaned_segments
+
+
+def find_pad_nearest_to_position(pcb_data: PCBData, net_id: int, x: float, y: float) -> Optional[Pad]:
+    """Find the pad for a given net that is nearest to the specified position."""
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    if not pads:
+        return None
+
+    best_pad = None
+    best_dist = float('inf')
+    for pad in pads:
+        dist = (pad.global_x - x) ** 2 + (pad.global_y - y) ** 2
+        if dist < best_dist:
+            best_dist = dist
+            best_pad = pad
+
+    return best_pad
+
+
+def find_connected_segment_positions(pcb_data: PCBData, start_x: float, start_y: float,
+                                      net_id: int, tolerance: float = 0.1) -> set:
+    """
+    Find all segment endpoint positions connected to a starting position for a given net.
+
+    Uses BFS to traverse the segment chain from the starting position.
+    Returns a set of (x, y) tuples for all endpoints in the connected stub chain.
+    """
+    # Get all segments for this net
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+
+    # Build adjacency: position -> list of connected positions
+    def pos_key(x, y):
+        return (round(x, 2), round(y, 2))
+
+    adjacency = {}
+    for seg in net_segments:
+        start = pos_key(seg.start_x, seg.start_y)
+        end = pos_key(seg.end_x, seg.end_y)
+        if start not in adjacency:
+            adjacency[start] = []
+        if end not in adjacency:
+            adjacency[end] = []
+        adjacency[start].append(end)
+        adjacency[end].append(start)
+
+    # BFS from start position
+    start_key = pos_key(start_x, start_y)
+    visited = set()
+    queue = [start_key]
+
+    while queue:
+        pos = queue.pop(0)
+        if pos in visited:
+            continue
+        visited.add(pos)
+        for neighbor in adjacency.get(pos, []):
+            if neighbor not in visited:
+                queue.append(neighbor)
+
+    return visited

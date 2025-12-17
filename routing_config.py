@@ -42,6 +42,7 @@ class GridRouteConfig:
     # Differential pair routing parameters
     diff_pair_gap: float = 0.1  # mm - gap between P and N traces (center-to-center = track_width + gap)
     diff_pair_centerline_setback: float = 0.4  # mm - distance in front of stubs to start centerline route
+    fix_polarity: bool = False  # Swap target pad nets if polarity swap needed
     debug_layers: bool = False  # Output raw A* path on User.9, simplified path on User.8
 
 

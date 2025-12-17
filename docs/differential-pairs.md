@@ -132,7 +132,7 @@ The router also detects if polarity differs between source and target (polarity 
 Polarity: src_p_sign=1, tgt_p_sign=-1, swap_needed=True, has_vias=True
 ```
 
-**Note:** Polarity swaps are currently detected but not automatically handled. Routes requiring polarity swaps may need manual adjustment.
+**Note:** Polarity swaps can be automatically fixed using `--fix-polarity`, which swaps the target pad net assignments (P↔N) so polarity matches. Without this option, routes requiring polarity swaps may need manual adjustment.
 
 ## Via Placement
 
@@ -208,6 +208,7 @@ This helps visualize the routing structure without affecting the actual routed l
 | `--diff-pairs` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 1.5 | Distance in front of stubs to start centerline (mm) |
+| `--fix-polarity` | false | Swap target pad nets when polarity swap is needed |
 | `--debug-layers` | false | Output debug geometry on In4/In5/User.8/User.9 |
 | `--stub-proximity-radius` | 1.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 3.0 | Cost penalty near stubs (mm equivalent) |
@@ -215,7 +216,7 @@ This helps visualize the routing structure without affecting the actual routed l
 ## Limitations
 
 1. **Single via transition** - Currently limited to at most one layer change per diff pair route
-2. **No polarity swap handling** - Polarity swaps are detected but not automatically routed; manual adjustment may be needed
+2. **Polarity swap requires --fix-polarity** - Polarity swaps are detected; use `--fix-polarity` to automatically swap target pads
 3. **No length matching** - P and N paths may have slightly different lengths
 4. **Fixed spacing** - Spacing is constant along the route (no tapering)
 5. **Grid snapping** - Centerline endpoints snap to grid

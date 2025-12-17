@@ -66,6 +66,7 @@ python batch_grid_router.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA
 | `--diff-pairs` / `-D` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 0.4 | Distance in front of stubs to start centerline (mm) |
+| `--fix-polarity` | false | Swap target pad nets when polarity swap needed |
 
 ### Debug Options
 
@@ -110,6 +111,7 @@ class GridRouteConfig:
     # Differential pairs
     diff_pair_gap: float = 0.1           # mm between P and N
     diff_pair_centerline_setback: float = 0.4  # mm in front of stubs
+    fix_polarity: bool = False           # swap target pads if polarity swap needed
 
     # Debug
     debug_layers: bool = False

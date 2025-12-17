@@ -186,6 +186,8 @@ Examples:
                               help='Distance in front of stubs to start route in mm (default: 1.5)')
     router_group.add_argument('--debug-layers', action='store_true',
                               help='Output debug geometry on In4.Cu (turn segments), In5.Cu (connectors), User.8/9 (centerline)')
+    router_group.add_argument('--fix-polarity', action='store_true',
+                              help='Swap target pad nets if polarity swap is needed')
 
     args = parser.parse_args()
 
@@ -286,6 +288,8 @@ Examples:
     router_cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
     if args.debug_layers:
         router_cmd.append("--debug-layers")
+    if args.fix_polarity:
+        router_cmd.append("--fix-polarity")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(
