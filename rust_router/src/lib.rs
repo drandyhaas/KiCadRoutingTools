@@ -1339,7 +1339,7 @@ impl DiffPairRouter {
 }
 
 /// Module version
-const VERSION: &str = "0.4.0";
+const VERSION: &str = "0.5.0";
 
 /// Python module
 #[pymodule]

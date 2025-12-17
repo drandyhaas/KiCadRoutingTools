@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.4.0**
+**Current Version: 0.5.0**
 
 ## Features
 
@@ -12,6 +12,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - BGA exclusion zone with allowed cell overrides
 - Stub proximity costs to avoid blocking unrouted nets
 - **Rectangular pad obstacle blocking** with proper rotation handling
+- **Collinear via constraint** for differential pair routing (ensures clean via geometry)
 - ~10x speedup vs Python implementation
 
 ## Building
@@ -154,7 +155,8 @@ router = GridRouter(via_cost: int, h_weight: float)
 ```
 
 Methods:
-- `route_multi(obstacles, sources, targets, max_iterations)` - Find path from any source to any target
+- `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False)` - Find path from any source to any target
+  - `collinear_vias`: If True, after a via the route must continue straight for one step, then can only turn ±45° (for differential pair routing)
   - Returns `(path, iterations)` where path is `List[(gx, gy, layer)]` or `None`
 
 ## Architecture
@@ -167,6 +169,7 @@ Methods:
 
 ## Version History
 
+- **0.5.0**: Added `collinear_vias` parameter for differential pair routing - ensures vias are placed on straight sections with gradual exit turns
 - **0.4.0**: Performance and stability improvements
 - **0.3.0**: Added `clone()` method for GridObstacleMap to support incremental obstacle caching
 - **0.2.1**: Fixed `is_blocked()` to check blocked_cells before allowed_cells (prevents allowed_cells from overriding regular obstacles)
