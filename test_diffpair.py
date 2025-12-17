@@ -148,8 +148,8 @@ Examples:
     parser.add_argument('--output', default='test_batch_diffpair.kicad_pcb',
                         help='Output PCB file (default: test_batch_diffpair.kicad_pcb)')
 
-    # Router options (pass-through to batch_grid_router.py)
-    router_group = parser.add_argument_group('Router options (passed to batch_grid_router.py)')
+    # Router options (pass-through to route.py)
+    router_group = parser.add_argument_group('Router options (passed to route.py)')
     router_group.add_argument('--ordering', '-o', choices=['inside_out', 'mps', 'original'],
                               help='Net ordering strategy (default: mps)')
     router_group.add_argument('--direction', '-d', choices=['forward', 'backwards', 'random'],
@@ -250,7 +250,7 @@ Examples:
 
     # Build router command with pass-through options
     router_cmd = [
-        sys.executable, "batch_grid_router.py",
+        sys.executable, "route.py",
         input_pcb, output_pcb
     ] + net_patterns
 

@@ -25,13 +25,13 @@ python build_router.py
 
 ```bash
 # Route specific nets
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
+python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
 
 # Route with wildcard patterns
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)"
+python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)"
 
 # Route differential pairs
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
+python route.py input.kicad_pcb output.kicad_pcb "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
 ```
 
 ### 3. Verify Results
@@ -60,7 +60,7 @@ python check_connected.py output.kicad_pcb --nets "*DATA*"
 
 ```
 KiCadRoutingTools/
-├── batch_grid_router.py      # Main CLI - batch routing orchestration
+├── route.py      # Main CLI - batch routing orchestration
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_utils.py          # Shared utilities (connectivity, MPS, cleanup)
 ├── obstacle_map.py           # Obstacle map building functions
@@ -88,7 +88,7 @@ KiCadRoutingTools/
 | `obstacle_map.py` | 330 | Obstacle map building from PCB data |
 | `single_ended_routing.py` | 343 | Single-ended net routing with A* |
 | `diff_pair_routing.py` | 1091 | Differential pair centerline + offset routing |
-| `batch_grid_router.py` | 643 | CLI and batch routing orchestration |
+| `route.py` | 643 | CLI and batch routing orchestration |
 
 ## Performance
 
@@ -102,7 +102,7 @@ KiCadRoutingTools/
 ## Common Options
 
 ```bash
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 
 # Geometry
 --track-width 0.1       # Track width (mm)

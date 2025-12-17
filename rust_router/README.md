@@ -55,7 +55,7 @@ cp target/release/libgrid_router.so grid_router.so
 cp target/release/libgrid_router.dylib grid_router.so
 ```
 
-The `batch_grid_router.py` script automatically adds this directory to the Python path.
+The `route.py` script automatically adds this directory to the Python path.
 
 ### Using maturin (alternative)
 
@@ -111,7 +111,7 @@ else:
 Run the full 32-net benchmark from the parent directory:
 
 ```bash
-python batch_grid_router.py fanout_starting_point.kicad_pcb routed.kicad_pcb \
+python route.py fanout_starting_point.kicad_pcb routed.kicad_pcb \
   "Net-(U2A-DATA_23)" "Net-(U2A-DATA_20)" ...
 ```
 
@@ -174,7 +174,7 @@ Methods:
 
 ## Pad Rotation and Rectangular Blocking
 
-The `batch_grid_router.py` script uses rectangular pad blocking with proper rotation handling:
+The `route.py` script uses rectangular pad blocking with proper rotation handling:
 
 ```python
 # Pads are blocked with rectangular bounds based on their rotated dimensions

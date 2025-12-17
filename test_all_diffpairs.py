@@ -12,7 +12,7 @@ import os
 import argparse
 import re
 from kicad_parser import parse_kicad_pcb
-from batch_grid_router import find_differential_pairs
+from route import find_differential_pairs
 
 
 def run_test(diff_pair_name, args, verbose=False):
@@ -118,8 +118,8 @@ def main():
     parser.add_argument('--input', default='routed_output.kicad_pcb',
                         help='Input PCB file (default: routed_output.kicad_pcb)')
 
-    # Router options (pass-through to batch_grid_router.py)
-    router_group = parser.add_argument_group('Router options (passed to batch_grid_router.py)')
+    # Router options (pass-through to route.py)
+    router_group = parser.add_argument_group('Router options (passed to route.py)')
     router_group.add_argument('--ordering', '-o', choices=['inside_out', 'mps', 'original'],
                               help='Net ordering strategy (default: mps)')
     router_group.add_argument('--direction', '-d', choices=['forward', 'backwards', 'random'],

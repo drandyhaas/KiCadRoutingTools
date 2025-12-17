@@ -2,7 +2,7 @@
 Batch PCB Router using Rust-accelerated A* - Routes multiple nets sequentially.
 
 Usage:
-    python batch_grid_router.py input.kicad_pcb output.kicad_pcb net1 net2 net3 ...
+    python route.py input.kicad_pcb output.kicad_pcb net1 net2 net3 ...
 
 Requires the Rust router module. Build it with:
     cd rust_router && cargo build --release
@@ -685,11 +685,11 @@ Wildcard patterns supported:
   "Net-(*CLK*)"       - matches any net containing CLK
 
 Examples:
-  python batch_grid_router.py fanout_starting_point.kicad_pcb routed.kicad_pcb "Net-(U2A-DATA_*)"
-  python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)" --ordering mps
+  python route.py fanout_starting_point.kicad_pcb routed.kicad_pcb "Net-(U2A-DATA_*)"
+  python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)" --ordering mps
 
 Differential pair routing:
-  python batch_grid_router.py input.kicad_pcb output.kicad_pcb "*lvds*" --diff-pairs "*lvds*"
+  python route.py input.kicad_pcb output.kicad_pcb "*lvds*" --diff-pairs "*lvds*"
 
   The --diff-pairs option specifies patterns for nets that should be routed as differential pairs.
   Nets matching these patterns with _P/_N, P/N, or +/- suffixes will be routed together

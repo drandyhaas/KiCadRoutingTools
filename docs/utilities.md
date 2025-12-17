@@ -280,7 +280,7 @@ python extract_board_data.py board.kicad_pcb --nets "*DATA*" --output data_nets.
 
 ```bash
 # Route the nets
-python batch_grid_router.py input.kicad_pcb routed.kicad_pcb "Net-*" --ordering mps
+python route.py input.kicad_pcb routed.kicad_pcb "Net-*" --ordering mps
 
 # Check for DRC violations
 python check_drc.py routed.kicad_pcb
@@ -296,7 +296,7 @@ python check_connected.py routed.kicad_pcb
 python bga_fanout.py board.kicad_pcb fanout.kicad_pcb U2A --pattern "*lvds*"
 
 # 2. Route differential pairs
-python batch_grid_router.py fanout.kicad_pcb routed.kicad_pcb "*lvds*" \
+python route.py fanout.kicad_pcb routed.kicad_pcb "*lvds*" \
     --diff-pairs "*lvds*" \
     --ordering inside_out
 
@@ -312,7 +312,7 @@ python check_connected.py routed.kicad_pcb --nets "*lvds*"
 python list_nets.py board.kicad_pcb U2A --pads
 
 # Route with debug layers enabled
-python batch_grid_router.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-layers
+python route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-layers
 
 # Open debug.kicad_pcb in KiCad, check User.8 and User.9 layers
 ```

@@ -32,13 +32,13 @@ Add `--visualize` to any batch router command:
 
 ```bash
 # Single net
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_0)" --visualize
+python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_0)" --visualize
 
 # Multiple nets with wildcards
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)" --visualize
+python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)" --visualize
 
 # Auto-advance through nets
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-(U2A-*)" --visualize --auto
+python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-*)" --visualize --auto
 ```
 
 ## Command-Line Options
@@ -104,7 +104,7 @@ All standard batch router options are also supported (--ordering, --via-cost, et
 The visualizer is now integrated with the main batch router:
 
 ```
-batch_grid_router.py --visualize
+route.py --visualize
     │
     ├── routing logic (single_ended_routing.py, obstacle_map.py, etc.)
     │
@@ -136,7 +136,7 @@ To integrate visualization with custom code:
 
 ```python
 from pygame_visualizer import create_pygame_callback
-from batch_grid_router import batch_route
+from route import batch_route
 
 # Create callback
 vis_callback = create_pygame_callback(

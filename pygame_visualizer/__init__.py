@@ -5,7 +5,7 @@ This visualizer shows the A* search progression in real-time as it explores
 the routing grid, using the same Rust router as the batch router.
 
 Usage:
-    python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-*" --visualize
+    python route.py input.kicad_pcb output.kicad_pcb "Net-*" --visualize
 """
 
 from .visualizer import RoutingVisualizer

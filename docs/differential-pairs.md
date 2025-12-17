@@ -36,7 +36,7 @@ python test_diffpair.py "*lvds_rx1_11" --stub-proximity-radius 4 --debug-layers
 ### Direct Router Usage
 
 ```bash
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "*lvds*" \
+python route.py input.kicad_pcb output.kicad_pcb "*lvds*" \
     --diff-pairs "*lvds*" \
     --diff-pair-gap 0.1 \
     --diff-pair-centerline-setback 1.5

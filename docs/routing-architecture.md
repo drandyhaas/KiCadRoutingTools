@@ -8,7 +8,7 @@ The router is organized into focused modules:
 
 ```
 KiCadRoutingTools/
-├── batch_grid_router.py      # Main CLI and batch orchestration
+├── route.py      # Main CLI and batch orchestration
 ├── routing_config.py         # Configuration dataclasses
 ├── routing_utils.py          # Shared utilities
 ├── obstacle_map.py           # Obstacle map building
@@ -28,7 +28,7 @@ KiCadRoutingTools/
 | `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones) |
 | `single_ended_routing.py` | Routes individual nets using A* pathfinding |
 | `diff_pair_routing.py` | Routes P/N pairs using centerline + offset approach |
-| `batch_grid_router.py` | CLI interface and batch routing orchestration |
+| `route.py` | CLI interface and batch routing orchestration |
 
 ## Grid Coordinate System
 

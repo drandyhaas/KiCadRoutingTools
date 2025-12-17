@@ -106,7 +106,7 @@ Order: [C, D, A, B]
 ### Usage
 
 ```bash
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
 
 ## Inside-Out Ordering
@@ -163,7 +163,7 @@ BGA Pad Array:
 ### Usage
 
 ```bash
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering inside_out
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering inside_out
 ```
 
 ## Original Ordering
@@ -179,7 +179,7 @@ Keeps nets in the order they were specified on the command line.
 ### Usage
 
 ```bash
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-C" --ordering original
+python route.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-C" --ordering original
 ```
 
 ## Strategy Comparison
@@ -199,7 +199,7 @@ Net ordering (which net routes first) combines with direction order (which endpo
 
 ```bash
 # MPS ordering + random direction per net
-python batch_grid_router.py input.kicad_pcb output.kicad_pcb "Net-*" \
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" \
     --ordering mps \
     --direction random
 ```
