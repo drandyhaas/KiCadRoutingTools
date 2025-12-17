@@ -65,14 +65,13 @@ python batch_grid_router.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA
 |--------|---------|-------------|
 | `--diff-pairs` / `-D` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
-| `--min-diff-pair-centerline-setback` | 0.4 | Min setback from stubs (mm) |
-| `--max-diff-pair-centerline-setback` | 0.4 | Max setback from stubs (mm) |
+| `--diff-pair-centerline-setback` | 0.4 | Distance in front of stubs to start centerline (mm) |
 
 ### Debug Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-layers` | false | Output A* paths on User.8/User.9 layers |
+| `--debug-layers` | false | Output debug geometry on In4/In5/User.8/User.9 layers |
 
 ## GridRouteConfig Class
 
@@ -110,8 +109,7 @@ class GridRouteConfig:
 
     # Differential pairs
     diff_pair_gap: float = 0.1           # mm between P and N
-    min_diff_pair_centerline_setback: float = 0.4  # mm
-    max_diff_pair_centerline_setback: float = 0.4  # mm
+    diff_pair_centerline_setback: float = 0.4  # mm in front of stubs
 
     # Debug
     debug_layers: bool = False
