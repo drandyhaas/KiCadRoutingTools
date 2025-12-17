@@ -145,8 +145,8 @@ Examples:
                         help='Skip connectivity checks after routing')
     parser.add_argument('--input', default='routed_output.kicad_pcb',
                         help='Input PCB file (default: routed_output.kicad_pcb)')
-    parser.add_argument('--output', default='test_batch_diffpair.kicad_pcb',
-                        help='Output PCB file (default: test_batch_diffpair.kicad_pcb)')
+    parser.add_argument('--output', default='test_diffpair.kicad_pcb',
+                        help='Output PCB file (default: test_diffpair.kicad_pcb)')
 
     # Router options (pass-through to route.py)
     router_group = parser.add_argument_group('Router options (passed to route.py)')
