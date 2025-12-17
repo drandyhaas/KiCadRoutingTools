@@ -170,7 +170,7 @@ Examples:
                               help='Via drill size in mm (default: 0.2)')
     router_group.add_argument('--grid-step', type=float,
                               help='Grid resolution in mm (default: 0.1)')
-    router_group.add_argument('--via-cost', type=float,
+    router_group.add_argument('--via-cost', type=int,
                               help='Via cost penalty in grid steps (default: 25)')
     router_group.add_argument('--max-iterations', type=int,
                               help='Max A* iterations (default: 100000)')
