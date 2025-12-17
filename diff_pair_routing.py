@@ -383,13 +383,15 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Create router for centerline
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
 
-    path, iterations = router.route_multi(obstacles, center_sources, center_targets, config.max_iterations)
+    path, iterations = router.route_multi(obstacles, center_sources, center_targets, config.max_iterations,
+                                          collinear_vias=True)
     total_iterations = iterations
 
     if path is None:
         # Try reverse direction
         print(f"No route found after {iterations} iterations, trying backwards...")
-        path, iter2 = router.route_multi(obstacles, center_targets, center_sources, config.max_iterations)
+        path, iter2 = router.route_multi(obstacles, center_targets, center_sources, config.max_iterations,
+                                         collinear_vias=True)
         total_iterations += iter2
         if path is not None:
             path = list(reversed(path))

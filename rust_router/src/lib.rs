@@ -264,12 +264,17 @@ impl GridRouter {
     /// Route from multiple source points to multiple target points.
     /// Returns (path, iterations) where path is list of (gx, gy, layer) tuples,
     /// or (None, iterations) if no path found.
+    ///
+    /// collinear_vias: If true, after a via the route must continue in the same
+    /// direction as before the via (for diff pair routing to ensure clean via geometry).
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false))]
     fn route_multi(
         &self,
         obstacles: &GridObstacleMap,
         sources: Vec<(i32, i32, u8)>,
         targets: Vec<(i32, i32, u8)>,
         max_iterations: u32,
+        collinear_vias: bool,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32) {
         // Convert targets to set for O(1) lookup
         let target_set: FxHashSet<u64> = targets
@@ -327,8 +332,31 @@ impl GridRouter {
                 return (Some(path), iterations);
             }
 
+            // Check via constraints for diff pair routing (collinear_vias mode):
+            // 1. If we just came through a via: must continue in exact same direction as before via
+            // 2. If we're one step after a via exit: must be within ±45° of the pre-via direction
+            // This ensures clean via geometry for differential pairs
+            let (required_direction, allowed_45deg_from): (Option<(i32, i32)>, Option<(i32, i32)>) = if collinear_vias {
+                self.get_via_direction_constraints(&parents, current_key, &current)
+            } else {
+                (None, None)
+            };
+
             // Expand neighbors - 8 directions
             for (dx, dy) in DIRECTIONS {
+                // If we have a required exact direction (just came through via), only allow that direction
+                if let Some((req_dx, req_dy)) = required_direction {
+                    if dx != req_dx || dy != req_dy {
+                        continue;
+                    }
+                }
+                // If we're one step after via, must be within ±45° of the pre-via direction
+                else if let Some((base_dx, base_dy)) = allowed_45deg_from {
+                    if !Self::is_within_45_degrees(dx, dy, base_dx, base_dy) {
+                        continue;
+                    }
+                }
+
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
@@ -455,6 +483,111 @@ impl GridRouter {
 
         path.reverse();
         path
+    }
+
+    /// Helper to unpack a key back to coordinates
+    #[inline]
+    fn unpack_key(key: u64) -> (i32, i32, u8) {
+        let layer = (key & 0xFF) as u8;
+        let y = ((key >> 8) & 0xFFFFF) as i32;
+        let x = ((key >> 28) & 0xFFFFF) as i32;
+        let x = if x & 0x80000 != 0 { x | !0xFFFFF_i32 } else { x };
+        let y = if y & 0x80000 != 0 { y | !0xFFFFF_i32 } else { y };
+        (x, y, layer)
+    }
+
+    /// Check if direction (dx, dy) is within ±45° of (base_dx, base_dy)
+    /// For grid directions, this means the direction is either the same or one of the two adjacent directions
+    #[inline]
+    fn is_within_45_degrees(dx: i32, dy: i32, base_dx: i32, base_dy: i32) -> bool {
+        // Same direction
+        if dx == base_dx && dy == base_dy {
+            return true;
+        }
+        // For each base direction, compute which directions are within 45°
+        // The 8 directions in order: E(1,0), NE(1,-1), N(0,-1), NW(-1,-1), W(-1,0), SW(-1,1), S(0,1), SE(1,1)
+        // Each direction is 45° apart, so "within 45°" means same or adjacent
+        let base_idx = Self::direction_to_index(base_dx, base_dy);
+        let test_idx = Self::direction_to_index(dx, dy);
+
+        // Check if indices are adjacent (with wraparound)
+        let diff = (test_idx as i32 - base_idx as i32 + 8) % 8;
+        diff == 0 || diff == 1 || diff == 7
+    }
+
+    /// Convert direction to index (0-7)
+    #[inline]
+    fn direction_to_index(dx: i32, dy: i32) -> usize {
+        match (dx, dy) {
+            (1, 0) => 0,    // E
+            (1, -1) => 1,   // NE
+            (0, -1) => 2,   // N
+            (-1, -1) => 3,  // NW
+            (-1, 0) => 4,   // W
+            (-1, 1) => 5,   // SW
+            (0, 1) => 6,    // S
+            (1, 1) => 7,    // SE
+            _ => 0,
+        }
+    }
+
+    /// Get via direction constraints for the current position
+    /// Returns (required_exact_direction, allowed_45deg_base_direction)
+    fn get_via_direction_constraints(
+        &self,
+        parents: &FxHashMap<u64, u64>,
+        current_key: u64,
+        current: &GridState,
+    ) -> (Option<(i32, i32)>, Option<(i32, i32)>) {
+        // Get parent
+        let parent_key = match parents.get(&current_key) {
+            Some(&k) => k,
+            None => return (None, None),
+        };
+        let (parent_x, parent_y, parent_layer) = Self::unpack_key(parent_key);
+
+        // Check if parent was a via (same position as current, different layer)
+        let parent_is_via = parent_x == current.gx && parent_y == current.gy && parent_layer != current.layer;
+
+        if parent_is_via {
+            // We just came through a via - need exact same direction as before via
+            if let Some(&grandparent_key) = parents.get(&parent_key) {
+                let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
+                let dx = parent_x - gp_x;
+                let dy = parent_y - gp_y;
+                if dx != 0 || dy != 0 {
+                    let norm_dx = if dx != 0 { dx / dx.abs() } else { 0 };
+                    let norm_dy = if dy != 0 { dy / dy.abs() } else { 0 };
+                    return (Some((norm_dx, norm_dy)), None);
+                }
+            }
+            return (None, None);
+        }
+
+        // Check if grandparent was a via (we're one step after via exit)
+        let grandparent_key = match parents.get(&parent_key) {
+            Some(&k) => k,
+            None => return (None, None),
+        };
+        let (gp_x, gp_y, gp_layer) = Self::unpack_key(grandparent_key);
+
+        let grandparent_is_via = gp_x == parent_x && gp_y == parent_y && gp_layer != parent_layer;
+
+        if grandparent_is_via {
+            // We're one step after via exit - need direction within ±45° of pre-via direction
+            if let Some(&great_grandparent_key) = parents.get(&grandparent_key) {
+                let (ggp_x, ggp_y, _) = Self::unpack_key(great_grandparent_key);
+                let dx = gp_x - ggp_x;
+                let dy = gp_y - ggp_y;
+                if dx != 0 || dy != 0 {
+                    let norm_dx = if dx != 0 { dx / dx.abs() } else { 0 };
+                    let norm_dy = if dy != 0 { dy / dy.abs() } else { 0 };
+                    return (None, Some((norm_dx, norm_dy)));
+                }
+            }
+        }
+
+        (None, None)
     }
 }
 
