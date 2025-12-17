@@ -381,7 +381,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     center_targets = [(tgt_gx, tgt_gy, tgt_layer)]
 
     # Create router for centerline
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
+    # Double via cost since diff pairs place two vias per layer change
+    router = GridRouter(via_cost=config.via_cost * 1000 * 2, h_weight=config.heuristic_weight)
 
     path, iterations = router.route_multi(obstacles, center_sources, center_targets, config.max_iterations,
                                           collinear_vias=True)

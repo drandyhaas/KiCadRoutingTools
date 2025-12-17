@@ -136,6 +136,21 @@ Polarity: src_p_sign=1, tgt_p_sign=-1, swap_needed=True, has_vias=True
 
 ## Via Placement
 
+### Collinear Via Constraint
+
+The Rust router enforces a **collinear via constraint** for differential pair routing to ensure clean via geometry. The constraint requires:
+
+1. **2 steps minimum before via** - At least 2 grid steps must exist before placing a via
+2. **Approach direction within ±45°** - The approach direction must be within ±45° of the previous direction
+3. **Exit same as approach** - After the via, must continue in the same direction
+4. **Then ±45° allowed** - After the exit step, can turn up to ±45°
+
+This creates symmetric geometry around vias: `±45° → D → VIA → D → ±45°`
+
+### Via Cost
+
+The via cost is **doubled** for differential pairs since each layer change requires placing two vias (P and N). This discourages unnecessary layer transitions.
+
 ### Via Positions
 
 P and N vias are placed perpendicular to the centerline direction at layer changes:

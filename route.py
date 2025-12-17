@@ -81,7 +81,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 via_drill: float = 0.2,
                 grid_step: float = 0.1,
                 via_cost: int = 25,
-                max_iterations: int = 100000,
+                max_iterations: int = 200000,
                 heuristic_weight: float = 1.5,
                 stub_proximity_radius: float = 1.0,
                 stub_proximity_cost: float = 3.0,
@@ -112,8 +112,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_size: Via outer diameter in mm (default: 0.3)
         via_drill: Via drill size in mm (default: 0.2)
         grid_step: Grid resolution in mm (default: 0.1)
-        via_cost: Penalty for placing a via in grid steps (default: 25)
-        max_iterations: Max A* iterations before giving up (default: 100000)
+        via_cost: Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)
+        max_iterations: Max A* iterations before giving up (default: 200000)
         heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.5)
         stub_proximity_radius: Radius around stubs to penalize in mm (default: 1.0)
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 3.0)
@@ -726,9 +726,9 @@ Differential pair routing:
     parser.add_argument("--grid-step", type=float, default=0.1,
                         help="Grid resolution in mm (default: 0.1)")
     parser.add_argument("--via-cost", type=int, default=25,
-                        help="Penalty for placing a via in grid steps (default: 25)")
-    parser.add_argument("--max-iterations", type=int, default=100000,
-                        help="Max A* iterations before giving up (default: 100000)")
+                        help="Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)")
+    parser.add_argument("--max-iterations", type=int, default=200000,
+                        help="Max A* iterations before giving up (default: 200000)")
     parser.add_argument("--heuristic-weight", type=float, default=1.5,
                         help="A* heuristic weight, higher=faster but less optimal (default: 1.5)")
 

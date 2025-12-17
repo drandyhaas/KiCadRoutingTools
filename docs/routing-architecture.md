@@ -166,7 +166,7 @@ path, iterations = router.route_multi(
     obstacles,
     sources=[(gx1, gy1, layer1), (gx2, gy2, layer1), ...],
     targets=[(gx3, gy3, layer2), (gx4, gy4, layer2), ...],
-    max_iterations=100000
+    max_iterations=200000
 )
 ```
 

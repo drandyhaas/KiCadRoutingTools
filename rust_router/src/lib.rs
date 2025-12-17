@@ -392,7 +392,52 @@ impl GridRouter {
             }
 
             // Try via to other layers
-            if !obstacles.is_via_blocked(current.gx, current.gy) {
+            // For collinear_vias mode, enforce symmetric constraint around via:
+            // ±45° -> direction D -> VIA -> direction D -> ±45°
+            // This requires at least 2 steps before via (great-grandparent must exist),
+            // and direction into via must be within ±45° of previous direction
+            let can_place_via = if collinear_vias {
+                if let Some(&parent_key) = parents.get(&current_key) {
+                    if let Some(&grandparent_key) = parents.get(&parent_key) {
+                        // Need great-grandparent to ensure 2 full steps before via
+                        if !parents.contains_key(&grandparent_key) {
+                            false // Only 1 step before via - need at least 2
+                        } else {
+                            // Have great-grandparent - check that approach direction is within ±45° of previous
+                            let (parent_x, parent_y, _) = Self::unpack_key(parent_key);
+                            let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
+
+                            // Direction from grandparent to parent (previous direction)
+                            let prev_dx = parent_x - gp_x;
+                            let prev_dy = parent_y - gp_y;
+
+                            // Direction from parent to current (approach direction)
+                            let approach_dx = current.gx - parent_x;
+                            let approach_dy = current.gy - parent_y;
+
+                            if (prev_dx != 0 || prev_dy != 0) && (approach_dx != 0 || approach_dy != 0) {
+                                let norm_prev_dx = if prev_dx != 0 { prev_dx / prev_dx.abs() } else { 0 };
+                                let norm_prev_dy = if prev_dy != 0 { prev_dy / prev_dy.abs() } else { 0 };
+                                let norm_approach_dx = if approach_dx != 0 { approach_dx / approach_dx.abs() } else { 0 };
+                                let norm_approach_dy = if approach_dy != 0 { approach_dy / approach_dy.abs() } else { 0 };
+
+                                // Approach must be same or within ±45° of previous
+                                Self::is_within_45_degrees(norm_approach_dx, norm_approach_dy, norm_prev_dx, norm_prev_dy)
+                            } else {
+                                false
+                            }
+                        }
+                    } else {
+                        false // No grandparent - too close to start
+                    }
+                } else {
+                    false // No parent at all - this is a source node
+                }
+            } else {
+                true
+            };
+
+            if can_place_via && !obstacles.is_via_blocked(current.gx, current.gy) {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer {
                         continue;
@@ -459,7 +504,7 @@ impl GridRouter {
         &self,
         parents: &FxHashMap<u64, u64>,
         goal_key: u64,
-        g_costs: &FxHashMap<u64, i32>,
+        _g_costs: &FxHashMap<u64, i32>,
     ) -> Vec<(i32, i32, u8)> {
         let mut path = Vec::new();
         let mut current_key = goal_key;
@@ -565,6 +610,7 @@ impl GridRouter {
         }
 
         // Check if grandparent was a via (we're one step after via exit)
+        // Still require exact same direction for symmetry when path is reversed
         let grandparent_key = match parents.get(&parent_key) {
             Some(&k) => k,
             None => return (None, None),
@@ -574,11 +620,36 @@ impl GridRouter {
         let grandparent_is_via = gp_x == parent_x && gp_y == parent_y && gp_layer != parent_layer;
 
         if grandparent_is_via {
-            // We're one step after via exit - need direction within ±45° of pre-via direction
+            // We're one step after via exit - still require exact same direction
+            // (This ensures 2 straight steps after via for symmetric geometry when reversed)
             if let Some(&great_grandparent_key) = parents.get(&grandparent_key) {
                 let (ggp_x, ggp_y, _) = Self::unpack_key(great_grandparent_key);
                 let dx = gp_x - ggp_x;
                 let dy = gp_y - ggp_y;
+                if dx != 0 || dy != 0 {
+                    let norm_dx = if dx != 0 { dx / dx.abs() } else { 0 };
+                    let norm_dy = if dy != 0 { dy / dy.abs() } else { 0 };
+                    return (Some((norm_dx, norm_dy)), None);
+                }
+            }
+            return (None, None);
+        }
+
+        // Check if great-grandparent was a via (we're two steps after via exit)
+        let great_grandparent_key = match parents.get(&grandparent_key) {
+            Some(&k) => k,
+            None => return (None, None),
+        };
+        let (ggp_x, ggp_y, ggp_layer) = Self::unpack_key(great_grandparent_key);
+
+        let great_grandparent_is_via = ggp_x == gp_x && ggp_y == gp_y && ggp_layer != gp_layer;
+
+        if great_grandparent_is_via {
+            // We're two steps after via exit - allow ±45° turn
+            if let Some(&gggp_key) = parents.get(&great_grandparent_key) {
+                let (gggp_x, gggp_y, _) = Self::unpack_key(gggp_key);
+                let dx = ggp_x - gggp_x;
+                let dy = ggp_y - gggp_y;
                 if dx != 0 || dy != 0 {
                     let norm_dx = if dx != 0 { dx / dx.abs() } else { 0 };
                     let norm_dy = if dy != 0 { dy / dy.abs() } else { 0 };
@@ -1236,42 +1307,6 @@ impl DiffPairRouter {
 }
 
 impl DiffPairRouter {
-    /// Convert P and N positions to a DiffPairState with appropriate orientation
-    fn positions_to_state(&self, p_gx: i32, p_gy: i32, n_gx: i32, n_gy: i32, layer: u8) -> Option<DiffPairState> {
-        let dx = p_gx - n_gx;
-        let dy = p_gy - n_gy;
-
-        // Determine orientation based on relative positions
-        let orientation = if dx == 0 && dy != 0 {
-            // P and N aligned vertically - horizontal orientation (P above if dy > 0)
-            0
-        } else if dy == 0 && dx != 0 {
-            // P and N aligned horizontally - vertical orientation (P right if dx > 0)
-            1
-        } else if dx > 0 && dy > 0 {
-            // P is NE of N
-            2
-        } else if dx < 0 && dy > 0 {
-            // P is NW of N
-            3
-        } else if dx > 0 && dy < 0 {
-            // P is SE of N - same as NW with swapped roles
-            3
-        } else if dx < 0 && dy < 0 {
-            // P is SW of N - same as NE with swapped roles
-            2
-        } else {
-            // P and N at same position - invalid
-            return None;
-        };
-
-        // Calculate center position
-        let center_gx = (p_gx + n_gx) / 2;
-        let center_gy = (p_gy + n_gy) / 2;
-
-        Some(DiffPairState::new(center_gx, center_gy, layer, orientation))
-    }
-
     /// Get valid orientations for a given move direction
     /// Returns orientations that make sense for the direction of travel
     fn get_valid_orientations(&self, dx: i32, dy: i32, current_orientation: u8) -> Vec<u8> {

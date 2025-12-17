@@ -1,4 +1,4 @@
-alias python=python3
+# alias python=python3
 
 # Test fanning out BGA chips
 # Run in Windows powershell like: .\apply_fanouts.ps1

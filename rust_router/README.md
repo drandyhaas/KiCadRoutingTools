@@ -97,7 +97,7 @@ router = GridRouter(via_cost=500000, h_weight=1.5)
 sources = [(100, 200, 0), (101, 200, 0)]  # (gx, gy, layer)
 targets = [(300, 400, 0), (301, 400, 0)]
 
-path, iterations = router.route_multi(obstacles, sources, targets, max_iterations=100000)
+path, iterations = router.route_multi(obstacles, sources, targets, max_iterations=200000)
 
 if path:
     print(f"Found path with {len(path)} points in {iterations} iterations")
@@ -169,7 +169,7 @@ Methods:
 
 ## Version History
 
-- **0.5.0**: Added `collinear_vias` parameter for differential pair routing - ensures vias are placed on straight sections with gradual exit turns
+- **0.5.0**: Added `collinear_vias` parameter for differential pair routing - enforces symmetric via geometry: `±45° → D → VIA → D → ±45°` (requires 2 steps before via, approach within ±45° of previous, exit same as approach, then ±45° allowed)
 - **0.4.0**: Performance and stability improvements
 - **0.3.0**: Added `clone()` method for GridObstacleMap to support incremental obstacle caching
 - **0.2.1**: Fixed `is_blocked()` to check blocked_cells before allowed_cells (prevents allowed_cells from overriding regular obstacles)
