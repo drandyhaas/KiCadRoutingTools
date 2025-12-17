@@ -11,6 +11,7 @@ import sys
 import os
 import argparse
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from kicad_parser import parse_kicad_pcb
 from route import find_differential_pairs
 
@@ -110,6 +111,8 @@ def main():
                         help='Show detailed output for each test')
     parser.add_argument('--stop-on-error', '-s', action='store_true',
                         help='Stop on first error')
+    parser.add_argument('--threads', '-t', type=int, default=14,
+                        help='Number of parallel threads (default: 14)')
 
     # Test script options (pass-through to test_diffpair.py)
     parser.add_argument('--build', action='store_true',
@@ -188,36 +191,56 @@ def main():
         short_names.append(short)
 
     print(f"Found {len(short_names)} differential pairs to test")
+    print(f"Running with {args.threads} threads")
     print("=" * 60)
 
-    # Run tests
+    # Run tests in parallel
     results = []
-    for i, name in enumerate(short_names):
-        print(f"\n[{i+1}/{len(short_names)}] Testing {name}...")
+    completed = 0
+    stop_flag = False
 
-        result = run_test(name, args, args.verbose)
-        results.append(result)
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        # Submit all tasks
+        future_to_name = {
+            executor.submit(run_test, name, args, args.verbose): name
+            for name in short_names
+        }
 
-        if result['routing_success'] and result['drc_success']:
-            print(f"  PASS")
-        elif not result['routing_success']:
-            print(f"  FAIL - Routing failed")
-            if args.stop_on_error:
-                break
-        elif result['polarity_no_vias']:
-            # Known limitation: polarity swap without vias causes crossing
-            print(f"  KNOWN LIMITATION - Polarity swap without vias (tracks cross)")
-        else:
-            print(f"  FAIL - DRC violations: {len(result['violations'])}")
-            for v in result['violations'][:3]:
-                print(f"    {v}")
-            if len(result['violations']) > 3:
-                print(f"    ... and {len(result['violations']) - 3} more")
-            if args.stop_on_error:
-                break
+        for future in as_completed(future_to_name):
+            if stop_flag:
+                continue
 
-        if args.verbose and result['output']:
-            print(result['output'])
+            name = future_to_name[future]
+            completed += 1
+
+            try:
+                result = future.result()
+                results.append(result)
+
+                if result['routing_success'] and result['drc_success']:
+                    print(f"[{completed}/{len(short_names)}] {name}: PASS")
+                elif not result['routing_success']:
+                    print(f"[{completed}/{len(short_names)}] {name}: FAIL - Routing failed")
+                    if args.stop_on_error:
+                        stop_flag = True
+                elif result['polarity_no_vias']:
+                    print(f"[{completed}/{len(short_names)}] {name}: KNOWN LIMITATION - Polarity swap without vias")
+                else:
+                    print(f"[{completed}/{len(short_names)}] {name}: FAIL - DRC violations: {len(result['violations'])}")
+                    for v in result['violations'][:3]:
+                        print(f"    {v}")
+                    if len(result['violations']) > 3:
+                        print(f"    ... and {len(result['violations']) - 3} more")
+                    if args.stop_on_error:
+                        stop_flag = True
+
+                if args.verbose and result['output']:
+                    print(result['output'])
+
+            except Exception as e:
+                print(f"[{completed}/{len(short_names)}] {name}: ERROR - {e}")
+                if args.stop_on_error:
+                    stop_flag = True
 
     # Summary
     print("\n" + "=" * 60)
