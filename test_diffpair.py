@@ -154,10 +154,8 @@ Examples:
                               help='Net ordering strategy (default: mps)')
     router_group.add_argument('--direction', '-d', choices=['forward', 'backwards', 'random'],
                               help='Direction search order')
-    router_group.add_argument('--no-bga-zones', action='store_true', default=True,
-                              help='Disable BGA exclusion zones (default: enabled)')
-    router_group.add_argument('--bga-zones', action='store_true',
-                              help='Enable BGA exclusion zones')
+    router_group.add_argument('--no-bga-zones', action='store_true',
+                              help='Disable BGA exclusion zones')
     router_group.add_argument('--layers', '-l', nargs='+',
                               help='Routing layers (default: F.Cu In1.Cu In2.Cu B.Cu)')
     router_group.add_argument('--track-width', type=float,
@@ -182,8 +180,10 @@ Examples:
                               help='Cost penalty near stubs in mm equivalent (default: 2.0)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
-    router_group.add_argument('--diff-pair-centerline-setback', type=float, default=1.5,
-                              help='Distance in front of stubs to start route in mm (default: 1.5)')
+    router_group.add_argument('--min-diff-pair-centerline-setback', type=float,
+                              help='Minimum distance in front of stubs to start route in mm (default: 1.0)')
+    router_group.add_argument('--max-diff-pair-centerline-setback', type=float,
+                              help='Maximum setback to try if minimum is blocked in mm (default: 5.0)')
     router_group.add_argument('--debug-layers', action='store_true',
                               help='Output debug geometry on In4.Cu (turn segments), In5.Cu (connectors), User.8/9 (centerline)')
     router_group.add_argument('--fix-polarity', action='store_true',
@@ -255,7 +255,7 @@ Examples:
     ] + net_patterns
 
     # Add pass-through options
-    if args.no_bga_zones and not args.bga_zones:
+    if args.no_bga_zones:
         router_cmd.append("--no-bga-zones")
     if args.ordering:
         router_cmd.extend(["--ordering", args.ordering])
@@ -285,7 +285,10 @@ Examples:
         router_cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-    router_cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
+    if args.min_diff_pair_centerline_setback is not None:
+        router_cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
+    if args.max_diff_pair_centerline_setback is not None:
+        router_cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
     if args.debug_layers:
         router_cmd.append("--debug-layers")
     if args.fix_polarity:

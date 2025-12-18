@@ -352,22 +352,44 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
 
-    # Get single fixed setback
-    setback = config.diff_pair_centerline_setback
+    # Get minimum setback and try progressively larger ones if blocked
+    min_setback = config.min_diff_pair_centerline_setback
+    max_setback = config.max_diff_pair_centerline_setback
+    setback_step = config.grid_step  # Increment by one grid step
 
-    print(f"  Centerline setback: {setback}mm")
     print(f"  Source direction: ({src_dir_x:.2f}, {src_dir_y:.2f}), target direction: ({tgt_dir_x:.2f}, {tgt_dir_y:.2f})")
 
-    # Calculate single source and target centerline points
+    # Find open positions for source and target centerline points
     allow_radius = 2
 
-    src_x = center_src_x + src_dir_x * setback
-    src_y = center_src_y + src_dir_y * setback
-    src_gx, src_gy = coord.to_grid(src_x, src_y)
+    def find_open_setback(center_x, center_y, dir_x, dir_y, layer_idx, min_sb, max_sb, step, label):
+        """Find the smallest setback where the position is not blocked."""
+        setback = min_sb
+        while setback <= max_sb:
+            x = center_x + dir_x * setback
+            y = center_y + dir_y * setback
+            gx, gy = coord.to_grid(x, y)
+            # Check if this position is blocked (on the layer or for vias)
+            if not obstacles.is_blocked(gx, gy, layer_idx) and not obstacles.is_via_blocked(gx, gy):
+                return setback, gx, gy
+            setback += step
+        # If all positions blocked, return the minimum setback anyway
+        x = center_x + dir_x * min_sb
+        y = center_y + dir_y * min_sb
+        gx, gy = coord.to_grid(x, y)
+        print(f"  Warning: {label} centerline position blocked at all setbacks, using minimum")
+        return min_sb, gx, gy
 
-    tgt_x = center_tgt_x + tgt_dir_x * setback
-    tgt_y = center_tgt_y + tgt_dir_y * setback
-    tgt_gx, tgt_gy = coord.to_grid(tgt_x, tgt_y)
+    src_setback, src_gx, src_gy = find_open_setback(
+        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer,
+        min_setback, max_setback, setback_step, "source"
+    )
+    tgt_setback, tgt_gx, tgt_gy = find_open_setback(
+        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer,
+        min_setback, max_setback, setback_step, "target"
+    )
+
+    print(f"  Centerline setback: src={src_setback:.2f}mm, tgt={tgt_setback:.2f}mm (min={min_setback}mm)")
 
     # Add allowed cells around source and target
     for dx in range(-allow_radius, allow_radius + 1):
@@ -414,12 +436,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Add turn segments at start and end to face the connector stubs
     # This makes the centerline turn to align with stub direction before connecting
     # Use a shorter turn length to reduce connector segment length
-    turn_length_mm = setback * 0.3  # Length of the turn segment in mm
-    turn_length_grid = int(turn_length_mm / config.grid_step)
     # When there's a via at start/end, use longer turn to clear via approach area
     via_turn_multiplier = 1.15  # Minimum ~1.1, use 1.15 for safety margin
 
-    if len(simplified_path) >= 2 and turn_length_grid > 0:
+    if len(simplified_path) >= 2:
         # Check if there's a via at the start (layer change between first two points)
         has_via_at_start = (len(simplified_path) >= 2 and
                            simplified_path[0][2] != simplified_path[1][2])
@@ -428,20 +448,26 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                          simplified_path[-1][2] != simplified_path[-2][2])
 
         # Add turn segment at start (facing source stubs)
-        # If there's a via at start, use longer turn to clear the via approach area
-        first_gx, first_gy, first_layer = simplified_path[0]
-        start_turn_mult = via_turn_multiplier if has_via_at_start else 1.0
-        turn_start_gx = first_gx - int(src_dir_x * turn_length_grid * start_turn_mult)
-        turn_start_gy = first_gy - int(src_dir_y * turn_length_grid * start_turn_mult)
-        simplified_path.insert(0, (turn_start_gx, turn_start_gy, first_layer))
+        # Use source setback for start turn length
+        src_turn_length_mm = src_setback * 0.3
+        src_turn_length_grid = int(src_turn_length_mm / config.grid_step)
+        if src_turn_length_grid > 0:
+            first_gx, first_gy, first_layer = simplified_path[0]
+            start_turn_mult = via_turn_multiplier if has_via_at_start else 1.0
+            turn_start_gx = first_gx - int(src_dir_x * src_turn_length_grid * start_turn_mult)
+            turn_start_gy = first_gy - int(src_dir_y * src_turn_length_grid * start_turn_mult)
+            simplified_path.insert(0, (turn_start_gx, turn_start_gy, first_layer))
 
         # Add turn segment at end (facing target stubs)
-        # If there's a via at end, use longer turn to clear the via approach area
-        last_gx, last_gy, last_layer = simplified_path[-1]
-        end_turn_mult = via_turn_multiplier if has_via_at_end else 1.0
-        turn_end_gx = last_gx - int(tgt_dir_x * turn_length_grid * end_turn_mult)
-        turn_end_gy = last_gy - int(tgt_dir_y * turn_length_grid * end_turn_mult)
-        simplified_path.append((turn_end_gx, turn_end_gy, last_layer))
+        # Use target setback for end turn length
+        tgt_turn_length_mm = tgt_setback * 0.3
+        tgt_turn_length_grid = int(tgt_turn_length_mm / config.grid_step)
+        if tgt_turn_length_grid > 0:
+            last_gx, last_gy, last_layer = simplified_path[-1]
+            end_turn_mult = via_turn_multiplier if has_via_at_end else 1.0
+            turn_end_gx = last_gx - int(tgt_dir_x * tgt_turn_length_grid * end_turn_mult)
+            turn_end_gy = last_gy - int(tgt_dir_y * tgt_turn_length_grid * end_turn_mult)
+            simplified_path.append((turn_end_gx, turn_end_gy, last_layer))
 
         print(f"  Added turn segments: path now {len(simplified_path)} points")
 

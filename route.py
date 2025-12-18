@@ -87,7 +87,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 stub_proximity_cost: float = 3.0,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
-                diff_pair_centerline_setback: float = 0.4,
+                min_diff_pair_centerline_setback: float = 1.0,
+                max_diff_pair_centerline_setback: float = 5.0,
                 debug_layers: bool = False,
                 fix_polarity: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
@@ -162,7 +163,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_radius=stub_proximity_radius,
         stub_proximity_cost=stub_proximity_cost,
         diff_pair_gap=diff_pair_gap,
-        diff_pair_centerline_setback=diff_pair_centerline_setback,
+        min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
+        max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
         debug_layers=debug_layers,
         fix_polarity=fix_polarity,
     )
@@ -391,15 +393,35 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
-            add_route_to_pcb_data(pcb_data, result, debug_layers=config.debug_layers)
 
             # Check if polarity was fixed - need to swap target pad and stub nets
+            # Do this BEFORE add_route_to_pcb_data so collapse_appendices sees correct net IDs
             if result.get('polarity_fixed') and result.get('swap_target_pads'):
                 swap_info = result['swap_target_pads']
                 p_pos = swap_info['p_pos']  # Original P target stub position
                 n_pos = swap_info['n_pos']  # Original N target stub position
                 p_net_id = swap_info['p_net_id']
                 n_net_id = swap_info['n_net_id']
+
+                # Swap stub net IDs in pcb_data.segments so collapse_appendices works correctly
+                # Find segments connected to each stub position and swap their net IDs
+                p_stub_positions = find_connected_segment_positions(pcb_data, p_pos[0], p_pos[1], p_net_id)
+                n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
+                for seg in pcb_data.segments:
+                    seg_start = (round(seg.start_x, 2), round(seg.start_y, 2))
+                    seg_end = (round(seg.end_x, 2), round(seg.end_y, 2))
+                    if seg.net_id == p_net_id and (seg_start in p_stub_positions or seg_end in p_stub_positions):
+                        seg.net_id = n_net_id
+                    elif seg.net_id == n_net_id and (seg_start in n_stub_positions or seg_end in n_stub_positions):
+                        seg.net_id = p_net_id
+
+                # Also swap via net IDs at stub positions
+                for via in pcb_data.vias:
+                    via_pos = (round(via.x, 2), round(via.y, 2))
+                    if via.net_id == p_net_id and via_pos in p_stub_positions:
+                        via.net_id = n_net_id
+                    elif via.net_id == n_net_id and via_pos in n_stub_positions:
+                        via.net_id = p_net_id
 
                 # Find the target pads by net ID and proximity to stub positions
                 pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_pos[0], p_pos[1])
@@ -411,6 +433,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         'pad_n': pad_n,
                         'p_net_id': p_net_id,
                         'n_net_id': n_net_id,
+                        # Store positions now before pcb_data net IDs are swapped
+                        'p_stub_positions': p_stub_positions,
+                        'n_stub_positions': n_stub_positions,
                     })
                     print(f"  Polarity fixed: will swap nets of {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
                 else:
@@ -419,6 +444,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         print(f"    Missing P pad (net {p_net_id}) near {p_pos}")
                     if not pad_n:
                         print(f"    Missing N pad (net {n_net_id}) near {n_pos}")
+
+            add_route_to_pcb_data(pcb_data, result, debug_layers=config.debug_layers)
 
             if pair.p_net_id in remaining_net_ids:
                 remaining_net_ids.remove(pair.p_net_id)
@@ -565,9 +592,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 content = swap_pad_nets_in_content(content, pad_p, pad_n)
                 print(f"  Pads: {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
 
-                # Find all connected segment positions for each stub chain (BFS traversal)
-                p_positions = find_connected_segment_positions(pcb_data, pad_p.global_x, pad_p.global_y, p_net_id)
-                n_positions = find_connected_segment_positions(pcb_data, pad_n.global_x, pad_n.global_y, n_net_id)
+                # Use pre-computed stub positions (saved before pcb_data was modified)
+                p_positions = swap.get('p_stub_positions')
+                n_positions = swap.get('n_stub_positions')
+
+                # Fallback to computing if not stored (for backward compatibility)
+                if p_positions is None:
+                    p_positions = find_connected_segment_positions(pcb_data, pad_p.global_x, pad_p.global_y, p_net_id)
+                if n_positions is None:
+                    n_positions = find_connected_segment_positions(pcb_data, pad_n.global_x, pad_n.global_y, n_net_id)
 
                 # Swap entire stub chains - all segments connected to each pad
                 content, p_seg_count = swap_segment_nets_at_positions(content, p_positions, p_net_id, n_net_id)
@@ -743,8 +776,10 @@ Differential pair routing:
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
     parser.add_argument("--diff-pair-gap", type=float, default=0.1,
                         help="Gap between P and N traces of differential pairs in mm (default: 0.1)")
-    parser.add_argument("--diff-pair-centerline-setback", type=float, default=0.4,
-                        help="Distance in front of stubs to start centerline route in mm (default: 0.4)")
+    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=1.0,
+                        help="Minimum distance in front of stubs to start centerline route in mm (default: 1.0)")
+    parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=5.0,
+                        help="Maximum setback to try if minimum is blocked in mm (default: 5.0)")
     parser.add_argument("--fix-polarity", action="store_true",
                         help="Swap target pad net assignments if polarity swap is needed")
 
@@ -805,7 +840,8 @@ Differential pair routing:
                 stub_proximity_cost=args.stub_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
-                diff_pair_centerline_setback=args.diff_pair_centerline_setback,
+                min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
+                max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
                 debug_layers=args.debug_layers,
                 fix_polarity=args.fix_polarity,
                 vis_callback=vis_callback)
