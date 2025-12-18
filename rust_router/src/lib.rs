@@ -272,8 +272,8 @@ impl GridRouter {
     /// important for diff pair routing where P/N tracks are offset from centerline.
     /// start_direction: Optional (dx, dy) direction for initial moves from source.
     /// If specified, first N moves must be within ±45° of this direction.
-    /// end_direction: Optional (dx, dy) direction for final moves to target.
-    /// If specified, penalizes arriving from wrong direction.
+    /// end_direction: Optional (dx, dy) continuous direction for final moves to target.
+    /// If specified, checks arrival direction is within ±60° of this direction.
     /// direction_steps: Number of steps to constrain at start (default 2).
     #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2))]
     fn route_multi(
@@ -285,7 +285,7 @@ impl GridRouter {
         collinear_vias: bool,
         via_exclusion_radius: i32,
         start_direction: Option<(i32, i32)>,
-        end_direction: Option<(i32, i32)>,
+        end_direction: Option<(f64, f64)>,
         direction_steps: i32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32) {
         // Convert targets to set for O(1) lookup
@@ -322,10 +322,10 @@ impl GridRouter {
         });
 
         // Normalize end direction if provided (direction we want to arrive FROM)
-        let norm_end_dir: Option<(i32, i32)> = end_direction.map(|(dx, dy)| {
-            let ndx = if dx != 0 { dx / dx.abs() } else { 0 };
-            let ndy = if dy != 0 { dy / dy.abs() } else { 0 };
-            (ndx, ndy)
+        // This is a continuous (f64, f64) unit vector
+        let norm_end_dir: Option<(f64, f64)> = end_direction.map(|(dx, dy)| {
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) }
         });
 
         // Helper: check if position (nx, ny) would violate via exclusion
@@ -412,13 +412,17 @@ impl GridRouter {
                 let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
                     if let Some(&parent_key) = parents.get(&current_key) {
                         let (px, py, _) = Self::unpack_key(parent_key);
-                        let arrive_dx = current.gx - px;
-                        let arrive_dy = current.gy - py;
-                        if arrive_dx != 0 || arrive_dy != 0 {
-                            let norm_arrive_dx = if arrive_dx != 0 { arrive_dx / arrive_dx.abs() } else { 0 };
-                            let norm_arrive_dy = if arrive_dy != 0 { arrive_dy / arrive_dy.abs() } else { 0 };
-                            // Check if arrival direction is within ±45° of required end direction
-                            Self::is_within_45_degrees(norm_arrive_dx, norm_arrive_dy, end_dx, end_dy)
+                        let arrive_dx = (current.gx - px) as f64;
+                        let arrive_dy = (current.gy - py) as f64;
+                        let arrive_len = (arrive_dx * arrive_dx + arrive_dy * arrive_dy).sqrt();
+                        if arrive_len > 0.0 {
+                            // Normalize arrival direction and compute dot product
+                            let norm_arrive_dx = arrive_dx / arrive_len;
+                            let norm_arrive_dy = arrive_dy / arrive_len;
+                            let dot = norm_arrive_dx * end_dx + norm_arrive_dy * end_dy;
+                            // Check if arrival direction is within ±120° of required end direction
+                            // cos(120°) = -0.5, so dot product must be >= -0.5
+                            dot >= -0.5
                         } else {
                             true // Same position as parent (via), allow it
                         }

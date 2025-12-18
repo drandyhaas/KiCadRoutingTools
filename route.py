@@ -409,8 +409,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         add_same_net_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
 
         # Route the differential pair
-        # Pass both diff pair obstacles (with extra clearance) and base obstacles (for connector checks)
-        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles)
+        # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
+        # Also pass unrouted stubs for finding clear extension endpoints
+        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles, unrouted_stubs)
         elapsed = time.time() - start_time
         total_time += elapsed
 

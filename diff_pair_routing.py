@@ -363,7 +363,8 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap,
-                                    base_obstacles: GridObstacleMap = None) -> Optional[dict]:
+                                    base_obstacles: GridObstacleMap = None,
+                                    unrouted_stubs: List[Tuple[float, float]] = None) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
@@ -555,9 +556,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         return None
 
     src_grid_dir = direction_to_grid(src_dir_x, src_dir_y)
-    # TODO: End direction constraint disabled for now - stub bends mean the pad direction
-    # doesn't reflect the actual approach direction. Need to trace along stub path.
-    tgt_grid_dir = None
+    tgt_grid_dir = direction_to_grid(tgt_dir_x, tgt_dir_y)
 
     # Create router for centerline
     # Double via cost since diff pairs place two vias per layer change
@@ -567,31 +566,165 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # to ensure P/N tracks stay parallel long enough for connectors to work
     direction_steps = max(3, int(src_setback / config.grid_step / 2))
 
-    path, iterations = router.route_multi(obstacles, center_sources, center_targets, config.max_iterations,
-                                          collinear_vias=True, via_exclusion_radius=via_exclusion_radius,
-                                          start_direction=src_grid_dir, end_direction=tgt_grid_dir,
-                                          direction_steps=direction_steps)
-    total_iterations = iterations
+    # Route in 3 phases: source extension (10%), middle, target extension (10%)
+    # Extensions aim toward the other endpoint with start direction constraints
+    src_x_float = coord.to_float(src_gx, src_gy)[0]
+    src_y_float = coord.to_float(src_gx, src_gy)[1]
+    tgt_x_float = coord.to_float(tgt_gx, tgt_gy)[0]
+    tgt_y_float = coord.to_float(tgt_gx, tgt_gy)[1]
 
-    if path is None:
-        # Try reverse direction (swap start and end directions)
-        print(f"No route found after {iterations} iterations, trying backwards...")
-        # When reversing: start at target setback, end at source setback
-        # Start direction: leave target going AWAY from target stubs (in stub direction)
-        # End direction: arrive at source going TOWARD source stubs (opposite of stub direction)
-        rev_start_dir = direction_to_grid(tgt_dir_x, tgt_dir_y)
-        rev_end_dir = direction_to_grid(-src_dir_x, -src_dir_y)
-        path, iter2 = router.route_multi(obstacles, center_targets, center_sources, config.max_iterations,
+    total_dist = math.sqrt((tgt_x_float - src_x_float)**2 + (tgt_y_float - src_y_float)**2)
+    extension_dist = max(0.5, total_dist * 0.1)  # At least 0.5mm, or 10% of distance
+    extension_steps = max(1, int(extension_dist / config.grid_step))
+
+    # Direction from src to tgt
+    dir_to_tgt_x = (tgt_x_float - src_x_float) / total_dist
+    dir_to_tgt_y = (tgt_y_float - src_y_float) / total_dist
+
+    # Helper to check if a point is clear (not too close to stubs or in BGA zone)
+    def is_point_clear(x, y, min_radius):
+        # Check BGA zones
+        for zone in config.bga_exclusion_zones:
+            min_bga_x, min_bga_y, max_bga_x, max_bga_y = zone
+            # Check if point is within min_radius of BGA zone
+            closest_x = max(min_bga_x, min(x, max_bga_x))
+            closest_y = max(min_bga_y, min(y, max_bga_y))
+            dist_to_bga = math.sqrt((x - closest_x)**2 + (y - closest_y)**2)
+            if dist_to_bga < min_radius:
+                return False
+        # Check stub proximity
+        if unrouted_stubs:
+            for stub_x, stub_y in unrouted_stubs:
+                dist = math.sqrt((x - stub_x)**2 + (y - stub_y)**2)
+                if dist < min_radius:
+                    return False
+        return True
+
+    # Find clear extension point by searching along direction
+    def find_clear_extension_point(start_x, start_y, dir_x, dir_y, initial_dist, min_radius, max_dist):
+        """Find the closest clear point along direction, starting from initial_dist."""
+        step = config.grid_step
+        # First try the initial point
+        test_x = start_x + dir_x * initial_dist
+        test_y = start_y + dir_y * initial_dist
+        if is_point_clear(test_x, test_y, min_radius):
+            return test_x, test_y, initial_dist
+        # Search outward from initial point toward start (closer)
+        for dist in range(int(initial_dist / step), 0, -1):
+            d = dist * step
+            test_x = start_x + dir_x * d
+            test_y = start_y + dir_y * d
+            if is_point_clear(test_x, test_y, min_radius):
+                return test_x, test_y, d
+        # If no clear point found toward start, search outward (farther)
+        for dist in range(int(initial_dist / step), int(max_dist / step) + 1):
+            d = dist * step
+            test_x = start_x + dir_x * d
+            test_y = start_y + dir_y * d
+            if is_point_clear(test_x, test_y, min_radius):
+                return test_x, test_y, d
+        # Fallback to initial point if nothing found
+        return start_x + dir_x * initial_dist, start_y + dir_y * initial_dist, initial_dist
+
+    # Calculate extension target points (10% toward the other side)
+    # Extension points must be at least stub_proximity_radius from any stub/BGA
+    min_clearance = config.stub_proximity_radius
+
+    src_ext_x, src_ext_y, src_ext_dist = find_clear_extension_point(
+        src_x_float, src_y_float, dir_to_tgt_x, dir_to_tgt_y,
+        extension_dist, min_clearance, total_dist * 0.4)
+
+    tgt_ext_x, tgt_ext_y, tgt_ext_dist = find_clear_extension_point(
+        tgt_x_float, tgt_y_float, -dir_to_tgt_x, -dir_to_tgt_y,
+        extension_dist, min_clearance, total_dist * 0.4)
+
+    src_ext_gx, src_ext_gy = coord.to_grid(src_ext_x, src_ext_y)
+    tgt_ext_gx, tgt_ext_gy = coord.to_grid(tgt_ext_x, tgt_ext_y)
+
+    # Update extension_steps based on actual distances found
+    max_ext_dist = max(src_ext_dist, tgt_ext_dist)
+    extension_steps = max(1, int(max_ext_dist / config.grid_step))
+
+    print(f"  Extension targets: src ({src_x_float:.2f},{src_y_float:.2f})->({src_ext_x:.2f},{src_ext_y:.2f}), tgt ({tgt_x_float:.2f},{tgt_y_float:.2f})->({tgt_ext_x:.2f},{tgt_ext_y:.2f})")
+
+    # Phase 1: Route source extension (src_setback -> src_ext, aiming toward target)
+    # Use main obstacles map (has stub proximity costs to guide away from other stubs)
+    ext_obstacles = obstacles
+
+    # Add allowed cells around extension endpoints
+    for dx in range(-allow_radius, allow_radius + 1):
+        for dy in range(-allow_radius, allow_radius + 1):
+            obstacles.add_allowed_cell(src_ext_gx + dx, src_ext_gy + dy)
+            obstacles.add_allowed_cell(tgt_ext_gx + dx, tgt_ext_gy + dy)
+    obstacles.add_source_target_cell(src_ext_gx, src_ext_gy, src_layer)
+    obstacles.add_source_target_cell(tgt_ext_gx, tgt_ext_gy, tgt_layer)
+    ext_max_iter = max(5000, extension_steps * 100)
+    # Start direction must be along stub direction (±45°) for first few steps
+    src_ext_dir_steps = max(3, int(min_setback / config.grid_step / 2))
+    prefix_path, iter1 = router.route_multi(ext_obstacles, [(src_gx, src_gy, src_layer)],
+                                            [(src_ext_gx, src_ext_gy, src_layer)],
+                                            ext_max_iter,
+                                            collinear_vias=False, via_exclusion_radius=0,
+                                            start_direction=src_grid_dir, end_direction=None,
+                                            direction_steps=src_ext_dir_steps)
+    total_iterations = iter1
+
+    if prefix_path is None:
+        src_ext_float = coord.to_float(src_ext_gx, src_ext_gy)
+        print(f"  Source extension failed after {iter1} iters: ({src_x_float:.2f},{src_y_float:.2f}) -> ({src_ext_float[0]:.2f},{src_ext_float[1]:.2f})mm")
+        return {'failed': True, 'iterations': total_iterations}
+
+    # Phase 2: Route target extension (tgt_setback -> tgt_ext, aiming toward source)
+    # Start direction must be along stub direction (±45°) for first few steps
+    tgt_ext_dir_steps = max(3, int(min_setback / config.grid_step / 2))
+    suffix_path_rev, iter2 = router.route_multi(ext_obstacles, [(tgt_gx, tgt_gy, tgt_layer)],
+                                                [(tgt_ext_gx, tgt_ext_gy, tgt_layer)],
+                                                ext_max_iter,
+                                                collinear_vias=False, via_exclusion_radius=0,
+                                                start_direction=tgt_grid_dir, end_direction=None,
+                                                direction_steps=tgt_ext_dir_steps)
+    total_iterations += iter2
+
+    if suffix_path_rev is None:
+        tgt_ext_float = coord.to_float(tgt_ext_gx, tgt_ext_gy)
+        tgt_float = coord.to_float(tgt_gx, tgt_gy)
+        print(f"  Target extension failed after {iter2} iters: ({tgt_float[0]:.2f},{tgt_float[1]:.2f}) -> ({tgt_ext_float[0]:.2f},{tgt_ext_float[1]:.2f})mm")
+        return {'failed': True, 'iterations': total_iterations}
+
+    # suffix_path goes from tgt_ext to tgt_setback
+    suffix_path = list(reversed(suffix_path_rev))
+
+    # Update extension endpoints after routing
+    src_ext_gx, src_ext_gy = prefix_path[-1][0], prefix_path[-1][1]
+    tgt_ext_gx, tgt_ext_gy = suffix_path[0][0], suffix_path[0][1]
+
+    # Phase 3: Route the middle (src_ext -> tgt_ext, no direction constraints)
+    mid_sources = [(src_ext_gx, src_ext_gy, src_layer)]
+    mid_targets = [(tgt_ext_gx, tgt_ext_gy, tgt_layer)]
+
+    mid_path, iter3 = router.route_multi(obstacles, mid_sources, mid_targets, config.max_iterations,
                                          collinear_vias=True, via_exclusion_radius=via_exclusion_radius,
-                                         start_direction=rev_start_dir, end_direction=rev_end_dir,
-                                         direction_steps=direction_steps)
-        total_iterations += iter2
-        if path is not None:
-            path = list(reversed(path))
+                                         start_direction=None, end_direction=None,
+                                         direction_steps=0)
+    total_iterations += iter3
 
-    if path is None:
+    if mid_path is None:
+        # Try reverse direction for middle
+        print(f"No route found after {iter3} iterations, trying backwards...")
+        mid_path, iter4 = router.route_multi(obstacles, mid_targets, mid_sources, config.max_iterations,
+                                             collinear_vias=True, via_exclusion_radius=via_exclusion_radius,
+                                             start_direction=None, end_direction=None,
+                                             direction_steps=0)
+        total_iterations += iter4
+        if mid_path is not None:
+            mid_path = list(reversed(mid_path))
+
+    if mid_path is None:
         print(f"No route found after {total_iterations} iterations (both directions)")
         return {'failed': True, 'iterations': total_iterations}
+
+    # Concatenate: prefix + middle (skip first point) + suffix (skip first point)
+    path = prefix_path + mid_path[1:] + suffix_path[1:]
 
     # Simplify path by removing collinear points
     simplified_path = simplify_path(path)
