@@ -449,7 +449,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
         # Add turn segment at start (facing source stubs)
         # Use source setback for start turn length
-        src_turn_length_mm = src_setback * 0.3
+        src_turn_length_mm = src_setback * 0.5
         src_turn_length_grid = int(src_turn_length_mm / config.grid_step)
         if src_turn_length_grid > 0:
             first_gx, first_gy, first_layer = simplified_path[0]
@@ -460,7 +460,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
         # Add turn segment at end (facing target stubs)
         # Use target setback for end turn length
-        tgt_turn_length_mm = tgt_setback * 0.3
+        tgt_turn_length_mm = tgt_setback * 0.5
         tgt_turn_length_grid = int(tgt_turn_length_mm / config.grid_step)
         if tgt_turn_length_grid > 0:
             last_gx, last_gy, last_layer = simplified_path[-1]

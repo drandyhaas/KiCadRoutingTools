@@ -211,6 +211,7 @@ With `--debug-layers`, debug geometry is output on special layers:
 |-------|---------|
 | `In4.Cu` | Turn segments (first and last segments of P/N paths) |
 | `In5.Cu` | Connectors (stub to P/N track) |
+| `User.7` | DRC violation debug lines (from `check_drc.py --debug`) |
 | `User.8` | Simplified centerline path |
 | `User.9` | Raw A* centerline path |
 
