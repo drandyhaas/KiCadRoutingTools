@@ -533,9 +533,9 @@ if __name__ == "__main__":
                         help='Minimum clearance in mm (default: 0.1)')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
                         help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
-    parser.add_argument('--debug', '-d', action='store_true',
+    parser.add_argument('--debug-lines', '-d', action='store_true',
                         help='Write debug lines to User.7 layer showing violation locations')
 
     args = parser.parse_args()
 
-    run_drc(args.pcb, args.clearance, args.nets, args.debug)
+    run_drc(args.pcb, args.clearance, args.nets, args.debug_lines)

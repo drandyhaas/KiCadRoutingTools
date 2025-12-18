@@ -72,7 +72,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-layers` | false | Output debug geometry on In4/In5/User.8/User.9 layers |
+| `--debug-lines` | false | Output debug geometry on User.2/3/8/9 layers |
 
 ## GridRouteConfig Class
 
@@ -114,7 +114,7 @@ class GridRouteConfig:
     fix_polarity: bool = False           # swap target pads if polarity swap needed
 
     # Debug
-    debug_layers: bool = False
+    debug_lines: bool = False
 ```
 
 ## Parameter Guidelines

@@ -850,7 +850,7 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 
 def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
                         max_appendix_length: float = 1.0, vias: List[Via] = None,
-                        debug_layers: bool = False) -> List[Segment]:
+                        debug_lines: bool = False) -> List[Segment]:
     """Collapse short appendix segments by moving dead-end vertices to junction points.
 
     An appendix is a short segment where one endpoint is a dead-end (degree 1) and
@@ -860,8 +860,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     Only collapses segments where the dead-end doesn't connect to existing segments or vias.
     Also fixes self-intersections where new segments cross existing segments.
 
-    If debug_layers is True, endpoint degrees are counted across all layers (since
-    debug_layers mode puts turn segments on different layers but they still connect).
+    If debug_lines is True, endpoint degrees are counted across all layers.
     """
     if not segments:
         return segments
@@ -920,10 +919,10 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
                 return True
         return False
 
-    # When debug_layers is enabled, build endpoint degree map across ALL layers
-    # because debug_layers puts turn segments on different layers but they still connect
+    # When debug_lines is enabled, build endpoint degree map across ALL layers
+    # because debug_lines puts turn segments on different layers but they still connect
     global_endpoint_counts = None
-    if debug_layers:
+    if debug_lines:
         global_endpoint_counts = {}
         for seg in segments:
             start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
@@ -935,9 +934,9 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
         layer_existing = existing_endpoints.get(layer, [])
         layer_vias = via_locations.get(layer, [])
 
-        # Build per-layer endpoint counts (used when not in debug_layers mode)
+        # Build per-layer endpoint counts (used when not in debug_lines mode)
         layer_endpoint_counts = None
-        if not debug_layers:
+        if not debug_lines:
             layer_endpoint_counts = {}
             for seg in layer_segs:
                 start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
@@ -955,7 +954,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
             start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
             end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-            endpoint_counts = global_endpoint_counts if debug_layers else layer_endpoint_counts
+            endpoint_counts = global_endpoint_counts if debug_lines else layer_endpoint_counts
             start_degree = endpoint_counts.get(start_key, 0)
             end_degree = endpoint_counts.get(end_key, 0)
 
@@ -1000,7 +999,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     return result_segments
 
 
-def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_layers: bool = False) -> None:
+def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = False) -> None:
     """Add routed segments and vias to PCB data for subsequent routes to see."""
     new_segments = result['new_segments']
     if not new_segments:
@@ -1020,7 +1019,7 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_layers: bool = 
         # Include both new vias and existing vias for this net
         net_vias = [v for v in new_vias if v.net_id == net_id]
         net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
-        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias, debug_layers=debug_layers)
+        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias, debug_lines=debug_lines)
         cleaned_segments.extend(cleaned)
 
     # Filter out very short (degenerate) segments

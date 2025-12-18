@@ -90,7 +90,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 min_diff_pair_centerline_setback: float = 0.6,
                 max_diff_pair_centerline_setback: float = 5.0,
                 diff_pair_turn_length: float = 0.3,
-                debug_layers: bool = False,
+                debug_lines: bool = False,
                 fix_polarity: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
@@ -121,7 +121,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 3.0)
         diff_pair_patterns: Glob patterns for nets to route as differential pairs
         diff_pair_gap: Gap between P and N traces in differential pairs (default: 0.1mm)
-        debug_layers: Output raw A* path on User.9, simplified path on User.8
+        debug_lines: Output debug geometry on User.2/3/8/9 layers
         vis_callback: Optional visualization callback (implements VisualizationCallback protocol)
 
     Returns:
@@ -167,7 +167,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
         max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
         diff_pair_turn_length=diff_pair_turn_length,
-        debug_layers=debug_layers,
+        debug_lines=debug_lines,
         fix_polarity=fix_polarity,
     )
     if direction_order is not None:
@@ -471,7 +471,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if not pad_n:
                         print(f"    Missing N pad (net {n_net_id}) near {n_pos}")
 
-            add_route_to_pcb_data(pcb_data, result, debug_layers=config.debug_layers)
+            add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
 
             if pair.p_net_id in remaining_net_ids:
                 remaining_net_ids.remove(pair.p_net_id)
@@ -582,7 +582,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
-            add_route_to_pcb_data(pcb_data, result, debug_layers=config.debug_layers)
+            add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
             remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
         else:
@@ -651,8 +651,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 ) + "\n"
 
         # Add debug paths if enabled (using gr_line for User layers)
-        if debug_layers:
-            print("Adding debug paths to User.8 (simplified) and User.9 (raw A*)")
+        if debug_lines:
+            print("Adding debug paths to User.2 (turns), User.3 (connectors), User.8 (simplified), User.9 (raw A*)")
             for result in results:
                 # Raw A* path on User.9
                 raw_path = result.get('raw_astar_path', [])
@@ -677,6 +677,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 (x1, y1), (x2, y2),
                                 0.15, "User.8"  # Thicker line
                             ) + "\n"
+
+                # Turn segments on User.2
+                turn_lines = result.get('debug_turn_lines', [])
+                for start, end in turn_lines:
+                    routing_text += generate_gr_line_sexpr(
+                        start, end,
+                        0.1, "User.2"
+                    ) + "\n"
+
+                # Connector segments on User.3
+                connector_lines = result.get('debug_connector_lines', [])
+                for start, end in connector_lines:
+                    routing_text += generate_gr_line_sexpr(
+                        start, end,
+                        0.1, "User.3"
+                    ) + "\n"
 
         last_paren = content.rfind(')')
         new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
@@ -812,8 +828,8 @@ Differential pair routing:
                         help="Swap target pad net assignments if polarity swap is needed")
 
     # Debug options
-    parser.add_argument("--debug-layers", action="store_true",
-                        help="Output raw A* path on User.9, simplified path on User.8 for debugging")
+    parser.add_argument("--debug-lines", action="store_true",
+                        help="Output debug geometry on User.2 (turns), User.3 (connectors), User.8 (simplified), User.9 (raw A*)")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",
@@ -871,6 +887,6 @@ Differential pair routing:
                 min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
                 max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
                 diff_pair_turn_length=args.diff_pair_turn_length,
-                debug_layers=args.debug_layers,
+                debug_lines=args.debug_lines,
                 fix_polarity=args.fix_polarity,
                 vis_callback=vis_callback)

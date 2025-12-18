@@ -15,7 +15,7 @@ Options:
   --clearance FLOAT    Track-to-track clearance in mm (default: 0.1)
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
   --nets PATTERN       Only check nets matching pattern
-  --debug              Output debug lines on User.7 showing violation locations
+  --debug-lines        Output debug lines on User.7 showing violation locations
 ```
 
 ### Examples
@@ -37,10 +37,10 @@ The DRC checker uses a 5% clearance margin by default to ignore tiny geometric a
 
 ### Debug Visualization
 
-With `--debug`, the checker outputs debug lines on the `User.7` layer in the PCB file, showing the closest points between violating segments:
+With `--debug-lines`, the checker outputs debug lines on the `User.7` layer in the PCB file, showing the closest points between violating segments:
 
 ```bash
-python check_drc.py routed.kicad_pcb --debug
+python check_drc.py routed.kicad_pcb --debug-lines
 ```
 
 Output includes the distance of each violation:
@@ -438,8 +438,8 @@ python check_connected.py routed.kicad_pcb --nets "*lvds*"
 # List nets on problematic component
 python list_nets.py board.kicad_pcb U2A --pads
 
-# Route with debug layers enabled
-python route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-layers
+# Route with debug lines enabled
+python route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-lines
 
-# Open debug.kicad_pcb in KiCad, check User.8 and User.9 layers
+# Open debug.kicad_pcb in KiCad, check User.2/3/8/9 layers
 ```

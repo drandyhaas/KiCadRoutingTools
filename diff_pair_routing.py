@@ -720,11 +720,15 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Convert floating-point paths to segments and vias
     new_segments = []
     new_vias = []
+    debug_turn_lines = []  # For User.2 layer (turn segments)
+    debug_connector_lines = []  # For User.3 layer (connectors)
 
     def float_path_to_geometry(float_path, net_id, original_start, original_end):
         """Convert floating-point path (x, y, layer) to segments and vias."""
         segs = []
         vias = []
+        turn_lines = []  # Debug lines for turn segments
+        connector_lines = []  # Debug lines for connectors
         num_segments = len(float_path) - 1
 
         # Add connecting segment from original start if needed
@@ -732,15 +736,16 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             first_x, first_y, first_layer = float_path[0]
             orig_x, orig_y = original_start
             if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
-                # Use In5.Cu for debug visualization, otherwise use actual layer
-                conn_layer = 'In5.Cu' if config.debug_layers else layer_names[first_layer]
                 segs.append(Segment(
                     start_x=orig_x, start_y=orig_y,
                     end_x=first_x, end_y=first_y,
                     width=config.track_width,
-                    layer=conn_layer,
+                    layer=layer_names[first_layer],
                     net_id=net_id
                 ))
+                # Collect debug line for connector
+                if config.debug_lines:
+                    connector_lines.append(((orig_x, orig_y), (first_x, first_y)))
 
         # Convert path segments
         for i in range(num_segments):
@@ -757,37 +762,36 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     net_id=net_id
                 ))
             elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
-                # Determine layer for this segment
-                # Turn segments (first and last) go on In4.Cu if debug_layers enabled
-                is_turn_segment = (i == 0 or i == num_segments - 1)
-                if config.debug_layers and is_turn_segment:
-                    seg_layer = 'In4.Cu'
-                else:
-                    seg_layer = layer_names[layer1]
+                # Always use actual layer for segment
                 segs.append(Segment(
                     start_x=x1, start_y=y1,
                     end_x=x2, end_y=y2,
                     width=config.track_width,
-                    layer=seg_layer,
+                    layer=layer_names[layer1],
                     net_id=net_id
                 ))
+                # Collect debug line for turn segments (first and last)
+                is_turn_segment = (i == 0 or i == num_segments - 1)
+                if config.debug_lines and is_turn_segment:
+                    turn_lines.append(((x1, y1), (x2, y2)))
 
         # Add connecting segment to original end if needed
         if original_end and len(float_path) > 0:
             last_x, last_y, last_layer = float_path[-1]
             orig_x, orig_y = original_end
             if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
-                # Use In5.Cu for debug visualization, otherwise use actual layer
-                conn_layer = 'In5.Cu' if config.debug_layers else layer_names[last_layer]
                 segs.append(Segment(
                     start_x=last_x, start_y=last_y,
                     end_x=orig_x, end_y=orig_y,
                     width=config.track_width,
-                    layer=conn_layer,
+                    layer=layer_names[last_layer],
                     net_id=net_id
                 ))
+                # Collect debug line for connector
+                if config.debug_lines:
+                    connector_lines.append(((last_x, last_y), (orig_x, orig_y)))
 
-        return segs, vias
+        return segs, vias, turn_lines, connector_lines
 
     # Get original coordinates for P and N nets
     p_start = (p_src_x, p_src_y)
@@ -802,14 +806,18 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         n_end = (n_tgt_x, n_tgt_y)
 
     # Convert P path
-    p_segs, p_vias = float_path_to_geometry(p_float_path, p_net_id, p_start, p_end)
+    p_segs, p_vias, p_turn_lines, p_conn_lines = float_path_to_geometry(p_float_path, p_net_id, p_start, p_end)
     new_segments.extend(p_segs)
     new_vias.extend(p_vias)
+    debug_turn_lines.extend(p_turn_lines)
+    debug_connector_lines.extend(p_conn_lines)
 
     # Convert N path
-    n_segs, n_vias = float_path_to_geometry(n_float_path, n_net_id, n_start, n_end)
+    n_segs, n_vias, n_turn_lines, n_conn_lines = float_path_to_geometry(n_float_path, n_net_id, n_start, n_end)
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
+    debug_turn_lines.extend(n_turn_lines)
+    debug_connector_lines.extend(n_conn_lines)
 
     # Convert float paths back to grid format for return value
     p_path = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
@@ -827,6 +835,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         'n_path': n_path,
         'raw_astar_path': raw_astar_path,
         'simplified_path': simplified_path_float,
+        'debug_turn_lines': debug_turn_lines,  # For User.2 layer
+        'debug_connector_lines': debug_connector_lines,  # For User.3 layer
     }
 
     # If polarity was fixed, include info about which target pads need net swaps

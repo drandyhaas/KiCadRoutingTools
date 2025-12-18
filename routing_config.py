@@ -45,7 +45,7 @@ class GridRouteConfig:
     max_diff_pair_centerline_setback: float = 5.0  # mm - max setback to try if min is blocked
     diff_pair_turn_length: float = 0.3  # mm - length of turn segments at start/end of diff pair routes
     fix_polarity: bool = False  # Swap target pad nets if polarity swap needed
-    debug_layers: bool = False  # Output raw A* path on User.9, simplified path on User.8
+    debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
 
 
 class GridCoord:

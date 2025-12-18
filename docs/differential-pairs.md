@@ -30,7 +30,7 @@ The router recognizes common differential pair naming conventions:
 python test_diffpair.py "*lvds_rx1_11" --stub-proximity-radius 4
 
 # Route with debug visualization
-python test_diffpair.py "*lvds_rx1_11" --stub-proximity-radius 4 --debug-layers
+python test_diffpair.py "*lvds_rx1_11" --stub-proximity-radius 4 --debug-lines
 ```
 
 ### Direct Router Usage
@@ -215,17 +215,17 @@ Simple straight connectors link the original stub endpoints to the corresponding
 
 ## Debug Visualization
 
-With `--debug-layers`, debug geometry is output on special layers:
+With `--debug-lines`, debug geometry is output on User layers as graphic lines:
 
 | Layer | Content |
 |-------|---------|
-| `In4.Cu` | Turn segments (first and last segments of P/N paths) |
-| `In5.Cu` | Connectors (stub to P/N track) |
-| `User.7` | DRC violation debug lines (from `check_drc.py --debug`) |
+| `User.2` | Turn segments (first and last segments of P/N paths) |
+| `User.3` | Connectors (stub to P/N track) |
+| `User.7` | DRC violation debug lines (from `check_drc.py --debug-lines`) |
 | `User.8` | Simplified centerline path |
 | `User.9` | Raw A* centerline path |
 
-This helps visualize the routing structure without affecting the actual routed layers.
+This helps visualize the routing structure without affecting the actual routed copper layers.
 
 ## Configuration Options
 
@@ -235,7 +235,7 @@ This helps visualize the routing structure without affecting the actual routed l
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 1.5 | Distance in front of stubs to start centerline (mm) |
 | `--fix-polarity` | false | Swap target pad nets when polarity swap is needed |
-| `--debug-layers` | false | Output debug geometry on In4/In5/User.8/User.9 |
+| `--debug-lines` | false | Output debug geometry on User.2/3/8/9 layers |
 | `--stub-proximity-radius` | 1.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 3.0 | Cost penalty near stubs (mm equivalent) |
 

@@ -186,8 +186,8 @@ Examples:
                               help='Maximum setback to try if minimum is blocked in mm (default: 5.0)')
     router_group.add_argument('--diff-pair-turn-length', type=float,
                               help='Length of turn segments at start/end of diff pair routes in mm (default: 0.3)')
-    router_group.add_argument('--debug-layers', action='store_true',
-                              help='Output debug geometry on In4.Cu (turn segments), In5.Cu (connectors), User.8/9 (centerline)')
+    router_group.add_argument('--debug-lines', action='store_true',
+                              help='Output debug geometry on User.2 (turn segments), User.3 (connectors), User.8/9 (centerline)')
     router_group.add_argument('--fix-polarity', action='store_true',
                               help='Swap target pad nets if polarity swap is needed')
 
@@ -293,8 +293,8 @@ Examples:
         router_cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
     if args.diff_pair_turn_length is not None:
         router_cmd.extend(["--diff-pair-turn-length", str(args.diff_pair_turn_length)])
-    if args.debug_layers:
-        router_cmd.append("--debug-layers")
+    if args.debug_lines:
+        router_cmd.append("--debug-lines")
     if args.fix_polarity:
         router_cmd.append("--fix-polarity")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
@@ -350,8 +350,11 @@ Examples:
     else:
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
+            drc_cmd = [sys.executable, "check_drc.py", output_pcb, "--nets", net_pattern]
+            if args.debug_lines:
+                drc_cmd.append("--debug-lines")
             result = run_command(
-                [sys.executable, "check_drc.py", output_pcb, "--nets", net_pattern],
+                drc_cmd,
                 f"Step 3: DRC check for {diff_pair}",
                 capture_output=True
             )
@@ -390,13 +393,10 @@ Examples:
 
     # Step 4: Run connectivity check only on successfully routed pairs (unless skipped)
     connectivity_results = {}  # diff_pair -> (passed, disconnected_count)
-    skip_connectivity = args.skip_connectivity or args.debug_layers
+    skip_connectivity = args.skip_connectivity
 
     if skip_connectivity:
-        if args.debug_layers:
-            print("\nSkipping connectivity checks (--debug-layers puts segments on different layers)")
-        else:
-            print("\nSkipping connectivity checks (--skip-connectivity)")
+        print("\nSkipping connectivity checks (--skip-connectivity)")
     else:
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
