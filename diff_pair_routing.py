@@ -115,11 +115,6 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
         n_tgt[3], n_tgt[4]  # N original coords
     )]
 
-    if not paired_sources:
-        return [], [], "Could not match P and N source endpoints"
-    if not paired_targets:
-        return [], [], "Could not match P and N target endpoints"
-
     return paired_sources, paired_targets, None
 
 
@@ -562,10 +557,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Double via cost since diff pairs place two vias per layer change
     router = GridRouter(via_cost=config.via_cost * 1000 * 2, h_weight=config.heuristic_weight)
 
-    # Calculate direction steps based on setback - more steps for smaller setbacks
-    # to ensure P/N tracks stay parallel long enough for connectors to work
-    direction_steps = max(3, int(src_setback / config.grid_step / 2))
-
     # Route in 3 phases: source extension (10%), middle, target extension (10%)
     # Extensions aim toward the other endpoint with start direction constraints
     src_x_float = coord.to_float(src_gx, src_gy)[0]
@@ -575,7 +566,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     total_dist = math.sqrt((tgt_x_float - src_x_float)**2 + (tgt_y_float - src_y_float)**2)
     extension_dist = max(0.5, total_dist * 0.1)  # At least 0.5mm, or 10% of distance
-    extension_steps = max(1, int(extension_dist / config.grid_step))
 
     # Direction from src to tgt
     dir_to_tgt_x = (tgt_x_float - src_x_float) / total_dist
@@ -648,9 +638,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     print(f"  Extension targets: src ({src_x_float:.2f},{src_y_float:.2f})->({src_ext_x:.2f},{src_ext_y:.2f}), tgt ({tgt_x_float:.2f},{tgt_y_float:.2f})->({tgt_ext_x:.2f},{tgt_ext_y:.2f})")
 
     # Phase 1: Route source extension (src_setback -> src_ext, aiming toward target)
-    # Use main obstacles map (has stub proximity costs to guide away from other stubs)
-    ext_obstacles = obstacles
-
     # Add allowed cells around extension endpoints
     for dx in range(-allow_radius, allow_radius + 1):
         for dy in range(-allow_radius, allow_radius + 1):
@@ -661,7 +648,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     ext_max_iter = max(5000, extension_steps * 100)
     # Start direction must be along stub direction (±45°) for first few steps
     src_ext_dir_steps = max(3, int(min_setback / config.grid_step / 2))
-    prefix_path, iter1 = router.route_multi(ext_obstacles, [(src_gx, src_gy, src_layer)],
+    prefix_path, iter1 = router.route_multi(obstacles, [(src_gx, src_gy, src_layer)],
                                             [(src_ext_gx, src_ext_gy, src_layer)],
                                             ext_max_iter,
                                             collinear_vias=False, via_exclusion_radius=0,
@@ -677,7 +664,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Phase 2: Route target extension (tgt_setback -> tgt_ext, aiming toward source)
     # Start direction must be along stub direction (±45°) for first few steps
     tgt_ext_dir_steps = max(3, int(min_setback / config.grid_step / 2))
-    suffix_path_rev, iter2 = router.route_multi(ext_obstacles, [(tgt_gx, tgt_gy, tgt_layer)],
+    suffix_path_rev, iter2 = router.route_multi(obstacles, [(tgt_gx, tgt_gy, tgt_layer)],
                                                 [(tgt_ext_gx, tgt_ext_gy, tgt_layer)],
                                                 ext_max_iter,
                                                 collinear_vias=False, via_exclusion_radius=0,

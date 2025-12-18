@@ -4,12 +4,16 @@ This document describes how the router handles differential pairs, including P/N
 
 ## Overview
 
-Differential pairs are routed using a **centerline + offset** approach:
+Differential pairs are routed using a **centerline + offset** approach with **3-phase extension routing**:
 
-1. Route a single centerline path using A* with extra clearance
-2. Add turn segments at start/end to align with stub directions
-3. Generate P and N paths as perpendicular offsets from centerline
-4. Add approach/exit tracks at vias to keep P/N parallel
+1. **Source extension** - Route 10% from source setback toward target, following stub direction
+2. **Target extension** - Route 10% from target setback toward source, following stub direction
+3. **Middle route** - Connect the two extension endpoints using A* with extra clearance
+4. **Path simplification** - Remove collinear points for cleaner geometry
+5. **P/N offset generation** - Create P and N paths as perpendicular offsets from centerline
+6. **Via handling** - Add approach/exit tracks at layer changes to keep P/N parallel
+
+The 3-phase approach ensures routes start aligned with stub directions before navigating around obstacles.
 
 ## Identifying Differential Pairs
 
@@ -69,6 +73,42 @@ Centerline:       o---o
 The centerline endpoints are positioned:
 - At the midpoint between P and N stub tips
 - Offset by the setback distance in the stub direction
+
+### 3-Phase Extension Routing
+
+Instead of routing directly from source to target, the router uses 3 phases to ensure proper alignment with stub directions:
+
+```
+Source stub    Source ext     Middle route      Target ext    Target stub
+    |              |               |                |              |
+    o----[10%]---->o<=============>o<----[10%]-----o--------------o
+         ^                                              ^
+    Follows stub                                   Follows stub
+    direction                                      direction
+```
+
+**Phase 1: Source Extension**
+- Routes from source setback point toward target (10% of total distance)
+- First 3+ steps must follow source stub direction (±45°)
+- Extension endpoint must be clear of other stubs and BGA zones
+
+**Phase 2: Target Extension**
+- Routes from target setback point toward source (10% of total distance)
+- First 3+ steps must follow target stub direction (±45°)
+- Extension endpoint must be clear of other stubs and BGA zones
+
+**Phase 3: Middle Route**
+- Connects source and target extension endpoints
+- No direction constraints - free to navigate around obstacles
+- Uses stub proximity costs to avoid routing near other unrouted stubs
+
+**Extension Endpoint Placement**
+
+Extension endpoints are placed at least `stub_proximity_radius` away from:
+- Any unrouted stub endpoint (prevents congestion)
+- Any BGA exclusion zone (keeps routes out of BGA areas)
+
+If the initial 10% point is too close, the search moves outward until a clear point is found.
 
 ### Turn Segments
 
