@@ -147,8 +147,8 @@ def main():
                               help='Net ordering strategy (default: mps)')
     router_group.add_argument('--direction', '-d', choices=['forward', 'backwards', 'random'],
                               help='Direction search order')
-    router_group.add_argument('--no-bga-zones', action='store_true', default=True,
-                              help='Disable BGA exclusion zones (default: enabled)')
+    router_group.add_argument('--no-bga-zones', action='store_true',
+                              help='Disable BGA exclusion zones')
     router_group.add_argument('--bga-zones', action='store_true',
                               help='Enable BGA exclusion zones')
     router_group.add_argument('--layers', '-l', nargs='+',
