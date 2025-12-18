@@ -90,6 +90,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 min_diff_pair_centerline_setback: float = 0.6,
                 max_diff_pair_centerline_setback: float = 5.0,
                 diff_pair_turn_length: float = 0.3,
+                min_turning_radius: float = 0.4,
                 debug_lines: bool = False,
                 fix_polarity: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
@@ -167,6 +168,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
         max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
         diff_pair_turn_length=diff_pair_turn_length,
+        min_turning_radius=min_turning_radius,
         debug_lines=debug_lines,
         fix_polarity=fix_polarity,
     )
@@ -833,6 +835,8 @@ Differential pair routing:
                         help="Maximum setback to try if minimum is blocked in mm (default: 5.0)")
     parser.add_argument("--diff-pair-turn-length", type=float, default=0.3,
                         help="Length of turn segments at start/end of diff pair routes in mm (default: 0.3)")
+    parser.add_argument("--min-turning-radius", type=float, default=0.4,
+                        help="Minimum turning radius for pose-based routing in mm (default: 0.4)")
     parser.add_argument("--fix-polarity", action="store_true",
                         help="Swap target pad net assignments if polarity swap is needed")
 
@@ -896,6 +900,7 @@ Differential pair routing:
                 min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
                 max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
                 diff_pair_turn_length=args.diff_pair_turn_length,
+                min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
                 fix_polarity=args.fix_polarity,
                 vis_callback=vis_callback)

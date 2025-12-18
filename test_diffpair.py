@@ -186,6 +186,8 @@ Examples:
                               help='Maximum setback to try if minimum is blocked in mm (default: 5.0)')
     router_group.add_argument('--diff-pair-turn-length', type=float,
                               help='Length of turn segments at start/end of diff pair routes in mm (default: 0.3)')
+    router_group.add_argument('--min-turning-radius', type=float,
+                              help='Minimum turning radius for pose-based routing in mm (default: 0.4)')
     router_group.add_argument('--debug-lines', action='store_true',
                               help='Output debug geometry on User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--fix-polarity', action='store_true',
@@ -293,6 +295,8 @@ Examples:
         router_cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
     if args.diff_pair_turn_length is not None:
         router_cmd.extend(["--diff-pair-turn-length", str(args.diff_pair_turn_length)])
+    if args.min_turning_radius is not None:
+        router_cmd.extend(["--min-turning-radius", str(args.min_turning_radius)])
     if args.debug_lines:
         router_cmd.append("--debug-lines")
     if args.fix_polarity:
