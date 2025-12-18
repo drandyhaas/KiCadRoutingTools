@@ -181,9 +181,11 @@ Examples:
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
     router_group.add_argument('--min-diff-pair-centerline-setback', type=float,
-                              help='Minimum distance in front of stubs to start route in mm (default: 1.0)')
+                              help='Minimum distance in front of stubs to start route in mm (default: 0.6)')
     router_group.add_argument('--max-diff-pair-centerline-setback', type=float,
                               help='Maximum setback to try if minimum is blocked in mm (default: 5.0)')
+    router_group.add_argument('--diff-pair-turn-length', type=float,
+                              help='Length of turn segments at start/end of diff pair routes in mm (default: 0.3)')
     router_group.add_argument('--debug-layers', action='store_true',
                               help='Output debug geometry on In4.Cu (turn segments), In5.Cu (connectors), User.8/9 (centerline)')
     router_group.add_argument('--fix-polarity', action='store_true',
@@ -289,6 +291,8 @@ Examples:
         router_cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
     if args.max_diff_pair_centerline_setback is not None:
         router_cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
+    if args.diff_pair_turn_length is not None:
+        router_cmd.extend(["--diff-pair-turn-length", str(args.diff_pair_turn_length)])
     if args.debug_layers:
         router_cmd.append("--debug-layers")
     if args.fix_polarity:

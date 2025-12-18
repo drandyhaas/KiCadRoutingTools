@@ -362,7 +362,8 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                                     config: GridRouteConfig,
-                                    obstacles: GridObstacleMap) -> Optional[dict]:
+                                    obstacles: GridObstacleMap,
+                                    base_obstacles: GridObstacleMap = None) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
@@ -469,27 +470,34 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     print(f"  Source direction: ({src_dir_x:.2f}, {src_dir_y:.2f}), target direction: ({tgt_dir_x:.2f}, {tgt_dir_y:.2f})")
 
+    # Use base_obstacles for connector clearance checks if available
+    # (connectors are single tracks that don't need diff pair extra clearance)
+    connector_obstacles = base_obstacles if base_obstacles is not None else obstacles
+
     # Find open positions for source and target centerline points
     allow_radius = 2
 
     def find_open_setback(center_x, center_y, dir_x, dir_y, layer_idx, min_sb, max_sb, step, label):
-        """Find the largest setback where position and connector path are clear.
+        """Find the smallest setback where position and connector path are clear.
 
-        Starts from max_sb and decreases to min_sb, preferring larger setbacks.
+        Starts from min_sb and increases to max_sb, preferring smaller setbacks
+        to minimize connector length.
         Checks both the setback position and the connector path from stub center.
         Returns None if no valid setback is found.
         """
-        setback = max_sb
-        while setback >= min_sb:
+        setback = min_sb
+        while setback <= max_sb:
             x = center_x + dir_x * setback
             y = center_y + dir_y * setback
             gx, gy = coord.to_grid(x, y)
             # Check track blocking at setback position
             if not obstacles.is_blocked(gx, gy, layer_idx):
                 # Also check the connector path from stub center to setback position
-                if check_line_clearance(obstacles, center_x, center_y, x, y, layer_idx, config):
+                # Use connector_obstacles (base map) since connectors are single tracks
+                # that don't need the extra diff pair clearance
+                if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
                     return setback, gx, gy
-            setback -= step
+            setback += step
         # No valid setback found
         print(f"  Error: {label} - no valid setback found (all positions or connector paths blocked)")
         return None
@@ -528,19 +536,55 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     center_sources = [(src_gx, src_gy, src_layer)]
     center_targets = [(tgt_gx, tgt_gy, tgt_layer)]
 
+    # Convert stub directions to grid units for direction constraint
+    # Round to nearest grid direction (-1, 0, or 1)
+    def direction_to_grid(dx, dy):
+        """Convert float direction to grid direction."""
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            return None
+        # Normalize and round to nearest grid direction
+        length = math.sqrt(dx*dx + dy*dy)
+        if length > 0:
+            ndx = dx / length
+            ndy = dy / length
+            # Round to nearest of -1, 0, 1
+            gdx = round(ndx) if abs(ndx) > 0.3 else 0
+            gdy = round(ndy) if abs(ndy) > 0.3 else 0
+            if gdx != 0 or gdy != 0:
+                return (gdx, gdy)
+        return None
+
+    src_grid_dir = direction_to_grid(src_dir_x, src_dir_y)
+    # TODO: End direction constraint disabled for now - stub bends mean the pad direction
+    # doesn't reflect the actual approach direction. Need to trace along stub path.
+    tgt_grid_dir = None
+
     # Create router for centerline
     # Double via cost since diff pairs place two vias per layer change
     router = GridRouter(via_cost=config.via_cost * 1000 * 2, h_weight=config.heuristic_weight)
 
+    # Calculate direction steps based on setback - more steps for smaller setbacks
+    # to ensure P/N tracks stay parallel long enough for connectors to work
+    direction_steps = max(3, int(src_setback / config.grid_step / 2))
+
     path, iterations = router.route_multi(obstacles, center_sources, center_targets, config.max_iterations,
-                                          collinear_vias=True, via_exclusion_radius=via_exclusion_radius)
+                                          collinear_vias=True, via_exclusion_radius=via_exclusion_radius,
+                                          start_direction=src_grid_dir, end_direction=tgt_grid_dir,
+                                          direction_steps=direction_steps)
     total_iterations = iterations
 
     if path is None:
-        # Try reverse direction
+        # Try reverse direction (swap start and end directions)
         print(f"No route found after {iterations} iterations, trying backwards...")
+        # When reversing: start at target setback, end at source setback
+        # Start direction: leave target going AWAY from target stubs (in stub direction)
+        # End direction: arrive at source going TOWARD source stubs (opposite of stub direction)
+        rev_start_dir = direction_to_grid(tgt_dir_x, tgt_dir_y)
+        rev_end_dir = direction_to_grid(-src_dir_x, -src_dir_y)
         path, iter2 = router.route_multi(obstacles, center_targets, center_sources, config.max_iterations,
-                                         collinear_vias=True, via_exclusion_radius=via_exclusion_radius)
+                                         collinear_vias=True, via_exclusion_radius=via_exclusion_radius,
+                                         start_direction=rev_start_dir, end_direction=rev_end_dir,
+                                         direction_steps=direction_steps)
         total_iterations += iter2
         if path is not None:
             path = list(reversed(path))
@@ -559,43 +603,31 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     simplified_path_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], layer)
                              for gx, gy, layer in simplified_path]
 
-    # Add turn segments at start and end to face the connector stubs
-    # This makes the centerline turn to align with stub direction before connecting
-    # Use a shorter turn length to reduce connector segment length
-    # When there's a via at start/end, use longer turn to clear via approach area
-    via_turn_multiplier = 1.15  # Minimum ~1.1, use 1.15 for safety margin
+    # Add short turn segments at start and end to align connectors
+    # These segments go TOWARD the stubs (opposite of route direction) so that
+    # when offset to P/N tracks, they're parallel to the connector direction.
+    # This prevents P/N connectors from crossing each other.
+    turn_length_mm = config.diff_pair_turn_length
 
     if len(simplified_path) >= 2:
-        # Check if there's a via at the start (layer change between first two points)
-        has_via_at_start = (len(simplified_path) >= 2 and
-                           simplified_path[0][2] != simplified_path[1][2])
-        # Check if there's a via at the end (layer change between last two points)
-        has_via_at_end = (len(simplified_path) >= 2 and
-                         simplified_path[-1][2] != simplified_path[-2][2])
+        src_turn_length_grid = int(turn_length_mm / config.grid_step)
+        tgt_turn_length_grid = int(turn_length_mm / config.grid_step)
 
         # Add turn segment at start (facing source stubs)
-        # Use source setback for start turn length
-        src_turn_length_mm = src_setback * 0.5
-        src_turn_length_grid = int(src_turn_length_mm / config.grid_step)
         if src_turn_length_grid > 0:
             first_gx, first_gy, first_layer = simplified_path[0]
-            start_turn_mult = via_turn_multiplier if has_via_at_start else 1.0
-            turn_start_gx = first_gx - int(src_dir_x * src_turn_length_grid * start_turn_mult)
-            turn_start_gy = first_gy - int(src_dir_y * src_turn_length_grid * start_turn_mult)
+            # Turn goes TOWARD stubs (negative stub direction)
+            turn_start_gx = first_gx - int(src_dir_x * src_turn_length_grid)
+            turn_start_gy = first_gy - int(src_dir_y * src_turn_length_grid)
             simplified_path.insert(0, (turn_start_gx, turn_start_gy, first_layer))
 
         # Add turn segment at end (facing target stubs)
-        # Use target setback for end turn length
-        tgt_turn_length_mm = tgt_setback * 0.5
-        tgt_turn_length_grid = int(tgt_turn_length_mm / config.grid_step)
         if tgt_turn_length_grid > 0:
             last_gx, last_gy, last_layer = simplified_path[-1]
-            end_turn_mult = via_turn_multiplier if has_via_at_end else 1.0
-            turn_end_gx = last_gx - int(tgt_dir_x * tgt_turn_length_grid * end_turn_mult)
-            turn_end_gy = last_gy - int(tgt_dir_y * tgt_turn_length_grid * end_turn_mult)
+            # Turn goes TOWARD stubs (negative target direction, since tgt_dir is away from stubs)
+            turn_end_gx = last_gx - int(tgt_dir_x * tgt_turn_length_grid)
+            turn_end_gy = last_gy - int(tgt_dir_y * tgt_turn_length_grid)
             simplified_path.append((turn_end_gx, turn_end_gy, last_layer))
-
-        print(f"  Added turn segments: path now {len(simplified_path)} points")
 
 
     # Determine which side of the centerline P is on

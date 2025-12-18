@@ -87,8 +87,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 stub_proximity_cost: float = 3.0,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
-                min_diff_pair_centerline_setback: float = 1.0,
+                min_diff_pair_centerline_setback: float = 0.6,
                 max_diff_pair_centerline_setback: float = 5.0,
+                diff_pair_turn_length: float = 0.3,
                 debug_layers: bool = False,
                 fix_polarity: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
@@ -165,6 +166,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         diff_pair_gap=diff_pair_gap,
         min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
         max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
+        diff_pair_turn_length=diff_pair_turn_length,
         debug_layers=debug_layers,
         fix_polarity=fix_polarity,
     )
@@ -407,7 +409,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         add_same_net_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
 
         # Route the differential pair
-        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles)
+        # Pass both diff pair obstacles (with extra clearance) and base obstacles (for connector checks)
+        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles)
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -799,10 +802,12 @@ Differential pair routing:
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
     parser.add_argument("--diff-pair-gap", type=float, default=0.1,
                         help="Gap between P and N traces of differential pairs in mm (default: 0.1)")
-    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=1.0,
-                        help="Minimum distance in front of stubs to start centerline route in mm (default: 1.0)")
+    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=0.6,
+                        help="Minimum distance in front of stubs to start centerline route in mm (default: 0.6)")
     parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=5.0,
                         help="Maximum setback to try if minimum is blocked in mm (default: 5.0)")
+    parser.add_argument("--diff-pair-turn-length", type=float, default=0.3,
+                        help="Length of turn segments at start/end of diff pair routes in mm (default: 0.3)")
     parser.add_argument("--fix-polarity", action="store_true",
                         help="Swap target pad net assignments if polarity swap is needed")
 
@@ -865,6 +870,7 @@ Differential pair routing:
                 diff_pair_gap=args.diff_pair_gap,
                 min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
                 max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
+                diff_pair_turn_length=args.diff_pair_turn_length,
                 debug_layers=args.debug_layers,
                 fix_polarity=args.fix_polarity,
                 vis_callback=vis_callback)

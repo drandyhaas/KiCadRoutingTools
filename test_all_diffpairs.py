@@ -67,8 +67,12 @@ def run_test(diff_pair_name, args, verbose=False):
             cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
         if args.diff_pair_gap is not None:
             cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-        if args.diff_pair_centerline_setback is not None:
-            cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
+        if args.min_diff_pair_centerline_setback is not None:
+            cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
+        if args.max_diff_pair_centerline_setback is not None:
+            cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
+        if args.diff_pair_turn_length is not None:
+            cmd.extend(["--diff-pair-turn-length", str(args.diff_pair_turn_length)])
         if args.fix_polarity:
             cmd.append("--fix-polarity")
 
@@ -98,7 +102,9 @@ def run_test(diff_pair_name, args, verbose=False):
                     in_violations = False
 
         # Check for routing failure
-        routing_failed = "Routing failed" in output or "No route found" in output
+        # Note: "No route found after N iterations, trying backwards..." is not a failure
+        # Only "No route found after N iterations (both directions)" is a failure
+        routing_failed = "Routing failed" in output or "(both directions)" in output
 
         return {
             'name': diff_pair_name,
@@ -169,8 +175,12 @@ def main():
                               help='Cost penalty near stubs in mm equivalent (default: 2.0)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
-    router_group.add_argument('--diff-pair-centerline-setback', type=float,
-                              help='Distance in front of stubs to start route in mm (default: 1.5)')
+    router_group.add_argument('--min-diff-pair-centerline-setback', type=float,
+                              help='Minimum distance in front of stubs to start route in mm (default: 0.6)')
+    router_group.add_argument('--max-diff-pair-centerline-setback', type=float,
+                              help='Maximum distance in front of stubs to start route in mm (default: 5.0)')
+    router_group.add_argument('--diff-pair-turn-length', type=float,
+                              help='Length of turn segments at start/end of diff pair routes in mm (default: 0.3)')
     router_group.add_argument('--fix-polarity', action='store_true',
                               help='Automatically fix P/N polarity swaps by swapping target pads')
 

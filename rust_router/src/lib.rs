@@ -270,7 +270,12 @@ impl GridRouter {
     /// via_exclusion_radius: Grid cells to exclude around placed vias during search.
     /// This prevents the route from passing too close to its own vias, which is
     /// important for diff pair routing where P/N tracks are offset from centerline.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0))]
+    /// start_direction: Optional (dx, dy) direction for initial moves from source.
+    /// If specified, first N moves must be within ±45° of this direction.
+    /// end_direction: Optional (dx, dy) direction for final moves to target.
+    /// If specified, penalizes arriving from wrong direction.
+    /// direction_steps: Number of steps to constrain at start (default 2).
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2))]
     fn route_multi(
         &self,
         obstacles: &GridObstacleMap,
@@ -279,6 +284,9 @@ impl GridRouter {
         max_iterations: u32,
         collinear_vias: bool,
         via_exclusion_radius: i32,
+        start_direction: Option<(i32, i32)>,
+        end_direction: Option<(i32, i32)>,
+        direction_steps: i32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32) {
         // Convert targets to set for O(1) lookup
         let target_set: FxHashSet<u64> = targets
@@ -301,6 +309,24 @@ impl GridRouter {
         // Track via positions for each node's path (only used if via_exclusion_radius > 0)
         // Maps node key -> list of (gx, gy) via positions on path to that node
         let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
+
+        // Track steps from source for direction constraint
+        // Maps node key -> steps from nearest source
+        let mut steps_from_source: FxHashMap<u64, i32> = FxHashMap::default();
+
+        // Normalize start direction if provided
+        let norm_start_dir: Option<(i32, i32)> = start_direction.map(|(dx, dy)| {
+            let ndx = if dx != 0 { dx / dx.abs() } else { 0 };
+            let ndy = if dy != 0 { dy / dy.abs() } else { 0 };
+            (ndx, ndy)
+        });
+
+        // Normalize end direction if provided (direction we want to arrive FROM)
+        let norm_end_dir: Option<(i32, i32)> = end_direction.map(|(dx, dy)| {
+            let ndx = if dx != 0 { dx / dx.abs() } else { 0 };
+            let ndy = if dy != 0 { dy / dy.abs() } else { 0 };
+            (ndx, ndy)
+        });
 
         // Helper: check if position (nx, ny) would violate via exclusion
         // Returns true if blocked (too close to a via and not moving away from it)
@@ -360,6 +386,8 @@ impl GridRouter {
             if via_exclusion_radius > 0 {
                 path_vias.insert(key, Vec::new());
             }
+            // Source nodes are at step 0
+            steps_from_source.insert(key, 0);
         }
 
         let mut iterations: u32 = 0;
@@ -377,14 +405,40 @@ impl GridRouter {
             if closed.contains(&current_key) {
                 continue;
             }
-            closed.insert(current_key);
 
             // Check if reached target
             if target_set.contains(&current_key) {
-                // Reconstruct path
-                let path = self.reconstruct_path(&parents, current_key, &g_costs);
-                return (Some(path), iterations);
+                // If end_direction is specified, verify we arrived from a compatible direction
+                let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
+                    if let Some(&parent_key) = parents.get(&current_key) {
+                        let (px, py, _) = Self::unpack_key(parent_key);
+                        let arrive_dx = current.gx - px;
+                        let arrive_dy = current.gy - py;
+                        if arrive_dx != 0 || arrive_dy != 0 {
+                            let norm_arrive_dx = if arrive_dx != 0 { arrive_dx / arrive_dx.abs() } else { 0 };
+                            let norm_arrive_dy = if arrive_dy != 0 { arrive_dy / arrive_dy.abs() } else { 0 };
+                            // Check if arrival direction is within ±45° of required end direction
+                            Self::is_within_45_degrees(norm_arrive_dx, norm_arrive_dy, end_dx, end_dy)
+                        } else {
+                            true // Same position as parent (via), allow it
+                        }
+                    } else {
+                        true // No parent (source is target), allow it
+                    }
+                } else {
+                    true // No end direction constraint
+                };
+
+                if arrival_ok {
+                    // Reconstruct path
+                    let path = self.reconstruct_path(&parents, current_key, &g_costs);
+                    return (Some(path), iterations);
+                }
+                // Arrival direction not ok - DON'T add to closed, allow reaching from different direction
+                continue;
             }
+
+            closed.insert(current_key);
 
             // Check via constraints for diff pair routing (collinear_vias mode):
             // 1. If we just came through a via: must continue in exact same direction as before via
@@ -403,6 +457,9 @@ impl GridRouter {
                 Vec::new()
             };
 
+            // Get steps from source for direction constraint
+            let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(i32::MAX);
+
             // Expand neighbors - 8 directions
             for (dx, dy) in DIRECTIONS {
                 // If we have a required exact direction (just came through via), only allow that direction
@@ -415,6 +472,15 @@ impl GridRouter {
                 else if let Some((base_dx, base_dy)) = allowed_45deg_from {
                     if !Self::is_within_45_degrees(dx, dy, base_dx, base_dy) {
                         continue;
+                    }
+                }
+
+                // Check start direction constraint for first N steps
+                if let Some((start_dx, start_dy)) = norm_start_dir {
+                    if current_steps < direction_steps {
+                        if !Self::is_within_45_degrees(dx, dy, start_dx, start_dy) {
+                            continue;
+                        }
                     }
                 }
 
@@ -449,6 +515,8 @@ impl GridRouter {
                     if via_exclusion_radius > 0 {
                         path_vias.insert(neighbor_key, current_vias.clone());
                     }
+                    // Update steps from source for neighbor
+                    steps_from_source.insert(neighbor_key, current_steps + 1);
                     let h = self.heuristic_to_targets(&neighbor, &target_states);
                     let f = new_g + h;
                     open_set.push(OpenEntry {
@@ -548,6 +616,8 @@ impl GridRouter {
                             new_vias.push((current.gx, current.gy));
                             path_vias.insert(neighbor_key, new_vias);
                         }
+                        // Via doesn't count as a step for direction constraint
+                        steps_from_source.insert(neighbor_key, current_steps);
                         let h = self.heuristic_to_targets(&neighbor, &target_states);
                         let f = new_g + h;
                         open_set.push(OpenEntry {
@@ -1460,7 +1530,7 @@ impl DiffPairRouter {
 }
 
 /// Module version
-const VERSION: &str = "0.5.1";
+const VERSION: &str = "0.6.1";
 
 /// Python module
 #[pymodule]
