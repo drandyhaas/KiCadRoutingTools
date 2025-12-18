@@ -36,23 +36,59 @@ def point_to_segment_distance(px: float, py: float,
     return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
 
 
+def closest_point_on_segment(px: float, py: float,
+                              x1: float, y1: float,
+                              x2: float, y2: float) -> Tuple[float, float]:
+    """Find the closest point on segment (x1,y1)-(x2,y2) to point (px, py)."""
+    dx = x2 - x1
+    dy = y2 - y1
+
+    if dx == 0 and dy == 0:
+        return x1, y1
+
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+    return x1 + t * dx, y1 + t * dy
+
+
+def segment_to_segment_closest_points(seg1: Segment, seg2: Segment) -> Tuple[float, Tuple[float, float], Tuple[float, float]]:
+    """Find closest point pair between two segments.
+
+    Returns (distance, point_on_seg1, point_on_seg2)
+    """
+    # Check all endpoint-to-segment distances and track closest points
+    candidates = []
+
+    # seg1 endpoints to seg2
+    p1 = closest_point_on_segment(seg1.start_x, seg1.start_y,
+                                   seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y)
+    d1 = math.sqrt((seg1.start_x - p1[0])**2 + (seg1.start_y - p1[1])**2)
+    candidates.append((d1, (seg1.start_x, seg1.start_y), p1))
+
+    p2 = closest_point_on_segment(seg1.end_x, seg1.end_y,
+                                   seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y)
+    d2 = math.sqrt((seg1.end_x - p2[0])**2 + (seg1.end_y - p2[1])**2)
+    candidates.append((d2, (seg1.end_x, seg1.end_y), p2))
+
+    # seg2 endpoints to seg1
+    p3 = closest_point_on_segment(seg2.start_x, seg2.start_y,
+                                   seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y)
+    d3 = math.sqrt((seg2.start_x - p3[0])**2 + (seg2.start_y - p3[1])**2)
+    candidates.append((d3, p3, (seg2.start_x, seg2.start_y)))
+
+    p4 = closest_point_on_segment(seg2.end_x, seg2.end_y,
+                                   seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y)
+    d4 = math.sqrt((seg2.end_x - p4[0])**2 + (seg2.end_y - p4[1])**2)
+    candidates.append((d4, p4, (seg2.end_x, seg2.end_y)))
+
+    # Return the minimum
+    best = min(candidates, key=lambda x: x[0])
+    return best
+
+
 def segment_to_segment_distance(seg1: Segment, seg2: Segment) -> float:
     """Calculate minimum distance between two segments."""
-    # Check all endpoint-to-segment distances
-    d1 = point_to_segment_distance(seg1.start_x, seg1.start_y,
-                                    seg2.start_x, seg2.start_y,
-                                    seg2.end_x, seg2.end_y)
-    d2 = point_to_segment_distance(seg1.end_x, seg1.end_y,
-                                    seg2.start_x, seg2.start_y,
-                                    seg2.end_x, seg2.end_y)
-    d3 = point_to_segment_distance(seg2.start_x, seg2.start_y,
-                                    seg1.start_x, seg1.start_y,
-                                    seg1.end_x, seg1.end_y)
-    d4 = point_to_segment_distance(seg2.end_x, seg2.end_y,
-                                    seg1.start_x, seg1.start_y,
-                                    seg1.end_x, seg1.end_y)
-
-    return min(d1, d2, d3, d4)
+    dist, _, _ = segment_to_segment_closest_points(seg1, seg2)
+    return dist
 
 
 def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tuple[bool, Optional[Tuple[float, float]]]:
@@ -105,30 +141,36 @@ def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tu
     return False, None
 
 
-def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, tolerance: float = 0.001) -> Tuple[bool, float]:
+def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, clearance_margin: float = 0.05):
     """Check if two segments on the same layer violate clearance.
 
     Args:
-        tolerance: Ignore violations smaller than this (mm). Default 0.001mm (1 micron).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
+                         Violations smaller than clearance * clearance_margin are ignored.
+
+    Returns:
+        (has_violation, overlap, closest_pt1, closest_pt2)
     """
     if seg1.layer != seg2.layer:
-        return False, 0.0
+        return False, 0.0, None, None
 
     # Required distance is half-widths plus clearance
     required_dist = seg1.width / 2 + seg2.width / 2 + clearance
-    actual_dist = segment_to_segment_distance(seg1, seg2)
+    actual_dist, pt1, pt2 = segment_to_segment_closest_points(seg1, seg2)
     overlap = required_dist - actual_dist
 
+    # Use clearance-based tolerance (5% of clearance by default)
+    tolerance = clearance * clearance_margin
     if overlap > tolerance:
-        return True, overlap
-    return False, 0.0
+        return True, overlap, pt1, pt2
+    return False, 0.0, None, None
 
 
-def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, tolerance: float = 0.001) -> Tuple[bool, float]:
+def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if a via overlaps with a segment on any common layer.
 
     Args:
-        tolerance: Ignore violations smaller than this (mm). Default 0.001mm (1 micron).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
     """
     # Check if they share a layer
     via_layers = set(via.layers) if via.layers else {'F.Cu', 'B.Cu'}
@@ -141,28 +183,83 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, toleranc
                                             seg.end_x, seg.end_y)
     overlap = required_dist - actual_dist
 
+    tolerance = clearance * clearance_margin
     if overlap > tolerance:
         return True, overlap
     return False, 0.0
 
 
-def check_via_via_overlap(via1: Via, via2: Via, clearance: float, tolerance: float = 0.001) -> Tuple[bool, float]:
+def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if two vias overlap.
 
     Args:
-        tolerance: Ignore violations smaller than this (mm). Default 0.001mm (1 micron).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
     """
     # All vias are through-hole, so they always potentially conflict
     required_dist = via1.size / 2 + via2.size / 2 + clearance
     actual_dist = math.sqrt((via1.x - via2.x)**2 + (via1.y - via2.y)**2)
     overlap = required_dist - actual_dist
 
+    tolerance = clearance * clearance_margin
     if overlap > tolerance:
         return True, overlap
     return False, 0.0
 
 
-def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None):
+def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, layer: str = "User.7"):
+    """Write debug lines to PCB file showing violation locations.
+
+    Adds gr_line elements connecting closest points of violating segments.
+    """
+    import uuid
+
+    # Read the PCB file
+    with open(pcb_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # Generate gr_line elements for segment-segment violations
+    debug_lines = []
+    print(f"\nDebug lines (center-to-center distance, required clearance = {clearance}mm):")
+    for v in violations:
+        if v['type'] == 'segment-segment' and 'closest_pt1' in v and v['closest_pt1']:
+            pt1 = v['closest_pt1']
+            pt2 = v['closest_pt2']
+            dist = math.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+            # Track width is typically 0.1mm, so required center-to-center = 0.1 + clearance = 0.2mm
+            required = 0.1 + clearance  # half-width + half-width + clearance = track_width + clearance
+            violation_amt = required - dist
+            print(f"  {v['net1']} <-> {v['net2']}: dist={dist:.4f}mm, required={required:.3f}mm, violation={violation_amt:.4f}mm")
+            print(f"    from ({pt1[0]:.4f}, {pt1[1]:.4f}) to ({pt2[0]:.4f}, {pt2[1]:.4f})")
+
+            line = f'''\t(gr_line
+\t\t(start {pt1[0]:.6f} {pt1[1]:.6f})
+\t\t(end {pt2[0]:.6f} {pt2[1]:.6f})
+\t\t(stroke
+\t\t\t(width 0.05)
+\t\t\t(type solid)
+\t\t)
+\t\t(layer "{layer}")
+\t\t(uuid "{uuid.uuid4()}")
+\t)'''
+            debug_lines.append(line)
+
+    if not debug_lines:
+        print(f"No debug lines to write")
+        return
+
+    # Insert before the final closing paren
+    debug_text = '\n'.join(debug_lines)
+    last_paren = content.rfind(')')
+    new_content = content[:last_paren] + '\n' + debug_text + '\n' + content[last_paren:]
+
+    with open(pcb_file, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+
+    print(f"\nWrote {len(debug_lines)} debug line(s) to layer {layer}")
+
+
+def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
+            debug_output: bool = False):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -170,6 +267,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         clearance: Minimum clearance in mm
         net_patterns: Optional list of net name patterns (fnmatch style) to focus on.
                      If provided, only checks involving at least one matching net are reported.
+        debug_output: If True, write debug lines to User.7 layer showing violation locations
     """
     print(f"Loading {pcb_file}...")
     pcb_data = parse_kicad_pcb(pcb_file)
@@ -231,7 +329,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             for seg1 in segments_by_net[net1]:
                 for seg2 in segments_by_net[net2]:
-                    has_violation, overlap = check_segment_overlap(seg1, seg2, clearance)
+                    has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance)
                     if has_violation:
                         net1_name = pcb_data.nets.get(net1, None)
                         net2_name = pcb_data.nets.get(net2, None)
@@ -245,6 +343,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             'overlap_mm': overlap,
                             'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
                             'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
+                            'closest_pt1': pt1,
+                            'closest_pt2': pt2,
                         })
                     # Also check for segment crossings (different nets)
                     crosses, cross_point = segments_cross(seg1, seg2)
@@ -418,6 +518,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         print("NO DRC VIOLATIONS FOUND!")
 
     print("=" * 60)
+
+    # Write debug lines if requested
+    if debug_output and violations:
+        write_debug_lines(pcb_file, violations, clearance)
+
     return violations
 
 
@@ -428,7 +533,9 @@ if __name__ == "__main__":
                         help='Minimum clearance in mm (default: 0.1)')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
                         help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
+    parser.add_argument('--debug', '-d', action='store_true',
+                        help='Write debug lines to User.7 layer showing violation locations')
 
     args = parser.parse_args()
 
-    run_drc(args.pcb, args.clearance, args.nets)
+    run_drc(args.pcb, args.clearance, args.nets, args.debug)
