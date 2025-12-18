@@ -1,4 +1,4 @@
-# alias python=python3
+alias python=python3
 
 # Test fanning out BGA chips
 # Run in Windows powershell like: .\apply_fanouts.ps1
@@ -22,7 +22,7 @@ python bga_fanout.py fanout_output.kicad_pcb --component U1 --output fanout_outp
 python route.py fanout_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" --no-bga-zone #--max-iterations 500000
 
 # Check for errors
-python.exe check_drc.py routed_output.kicad_pcb
+python check_drc.py routed_output.kicad_pcb
 
 # Check connections
 python check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
