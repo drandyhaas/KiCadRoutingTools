@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.5.0**
+**Current Version: 0.5.1**
 
 ## Features
 
@@ -13,6 +13,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - Stub proximity costs to avoid blocking unrouted nets
 - **Rectangular pad obstacle blocking** with proper rotation handling
 - **Collinear via constraint** for differential pair routing (ensures clean via geometry)
+- **Via exclusion zones** to prevent routes from conflicting with their own vias (for diff pair P/N offset tracks)
 - ~10x speedup vs Python implementation
 
 ## Building
@@ -155,8 +156,9 @@ router = GridRouter(via_cost: int, h_weight: float)
 ```
 
 Methods:
-- `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False)` - Find path from any source to any target
+- `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0)` - Find path from any source to any target
   - `collinear_vias`: If True, after a via the route must continue straight for one step, then can only turn ±45° (for differential pair routing)
+  - `via_exclusion_radius`: Grid cells to exclude around placed vias. Prevents the route from drifting near its own vias, which is important for diff pair routing where P/N tracks are offset from centerline.
   - Returns `(path, iterations)` where path is `List[(gx, gy, layer)]` or `None`
 
 ## Architecture
@@ -169,6 +171,7 @@ Methods:
 
 ## Version History
 
+- **0.5.1**: Added `via_exclusion_radius` parameter to prevent routes from conflicting with their own vias. Tracks via positions along each path and blocks moves that would cause P/N offset tracks to intersect P/N vias.
 - **0.5.0**: Added `collinear_vias` parameter for differential pair routing - enforces symmetric via geometry: `±45° → D → VIA → D → ±45°` (requires 2 steps before via, approach within ±45° of previous, exit same as approach, then ±45° allowed)
 - **0.4.0**: Performance and stability improvements
 - **0.3.0**: Added `clone()` method for GridObstacleMap to support incremental obstacle caching

@@ -12,6 +12,7 @@ from routing_config import GridRouteConfig, GridCoord, DiffPair
 from routing_utils import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints
 )
+from obstacle_map import check_line_clearance
 
 # Import Rust router
 import sys
@@ -410,6 +411,22 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     spacing_mm = avg_pn_dist / 2  # Half-spacing for each track from centerline
     print(f"  P-N spacing: src={src_pn_dist:.3f}mm, tgt={tgt_pn_dist:.3f}mm, using={avg_pn_dist:.3f}mm (offset={spacing_mm:.3f}mm)")
 
+    # Calculate via exclusion radius in grid units
+    # When centerline places a via, P/N vias are offset by via_spacing perpendicular to path
+    # via_spacing is larger than spacing_mm to ensure via-via clearance
+    # We need to prevent centerline from returning near the via such that offset tracks would conflict
+    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.15
+    min_via_spacing = config.via_size + config.clearance  # Minimum via center-to-center distance
+    min_via_spacing_for_track = track_via_clearance - spacing_mm
+    via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
+    # Exclusion calculation: if centerline is at position X, the N track is at X + spacing_mm
+    # N via is at centerline_via + via_spacing
+    # For N track to clear N via: (X + spacing_mm) must be track_via_clearance from (centerline_via + via_spacing)
+    # So X must be (track_via_clearance + via_spacing - spacing_mm) away from centerline_via
+    # Use larger radius to ensure escape path also keeps offset tracks clear of offset vias
+    via_exclusion_mm = (track_via_clearance + via_spacing) * 2
+    via_exclusion_radius = max(1, int(via_exclusion_mm / config.grid_step + 0.5))  # Round up
+
     # Get segments for P and N nets to find stub directions
     p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
     n_segments = [s for s in pcb_data.segments if s.net_id == n_net_id]
@@ -456,36 +473,43 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     allow_radius = 2
 
     def find_open_setback(center_x, center_y, dir_x, dir_y, layer_idx, min_sb, max_sb, step, label):
-        """Find the smallest setback where the position is not blocked for track routing.
+        """Find the largest setback where position and connector path are clear.
 
-        Note: We only check track blocking, not via blocking. Via blocking in connector
-        regions is meant to prevent via placement during routing, but the setback
-        positions themselves should be valid for track routing.
+        Starts from max_sb and decreases to min_sb, preferring larger setbacks.
+        Checks both the setback position and the connector path from stub center.
+        Returns None if no valid setback is found.
         """
-        setback = min_sb
-        while setback <= max_sb:
+        setback = max_sb
+        while setback >= min_sb:
             x = center_x + dir_x * setback
             y = center_y + dir_y * setback
             gx, gy = coord.to_grid(x, y)
-            # Only check track blocking - via blocking is handled separately during routing
+            # Check track blocking at setback position
             if not obstacles.is_blocked(gx, gy, layer_idx):
-                return setback, gx, gy
-            setback += step
-        # If all positions blocked, return the minimum setback anyway
-        x = center_x + dir_x * min_sb
-        y = center_y + dir_y * min_sb
-        gx, gy = coord.to_grid(x, y)
-        print(f"  Warning: {label} centerline position blocked at all setbacks, using minimum")
-        return min_sb, gx, gy
+                # Also check the connector path from stub center to setback position
+                if check_line_clearance(obstacles, center_x, center_y, x, y, layer_idx, config):
+                    return setback, gx, gy
+            setback -= step
+        # No valid setback found
+        print(f"  Error: {label} - no valid setback found (all positions or connector paths blocked)")
+        return None
 
-    src_setback, src_gx, src_gy = find_open_setback(
+    src_result = find_open_setback(
         center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer,
         min_setback, max_setback, setback_step, "source"
     )
-    tgt_setback, tgt_gx, tgt_gy = find_open_setback(
+    if src_result is None:
+        return None
+
+    tgt_result = find_open_setback(
         center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer,
         min_setback, max_setback, setback_step, "target"
     )
+    if tgt_result is None:
+        return None
+
+    src_setback, src_gx, src_gy = src_result
+    tgt_setback, tgt_gx, tgt_gy = tgt_result
 
     print(f"  Centerline setback: src={src_setback:.2f}mm, tgt={tgt_setback:.2f}mm (min={min_setback}mm)")
 
@@ -509,14 +533,14 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     router = GridRouter(via_cost=config.via_cost * 1000 * 2, h_weight=config.heuristic_weight)
 
     path, iterations = router.route_multi(obstacles, center_sources, center_targets, config.max_iterations,
-                                          collinear_vias=True)
+                                          collinear_vias=True, via_exclusion_radius=via_exclusion_radius)
     total_iterations = iterations
 
     if path is None:
         # Try reverse direction
         print(f"No route found after {iterations} iterations, trying backwards...")
         path, iter2 = router.route_multi(obstacles, center_targets, center_sources, config.max_iterations,
-                                         collinear_vias=True)
+                                         collinear_vias=True, via_exclusion_radius=via_exclusion_radius)
         total_iterations += iter2
         if path is not None:
             path = list(reversed(path))
@@ -655,7 +679,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_float_path = create_parallel_path_float(simplified_path, coord, sign=n_sign, spacing_mm=spacing_mm,
                                                start_dir=start_stub_dir, end_dir=end_stub_dir)
 
-    # Process via positions (simplified - no polarity swap handling)
+    # Process via positions
     p_float_path, n_float_path = _process_via_positions(
         simplified_path, p_float_path, n_float_path, coord, config,
         p_sign, n_sign, spacing_mm

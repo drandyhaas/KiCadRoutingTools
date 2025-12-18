@@ -151,6 +151,16 @@ This creates symmetric geometry around vias: `±45° → D → VIA → D → ±4
 
 The via cost is **doubled** for differential pairs since each layer change requires placing two vias (P and N). This discourages unnecessary layer transitions.
 
+### Via Exclusion Zones
+
+The router tracks via positions along the centerline path and enforces exclusion zones to prevent P/N offset tracks from conflicting with P/N vias. When a via is placed:
+
+1. **Re-entry blocked** - After escaping the exclusion radius, the route cannot re-enter
+2. **Perpendicular drift blocked** - Within half the exclusion radius, perpendicular movement is blocked
+3. **Only escape allowed** - Within the exclusion zone, only moves that increase distance from the via are allowed
+
+This prevents the centerline from drifting near its own via locations, which would cause the offset P/N tracks to intersect the offset P/N vias.
+
 ### Via Positions
 
 P and N vias are placed perpendicular to the centerline direction at layer changes:

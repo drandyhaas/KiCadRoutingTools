@@ -267,7 +267,10 @@ impl GridRouter {
     ///
     /// collinear_vias: If true, after a via the route must continue in the same
     /// direction as before the via (for diff pair routing to ensure clean via geometry).
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false))]
+    /// via_exclusion_radius: Grid cells to exclude around placed vias during search.
+    /// This prevents the route from passing too close to its own vias, which is
+    /// important for diff pair routing where P/N tracks are offset from centerline.
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0))]
     fn route_multi(
         &self,
         obstacles: &GridObstacleMap,
@@ -275,6 +278,7 @@ impl GridRouter {
         targets: Vec<(i32, i32, u8)>,
         max_iterations: u32,
         collinear_vias: bool,
+        via_exclusion_radius: i32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32) {
         // Convert targets to set for O(1) lookup
         let target_set: FxHashSet<u64> = targets
@@ -294,6 +298,52 @@ impl GridRouter {
         let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
 
+        // Track via positions for each node's path (only used if via_exclusion_radius > 0)
+        // Maps node key -> list of (gx, gy) via positions on path to that node
+        let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
+
+        // Helper: check if position (nx, ny) would violate via exclusion
+        // Returns true if blocked (too close to a via and not moving away from it)
+        let check_via_exclusion = |nx: i32, ny: i32, current_gx: i32, current_gy: i32, vias: &[(i32, i32)], radius: i32| -> bool {
+            if radius <= 0 {
+                return false;
+            }
+            for &(vx, vy) in vias {
+                let dist_to_neighbor = (nx - vx).abs().max((ny - vy).abs());
+                let dist_to_current = (current_gx - vx).abs().max((current_gy - vy).abs());
+                // If we're outside the radius, block re-entry
+                if dist_to_neighbor <= radius && dist_to_current > radius {
+                    return true;
+                }
+                // If we're inside the radius, only allow moves that increase distance from via
+                // This prevents perpendicular drift within the exclusion zone
+                if dist_to_current <= radius && dist_to_neighbor <= dist_to_current {
+                    // Allow only if we're moving directly away from via (increasing distance)
+                    // or staying at same distance in the escape direction
+                    if dist_to_neighbor < dist_to_current {
+                        // Moving closer to via - block
+                        return true;
+                    }
+                    // Same distance - check if perpendicular movement
+                    // Block perpendicular moves within the exclusion zone
+                    if dist_to_neighbor == dist_to_current && dist_to_current > 0 {
+                        // Check if this is a perpendicular move by seeing if both x and y changed
+                        let dx_from_via = (nx - vx).abs() - (current_gx - vx).abs();
+                        let dy_from_via = (ny - vy).abs() - (current_gy - vy).abs();
+                        // If moving perpendicular (one axis increases while other decreases)
+                        // and still within half the radius, block
+                        if (dx_from_via > 0 && dy_from_via < 0) || (dx_from_via < 0 && dy_from_via > 0) {
+                            if dist_to_current <= radius / 2 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
@@ -306,6 +356,10 @@ impl GridRouter {
             });
             counter += 1;
             g_costs.insert(key, 0);
+            // Source nodes start with no vias on their path
+            if via_exclusion_radius > 0 {
+                path_vias.insert(key, Vec::new());
+            }
         }
 
         let mut iterations: u32 = 0;
@@ -342,6 +396,13 @@ impl GridRouter {
                 (None, None)
             };
 
+            // Get current node's via list for exclusion checking
+            let current_vias: Vec<(i32, i32)> = if via_exclusion_radius > 0 {
+                path_vias.get(&current_key).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
             // Expand neighbors - 8 directions
             for (dx, dy) in DIRECTIONS {
                 // If we have a required exact direction (just came through via), only allow that direction
@@ -364,6 +425,11 @@ impl GridRouter {
                     continue;
                 }
 
+                // Check via exclusion - can't approach our own vias once we've moved away
+                if check_via_exclusion(ngx, ngy, current.gx, current.gy, &current_vias, via_exclusion_radius) {
+                    continue;
+                }
+
                 let neighbor = GridState::new(ngx, ngy, current.layer);
                 let neighbor_key = neighbor.as_key();
 
@@ -379,6 +445,10 @@ impl GridRouter {
                 if new_g < existing_g {
                     g_costs.insert(neighbor_key, new_g);
                     parents.insert(neighbor_key, current_key);
+                    // Propagate via list to neighbor (same vias since no layer change)
+                    if via_exclusion_radius > 0 {
+                        path_vias.insert(neighbor_key, current_vias.clone());
+                    }
                     let h = self.heuristic_to_targets(&neighbor, &target_states);
                     let f = new_g + h;
                     open_set.push(OpenEntry {
@@ -437,7 +507,17 @@ impl GridRouter {
                 true
             };
 
-            if can_place_via && !obstacles.is_via_blocked(current.gx, current.gy) {
+            // Check if this via would be too close to existing vias in the path
+            let via_too_close = if via_exclusion_radius > 0 {
+                current_vias.iter().any(|&(vx, vy)| {
+                    let dist = (current.gx - vx).abs().max((current.gy - vy).abs());
+                    dist <= via_exclusion_radius * 2  // Need 2x radius for via-via clearance
+                })
+            } else {
+                false
+            };
+
+            if can_place_via && !via_too_close && !obstacles.is_via_blocked(current.gx, current.gy) {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer {
                         continue;
@@ -462,6 +542,12 @@ impl GridRouter {
                     if new_g < existing_g {
                         g_costs.insert(neighbor_key, new_g);
                         parents.insert(neighbor_key, current_key);
+                        // Add this via position to the path's via list
+                        if via_exclusion_radius > 0 {
+                            let mut new_vias = current_vias.clone();
+                            new_vias.push((current.gx, current.gy));
+                            path_vias.insert(neighbor_key, new_vias);
+                        }
                         let h = self.heuristic_to_targets(&neighbor, &target_states);
                         let f = new_g + h;
                         open_set.push(OpenEntry {
@@ -1374,7 +1460,7 @@ impl DiffPairRouter {
 }
 
 /// Module version
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.5.1";
 
 /// Python module
 #[pymodule]

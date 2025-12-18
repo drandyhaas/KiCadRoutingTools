@@ -561,6 +561,51 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
                                blocked_cells, blocked_vias)
 
 
+def check_line_clearance(obstacles: GridObstacleMap,
+                         x1: float, y1: float,
+                         x2: float, y2: float,
+                         layer_idx: int,
+                         config: GridRouteConfig) -> bool:
+    """Check if a line segment from (x1,y1) to (x2,y2) is clear of track obstacles on the given layer.
+
+    Uses fine sampling (half grid step) to ensure complete coverage.
+    Returns True if the path is clear, False if any cell is blocked.
+    """
+    coord = GridCoord(config.grid_step)
+
+    dx = x2 - x1
+    dy = y2 - y1
+    length = (dx * dx + dy * dy) ** 0.5
+
+    if length < 0.001:
+        # Point check only
+        gx, gy = coord.to_grid(x1, y1)
+        return not obstacles.is_blocked(gx, gy, layer_idx)
+
+    # Normalize direction
+    dir_x = dx / length
+    dir_y = dy / length
+
+    # Sample at half grid step for better coverage
+    step = config.grid_step / 2
+    checked = set()
+
+    dist = 0.0
+    while dist <= length:
+        x = x1 + dir_x * dist
+        y = y1 + dir_y * dist
+        gx, gy = coord.to_grid(x, y)
+
+        if (gx, gy) not in checked:
+            checked.add((gx, gy))
+            if obstacles.is_blocked(gx, gy, layer_idx):
+                return False
+
+        dist += step
+
+    return True
+
+
 def add_connector_region_via_blocking(obstacles: GridObstacleMap,
                                        center_x: float, center_y: float,
                                        dir_x: float, dir_y: float,
