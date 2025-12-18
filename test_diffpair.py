@@ -187,7 +187,7 @@ Examples:
     router_group.add_argument('--diff-pair-turn-length', type=float,
                               help='Length of turn segments at start/end of diff pair routes in mm (default: 0.3)')
     router_group.add_argument('--debug-lines', action='store_true',
-                              help='Output debug geometry on User.2 (turn segments), User.3 (connectors), User.8/9 (centerline)')
+                              help='Output debug geometry on User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--fix-polarity', action='store_true',
                               help='Swap target pad nets if polarity swap is needed')
 

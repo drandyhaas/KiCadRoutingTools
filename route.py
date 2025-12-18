@@ -652,7 +652,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         # Add debug paths if enabled (using gr_line for User layers)
         if debug_lines:
-            print("Adding debug paths to User.2 (turns), User.3 (connectors), User.8 (simplified), User.9 (raw A*)")
+            print("Adding debug paths to User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
             for result in results:
                 # Raw A* path on User.9
                 raw_path = result.get('raw_astar_path', [])
@@ -692,6 +692,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     routing_text += generate_gr_line_sexpr(
                         start, end,
                         0.1, "User.3"
+                    ) + "\n"
+
+                # Stub direction arrows on User.4
+                stub_arrows = result.get('debug_stub_arrows', [])
+                for start, end in stub_arrows:
+                    routing_text += generate_gr_line_sexpr(
+                        start, end,
+                        0.1, "User.4"
                     ) + "\n"
 
         last_paren = content.rfind(')')
@@ -829,7 +837,7 @@ Differential pair routing:
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
-                        help="Output debug geometry on User.2 (turns), User.3 (connectors), User.8 (simplified), User.9 (raw A*)")
+                        help="Output debug geometry on User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",

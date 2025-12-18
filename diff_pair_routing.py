@@ -825,6 +825,36 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_path = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
               for x, y, layer in n_float_path]
 
+    # Build stub direction arrows for debug visualization (User.4)
+    # Each arrow is 1mm shaft + arrowhead pointing in stub direction from midpoint
+    debug_stub_arrows = []
+    if config.debug_lines:
+        arrow_length = 1.0  # mm
+        head_length = 0.2  # mm
+        head_angle = 0.5  # radians (~30 degrees)
+
+        for mid_x, mid_y, dir_x, dir_y in [
+            (center_src_x, center_src_y, src_dir_x, src_dir_y),
+            (center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y)
+        ]:
+            # Arrow shaft
+            tip_x = mid_x + dir_x * arrow_length
+            tip_y = mid_y + dir_y * arrow_length
+            debug_stub_arrows.append(((mid_x, mid_y), (tip_x, tip_y)))
+
+            # Arrowhead lines (two lines from tip, angled back)
+            cos_a = math.cos(head_angle)
+            sin_a = math.sin(head_angle)
+            # Rotate direction by +/- head_angle and reverse
+            for sign in [1, -1]:
+                # Rotate (dir_x, dir_y) by sign * head_angle
+                rot_x = dir_x * cos_a - sign * dir_y * sin_a
+                rot_y = sign * dir_x * sin_a + dir_y * cos_a
+                # Point back from tip
+                head_end_x = tip_x - rot_x * head_length
+                head_end_y = tip_y - rot_y * head_length
+                debug_stub_arrows.append(((tip_x, tip_y), (head_end_x, head_end_y)))
+
     # Build result with polarity fix info
     result = {
         'new_segments': new_segments,
@@ -837,6 +867,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         'simplified_path': simplified_path_float,
         'debug_turn_lines': debug_turn_lines,  # For User.2 layer
         'debug_connector_lines': debug_connector_lines,  # For User.3 layer
+        'debug_stub_arrows': debug_stub_arrows,  # For User.4 layer
     }
 
     # If polarity was fixed, include info about which target pads need net swaps

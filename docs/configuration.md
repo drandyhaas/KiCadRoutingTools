@@ -72,7 +72,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-lines` | false | Output debug geometry on User.2/3/8/9 layers |
+| `--debug-lines` | false | Output debug geometry on User.2/3/4/8/9 layers |
 
 ## GridRouteConfig Class
 

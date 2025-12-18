@@ -221,6 +221,7 @@ With `--debug-lines`, debug geometry is output on User layers as graphic lines:
 |-------|---------|
 | `User.2` | Turn segments (first and last segments of P/N paths) |
 | `User.3` | Connectors (stub to P/N track) |
+| `User.4` | Stub direction arrows (1mm arrows from midpoint at src/tgt) |
 | `User.7` | DRC violation debug lines (from `check_drc.py --debug-lines`) |
 | `User.8` | Simplified centerline path |
 | `User.9` | Raw A* centerline path |
@@ -235,7 +236,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 1.5 | Distance in front of stubs to start centerline (mm) |
 | `--fix-polarity` | false | Swap target pad nets when polarity swap is needed |
-| `--debug-lines` | false | Output debug geometry on User.2/3/8/9 layers |
+| `--debug-lines` | false | Output debug geometry on User.2/3/4/8/9 layers |
 | `--stub-proximity-radius` | 1.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 3.0 | Cost penalty near stubs (mm equivalent) |
 
