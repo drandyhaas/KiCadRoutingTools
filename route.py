@@ -36,10 +36,10 @@ from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
-    VisualizationData
+    VisualizationData, add_connector_region_via_blocking
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
-from diff_pair_routing import route_diff_pair_with_obstacles
+from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
 import re
 
 # Add rust_router directory to path for importing the compiled module
@@ -328,6 +328,29 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route, diff_pair_extra_clearance)
     dp_base_elapsed = time.time() - dp_base_start
     print(f"Diff pair obstacle map built in {dp_base_elapsed:.2f}s")
+
+    # Block connector regions for ALL diff pairs upfront
+    # Vias span all layers, so we must block connector regions before any routing starts
+    # to prevent one pair's vias from interfering with another pair's connector segments
+    if diff_pair_ids_to_route:
+        print(f"Blocking connector regions for {len(diff_pair_ids_to_route)} diff pair(s)...")
+        for pair_name, pair in diff_pair_ids_to_route:
+            connector_info = get_diff_pair_connector_regions(pcb_data, pair, config)
+            if connector_info:
+                # Block source connector region
+                add_connector_region_via_blocking(
+                    diff_pair_base_obstacles,
+                    connector_info['src_center'][0], connector_info['src_center'][1],
+                    connector_info['src_dir'][0], connector_info['src_dir'][1],
+                    connector_info['src_setback'], connector_info['spacing_mm'], config
+                )
+                # Block target connector region
+                add_connector_region_via_blocking(
+                    diff_pair_base_obstacles,
+                    connector_info['tgt_center'][0], connector_info['tgt_center'][1],
+                    connector_info['tgt_dir'][0], connector_info['tgt_dir'][1],
+                    connector_info['tgt_setback'], connector_info['spacing_mm'], config
+                )
 
     # Notify visualization callback that routing is starting
     if visualize:

@@ -266,6 +266,99 @@ def create_parallel_path_float(centerline_path, coord, sign, spacing_mm=0.1, sta
     return result
 
 
+def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
+                                     config: GridRouteConfig) -> Optional[dict]:
+    """
+    Compute connector region parameters for a differential pair.
+
+    Returns dict with:
+        - src_center: (x, y) center between P and N source stubs
+        - src_dir: (dx, dy) normalized direction from stubs toward route
+        - src_setback: distance from stub center to route start
+        - tgt_center: (x, y) center between P and N target stubs
+        - tgt_dir: (dx, dy) normalized direction from stubs toward route
+        - tgt_setback: distance from stub center to route start
+        - spacing_mm: half-spacing between P and N tracks
+
+    Returns None if endpoints cannot be determined.
+    """
+    p_net_id = diff_pair.p_net_id
+    n_net_id = diff_pair.n_net_id
+
+    # Find endpoints
+    sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
+    if error or not sources or not targets:
+        return None
+
+    coord = GridCoord(config.grid_step)
+    layer_names = config.layers
+
+    src = sources[0]
+    tgt = targets[0]
+
+    # Get original stub positions (in mm)
+    p_src_x, p_src_y = src[5], src[6]
+    n_src_x, n_src_y = src[7], src[8]
+    p_tgt_x, p_tgt_y = tgt[5], tgt[6]
+    n_tgt_x, n_tgt_y = tgt[7], tgt[8]
+
+    # Calculate spacing from actual P-N stub distance
+    src_pn_dist = math.sqrt((p_src_x - n_src_x)**2 + (p_src_y - n_src_y)**2)
+    tgt_pn_dist = math.sqrt((p_tgt_x - n_tgt_x)**2 + (p_tgt_y - n_tgt_y)**2)
+    avg_pn_dist = (src_pn_dist + tgt_pn_dist) / 2
+    spacing_mm = avg_pn_dist / 2
+
+    # Get segments for P and N nets to find stub directions
+    p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
+    n_segments = [s for s in pcb_data.segments if s.net_id == n_net_id]
+
+    src_layer_name = layer_names[src[4]]
+    tgt_layer_name = layer_names[tgt[4]]
+
+    # Get stub directions at source and target
+    p_src_dir = get_stub_direction(p_segments, p_src_x, p_src_y, src_layer_name)
+    n_src_dir = get_stub_direction(n_segments, n_src_x, n_src_y, src_layer_name)
+    p_tgt_dir = get_stub_direction(p_segments, p_tgt_x, p_tgt_y, tgt_layer_name)
+    n_tgt_dir = get_stub_direction(n_segments, n_tgt_x, n_tgt_y, tgt_layer_name)
+
+    # Average P and N directions at each end
+    src_dir_x = (p_src_dir[0] + n_src_dir[0]) / 2
+    src_dir_y = (p_src_dir[1] + n_src_dir[1]) / 2
+    tgt_dir_x = (p_tgt_dir[0] + n_tgt_dir[0]) / 2
+    tgt_dir_y = (p_tgt_dir[1] + n_tgt_dir[1]) / 2
+
+    # Normalize
+    src_dir_len = math.sqrt(src_dir_x*src_dir_x + src_dir_y*src_dir_y)
+    tgt_dir_len = math.sqrt(tgt_dir_x*tgt_dir_x + tgt_dir_y*tgt_dir_y)
+    if src_dir_len > 0:
+        src_dir_x /= src_dir_len
+        src_dir_y /= src_dir_len
+    if tgt_dir_len > 0:
+        tgt_dir_x /= tgt_dir_len
+        tgt_dir_y /= tgt_dir_len
+
+    # Calculate centerline midpoints
+    center_src_x = (p_src_x + n_src_x) / 2
+    center_src_y = (p_src_y + n_src_y) / 2
+    center_tgt_x = (p_tgt_x + n_tgt_x) / 2
+    center_tgt_y = (p_tgt_y + n_tgt_y) / 2
+
+    # Use max setback for blocking (to be conservative)
+    # The actual setback used during routing may be smaller if position is unblocked
+    src_setback = config.max_diff_pair_centerline_setback
+    tgt_setback = config.max_diff_pair_centerline_setback
+
+    return {
+        'src_center': (center_src_x, center_src_y),
+        'src_dir': (src_dir_x, src_dir_y),
+        'src_setback': src_setback,
+        'tgt_center': (center_tgt_x, center_tgt_y),
+        'tgt_dir': (tgt_dir_x, tgt_dir_y),
+        'tgt_setback': tgt_setback,
+        'spacing_mm': spacing_mm,
+    }
+
+
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap) -> Optional[dict]:
@@ -363,14 +456,19 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     allow_radius = 2
 
     def find_open_setback(center_x, center_y, dir_x, dir_y, layer_idx, min_sb, max_sb, step, label):
-        """Find the smallest setback where the position is not blocked."""
+        """Find the smallest setback where the position is not blocked for track routing.
+
+        Note: We only check track blocking, not via blocking. Via blocking in connector
+        regions is meant to prevent via placement during routing, but the setback
+        positions themselves should be valid for track routing.
+        """
         setback = min_sb
         while setback <= max_sb:
             x = center_x + dir_x * setback
             y = center_y + dir_y * setback
             gx, gy = coord.to_grid(x, y)
-            # Check if this position is blocked (on the layer or for vias)
-            if not obstacles.is_blocked(gx, gy, layer_idx) and not obstacles.is_via_blocked(gx, gy):
+            # Only check track blocking - via blocking is handled separately during routing
+            if not obstacles.is_blocked(gx, gy, layer_idx):
                 return setback, gx, gy
             setback += step
         # If all positions blocked, return the minimum setback anyway
@@ -390,6 +488,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     )
 
     print(f"  Centerline setback: src={src_setback:.2f}mm, tgt={tgt_setback:.2f}mm (min={min_setback}mm)")
+
+    # Note: Connector region via blocking is done upfront in route.py for ALL diff pairs
+    # before any routing starts. This prevents one pair's vias from interfering with
+    # another pair's connector segments (vias span all layers).
 
     # Add allowed cells around source and target
     for dx in range(-allow_radius, allow_radius + 1):

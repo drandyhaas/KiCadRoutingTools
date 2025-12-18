@@ -561,6 +561,77 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
                                blocked_cells, blocked_vias)
 
 
+def add_connector_region_via_blocking(obstacles: GridObstacleMap,
+                                       center_x: float, center_y: float,
+                                       dir_x: float, dir_y: float,
+                                       setback_distance: float,
+                                       spacing_mm: float,
+                                       config: GridRouteConfig,
+                                       debug: bool = False):
+    """Block vias in the connector region between stub center and setback position.
+
+    The connector region extends from the stub center in the stub direction
+    to the setback distance plus margin. This region needs to remain clear
+    for the angled connector segments that will be added after routing.
+    Vias in this region cause DRC errors due to conflicts with the turn segments.
+
+    Args:
+        obstacles: The obstacle map to add via blocking to
+        center_x, center_y: Center point between P and N stubs (in mm)
+        dir_x, dir_y: Normalized direction from stubs toward route
+        setback_distance: Distance from stub center to route start (in mm)
+        spacing_mm: Half-spacing between P and N tracks (in mm)
+        config: Routing configuration
+        debug: If True, print debug info about blocked region
+    """
+    coord = GridCoord(config.grid_step)
+
+    # Block from stub center to setback + margin for via geometry
+    # The margin accounts for via size and clearance requirements
+    margin = config.via_size + config.clearance
+    total_distance = setback_distance + margin
+
+    # Corridor width should accommodate both P and N tracks plus clearance
+    # The turn segments extend perpendicular to the stub direction
+    corridor_half_width = spacing_mm + config.track_width / 2 + config.via_size / 2 + config.clearance
+
+    # Perpendicular direction for corridor width
+    perp_x = -dir_y
+    perp_y = dir_x
+
+    if debug:
+        print(f"    Blocking corridor: center=({center_x:.2f},{center_y:.2f}), "
+              f"dir=({dir_x:.2f},{dir_y:.2f}), dist={total_distance:.2f}mm, "
+              f"half_width={corridor_half_width:.3f}mm")
+
+    # Sample points along the connector region and block vias
+    # Use half grid step for better coverage of diagonal corridors
+    # (diagonal directions can miss grid cells when using full grid step)
+    step = config.grid_step / 2
+    dist = 0.0
+    blocked_set = set()  # Track unique grid positions to avoid duplicates
+    while dist <= total_distance:
+        # Center of corridor at this distance
+        cx = center_x + dir_x * dist
+        cy = center_y + dir_y * dist
+
+        # Block vias across the corridor width (also using half step for width)
+        width_step = config.grid_step / 2
+        width_steps = int(corridor_half_width / width_step) + 1
+        for w in range(-width_steps, width_steps + 1):
+            px = cx + perp_x * w * width_step
+            py = cy + perp_y * w * width_step
+            gx, gy = coord.to_grid(px, py)
+            if (gx, gy) not in blocked_set:
+                blocked_set.add((gx, gy))
+                obstacles.add_blocked_via(gx, gy)
+
+        dist += step
+
+    if debug:
+        print(f"    Blocked {len(blocked_set)} via positions")
+
+
 def get_net_bounds(pcb_data: PCBData, net_ids: List[int], padding: float = 5.0) -> Tuple[float, float, float, float]:
     """Get bounding box around all the nets' components.
 
