@@ -349,7 +349,8 @@ Examples:
     # Step 3: Run DRC check only on successfully routed pairs (unless skipped)
     drc_results = {}  # diff_pair -> (passed, error_count)
 
-    if args.skip_drc:
+    skip_drc = args.skip_drc
+    if skip_drc:
         print("\nSkipping DRC checks (--skip-drc)")
     else:
         for diff_pair in routed_pairs:
@@ -397,10 +398,10 @@ Examples:
 
     # Step 4: Run connectivity check only on successfully routed pairs (unless skipped)
     connectivity_results = {}  # diff_pair -> (passed, disconnected_count)
-    skip_connectivity = args.skip_connectivity
+    skip_connectivity = args.skip_connectivity or args.debug_lines
 
     if skip_connectivity:
-        print("\nSkipping connectivity checks (--skip-connectivity)")
+        print("\nSkipping connectivity checks" + (" (--debug-lines)" if args.debug_lines else " (--skip-connectivity)"))
     else:
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
@@ -450,7 +451,7 @@ Examples:
             print(f"    {pair}")
 
     # DRC summary (only for routed pairs, and only if DRC was run)
-    if routed_pairs and not args.skip_drc:
+    if routed_pairs and not skip_drc:
         drc_passed = [p for p, (ok, _) in drc_results.items() if ok]
         drc_failed = [p for p, (ok, _) in drc_results.items() if not ok]
 
@@ -467,7 +468,7 @@ Examples:
             for pair in drc_failed:
                 _, error_count = drc_results[pair]
                 print(f"    {pair} ({error_count} violation{'s' if error_count != 1 else ''})")
-    elif args.skip_drc:
+    elif skip_drc:
         print(f"\nDRC: skipped")
 
     # Connectivity summary (only for routed pairs, and only if connectivity check was run)
@@ -496,7 +497,7 @@ Examples:
 
     # Return error if any routing failures, DRC failures (if DRC was run), or connectivity failures
     has_failures = bool(failed_routing_pairs)
-    if not args.skip_drc:
+    if not skip_drc:
         has_failures = has_failures or any(not ok for ok, _ in drc_results.values())
     if not skip_connectivity:
         has_failures = has_failures or any(not ok for ok, _ in connectivity_results.values())
