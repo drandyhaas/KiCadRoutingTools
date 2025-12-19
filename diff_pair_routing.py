@@ -601,11 +601,14 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     # Route using pose-based A* with Dubins heuristic
     # Use 8x iterations for diff pairs due to larger pose-based search space
+    # Pass via spacing in grid units so router can check P/N via positions
+    via_spacing_grid = max(1, int(via_spacing / config.grid_step + 0.5))
     pose_path, total_iterations = pose_router.route_pose(
         obstacles,
         src_gx, src_gy, src_layer, src_theta_idx,
         tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
-        config.max_iterations * 8
+        config.max_iterations * 8,
+        diff_pair_via_spacing=via_spacing_grid
     )
 
     if pose_path is None:

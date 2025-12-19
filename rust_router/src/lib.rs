@@ -1468,16 +1468,20 @@ impl PoseRouter {
     ///     tgt_x, tgt_y, tgt_layer: Target position
     ///     tgt_theta_idx: Target heading (0-7, index into DIRECTIONS)
     ///     max_iterations: Maximum A* iterations
+    ///     diff_pair_via_spacing: Optional spacing in grid units for P/N via offset check.
+    ///         If provided, via placement checks that both +offset and -offset positions
+    ///         perpendicular to the heading are clear.
     ///
     /// Returns:
     ///     (path, iterations) where path is list of (gx, gy, theta_idx, layer) or None
-    #[pyo3(signature = (obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations))]
+    #[pyo3(signature = (obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations, diff_pair_via_spacing=None))]
     fn route_pose(
         &self,
         obstacles: &GridObstacleMap,
         src_x: i32, src_y: i32, src_layer: u8, src_theta_idx: u8,
         tgt_x: i32, tgt_y: i32, tgt_layer: u8, tgt_theta_idx: u8,
         max_iterations: u32,
+        diff_pair_via_spacing: Option<i32>,
     ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32) {
         let dubins = DubinsCalculator::new(self.min_radius_grid);
 
@@ -1622,9 +1626,31 @@ impl PoseRouter {
             // - Need at least 2 steps from source before placing a via
             // - Cannot place via while still in post-via straight requirement
             // - After via, must go straight for 2 steps
+            // - If diff_pair_via_spacing is set, check that offset positions are also clear
             let can_place_via = current_steps >= 2 && current_straight_remaining <= 0;
 
-            if can_place_via && !obstacles.is_via_blocked(current.gx, current.gy) {
+            // Check centerline via position
+            let mut via_positions_clear = !obstacles.is_via_blocked(current.gx, current.gy);
+
+            // For diff pairs, also check the perpendicular offset positions where P/N vias will go
+            if via_positions_clear {
+                if let Some(spacing) = diff_pair_via_spacing {
+                    let (dx, dy) = current.direction();
+                    // Perpendicular direction: rotate 90° -> (-dy, dx)
+                    let perp_x = -dy;
+                    let perp_y = dx;
+                    // Check both offset positions
+                    let p_via_x = current.gx + perp_x * spacing;
+                    let p_via_y = current.gy + perp_y * spacing;
+                    let n_via_x = current.gx - perp_x * spacing;
+                    let n_via_y = current.gy - perp_y * spacing;
+                    if obstacles.is_via_blocked(p_via_x, p_via_y) || obstacles.is_via_blocked(n_via_x, n_via_y) {
+                        via_positions_clear = false;
+                    }
+                }
+            }
+
+            if can_place_via && via_positions_clear {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer {
                         continue;
