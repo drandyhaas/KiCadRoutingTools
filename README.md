@@ -126,7 +126,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --diff-pairs "*lvds*"   # Pattern for diff pair nets
 --diff-pair-gap 0.1     # P-N gap (mm)
 --diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
---direction backwards   # Route from target to source
+--direction backward    # Route from target to source
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.

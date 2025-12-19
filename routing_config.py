@@ -35,8 +35,8 @@ class GridRouteConfig:
     heuristic_weight: float = 1.5
     # BGA exclusion zones (auto-detected from PCB) - vias blocked inside these areas
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
-    stub_proximity_radius: float = 1.0  # mm - radius around stubs to penalize
-    stub_proximity_cost: float = 3.0  # mm equivalent cost at stub center
+    stub_proximity_radius: float = 5.0  # mm - radius around stubs to penalize
+    stub_proximity_cost: float = 0.2  # mm equivalent cost at stub center
     # Direction search order: "forward", "backward", or "random"
     direction_order: str = "forward"
     # Differential pair routing parameters

@@ -83,8 +83,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 via_cost: int = 25,
                 max_iterations: int = 200000,
                 heuristic_weight: float = 1.5,
-                stub_proximity_radius: float = 1.0,
-                stub_proximity_cost: float = 3.0,
+                stub_proximity_radius: float = 5.0,
+                stub_proximity_cost: float = 0.2,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
                 diff_pair_centerline_setback: float = None,
@@ -116,8 +116,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_cost: Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)
         max_iterations: Max A* iterations before giving up (default: 200000)
         heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.5)
-        stub_proximity_radius: Radius around stubs to penalize in mm (default: 1.0)
-        stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 3.0)
+        stub_proximity_radius: Radius around stubs to penalize in mm (default: 5.0)
+        stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 0.2)
         diff_pair_patterns: Glob patterns for nets to route as differential pairs
         diff_pair_gap: Gap between P and N traces in differential pairs (default: 0.1mm)
         debug_lines: Output debug geometry on User.2/3/8/9 layers
@@ -808,10 +808,10 @@ Differential pair routing:
                         help="A* heuristic weight, higher=faster but less optimal (default: 1.5)")
 
     # Stub proximity penalty
-    parser.add_argument("--stub-proximity-radius", type=float, default=1.5,
-                        help="Radius around stubs to penalize routing in mm (default: 1.5)")
-    parser.add_argument("--stub-proximity-cost", type=float, default=2.0,
-                        help="Cost penalty near stubs in mm equivalent (default: 2.0)")
+    parser.add_argument("--stub-proximity-radius", type=float, default=5.0,
+                        help="Radius around stubs to penalize routing in mm (default: 5.0)")
+    parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
+                        help="Cost penalty near stubs in mm equivalent (default: 0.2)")
 
     # Differential pair routing
     parser.add_argument("--diff-pairs", "-D", nargs="+",

@@ -48,7 +48,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original` |
-| `--direction` / `-d` | forward | Direction: `forward`, `backwards`, or `random` |
+| `--direction` / `-d` | forward | Direction: `forward`, `backward`, or `random` |
 | `--layers` / `-l` | F.Cu In1.Cu In2.Cu B.Cu | Routing layers |
 | `--no-bga-zones` | false | Disable BGA exclusion zone detection |
 
@@ -56,8 +56,8 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--stub-proximity-radius` | 1.5 | Radius around stubs to penalize (mm) |
-| `--stub-proximity-cost` | 2.0 | Cost penalty at stub center (mm equivalent) |
+| `--stub-proximity-radius` | 5.0 | Radius around stubs to penalize (mm) |
+| `--stub-proximity-cost` | 0.2 | Cost penalty at stub center (mm equivalent) |
 
 ### Differential Pair Options
 
@@ -103,11 +103,11 @@ class GridRouteConfig:
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = []
 
     # Stub proximity
-    stub_proximity_radius: float = 1.0   # mm
-    stub_proximity_cost: float = 3.0     # mm equivalent
+    stub_proximity_radius: float = 5.0   # mm
+    stub_proximity_cost: float = 0.2     # mm equivalent
 
     # Direction
-    direction_order: str = "forward"     # forward, backwards, or random
+    direction_order: str = "forward"     # forward, backward, or random
 
     # Differential pairs
     diff_pair_gap: float = 0.1           # mm between P and N

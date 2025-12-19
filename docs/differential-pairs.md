@@ -6,7 +6,7 @@ This document describes how the router handles differential pairs, including P/N
 
 Differential pairs are routed using a **centerline + offset** approach with **pose-based A* routing**:
 
-1. **Setback position finding** - Find clear positions in front of stubs, scanning ±45° in 15° steps
+1. **Setback position finding** - Find clear positions in front of stubs at fixed setback distance, scanning 0°, ±15° angles
 2. **Pose-based centerline routing** - Route using orientation-aware A* with Dubins path heuristic
 3. **Path simplification** - Remove collinear points and in-place turns for cleaner geometry
 4. **P/N offset generation** - Create P and N paths as perpendicular offsets from centerline
@@ -277,8 +277,8 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--min-turning-radius` | 0.4 | Minimum turning radius for pose-based routing (mm) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
-| `--stub-proximity-radius` | 1.0 | Radius around stubs to penalize routing (mm) |
-| `--stub-proximity-cost` | 3.0 | Cost penalty near stubs (mm equivalent) |
+| `--stub-proximity-radius` | 5.0 | Radius around stubs to penalize routing (mm) |
+| `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
 
 ## Limitations
 

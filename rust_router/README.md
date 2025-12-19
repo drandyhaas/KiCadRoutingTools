@@ -177,9 +177,15 @@ Parameters:
 - `min_radius_grid`: Minimum turning radius in grid units
 
 Methods:
-- `route_pose(obstacles, src_x, src_y, src_layer, src_theta, tgt_x, tgt_y, tgt_layer, tgt_theta, max_iterations)`
+- `route_pose(obstacles, src_x, src_y, src_layer, src_theta, tgt_x, tgt_y, tgt_layer, tgt_theta, max_iterations, diff_pair_via_spacing=None)`
   - `src_theta`, `tgt_theta`: Direction indices 0-7 (0=East, 1=NE, 2=North, ..., 7=SE)
+  - `diff_pair_via_spacing`: Optional grid units for P/N via offset check. When set, via placement verifies that both +offset and -offset positions perpendicular to heading are clear.
   - Returns `(path, iterations)` where path is `List[(gx, gy, theta_idx, layer)]` or `None`
+
+Constraints enforced by PoseRouter:
+- **First move straight**: First move from start must be in the start direction (no immediate turn)
+- **Collinear vias**: At least 2 steps before placing a via; after via, must continue straight for 2 steps before turning
+- **Diff pair via clearance**: When `diff_pair_via_spacing` is set, checks that P/N via positions (perpendicular offsets from centerline) are clear
 
 The Dubins heuristic computes the shortest path length considering:
 - Start and end positions
