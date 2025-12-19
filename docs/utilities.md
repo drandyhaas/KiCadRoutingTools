@@ -398,8 +398,8 @@ DRC failed:         0
 All tests passed!
 ```
 
-Use `--fix-polarity` to automatically swap target pad assignments when polarity
-swap is needed, achieving 100% pass rate.
+Polarity fixing is enabled by default, automatically swapping target pad assignments
+when needed for 100% pass rate. Use `--no-fix-polarity` to disable.
 
 ## Common Workflows
 

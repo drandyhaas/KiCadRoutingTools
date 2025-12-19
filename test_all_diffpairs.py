@@ -73,8 +73,8 @@ def run_test(diff_pair_name, args, verbose=False):
             cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
         if args.diff_pair_turn_length is not None:
             cmd.extend(["--diff-pair-turn-length", str(args.diff_pair_turn_length)])
-        if args.fix_polarity:
-            cmd.append("--fix-polarity")
+        if args.no_fix_polarity:
+            cmd.append("--no-fix-polarity")
 
         result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -181,8 +181,8 @@ def main():
                               help='Maximum distance in front of stubs to start route in mm (default: 5.0)')
     router_group.add_argument('--diff-pair-turn-length', type=float,
                               help='Length of turn segments at start/end of diff pair routes in mm (default: 0.3)')
-    router_group.add_argument('--fix-polarity', action='store_true',
-                              help='Automatically fix P/N polarity swaps by swapping target pads')
+    router_group.add_argument('--no-fix-polarity', action='store_true',
+                              help="Don't swap target pad nets when polarity swap needed (default: fix polarity)")
 
     args = parser.parse_args()
 

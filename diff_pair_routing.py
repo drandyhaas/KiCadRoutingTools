@@ -519,8 +519,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
         Returns (setback, gx, gy, actual_dir_x, actual_dir_y) or None if no valid setback found.
         """
-        # Generate rotated directions: 0°, ±15°, ±30°, ±45° (prefer straight first)
-        angles_deg = [0, 15, -15, 30, -30, 45, -45]
+        # Generate rotated directions: 0°, ±15° (prefer straight first)
+        angles_deg = [0, 15, -15]
         directions = []
         for angle_deg in angles_deg:
             angle_rad = math.radians(angle_deg)

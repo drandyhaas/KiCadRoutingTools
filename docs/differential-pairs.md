@@ -100,17 +100,17 @@ This produces routes that:
 
 ### Setback Position Finding
 
-The router finds clear setback positions by scanning angles from -45° to +45° in 15° steps:
+The router finds clear setback positions by scanning angles from -15° to +15° in 15° steps:
 
 ```python
-angles_deg = [0, 15, -15, 30, -30, 45, -45]  # Prefer straight first
+angles_deg = [0, 15, -15]  # Prefer straight first
 ```
 
 For each angle at each setback distance:
 1. Check if the position is blocked in the obstacle map
 2. Check if the connector path from stub center is clear
 
-This allows finding unblocked positions even when the straight path is blocked by nearby stubs.
+This allows finding unblocked positions even when the straight path is blocked by nearby stubs, while keeping the approach angle within ±15° of the original stub direction (combined with ±22.5° theta quantization, max deviation is ~37.5°).
 
 ### Turn Segments
 
@@ -176,7 +176,7 @@ The router also detects if polarity differs between source and target (polarity 
 Polarity: src_p_sign=1, tgt_p_sign=-1, swap_needed=True, has_vias=True
 ```
 
-**Note:** Polarity swaps can be automatically fixed using `--fix-polarity`, which swaps the target pad net assignments (P↔N) so polarity matches. Without this option, routes requiring polarity swaps may need manual adjustment.
+**Note:** Polarity swaps are automatically fixed by default, which swaps the target pad net assignments (P↔N) so polarity matches. Use `--no-fix-polarity` to disable this behavior.
 
 ## Via Placement
 
@@ -278,18 +278,18 @@ This helps visualize the routing structure without affecting the actual routed c
 |--------|---------|-------------|
 | `--diff-pairs` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
-| `--min-diff-pair-centerline-setback` | 0.6 | Minimum distance in front of stubs to start centerline (mm) |
-| `--max-diff-pair-centerline-setback` | 5.0 | Maximum setback distance to search (mm) |
-| `--diff-pair-turn-length` | 0.3 | Length of turn segments at start/end (mm) |
+| `--min-diff-pair-centerline-setback` | 0.4 | Distance in front of stubs to start centerline (mm) |
+| `--max-diff-pair-centerline-setback` | 0.4 | Maximum setback distance to search (mm) |
+| `--diff-pair-turn-length` | 0.2 | Length of turn segments at start/end (mm) |
 | `--min-turning-radius` | 0.4 | Minimum turning radius for pose-based routing (mm) |
-| `--fix-polarity` | false | Swap target pad nets when polarity swap is needed |
+| `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
 | `--debug-lines` | false | Output debug geometry on User.2/3/4/8/9 layers |
 | `--stub-proximity-radius` | 1.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 3.0 | Cost penalty near stubs (mm equivalent) |
 
 ## Limitations
 
-1. **Polarity swap requires --fix-polarity** - Polarity swaps are detected; use `--fix-polarity` to automatically swap target pads
+1. **Polarity swap** - Enabled by default; use `--no-fix-polarity` to disable automatic target pad swapping
 2. **No length matching** - P and N paths may have slightly different lengths
 3. **Fixed spacing** - Spacing is constant along the route (no tapering)
 4. **Grid snapping** - Centerline endpoints snap to grid

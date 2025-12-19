@@ -87,12 +87,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 stub_proximity_cost: float = 3.0,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
-                min_diff_pair_centerline_setback: float = 0.6,
-                max_diff_pair_centerline_setback: float = 5.0,
-                diff_pair_turn_length: float = 0.3,
+                min_diff_pair_centerline_setback: float = 0.4,
+                max_diff_pair_centerline_setback: float = 0.4,
+                diff_pair_turn_length: float = 0.2,
                 min_turning_radius: float = 0.4,
                 debug_lines: bool = False,
-                fix_polarity: bool = False,
+                fix_polarity: bool = True,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -830,16 +830,16 @@ Differential pair routing:
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
     parser.add_argument("--diff-pair-gap", type=float, default=0.1,
                         help="Gap between P and N traces of differential pairs in mm (default: 0.1)")
-    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=0.6,
-                        help="Minimum distance in front of stubs to start centerline route in mm (default: 0.6)")
-    parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=5.0,
-                        help="Maximum setback to try if minimum is blocked in mm (default: 5.0)")
-    parser.add_argument("--diff-pair-turn-length", type=float, default=0.3,
-                        help="Length of turn segments at start/end of diff pair routes in mm (default: 0.3)")
+    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=0.4,
+                        help="Minimum distance in front of stubs to start centerline route in mm (default: 0.4)")
+    parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=0.4,
+                        help="Maximum setback to try if minimum is blocked in mm (default: 0.4)")
+    parser.add_argument("--diff-pair-turn-length", type=float, default=0.2,
+                        help="Length of turn segments at start/end of diff pair routes in mm (default: 0.2)")
     parser.add_argument("--min-turning-radius", type=float, default=0.4,
                         help="Minimum turning radius for pose-based routing in mm (default: 0.4)")
-    parser.add_argument("--fix-polarity", action="store_true",
-                        help="Swap target pad net assignments if polarity swap is needed")
+    parser.add_argument("--no-fix-polarity", action="store_true",
+                        help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
@@ -903,5 +903,5 @@ Differential pair routing:
                 diff_pair_turn_length=args.diff_pair_turn_length,
                 min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
-                fix_polarity=args.fix_polarity,
+                fix_polarity=not args.no_fix_polarity,
                 vis_callback=vis_callback)

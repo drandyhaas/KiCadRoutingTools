@@ -190,8 +190,8 @@ Examples:
                               help='Minimum turning radius for pose-based routing in mm (default: 0.4)')
     router_group.add_argument('--debug-lines', action='store_true',
                               help='Output debug geometry on User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
-    router_group.add_argument('--fix-polarity', action='store_true',
-                              help='Swap target pad nets if polarity swap is needed')
+    router_group.add_argument('--no-fix-polarity', action='store_true',
+                              help="Don't swap target pad nets if polarity swap is needed (default: fix polarity)")
 
     args = parser.parse_args()
 
@@ -299,8 +299,8 @@ Examples:
         router_cmd.extend(["--min-turning-radius", str(args.min_turning_radius)])
     if args.debug_lines:
         router_cmd.append("--debug-lines")
-    if args.fix_polarity:
-        router_cmd.append("--fix-polarity")
+    if args.no_fix_polarity:
+        router_cmd.append("--no-fix-polarity")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(

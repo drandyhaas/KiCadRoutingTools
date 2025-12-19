@@ -96,7 +96,7 @@ KiCadRoutingTools/
 
 | Metric | Value |
 |--------|-------|
-| 56 LVDS diff pairs | 100% with `--fix-polarity` |
+| 56 LVDS diff pairs | 100% (polarity fix enabled by default) |
 | Parallel testing | 14 threads default |
 | Speedup vs Python | ~10x |
 

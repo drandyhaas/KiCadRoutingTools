@@ -65,8 +65,11 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 |--------|---------|-------------|
 | `--diff-pairs` / `-D` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
-| `--diff-pair-centerline-setback` | 0.4 | Distance in front of stubs to start centerline (mm) |
-| `--fix-polarity` | false | Swap target pad nets when polarity swap needed |
+| `--min-diff-pair-centerline-setback` | 0.4 | Distance in front of stubs to start centerline (mm) |
+| `--max-diff-pair-centerline-setback` | 0.4 | Maximum setback distance to search (mm) |
+| `--diff-pair-turn-length` | 0.2 | Length of turn segments at start/end (mm) |
+| `--min-turning-radius` | 0.4 | Minimum turning radius for pose-based routing (mm) |
+| `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
 
 ### Debug Options
 
