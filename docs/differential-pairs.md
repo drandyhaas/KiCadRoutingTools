@@ -4,16 +4,15 @@ This document describes how the router handles differential pairs, including P/N
 
 ## Overview
 
-Differential pairs are routed using a **centerline + offset** approach with **3-phase extension routing**:
+Differential pairs are routed using a **centerline + offset** approach with **pose-based A* routing**:
 
-1. **Source extension** - Route 10% from source setback toward target, following stub direction
-2. **Target extension** - Route 10% from target setback toward source, following stub direction
-3. **Middle route** - Connect the two extension endpoints using A* with extra clearance
-4. **Path simplification** - Remove collinear points for cleaner geometry
-5. **P/N offset generation** - Create P and N paths as perpendicular offsets from centerline
-6. **Via handling** - Add approach/exit tracks at layer changes to keep P/N parallel
+1. **Setback position finding** - Find clear positions in front of stubs, scanning ±45° in 15° steps
+2. **Pose-based centerline routing** - Route using orientation-aware A* with Dubins path heuristic
+3. **Path simplification** - Remove collinear points and in-place turns for cleaner geometry
+4. **P/N offset generation** - Create P and N paths as perpendicular offsets from centerline
+5. **Via handling** - Add approach/exit tracks at layer changes to keep P/N parallel
 
-The 3-phase approach ensures routes start aligned with stub directions before navigating around obstacles.
+The pose-based approach treats routing as searching through (x, y, θ) space, ensuring routes properly respect entry/exit angles at pads.
 
 ## Identifying Differential Pairs
 
@@ -74,41 +73,44 @@ The centerline endpoints are positioned:
 - At the midpoint between P and N stub tips
 - Offset by the setback distance in the stub direction
 
-### 3-Phase Extension Routing
+### Pose-Based Centerline Routing
 
-Instead of routing directly from source to target, the router uses 3 phases to ensure proper alignment with stub directions:
+The centerline is routed using orientation-aware A* search with state space (x, y, θ, layer):
 
 ```
-Source stub    Source ext     Middle route      Target ext    Target stub
-    |              |               |                |              |
-    o----[10%]---->o<=============>o<----[10%]-----o--------------o
-         ^                                              ^
-    Follows stub                                   Follows stub
-    direction                                      direction
+Source stub                                              Target stub
+    |                                                        |
+    o----> setback ======== Dubins path ========= setback <---o
+           position                               position
 ```
 
-**Phase 1: Source Extension**
-- Routes from source setback point toward target (10% of total distance)
-- First 3+ steps must follow source stub direction (±45°)
-- Extension endpoint must be clear of other stubs and BGA zones
+**State Space**: Each node is defined by position AND heading (θ discretized to 8 directions at 45° intervals).
 
-**Phase 2: Target Extension**
-- Routes from target setback point toward source (10% of total distance)
-- First 3+ steps must follow target stub direction (±45°)
-- Extension endpoint must be clear of other stubs and BGA zones
+**Dubins Heuristic**: Instead of Euclidean distance, the heuristic uses Dubins path length - the shortest curve connecting two poses with prescribed headings and minimum turning radius.
 
-**Phase 3: Middle Route**
-- Connects source and target extension endpoints
-- No direction constraints - free to navigate around obstacles
-- Uses stub proximity costs to avoid routing near other unrouted stubs
+**Transitions**:
+- Move forward in current direction (cost = distance)
+- Turn in place by ±45° (cost based on arc length at min turning radius)
+- Layer change via (keeps position and heading)
 
-**Extension Endpoint Placement**
+This produces routes that:
+- Start in the stub direction at the source
+- End approaching from the correct direction at the target
+- Smoothly curve between orientations respecting the minimum turning radius
 
-Extension endpoints are placed at least `stub_proximity_radius` away from:
-- Any unrouted stub endpoint (prevents congestion)
-- Any BGA exclusion zone (keeps routes out of BGA areas)
+### Setback Position Finding
 
-If the initial 10% point is too close, the search moves outward until a clear point is found.
+The router finds clear setback positions by scanning angles from -45° to +45° in 15° steps:
+
+```python
+angles_deg = [0, 15, -15, 30, -30, 45, -45]  # Prefer straight first
+```
+
+For each angle at each setback distance:
+1. Check if the position is blocked in the obstacle map
+2. Check if the connector path from stub center is clear
+
+This allows finding unblocked positions even when the straight path is blocked by nearby stubs.
 
 ### Turn Segments
 
@@ -119,9 +121,11 @@ Turn segments are added at the start and end of the centerline to align the rout
 The centerline is routed with extra clearance to accommodate both P and N tracks:
 
 ```python
-# Extra clearance = spacing from centerline + one track width
-extra_clearance = (track_width + diff_pair_gap) / 2 + track_width
+# Extra clearance = offset from centerline to P/N track outer edge
+extra_clearance = (track_width + diff_pair_gap) / 2 + track_width / 2
 ```
+
+This accounts for the P/N track offset (half the track-to-track spacing) plus half the track width.
 
 ## P/N Path Generation
 
@@ -274,7 +278,10 @@ This helps visualize the routing structure without affecting the actual routed c
 |--------|---------|-------------|
 | `--diff-pairs` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
-| `--diff-pair-centerline-setback` | 1.5 | Distance in front of stubs to start centerline (mm) |
+| `--min-diff-pair-centerline-setback` | 0.6 | Minimum distance in front of stubs to start centerline (mm) |
+| `--max-diff-pair-centerline-setback` | 5.0 | Maximum setback distance to search (mm) |
+| `--diff-pair-turn-length` | 0.3 | Length of turn segments at start/end (mm) |
+| `--min-turning-radius` | 0.4 | Minimum turning radius for pose-based routing (mm) |
 | `--fix-polarity` | false | Swap target pad nets when polarity swap is needed |
 | `--debug-lines` | false | Output debug geometry on User.2/3/4/8/9 layers |
 | `--stub-proximity-radius` | 1.0 | Radius around stubs to penalize routing (mm) |

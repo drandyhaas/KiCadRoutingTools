@@ -7,7 +7,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Grid-based A* pathfinding** with Rust acceleration (~10x faster than Python)
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
-- **Differential pair routing** with centerline-based P/N pairing and polarity swap handling
+- **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
 - **Batch routing** with incremental obstacle caching (~7x speedup)
 - **Net ordering strategies** - MPS (crossing conflicts), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
