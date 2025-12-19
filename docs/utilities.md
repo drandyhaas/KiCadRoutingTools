@@ -398,8 +398,8 @@ DRC failed:         0
 All tests passed!
 ```
 
-Use `--fix-polarity` to automatically swap target pad assignments when polarity
-swap is needed, achieving 100% pass rate.
+Polarity fixing is enabled by default, automatically swapping target pad assignments
+when needed for 100% pass rate. Use `--no-fix-polarity` to disable.
 
 ## Common Workflows
 
@@ -441,5 +441,5 @@ python list_nets.py board.kicad_pcb U2A --pads
 # Route with debug lines enabled
 python route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-lines
 
-# Open debug.kicad_pcb in KiCad, check User.2/3/8/9 layers
+# Open debug.kicad_pcb in KiCad, check User.3/4/8/9 layers
 ```

@@ -7,7 +7,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Grid-based A* pathfinding** with Rust acceleration (~10x faster than Python)
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
-- **Differential pair routing** with centerline-based P/N pairing and polarity swap handling
+- **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
 - **Batch routing** with incremental obstacle caching (~7x speedup)
 - **Net ordering strategies** - MPS (crossing conflicts), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
@@ -96,7 +96,7 @@ KiCadRoutingTools/
 
 | Metric | Value |
 |--------|-------|
-| 56 LVDS diff pairs | 100% with `--fix-polarity` |
+| 56 LVDS diff pairs | 100% (polarity fix enabled by default) |
 | Parallel testing | 14 threads default |
 | Speedup vs Python | ~10x |
 
@@ -125,6 +125,8 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 # Differential pairs
 --diff-pairs "*lvds*"   # Pattern for diff pair nets
 --diff-pair-gap 0.1     # P-N gap (mm)
+--diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
+--direction backwards   # Route from target to source
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.

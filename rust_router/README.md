@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.5.1**
+**Current Version: 0.7.0**
 
 ## Features
 
@@ -11,6 +11,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - Via cost and layer transitions
 - BGA exclusion zone with allowed cell overrides
 - Stub proximity costs to avoid blocking unrouted nets
+- **Pose-based routing with Dubins heuristic** for differential pair centerlines (orientation-aware A*)
 - **Rectangular pad obstacle blocking** with proper rotation handling
 - **Collinear via constraint** for differential pair routing (ensures clean via geometry)
 - **Via exclusion zones** to prevent routes from conflicting with their own vias (for diff pair P/N offset tracks)
@@ -161,6 +162,32 @@ Methods:
   - `via_exclusion_radius`: Grid cells to exclude around placed vias. Prevents the route from drifting near its own vias, which is important for diff pair routing where P/N tracks are offset from centerline.
   - Returns `(path, iterations)` where path is `List[(gx, gy, layer)]` or `None`
 
+### PoseRouter
+
+Orientation-aware A* router using Dubins path length as heuristic. Used for differential pair centerline routing where start and end orientations are constrained by stub directions.
+
+```python
+router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float)
+```
+
+Parameters:
+- `via_cost`: Cost for layer transitions (scaled by 1000)
+- `h_weight`: Heuristic weight (>1 for faster but less optimal routes)
+- `turn_cost`: Cost for 45° in-place turn (typically `min_radius * π/4 * 1000`)
+- `min_radius_grid`: Minimum turning radius in grid units
+
+Methods:
+- `route_pose(obstacles, src_x, src_y, src_layer, src_theta, tgt_x, tgt_y, tgt_layer, tgt_theta, max_iterations)`
+  - `src_theta`, `tgt_theta`: Direction indices 0-7 (0=East, 1=NE, 2=North, ..., 7=SE)
+  - Returns `(path, iterations)` where path is `List[(gx, gy, theta_idx, layer)]` or `None`
+
+The Dubins heuristic computes the shortest path length considering:
+- Start and end positions
+- Required start and end headings
+- Minimum turning radius constraint
+
+This produces smoother routes that properly respect entry/exit angles at pads.
+
 ## Architecture
 
 - **GridObstacleMap**: Pre-computed obstacle data using FxHashSet for O(1) lookups
@@ -171,6 +198,7 @@ Methods:
 
 ## Version History
 
+- **0.7.0**: Added `PoseRouter` with Dubins path heuristic for orientation-aware differential pair centerline routing. State space expanded to (x, y, θ, layer) where θ is one of 8 directions (45° increments). Dubins path length used as heuristic for better routing with prescribed start/end orientations.
 - **0.5.1**: Added `via_exclusion_radius` parameter to prevent routes from conflicting with their own vias. Tracks via positions along each path and blocks moves that would cause P/N offset tracks to intersect P/N vias.
 - **0.5.0**: Added `collinear_vias` parameter for differential pair routing - enforces symmetric via geometry: `±45° → D → VIA → D → ±45°` (requires 2 steps before via, approach within ±45° of previous, exit same as approach, then ±45° allowed)
 - **0.4.0**: Performance and stability improvements

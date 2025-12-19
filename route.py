@@ -87,11 +87,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 stub_proximity_cost: float = 3.0,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
-                min_diff_pair_centerline_setback: float = 0.6,
-                max_diff_pair_centerline_setback: float = 5.0,
-                diff_pair_turn_length: float = 0.3,
+                diff_pair_centerline_setback: float = None,
+                min_turning_radius: float = 0.4,
                 debug_lines: bool = False,
-                fix_polarity: bool = False,
+                fix_polarity: bool = True,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -164,9 +163,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_radius=stub_proximity_radius,
         stub_proximity_cost=stub_proximity_cost,
         diff_pair_gap=diff_pair_gap,
-        min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
-        max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
-        diff_pair_turn_length=diff_pair_turn_length,
+        diff_pair_centerline_setback=diff_pair_centerline_setback,
+        min_turning_radius=min_turning_radius,
         debug_lines=debug_lines,
         fix_polarity=fix_polarity,
     )
@@ -323,8 +321,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
 
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
-    # Extra clearance = spacing from centerline to each track (at least one track width)
-    diff_pair_extra_clearance = (config.track_width + config.diff_pair_gap) / 2 + config.track_width
+    # Extra clearance = offset from centerline to P/N track outer edge
+    # (P/N tracks extend offset + track_width/2 from centerline)
+    diff_pair_extra_clearance = (config.track_width + config.diff_pair_gap) / 2 + config.track_width / 2
     print(f"Building diff pair obstacle map (extra clearance: {diff_pair_extra_clearance:.3f}mm)...")
     dp_base_start = time.time()
     diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route, diff_pair_extra_clearance)
@@ -653,7 +652,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         # Add debug paths if enabled (using gr_line for User layers)
         if debug_lines:
-            print("Adding debug paths to User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
+            print("Adding debug paths to User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
             for result in results:
                 # Raw A* path on User.9
                 raw_path = result.get('raw_astar_path', [])
@@ -676,23 +675,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
                             routing_text += generate_gr_line_sexpr(
                                 (x1, y1), (x2, y2),
-                                0.15, "User.8"  # Thicker line
+                                0.05, "User.8"
                             ) + "\n"
-
-                # Turn segments on User.2
-                turn_lines = result.get('debug_turn_lines', [])
-                for start, end in turn_lines:
-                    routing_text += generate_gr_line_sexpr(
-                        start, end,
-                        0.1, "User.2"
-                    ) + "\n"
 
                 # Connector segments on User.3
                 connector_lines = result.get('debug_connector_lines', [])
                 for start, end in connector_lines:
                     routing_text += generate_gr_line_sexpr(
                         start, end,
-                        0.1, "User.3"
+                        0.05, "User.3"
                     ) + "\n"
 
                 # Stub direction arrows on User.4
@@ -700,7 +691,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for start, end in stub_arrows:
                     routing_text += generate_gr_line_sexpr(
                         start, end,
-                        0.1, "User.4"
+                        0.05, "User.4"
                     ) + "\n"
 
         last_paren = content.rfind(')')
@@ -827,18 +818,16 @@ Differential pair routing:
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
     parser.add_argument("--diff-pair-gap", type=float, default=0.1,
                         help="Gap between P and N traces of differential pairs in mm (default: 0.1)")
-    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=0.6,
-                        help="Minimum distance in front of stubs to start centerline route in mm (default: 0.6)")
-    parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=5.0,
-                        help="Maximum setback to try if minimum is blocked in mm (default: 5.0)")
-    parser.add_argument("--diff-pair-turn-length", type=float, default=0.3,
-                        help="Length of turn segments at start/end of diff pair routes in mm (default: 0.3)")
-    parser.add_argument("--fix-polarity", action="store_true",
-                        help="Swap target pad net assignments if polarity swap is needed")
+    parser.add_argument("--diff-pair-centerline-setback", type=float, default=None,
+                        help="Distance in front of stubs to start centerline route in mm (default: 2x P-N spacing)")
+    parser.add_argument("--min-turning-radius", type=float, default=0.4,
+                        help="Minimum turning radius for pose-based routing in mm (default: 0.4)")
+    parser.add_argument("--no-fix-polarity", action="store_true",
+                        help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
-                        help="Output debug geometry on User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
+                        help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",
@@ -893,9 +882,8 @@ Differential pair routing:
                 stub_proximity_cost=args.stub_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
-                min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
-                max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
-                diff_pair_turn_length=args.diff_pair_turn_length,
+                diff_pair_centerline_setback=args.diff_pair_centerline_setback,
+                min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
-                fix_polarity=args.fix_polarity,
+                fix_polarity=not args.no_fix_polarity,
                 vis_callback=vis_callback)

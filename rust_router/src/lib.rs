@@ -1156,8 +1156,536 @@ impl VisualRouter {
     }
 }
 
+// =============================================================================
+// Pose-based A* Router with Dubins Heuristic
+// =============================================================================
+// State space: (x, y, theta_idx, layer) where theta_idx is 0-7 for 8 directions
+// Uses Dubins path length as heuristic for better orientation-aware routing.
+
+/// Pose state: (x, y, theta_idx, layer) for orientation-aware routing
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct PoseState {
+    gx: i32,
+    gy: i32,
+    theta_idx: u8,  // 0-7, corresponding to DIRECTIONS indices
+    layer: u8,
+}
+
+impl PoseState {
+    #[inline]
+    fn new(gx: i32, gy: i32, theta_idx: u8, layer: u8) -> Self {
+        Self { gx, gy, theta_idx, layer }
+    }
+
+    #[inline]
+    fn as_key(&self) -> u64 {
+        // Pack into u64: 19 bits x, 19 bits y, 3 bits theta, 8 bits layer
+        // This allows x,y in range [-262144, 262143]
+        let x = (self.gx as u64) & 0x7FFFF;
+        let y = (self.gy as u64) & 0x7FFFF;
+        let t = (self.theta_idx as u64) & 0x7;
+        let l = self.layer as u64;
+        (x << 30) | (y << 11) | (t << 8) | l
+    }
+
+    /// Get the direction vector for this pose's heading
+    #[inline]
+    fn direction(&self) -> (i32, i32) {
+        DIRECTIONS[self.theta_idx as usize]
+    }
+
+    /// Get theta in radians
+    #[inline]
+    fn theta_radians(&self) -> f64 {
+        (self.theta_idx as f64) * std::f64::consts::FRAC_PI_4
+    }
+}
+
+/// A* open set entry for pose-based search
+#[derive(Clone, Copy, Debug)]
+struct PoseOpenEntry {
+    f_score: i32,
+    g_score: i32,
+    state: PoseState,
+    counter: u32,
+}
+
+impl Eq for PoseOpenEntry {}
+
+impl PartialEq for PoseOpenEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.f_score == other.f_score && self.counter == other.counter
+    }
+}
+
+impl Ord for PoseOpenEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse ordering for min-heap (lowest f_score first)
+        other.f_score.cmp(&self.f_score)
+            .then_with(|| other.counter.cmp(&self.counter))
+    }
+}
+
+impl PartialOrd for PoseOpenEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Dubins path calculator for heuristic
+struct DubinsCalculator {
+    /// Minimum turning radius in grid units
+    min_radius: f64,
+}
+
+impl DubinsCalculator {
+    fn new(min_radius: f64) -> Self {
+        Self { min_radius: min_radius.max(0.1) }
+    }
+
+    /// Calculate shortest Dubins path length between two poses
+    /// Returns path length in grid units (scaled by 1000 for integer math)
+    fn path_length(&self,
+                   x1: f64, y1: f64, theta1: f64,
+                   x2: f64, y2: f64, theta2: f64) -> i32 {
+        let r = self.min_radius;
+
+        // Vector from start to goal
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let d = (dx * dx + dy * dy).sqrt();
+
+        // If very close, just return distance
+        if d < 0.001 {
+            // Just need to turn in place - approximate as arc
+            let dtheta = Self::normalize_angle(theta2 - theta1).abs();
+            return (dtheta * r * 1000.0) as i32;
+        }
+
+        // Normalize by turning radius
+        let d_norm = d / r;
+
+        // Angle from start to goal
+        let phi = dy.atan2(dx);
+
+        // Relative angles
+        let alpha = Self::normalize_angle(theta1 - phi);
+        let beta = Self::normalize_angle(theta2 - phi);
+
+        // Try all 6 Dubins path types and return shortest
+        let mut min_len = f64::MAX;
+
+        // CSC paths (Circle-Straight-Circle)
+        if let Some(len) = self.lsl_length(d_norm, alpha, beta) {
+            min_len = min_len.min(len);
+        }
+        if let Some(len) = self.rsr_length(d_norm, alpha, beta) {
+            min_len = min_len.min(len);
+        }
+        if let Some(len) = self.lsr_length(d_norm, alpha, beta) {
+            min_len = min_len.min(len);
+        }
+        if let Some(len) = self.rsl_length(d_norm, alpha, beta) {
+            min_len = min_len.min(len);
+        }
+
+        // CCC paths (Circle-Circle-Circle)
+        if let Some(len) = self.rlr_length(d_norm, alpha, beta) {
+            min_len = min_len.min(len);
+        }
+        if let Some(len) = self.lrl_length(d_norm, alpha, beta) {
+            min_len = min_len.min(len);
+        }
+
+        // Fallback: if no valid path (shouldn't happen), use straight line + turn estimate
+        if min_len == f64::MAX {
+            let dtheta = Self::normalize_angle(theta2 - theta1).abs();
+            min_len = d_norm + dtheta;
+        }
+
+        // Scale back by radius and convert to integer (x1000)
+        (min_len * r * 1000.0) as i32
+    }
+
+    #[inline]
+    fn normalize_angle(a: f64) -> f64 {
+        let mut a = a % (2.0 * std::f64::consts::PI);
+        if a > std::f64::consts::PI {
+            a -= 2.0 * std::f64::consts::PI;
+        } else if a < -std::f64::consts::PI {
+            a += 2.0 * std::f64::consts::PI;
+        }
+        a
+    }
+
+    #[inline]
+    fn mod2pi(a: f64) -> f64 {
+        let mut a = a % (2.0 * std::f64::consts::PI);
+        if a < 0.0 {
+            a += 2.0 * std::f64::consts::PI;
+        }
+        a
+    }
+
+    /// LSL path: Left turn, Straight, Left turn
+    fn lsl_length(&self, d: f64, alpha: f64, beta: f64) -> Option<f64> {
+        let ca = alpha.cos();
+        let sa = alpha.sin();
+        let cb = beta.cos();
+        let sb = beta.sin();
+
+        let tmp = 2.0 + d * d - 2.0 * (ca * cb + sa * sb - d * (sa - sb));
+        if tmp < 0.0 {
+            return None;
+        }
+        let p = tmp.sqrt();
+        let theta = (cb - ca).atan2(d + sa - sb);
+        let t = Self::mod2pi(-alpha + theta);
+        let q = Self::mod2pi(beta - theta);
+
+        Some(t + p + q)
+    }
+
+    /// RSR path: Right turn, Straight, Right turn
+    fn rsr_length(&self, d: f64, alpha: f64, beta: f64) -> Option<f64> {
+        let ca = alpha.cos();
+        let sa = alpha.sin();
+        let cb = beta.cos();
+        let sb = beta.sin();
+
+        let tmp = 2.0 + d * d - 2.0 * (ca * cb + sa * sb - d * (sb - sa));
+        if tmp < 0.0 {
+            return None;
+        }
+        let p = tmp.sqrt();
+        let theta = (ca - cb).atan2(d - sa + sb);
+        let t = Self::mod2pi(alpha - theta);
+        let q = Self::mod2pi(-beta + theta);
+
+        Some(t + p + q)
+    }
+
+    /// LSR path: Left turn, Straight, Right turn
+    fn lsr_length(&self, d: f64, alpha: f64, beta: f64) -> Option<f64> {
+        let ca = alpha.cos();
+        let sa = alpha.sin();
+        let cb = beta.cos();
+        let sb = beta.sin();
+
+        let tmp = -2.0 + d * d + 2.0 * (ca * cb + sa * sb + d * (sa + sb));
+        if tmp < 0.0 {
+            return None;
+        }
+        let p = tmp.sqrt();
+        let theta = (-ca - cb).atan2(d + sa + sb) - (-2.0_f64).atan2(p);
+        let t = Self::mod2pi(-alpha + theta);
+        let q = Self::mod2pi(-beta + theta);
+
+        Some(t + p + q)
+    }
+
+    /// RSL path: Right turn, Straight, Left turn
+    fn rsl_length(&self, d: f64, alpha: f64, beta: f64) -> Option<f64> {
+        let ca = alpha.cos();
+        let sa = alpha.sin();
+        let cb = beta.cos();
+        let sb = beta.sin();
+
+        let tmp = -2.0 + d * d + 2.0 * (ca * cb + sa * sb - d * (sa + sb));
+        if tmp < 0.0 {
+            return None;
+        }
+        let p = tmp.sqrt();
+        let theta = (ca + cb).atan2(d - sa - sb) - (2.0_f64).atan2(p);
+        let t = Self::mod2pi(alpha - theta);
+        let q = Self::mod2pi(beta - theta);
+
+        Some(t + p + q)
+    }
+
+    /// RLR path: Right turn, Left turn, Right turn
+    fn rlr_length(&self, d: f64, alpha: f64, beta: f64) -> Option<f64> {
+        let ca = alpha.cos();
+        let sa = alpha.sin();
+        let cb = beta.cos();
+        let sb = beta.sin();
+
+        let tmp = (6.0 - d * d + 2.0 * (ca * cb + sa * sb + d * (sa - sb))) / 8.0;
+        if tmp.abs() > 1.0 {
+            return None;
+        }
+        let p = Self::mod2pi(2.0 * std::f64::consts::PI - tmp.acos());
+        let theta = (ca - cb).atan2(d - sa + sb);
+        let t = Self::mod2pi(alpha - theta + p / 2.0);
+        let q = Self::mod2pi(alpha - beta - t + p);
+
+        Some(t + p + q)
+    }
+
+    /// LRL path: Left turn, Right turn, Left turn
+    fn lrl_length(&self, d: f64, alpha: f64, beta: f64) -> Option<f64> {
+        let ca = alpha.cos();
+        let sa = alpha.sin();
+        let cb = beta.cos();
+        let sb = beta.sin();
+
+        let tmp = (6.0 - d * d + 2.0 * (ca * cb + sa * sb - d * (sa - sb))) / 8.0;
+        if tmp.abs() > 1.0 {
+            return None;
+        }
+        let p = Self::mod2pi(2.0 * std::f64::consts::PI - tmp.acos());
+        let theta = (cb - ca).atan2(d + sa - sb);
+        let t = Self::mod2pi(-alpha + theta + p / 2.0);
+        let q = Self::mod2pi(beta - alpha - t + p);
+
+        Some(t + p + q)
+    }
+}
+
+/// Pose-based A* Router with Dubins heuristic
+#[pyclass]
+struct PoseRouter {
+    via_cost: i32,
+    h_weight: f32,
+    turn_cost: i32,  // Cost per 45° turn
+    min_radius_grid: f64,  // Minimum turning radius in grid units
+}
+
+#[pymethods]
+impl PoseRouter {
+    #[new]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid))]
+    fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64) -> Self {
+        Self { via_cost, h_weight, turn_cost, min_radius_grid }
+    }
+
+    /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
+    ///
+    /// Args:
+    ///     obstacles: The obstacle map
+    ///     src_x, src_y, src_layer: Source position
+    ///     src_theta_idx: Source heading (0-7, index into DIRECTIONS)
+    ///     tgt_x, tgt_y, tgt_layer: Target position
+    ///     tgt_theta_idx: Target heading (0-7, index into DIRECTIONS)
+    ///     max_iterations: Maximum A* iterations
+    ///
+    /// Returns:
+    ///     (path, iterations) where path is list of (gx, gy, theta_idx, layer) or None
+    #[pyo3(signature = (obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations))]
+    fn route_pose(
+        &self,
+        obstacles: &GridObstacleMap,
+        src_x: i32, src_y: i32, src_layer: u8, src_theta_idx: u8,
+        tgt_x: i32, tgt_y: i32, tgt_layer: u8, tgt_theta_idx: u8,
+        max_iterations: u32,
+    ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32) {
+        let dubins = DubinsCalculator::new(self.min_radius_grid);
+
+        let start = PoseState::new(src_x, src_y, src_theta_idx, src_layer);
+        let goal = PoseState::new(tgt_x, tgt_y, tgt_theta_idx, tgt_layer);
+        let goal_key = goal.as_key();
+
+        let mut open_set = BinaryHeap::new();
+        let mut g_costs: FxHashMap<u64, i32> = FxHashMap::default();
+        let mut parents: FxHashMap<u64, u64> = FxHashMap::default();
+        let mut closed: FxHashSet<u64> = FxHashSet::default();
+        let mut counter: u32 = 0;
+
+        // Initialize with start pose
+        let start_key = start.as_key();
+        let h = self.dubins_heuristic(&dubins, &start, &goal);
+        open_set.push(PoseOpenEntry {
+            f_score: h,
+            g_score: 0,
+            state: start,
+            counter,
+        });
+        counter += 1;
+        g_costs.insert(start_key, 0);
+
+        let mut iterations: u32 = 0;
+
+        while let Some(current_entry) = open_set.pop() {
+            if iterations >= max_iterations {
+                break;
+            }
+            iterations += 1;
+
+            let current = current_entry.state;
+            let current_key = current.as_key();
+            let g = current_entry.g_score;
+
+            if closed.contains(&current_key) {
+                continue;
+            }
+
+            // Goal check: position AND orientation must match
+            if current_key == goal_key {
+                let path = self.reconstruct_pose_path(&parents, current_key);
+                return (Some(path), iterations);
+            }
+
+            closed.insert(current_key);
+
+            // Expand neighbors: can move forward OR turn in place
+            // 1. Move forward in current direction
+            let (dx, dy) = current.direction();
+            let nx = current.gx + dx;
+            let ny = current.gy + dy;
+
+            if !obstacles.is_blocked(nx, ny, current.layer as usize) {
+                let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
+                let neighbor_key = neighbor.as_key();
+
+                if !closed.contains(&neighbor_key) {
+                    let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                    let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny);
+                    let new_g = g + move_cost + proximity_cost;
+
+                    let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                    if new_g < existing_g {
+                        g_costs.insert(neighbor_key, new_g);
+                        parents.insert(neighbor_key, current_key);
+                        let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
+                        open_set.push(PoseOpenEntry {
+                            f_score: new_g + h,
+                            g_score: new_g,
+                            state: neighbor,
+                            counter,
+                        });
+                        counter += 1;
+                    }
+                }
+            }
+
+            // 2. Move + turn by ±45°: move in the new direction while changing heading
+            // With a minimum turning radius, you can't turn in place - must move along an arc
+            // CONSTRAINT: First move from start must be straight in src_theta direction
+            // This ensures the route starts heading in the correct direction
+            if current_key != start_key {
+                for delta in [-1i8, 1i8] {
+                    let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
+                    let (dx, dy) = DIRECTIONS[new_theta as usize];
+                    let nx = current.gx + dx;
+                    let ny = current.gy + dy;
+
+                    if !obstacles.is_blocked(nx, ny, current.layer as usize) {
+                        let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
+                        let neighbor_key = neighbor.as_key();
+
+                        if !closed.contains(&neighbor_key) {
+                            // Cost = movement + turn arc cost
+                            let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                            let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny);
+                            let new_g = g + move_cost + self.turn_cost + proximity_cost;
+
+                            let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                            if new_g < existing_g {
+                                g_costs.insert(neighbor_key, new_g);
+                                parents.insert(neighbor_key, current_key);
+                                let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
+                                open_set.push(PoseOpenEntry {
+                                    f_score: new_g + h,
+                                    g_score: new_g,
+                                    state: neighbor,
+                                    counter,
+                                });
+                                counter += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Via to other layer (keep same position and heading)
+            if !obstacles.is_via_blocked(current.gx, current.gy) {
+                for layer in 0..obstacles.num_layers as u8 {
+                    if layer == current.layer {
+                        continue;
+                    }
+
+                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
+                        continue;
+                    }
+
+                    let neighbor = PoseState::new(current.gx, current.gy, current.theta_idx, layer);
+                    let neighbor_key = neighbor.as_key();
+
+                    if !closed.contains(&neighbor_key) {
+                        let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * 2;
+                        let new_g = g + self.via_cost + proximity_cost;
+
+                        let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                        if new_g < existing_g {
+                            g_costs.insert(neighbor_key, new_g);
+                            parents.insert(neighbor_key, current_key);
+                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
+                            open_set.push(PoseOpenEntry {
+                                f_score: new_g + h,
+                                g_score: new_g,
+                                state: neighbor,
+                                counter,
+                            });
+                            counter += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        (None, iterations)
+    }
+}
+
+impl PoseRouter {
+    /// Dubins heuristic: estimate shortest path considering orientation
+    fn dubins_heuristic(&self, dubins: &DubinsCalculator, state: &PoseState, goal: &PoseState) -> i32 {
+        let theta1 = state.theta_radians();
+        let theta2 = goal.theta_radians();
+
+        let mut h = dubins.path_length(
+            state.gx as f64, state.gy as f64, theta1,
+            goal.gx as f64, goal.gy as f64, theta2,
+        );
+
+        // Add via cost if layers differ
+        if state.layer != goal.layer {
+            h += self.via_cost;
+        }
+
+        (h as f32 * self.h_weight) as i32
+    }
+
+    /// Reconstruct path from parents map
+    fn reconstruct_pose_path(&self, parents: &FxHashMap<u64, u64>, goal_key: u64) -> Vec<(i32, i32, u8, u8)> {
+        let mut path = Vec::new();
+        let mut current_key = goal_key;
+
+        loop {
+            // Unpack key: 19 bits x, 19 bits y, 3 bits theta, 8 bits layer
+            let l = (current_key & 0xFF) as u8;
+            let t = ((current_key >> 8) & 0x7) as u8;
+            let y = ((current_key >> 11) & 0x7FFFF) as i32;
+            let x = ((current_key >> 30) & 0x7FFFF) as i32;
+            // Sign extension for negative coordinates
+            let x = if x & 0x40000 != 0 { x | !0x7FFFF_i32 } else { x };
+            let y = if y & 0x40000 != 0 { y | !0x7FFFF_i32 } else { y };
+
+            path.push((x, y, t, l));
+
+            match parents.get(&current_key) {
+                Some(&parent_key) => current_key = parent_key,
+                None => break,
+            }
+        }
+
+        path.reverse();
+        path
+    }
+}
+
 /// Module version
-const VERSION: &str = "0.6.1";
+const VERSION: &str = "0.7.0";
 
 /// Python module
 #[pymodule]
@@ -1165,6 +1693,7 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", VERSION)?;
     m.add_class::<GridObstacleMap>()?;
     m.add_class::<GridRouter>()?;
+    m.add_class::<PoseRouter>()?;
     m.add_class::<VisualRouter>()?;
     m.add_class::<SearchSnapshot>()?;
     Ok(())
