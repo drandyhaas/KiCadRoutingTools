@@ -273,8 +273,7 @@ This helps visualize the routing structure without affecting the actual routed c
 |--------|---------|-------------|
 | `--diff-pairs` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
-| `--min-diff-pair-centerline-setback` | 0.4 | Distance in front of stubs to start centerline (mm) |
-| `--max-diff-pair-centerline-setback` | 0.4 | Maximum setback distance to search (mm) |
+| `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.4 | Minimum turning radius for pose-based routing (mm) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |

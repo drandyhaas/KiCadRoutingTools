@@ -87,8 +87,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 stub_proximity_cost: float = 3.0,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.1,
-                min_diff_pair_centerline_setback: float = 0.4,
-                max_diff_pair_centerline_setback: float = 0.4,
+                diff_pair_centerline_setback: float = None,
                 min_turning_radius: float = 0.4,
                 debug_lines: bool = False,
                 fix_polarity: bool = True,
@@ -164,8 +163,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_radius=stub_proximity_radius,
         stub_proximity_cost=stub_proximity_cost,
         diff_pair_gap=diff_pair_gap,
-        min_diff_pair_centerline_setback=min_diff_pair_centerline_setback,
-        max_diff_pair_centerline_setback=max_diff_pair_centerline_setback,
+        diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
         debug_lines=debug_lines,
         fix_polarity=fix_polarity,
@@ -820,10 +818,8 @@ Differential pair routing:
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
     parser.add_argument("--diff-pair-gap", type=float, default=0.1,
                         help="Gap between P and N traces of differential pairs in mm (default: 0.1)")
-    parser.add_argument("--min-diff-pair-centerline-setback", type=float, default=0.4,
-                        help="Minimum distance in front of stubs to start centerline route in mm (default: 0.4)")
-    parser.add_argument("--max-diff-pair-centerline-setback", type=float, default=0.4,
-                        help="Maximum setback to try if minimum is blocked in mm (default: 0.4)")
+    parser.add_argument("--diff-pair-centerline-setback", type=float, default=None,
+                        help="Distance in front of stubs to start centerline route in mm (default: 2x P-N spacing)")
     parser.add_argument("--min-turning-radius", type=float, default=0.4,
                         help="Minimum turning radius for pose-based routing in mm (default: 0.4)")
     parser.add_argument("--no-fix-polarity", action="store_true",
@@ -886,8 +882,7 @@ Differential pair routing:
                 stub_proximity_cost=args.stub_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
-                min_diff_pair_centerline_setback=args.min_diff_pair_centerline_setback,
-                max_diff_pair_centerline_setback=args.max_diff_pair_centerline_setback,
+                diff_pair_centerline_setback=args.diff_pair_centerline_setback,
                 min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
                 fix_polarity=not args.no_fix_polarity,

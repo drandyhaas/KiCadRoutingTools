@@ -180,10 +180,8 @@ Examples:
                               help='Cost penalty near stubs in mm equivalent (default: 2.0)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
-    router_group.add_argument('--min-diff-pair-centerline-setback', type=float,
-                              help='Minimum distance in front of stubs to start route in mm (default: 0.6)')
-    router_group.add_argument('--max-diff-pair-centerline-setback', type=float,
-                              help='Maximum setback to try if minimum is blocked in mm (default: 5.0)')
+    router_group.add_argument('--diff-pair-centerline-setback', type=float,
+                              help='Distance in front of stubs to start route in mm (default: 2x P-N spacing)')
     router_group.add_argument('--min-turning-radius', type=float,
                               help='Minimum turning radius for pose-based routing in mm (default: 0.4)')
     router_group.add_argument('--debug-lines', action='store_true',
@@ -287,10 +285,8 @@ Examples:
         router_cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-    if args.min_diff_pair_centerline_setback is not None:
-        router_cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
-    if args.max_diff_pair_centerline_setback is not None:
-        router_cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
+    if args.diff_pair_centerline_setback is not None:
+        router_cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
     if args.min_turning_radius is not None:
         router_cmd.extend(["--min-turning-radius", str(args.min_turning_radius)])
     if args.debug_lines:

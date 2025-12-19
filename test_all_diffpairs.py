@@ -67,10 +67,8 @@ def run_test(diff_pair_name, args, verbose=False):
             cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
         if args.diff_pair_gap is not None:
             cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
-        if args.min_diff_pair_centerline_setback is not None:
-            cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
-        if args.max_diff_pair_centerline_setback is not None:
-            cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
+        if args.diff_pair_centerline_setback is not None:
+            cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
         if args.no_fix_polarity:
             cmd.append("--no-fix-polarity")
 
@@ -173,10 +171,8 @@ def main():
                               help='Cost penalty near stubs in mm equivalent (default: 2.0)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.1)')
-    router_group.add_argument('--min-diff-pair-centerline-setback', type=float,
-                              help='Minimum distance in front of stubs to start route in mm (default: 0.6)')
-    router_group.add_argument('--max-diff-pair-centerline-setback', type=float,
-                              help='Maximum distance in front of stubs to start route in mm (default: 5.0)')
+    router_group.add_argument('--diff-pair-centerline-setback', type=float,
+                              help='Distance in front of stubs to start route in mm (default: 2x P-N spacing)')
     router_group.add_argument('--no-fix-polarity', action='store_true',
                               help="Don't swap target pad nets when polarity swap needed (default: fix polarity)")
 

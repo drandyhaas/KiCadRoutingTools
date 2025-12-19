@@ -376,10 +376,13 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
 
-    # Use max setback for blocking (to be conservative)
-    # The actual setback used during routing may be smaller if position is unblocked
-    src_setback = config.max_diff_pair_centerline_setback
-    tgt_setback = config.max_diff_pair_centerline_setback
+    # Calculate setback (default to 4x spacing = 2x total P-N distance)
+    if config.diff_pair_centerline_setback is not None:
+        setback = config.diff_pair_centerline_setback
+    else:
+        setback = spacing_mm * 4
+    src_setback = setback
+    tgt_setback = setback
 
     return {
         'src_center': (center_src_x, center_src_y),
@@ -500,10 +503,11 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
 
-    # Get minimum setback and try progressively larger ones if blocked
-    min_setback = config.min_diff_pair_centerline_setback
-    max_setback = config.max_diff_pair_centerline_setback
-    setback_step = config.grid_step  # Increment by one grid step
+    # Calculate setback distance (default to 4x spacing = 2x total P-N distance)
+    if config.diff_pair_centerline_setback is not None:
+        setback = config.diff_pair_centerline_setback
+    else:
+        setback = spacing_mm * 4  # Default: 4x the P-N half-spacing = 2x total P-N distance
 
     print(f"  Source direction: ({src_dir_x:.2f}, {src_dir_y:.2f}), target direction: ({tgt_dir_x:.2f}, {tgt_dir_y:.2f})")
 
@@ -514,73 +518,50 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Find open positions for source and target centerline points
     allow_radius = 2
 
-    def find_open_setback(center_x, center_y, dir_x, dir_y, layer_idx, min_sb, max_sb, step, label):
-        """Find the smallest setback where position and connector path are clear.
+    def find_open_position(center_x, center_y, dir_x, dir_y, layer_idx, sb, label):
+        """Find an open position at the given setback distance.
 
-        Starts from min_sb and increases to max_sb, preferring smaller setbacks
-        to minimize connector length. Scans angles from -45° to +45° in 15° steps,
-        preferring straight (0°) first.
-
-        Returns (setback, gx, gy, actual_dir_x, actual_dir_y) or None if no valid setback found.
+        Scans angles 0°, ±15° from the stub direction, preferring straight first.
+        Returns (gx, gy, actual_dir_x, actual_dir_y) or None if all angles blocked.
         """
         # Generate rotated directions: 0°, ±15° (prefer straight first)
         angles_deg = [0, 15, -15]
-        directions = []
+
         for angle_deg in angles_deg:
             angle_rad = math.radians(angle_deg)
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
             # Rotate (dir_x, dir_y) by angle
-            rx = dir_x * cos_a - dir_y * sin_a
-            ry = dir_x * sin_a + dir_y * cos_a
-            directions.append((rx, ry, angle_deg))
+            dx = dir_x * cos_a - dir_y * sin_a
+            dy = dir_x * sin_a + dir_y * cos_a
 
-        setback = min_sb
-        debug_reasons = []
-        while setback <= max_sb:
-            # Try each direction at this setback distance
-            for dx, dy, angle_deg in directions:
-                x = center_x + dx * setback
-                y = center_y + dy * setback
-                gx, gy = coord.to_grid(x, y)
-                # Check track blocking at setback position
-                if obstacles.is_blocked(gx, gy, layer_idx):
-                    debug_reasons.append(f"setback={setback:.2f}mm @{angle_deg:+d}°: pos blocked")
-                else:
-                    # Also check the connector path from stub center to setback position
-                    if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
-                        if angle_deg != 0:
-                            print(f"  {label.capitalize()} setback: using {angle_deg:+d}° offset")
-                        return setback, gx, gy, dx, dy
-                    else:
-                        debug_reasons.append(f"setback={setback:.2f}mm @{angle_deg:+d}°: path blocked")
-            setback += step
-        # No valid setback found
-        print(f"  Error: {label} - no valid setback found (all positions/angles blocked)")
-        for reason in debug_reasons[:5]:
-            print(f"    {reason}")
-        if len(debug_reasons) > 5:
-            print(f"    ... and {len(debug_reasons) - 5} more")
+            x = center_x + dx * sb
+            y = center_y + dy * sb
+            gx, gy = coord.to_grid(x, y)
+
+            # Check track blocking at setback position
+            if not obstacles.is_blocked(gx, gy, layer_idx):
+                # Also check the connector path from stub center to setback position
+                if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
+                    if angle_deg != 0:
+                        print(f"  {label.capitalize()} setback: using {angle_deg:+d}° offset")
+                    return gx, gy, dx, dy
+
+        print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
         return None
 
-    src_result = find_open_setback(
-        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer,
-        min_setback, max_setback, setback_step, "source"
-    )
+    src_result = find_open_position(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source")
     if src_result is None:
         return None
 
-    tgt_result = find_open_setback(
-        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer,
-        min_setback, max_setback, setback_step, "target"
-    )
+    tgt_result = find_open_position(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target")
     if tgt_result is None:
         return None
 
-    src_setback, src_gx, src_gy, src_actual_dir_x, src_actual_dir_y = src_result
-    tgt_setback, tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y = tgt_result
+    src_gx, src_gy, src_actual_dir_x, src_actual_dir_y = src_result
+    tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y = tgt_result
 
-    print(f"  Centerline setback: src={src_setback:.2f}mm, tgt={tgt_setback:.2f}mm (min={min_setback}mm)")
+    print(f"  Centerline setback: {setback:.2f}mm")
 
     # Note: Connector region via blocking is done upfront in route.py for ALL diff pairs
     # before any routing starts. This prevents one pair's vias from interfering with
@@ -618,11 +599,12 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     )
 
     # Route using pose-based A* with Dubins heuristic
+    # Use 8x iterations for diff pairs due to larger pose-based search space
     pose_path, total_iterations = pose_router.route_pose(
         obstacles,
         src_gx, src_gy, src_layer, src_theta_idx,
         tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
-        config.max_iterations
+        config.max_iterations * 8
     )
 
     if pose_path is None:
