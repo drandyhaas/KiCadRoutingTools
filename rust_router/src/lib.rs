@@ -1491,6 +1491,13 @@ impl PoseRouter {
         let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
 
+        // Track steps from source for via constraint (need 2+ steps before via)
+        let mut steps_from_source: FxHashMap<u64, i32> = FxHashMap::default();
+
+        // Track "steps since last via" - when >0, must continue straight (no turns)
+        // Value: remaining straight steps required (2 after via, decrements each step)
+        let mut straight_steps_remaining: FxHashMap<u64, i32> = FxHashMap::default();
+
         // Initialize with start pose
         let start_key = start.as_key();
         let h = self.dubins_heuristic(&dubins, &start, &goal);
@@ -1502,6 +1509,8 @@ impl PoseRouter {
         });
         counter += 1;
         g_costs.insert(start_key, 0);
+        steps_from_source.insert(start_key, 0);
+        straight_steps_remaining.insert(start_key, 0);
 
         let mut iterations: u32 = 0;
 
@@ -1527,6 +1536,10 @@ impl PoseRouter {
 
             closed.insert(current_key);
 
+            // Get current constraint state
+            let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(0);
+            let current_straight_remaining = straight_steps_remaining.get(&current_key).copied().unwrap_or(0);
+
             // Expand neighbors: can move forward OR turn in place
             // 1. Move forward in current direction
             let (dx, dy) = current.direction();
@@ -1546,6 +1559,9 @@ impl PoseRouter {
                     if new_g < existing_g {
                         g_costs.insert(neighbor_key, new_g);
                         parents.insert(neighbor_key, current_key);
+                        // Update constraint tracking for straight move
+                        steps_from_source.insert(neighbor_key, current_steps + 1);
+                        straight_steps_remaining.insert(neighbor_key, (current_straight_remaining - 1).max(0));
                         let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                         open_set.push(PoseOpenEntry {
                             f_score: new_g + h,
@@ -1560,9 +1576,10 @@ impl PoseRouter {
 
             // 2. Move + turn by ±45°: move in the new direction while changing heading
             // With a minimum turning radius, you can't turn in place - must move along an arc
-            // CONSTRAINT: First move from start must be straight in src_theta direction
-            // This ensures the route starts heading in the correct direction
-            if current_key != start_key {
+            // CONSTRAINTS:
+            // - First move from start must be straight in src_theta direction
+            // - After a via, must go straight for 2 steps (no turns)
+            if current_key != start_key && current_straight_remaining <= 0 {
                 for delta in [-1i8, 1i8] {
                     let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
                     let (dx, dy) = DIRECTIONS[new_theta as usize];
@@ -1583,6 +1600,9 @@ impl PoseRouter {
                             if new_g < existing_g {
                                 g_costs.insert(neighbor_key, new_g);
                                 parents.insert(neighbor_key, current_key);
+                                // Update constraint tracking for turn move
+                                steps_from_source.insert(neighbor_key, current_steps + 1);
+                                straight_steps_remaining.insert(neighbor_key, 0);
                                 let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                                 open_set.push(PoseOpenEntry {
                                     f_score: new_g + h,
@@ -1598,7 +1618,13 @@ impl PoseRouter {
             }
 
             // 3. Via to other layer (keep same position and heading)
-            if !obstacles.is_via_blocked(current.gx, current.gy) {
+            // CONSTRAINTS for collinear vias:
+            // - Need at least 2 steps from source before placing a via
+            // - Cannot place via while still in post-via straight requirement
+            // - After via, must go straight for 2 steps
+            let can_place_via = current_steps >= 2 && current_straight_remaining <= 0;
+
+            if can_place_via && !obstacles.is_via_blocked(current.gx, current.gy) {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer {
                         continue;
@@ -1619,6 +1645,9 @@ impl PoseRouter {
                         if new_g < existing_g {
                             g_costs.insert(neighbor_key, new_g);
                             parents.insert(neighbor_key, current_key);
+                            // Via doesn't count as a step, but sets straight requirement
+                            steps_from_source.insert(neighbor_key, current_steps);
+                            straight_steps_remaining.insert(neighbor_key, 2);  // Must go straight for 2 steps after via
                             let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                             open_set.push(PoseOpenEntry {
                                 f_score: new_g + h,
