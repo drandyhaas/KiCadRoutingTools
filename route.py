@@ -679,7 +679,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
                             routing_text += generate_gr_line_sexpr(
                                 (x1, y1), (x2, y2),
-                                0.15, "User.8"  # Thicker line
+                                0.05, "User.8"
                             ) + "\n"
 
                 # Turn segments on User.2
@@ -687,7 +687,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for start, end in turn_lines:
                     routing_text += generate_gr_line_sexpr(
                         start, end,
-                        0.1, "User.2"
+                        0.05, "User.2"
                     ) + "\n"
 
                 # Connector segments on User.3
@@ -695,7 +695,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for start, end in connector_lines:
                     routing_text += generate_gr_line_sexpr(
                         start, end,
-                        0.1, "User.3"
+                        0.05, "User.3"
                     ) + "\n"
 
                 # Stub direction arrows on User.4
@@ -703,7 +703,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for start, end in stub_arrows:
                     routing_text += generate_gr_line_sexpr(
                         start, end,
-                        0.1, "User.4"
+                        0.05, "User.4"
                     ) + "\n"
 
         last_paren = content.rfind(')')
