@@ -67,7 +67,6 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
 | `--min-diff-pair-centerline-setback` | 0.4 | Distance in front of stubs to start centerline (mm) |
 | `--max-diff-pair-centerline-setback` | 0.4 | Maximum setback distance to search (mm) |
-| `--diff-pair-turn-length` | 0.2 | Length of turn segments at start/end (mm) |
 | `--min-turning-radius` | 0.4 | Minimum turning radius for pose-based routing (mm) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
 
@@ -75,7 +74,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-lines` | false | Output debug geometry on User.2/3/4/8/9 layers |
+| `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
 
 ## GridRouteConfig Class
 

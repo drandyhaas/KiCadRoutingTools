@@ -184,12 +184,10 @@ Examples:
                               help='Minimum distance in front of stubs to start route in mm (default: 0.6)')
     router_group.add_argument('--max-diff-pair-centerline-setback', type=float,
                               help='Maximum setback to try if minimum is blocked in mm (default: 5.0)')
-    router_group.add_argument('--diff-pair-turn-length', type=float,
-                              help='Length of turn segments at start/end of diff pair routes in mm (default: 0.3)')
     router_group.add_argument('--min-turning-radius', type=float,
                               help='Minimum turning radius for pose-based routing in mm (default: 0.4)')
     router_group.add_argument('--debug-lines', action='store_true',
-                              help='Output debug geometry on User.2 (turns), User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
+                              help='Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--no-fix-polarity', action='store_true',
                               help="Don't swap target pad nets if polarity swap is needed (default: fix polarity)")
 
@@ -293,8 +291,6 @@ Examples:
         router_cmd.extend(["--min-diff-pair-centerline-setback", str(args.min_diff_pair_centerline_setback)])
     if args.max_diff_pair_centerline_setback is not None:
         router_cmd.extend(["--max-diff-pair-centerline-setback", str(args.max_diff_pair_centerline_setback)])
-    if args.diff_pair_turn_length is not None:
-        router_cmd.extend(["--diff-pair-turn-length", str(args.diff_pair_turn_length)])
     if args.min_turning_radius is not None:
         router_cmd.extend(["--min-turning-radius", str(args.min_turning_radius)])
     if args.debug_lines:

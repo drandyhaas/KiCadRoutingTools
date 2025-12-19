@@ -648,33 +648,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     simplified_path_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], layer)
                              for gx, gy, layer in simplified_path]
 
-    # Add short turn segments at start and end to align connectors
-    # These segments go TOWARD the stubs (opposite of route direction) so that
-    # when offset to P/N tracks, they're parallel to the connector direction.
-    # This prevents P/N connectors from crossing each other.
-    turn_length_mm = config.diff_pair_turn_length
-
-    if len(simplified_path) >= 2:
-        src_turn_length_grid = int(turn_length_mm / config.grid_step)
-        tgt_turn_length_grid = int(turn_length_mm / config.grid_step)
-
-        # Add turn segment at start (facing source stubs)
-        if src_turn_length_grid > 0:
-            first_gx, first_gy, first_layer = simplified_path[0]
-            # Turn goes TOWARD stubs (negative stub direction)
-            turn_start_gx = first_gx - int(src_dir_x * src_turn_length_grid)
-            turn_start_gy = first_gy - int(src_dir_y * src_turn_length_grid)
-            simplified_path.insert(0, (turn_start_gx, turn_start_gy, first_layer))
-
-        # Add turn segment at end (facing target stubs)
-        if tgt_turn_length_grid > 0:
-            last_gx, last_gy, last_layer = simplified_path[-1]
-            # Turn goes TOWARD stubs (negative target direction, since tgt_dir is away from stubs)
-            turn_end_gx = last_gx - int(tgt_dir_x * tgt_turn_length_grid)
-            turn_end_gy = last_gy - int(tgt_dir_y * tgt_turn_length_grid)
-            simplified_path.append((turn_end_gx, turn_end_gy, last_layer))
-
-
     # Determine which side of the centerline P is on
     # Use the first segment direction of the simplified path
     if len(simplified_path) >= 2:
@@ -765,14 +738,12 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Convert floating-point paths to segments and vias
     new_segments = []
     new_vias = []
-    debug_turn_lines = []  # For User.2 layer (turn segments)
     debug_connector_lines = []  # For User.3 layer (connectors)
 
     def float_path_to_geometry(float_path, net_id, original_start, original_end):
         """Convert floating-point path (x, y, layer) to segments and vias."""
         segs = []
         vias = []
-        turn_lines = []  # Debug lines for turn segments
         connector_lines = []  # Debug lines for connectors
         num_segments = len(float_path) - 1
 
@@ -815,10 +786,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     layer=layer_names[layer1],
                     net_id=net_id
                 ))
-                # Collect debug line for turn segments (first and last)
-                is_turn_segment = (i == 0 or i == num_segments - 1)
-                if config.debug_lines and is_turn_segment:
-                    turn_lines.append(((x1, y1), (x2, y2)))
 
         # Add connecting segment to original end if needed
         if original_end and len(float_path) > 0:
@@ -836,7 +803,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 if config.debug_lines:
                     connector_lines.append(((last_x, last_y), (orig_x, orig_y)))
 
-        return segs, vias, turn_lines, connector_lines
+        return segs, vias, connector_lines
 
     # Get original coordinates for P and N nets
     p_start = (p_src_x, p_src_y)
@@ -851,17 +818,15 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         n_end = (n_tgt_x, n_tgt_y)
 
     # Convert P path
-    p_segs, p_vias, p_turn_lines, p_conn_lines = float_path_to_geometry(p_float_path, p_net_id, p_start, p_end)
+    p_segs, p_vias, p_conn_lines = float_path_to_geometry(p_float_path, p_net_id, p_start, p_end)
     new_segments.extend(p_segs)
     new_vias.extend(p_vias)
-    debug_turn_lines.extend(p_turn_lines)
     debug_connector_lines.extend(p_conn_lines)
 
     # Convert N path
-    n_segs, n_vias, n_turn_lines, n_conn_lines = float_path_to_geometry(n_float_path, n_net_id, n_start, n_end)
+    n_segs, n_vias, n_conn_lines = float_path_to_geometry(n_float_path, n_net_id, n_start, n_end)
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
-    debug_turn_lines.extend(n_turn_lines)
     debug_connector_lines.extend(n_conn_lines)
 
     # Convert float paths back to grid format for return value
@@ -910,7 +875,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         'n_path': n_path,
         'raw_astar_path': raw_astar_path,
         'simplified_path': simplified_path_float,
-        'debug_turn_lines': debug_turn_lines,  # For User.2 layer
         'debug_connector_lines': debug_connector_lines,  # For User.3 layer
         'debug_stub_arrows': debug_stub_arrows,  # For User.4 layer
     }
