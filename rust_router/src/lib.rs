@@ -1650,6 +1650,13 @@ impl PoseRouter {
                 }
             }
 
+            // Block vias within stub proximity radius (for diff pairs)
+            if via_positions_clear && diff_pair_via_spacing.is_some() {
+                if obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0 {
+                    via_positions_clear = false;
+                }
+            }
+
             if can_place_via && via_positions_clear {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer {
