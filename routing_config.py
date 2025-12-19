@@ -37,7 +37,7 @@ class GridRouteConfig:
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
     stub_proximity_radius: float = 1.0  # mm - radius around stubs to penalize
     stub_proximity_cost: float = 3.0  # mm equivalent cost at stub center
-    # Direction search order: "forward", "backwards", or "random"
+    # Direction search order: "forward", "backward", or "random"
     direction_order: str = "forward"
     # Differential pair routing parameters
     diff_pair_gap: float = 0.1  # mm - gap between P and N traces (center-to-center = track_width + gap)

@@ -67,7 +67,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     # Determine direction order
     if config.direction_order == "random":
         start_backwards = random.choice([True, False])
-    elif config.direction_order == "backwards":
+    elif config.direction_order in ("backwards", "backward"):
         start_backwards = True
     else:  # "forward" or default
         start_backwards = False
@@ -76,11 +76,11 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     if start_backwards:
         first_sources, first_targets = targets_grid, sources_grid
         second_sources, second_targets = sources_grid, targets_grid
-        first_label, second_label = "backwards", "forward"
+        first_label, second_label = "backward", "forward"
     else:
         first_sources, first_targets = sources_grid, targets_grid
         second_sources, second_targets = targets_grid, sources_grid
-        first_label, second_label = "forward", "backwards"
+        first_label, second_label = "forward", "backward"
 
     # Try first direction, then second if first fails
     reversed_path = False
@@ -228,7 +228,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Determine direction order
     if config.direction_order == "random":
         start_backwards = random.choice([True, False])
-    elif config.direction_order == "backwards":
+    elif config.direction_order in ("backwards", "backward"):
         start_backwards = True
     else:
         start_backwards = False
@@ -236,11 +236,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     if start_backwards:
         first_sources, first_targets = targets_grid, sources_grid
         second_sources, second_targets = sources_grid, targets_grid
-        first_label, second_label = "backwards", "forward"
+        first_label, second_label = "backward", "forward"
     else:
         first_sources, first_targets = sources_grid, targets_grid
         second_sources, second_targets = targets_grid, sources_grid
-        first_label, second_label = "forward", "backwards"
+        first_label, second_label = "forward", "backward"
 
     reversed_path = False
     total_iterations = 0
@@ -394,7 +394,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
     # Determine direction order
     if config.direction_order == "random":
         start_backwards = random.choice([True, False])
-    elif config.direction_order == "backwards":
+    elif config.direction_order in ("backwards", "backward"):
         start_backwards = True
     else:
         start_backwards = False
@@ -402,11 +402,11 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
     if start_backwards:
         first_sources, first_targets = targets_grid, sources_grid
         second_sources, second_targets = sources_grid, targets_grid
-        first_label, second_label = "backwards", "forward"
+        first_label, second_label = "backward", "forward"
     else:
         first_sources, first_targets = sources_grid, targets_grid
         second_sources, second_targets = targets_grid, sources_grid
-        first_label, second_label = "forward", "backwards"
+        first_label, second_label = "forward", "backward"
 
     # Create visual router
     router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)

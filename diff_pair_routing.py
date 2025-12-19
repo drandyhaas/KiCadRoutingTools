@@ -427,8 +427,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     src = sources[0]
     tgt = targets[0]
 
-    # Support backwards routing direction
-    if config.direction_order == "backwards":
+    # Support backward routing direction
+    routing_backwards = config.direction_order in ("backwards", "backward")
+    if routing_backwards:
         src, tgt = tgt, src
 
     p_src_gx, p_src_gy = src[0], src[1]
@@ -864,13 +865,20 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # If polarity was fixed, include info about which target pads need net swaps
     if polarity_fixed:
         result['polarity_fixed'] = True
-        # Original target positions (before swap) - these pads need their nets swapped
-        # Include net IDs so we can find the correct pads
-        orig_p_tgt = (targets[0][5], targets[0][6])
-        orig_n_tgt = (targets[0][7], targets[0][8])
+        # The pads to swap are at the ROUTING target end
+        # When routing forward: routing target = original target (targets[0])
+        # When routing backward: routing target = original source (sources[0])
+        if routing_backwards:
+            # Routing target is original source
+            routing_tgt_end = sources[0]
+        else:
+            # Routing target is original target
+            routing_tgt_end = targets[0]
+        orig_p_tgt = (routing_tgt_end[5], routing_tgt_end[6])
+        orig_n_tgt = (routing_tgt_end[7], routing_tgt_end[8])
         result['swap_target_pads'] = {
-            'p_pos': orig_p_tgt,  # Original P target stub position
-            'n_pos': orig_n_tgt,  # Original N target stub position
+            'p_pos': orig_p_tgt,  # P target stub position (routing target end)
+            'n_pos': orig_n_tgt,  # N target stub position (routing target end)
             'p_net_id': p_net_id,  # P net ID to find target pad
             'n_net_id': n_net_id,  # N net ID to find target pad
         }

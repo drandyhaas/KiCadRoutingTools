@@ -152,7 +152,7 @@ Examples:
     router_group = parser.add_argument_group('Router options (passed to route.py)')
     router_group.add_argument('--ordering', '-o', choices=['inside_out', 'mps', 'original'],
                               help='Net ordering strategy (default: mps)')
-    router_group.add_argument('--direction', '-d', choices=['forward', 'backwards', 'random'],
+    router_group.add_argument('--direction', '-d', choices=['forward', 'backward', 'random'],
                               help='Direction search order')
     router_group.add_argument('--no-bga-zones', action='store_true',
                               help='Disable BGA exclusion zones')

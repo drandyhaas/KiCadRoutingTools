@@ -778,7 +778,7 @@ Differential pair routing:
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
                         default="mps",
                         help="Net ordering strategy: mps (default, crossing conflicts), inside_out, or original")
-    parser.add_argument("--direction", "-d", choices=["forward", "backwards", "random"],
+    parser.add_argument("--direction", "-d", choices=["forward", "backward", "random"],
                         default=None,
                         help="Direction search order for each net route")
     parser.add_argument("--no-bga-zones", action="store_true",
