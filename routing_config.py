@@ -42,7 +42,7 @@ class GridRouteConfig:
     # Differential pair routing parameters
     diff_pair_gap: float = 0.1  # mm - gap between P and N traces (center-to-center = track_width + gap)
     diff_pair_centerline_setback: float = None  # mm - distance in front of stubs to start centerline route (None = 2 * spacing)
-    min_turning_radius: float = 0.4  # mm - minimum turning radius for pose-based routing (default: 2 * via_drill)
+    min_turning_radius: float = 0.6  # mm - minimum turning radius for pose-based routing
     fix_polarity: bool = True  # Swap target pad nets if polarity swap needed
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
 
