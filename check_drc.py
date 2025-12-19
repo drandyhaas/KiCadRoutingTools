@@ -141,11 +141,11 @@ def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tu
     return False, None
 
 
-def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, clearance_margin: float = 0.05):
+def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, clearance_margin: float = 0.10):
     """Check if two segments on the same layer violate clearance.
 
     Args:
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
                          Violations smaller than clearance * clearance_margin are ignored.
 
     Returns:
@@ -159,18 +159,18 @@ def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, cleara
     actual_dist, pt1, pt2 = segment_to_segment_closest_points(seg1, seg2)
     overlap = required_dist - actual_dist
 
-    # Use clearance-based tolerance (5% of clearance by default)
+    # Use clearance-based tolerance (10% of clearance by default)
     tolerance = clearance * clearance_margin
     if overlap > tolerance:
         return True, overlap, pt1, pt2
     return False, 0.0, None, None
 
 
-def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
+def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float]:
     """Check if a via overlaps with a segment on any common layer.
 
     Args:
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
     """
     # Check if they share a layer
     via_layers = set(via.layers) if via.layers else {'F.Cu', 'B.Cu'}
@@ -189,11 +189,11 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     return False, 0.0
 
 
-def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
+def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float]:
     """Check if two vias overlap.
 
     Args:
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
     """
     # All vias are through-hole, so they always potentially conflict
     required_dist = via1.size / 2 + via2.size / 2 + clearance

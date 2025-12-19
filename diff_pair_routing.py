@@ -335,11 +335,8 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
     p_tgt_x, p_tgt_y = tgt[5], tgt[6]
     n_tgt_x, n_tgt_y = tgt[7], tgt[8]
 
-    # Calculate spacing from actual P-N stub distance
-    src_pn_dist = math.sqrt((p_src_x - n_src_x)**2 + (p_src_y - n_src_y)**2)
-    tgt_pn_dist = math.sqrt((p_tgt_x - n_tgt_x)**2 + (p_tgt_y - n_tgt_y)**2)
-    avg_pn_dist = (src_pn_dist + tgt_pn_dist) / 2
-    spacing_mm = avg_pn_dist / 2
+    # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
+    spacing_mm = (config.track_width + config.diff_pair_gap) / 2
 
     # Get segments for P and N nets to find stub directions
     p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
@@ -446,12 +443,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     p_tgt_x, p_tgt_y = tgt[5], tgt[6]
     n_tgt_x, n_tgt_y = tgt[7], tgt[8]
 
-    # Calculate spacing from actual P-N stub distance (use average of source and target)
-    src_pn_dist = math.sqrt((p_src_x - n_src_x)**2 + (p_src_y - n_src_y)**2)
-    tgt_pn_dist = math.sqrt((p_tgt_x - n_tgt_x)**2 + (p_tgt_y - n_tgt_y)**2)
-    avg_pn_dist = (src_pn_dist + tgt_pn_dist) / 2
-    spacing_mm = avg_pn_dist / 2  # Half-spacing for each track from centerline
-    print(f"  P-N spacing: src={src_pn_dist:.3f}mm, tgt={tgt_pn_dist:.3f}mm, using={avg_pn_dist:.3f}mm (offset={spacing_mm:.3f}mm)")
+    # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
+    spacing_mm = (config.track_width + config.diff_pair_gap) / 2
+    print(f"  P-N spacing: {spacing_mm * 2:.3f}mm (offset={spacing_mm:.3f}mm from centerline)")
 
     # Calculate via exclusion radius in grid units
     # When centerline places a via, P/N vias are offset by via_spacing perpendicular to path
