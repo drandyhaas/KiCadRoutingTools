@@ -102,12 +102,30 @@ def run_test(diff_pair_name, args, verbose=False):
         # Only "No route found after N iterations (both directions)" is a failure
         routing_failed = "Routing failed" in output or "(both directions)" in output
 
+        # Parse SUCCESS line for iterations, vias, time
+        # Format: "SUCCESS: X segments, Y vias, Z iterations (T.TTs)"
+        iterations = 0
+        vias = 0
+        route_time = 0.0
+        success_match = re.search(r'SUCCESS:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?,\s*(\d+)\s*iterations?\s*\(([0-9.]+)s\)', output)
+        if success_match:
+            vias = int(success_match.group(2))
+            iterations = int(success_match.group(3))
+            route_time = float(success_match.group(4))
+
+        # Check for polarity fix (N<->P swap)
+        polarity_fixed = "Polarity fixed:" in output or "Polarity swap needed - will swap" in output
+
         return {
             'name': diff_pair_name,
             'routing_success': routing_success and not routing_failed,
             'drc_success': success,
             'polarity_no_vias': polarity_no_vias,
+            'polarity_fixed': polarity_fixed,
             'violations': violations,
+            'iterations': iterations,
+            'vias': vias,
+            'route_time': route_time,
             'output': output if verbose else None
         }
     finally:
@@ -264,12 +282,28 @@ def main():
     routing_failed = [r for r in results if not r['routing_success']]
     polarity_no_vias = [r for r in results if r['routing_success'] and not r['drc_success'] and r['polarity_no_vias']]
     drc_failed = [r for r in results if r['routing_success'] and not r['drc_success'] and not r['polarity_no_vias']]
+    polarity_fixed = [r for r in results if r.get('polarity_fixed', False)]
+
+    # Aggregate statistics
+    total_iterations = sum(r.get('iterations', 0) for r in results)
+    total_vias = sum(r.get('vias', 0) for r in results)
+    total_time = sum(r.get('route_time', 0) for r in results)
 
     print(f"Total:              {len(results)}")
     print(f"Passed:             {len(passed)}")
     print(f"Known limitations:  {len(polarity_no_vias)}")
     print(f"Routing failed:     {len(routing_failed)}")
     print(f"DRC failed:         {len(drc_failed)}")
+    print()
+    print(f"Total iterations:   {total_iterations:,}")
+    print(f"Total via pairs:    {total_vias // 2}")
+    print(f"Total routing time: {total_time:.2f}s")
+    print(f"Polarity swaps:     {len(polarity_fixed)}")
+
+    if polarity_fixed:
+        print(f"\nNets with P<->N polarity swap:")
+        for r in sorted(polarity_fixed, key=lambda x: x['name']):
+            print(f"  - {r['name']}")
 
     if polarity_no_vias:
         print(f"\nKnown limitations (polarity swap without vias):")

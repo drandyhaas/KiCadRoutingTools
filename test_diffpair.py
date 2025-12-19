@@ -311,6 +311,7 @@ Examples:
     #   FAILED: Could not find route (T.TTs)
 
     routing_results = {}  # diff_pair -> True (routed) or False (failed)
+    routing_stats = {}  # diff_pair -> {'iterations': int, 'vias': int, 'time': float, 'polarity_fixed': bool}
 
     for diff_pair in matched_pairs:
         # Find the section for this diff pair
@@ -323,6 +324,15 @@ Examples:
             # Check for SUCCESS or FAILED in this section
             if re.search(r'^\s*SUCCESS:', section, re.MULTILINE):
                 routing_results[diff_pair] = True
+                # Parse SUCCESS line: "SUCCESS: X segments, Y vias, Z iterations (T.TTs)"
+                success_match = re.search(r'SUCCESS:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?,\s*(\d+)\s*iterations?\s*\(([0-9.]+)s\)', section)
+                if success_match:
+                    routing_stats[diff_pair] = {
+                        'iterations': int(success_match.group(3)),
+                        'vias': int(success_match.group(2)),
+                        'time': float(success_match.group(4)),
+                        'polarity_fixed': 'Polarity fixed:' in section or 'Polarity swap needed - will swap' in section
+                    }
             elif re.search(r'^\s*FAILED:', section, re.MULTILINE):
                 routing_results[diff_pair] = False
             else:
@@ -428,9 +438,19 @@ Examples:
     print("SUMMARY")
     print(f"{'='*60}")
 
+    # Aggregate statistics
+    total_iterations = sum(s.get('iterations', 0) for s in routing_stats.values())
+    total_vias = sum(s.get('vias', 0) for s in routing_stats.values())
+    total_time = sum(s.get('time', 0) for s in routing_stats.values())
+    polarity_fixed_pairs = [p for p, s in routing_stats.items() if s.get('polarity_fixed', False)]
+
     # Routing summary
     print(f"\nRouting:")
     print(f"  Succeeded: {len(routed_pairs)}/{len(matched_pairs)}")
+    print(f"  Total iterations: {total_iterations:,}")
+    print(f"  Total via pairs:  {total_vias // 2}")
+    print(f"  Total time:       {total_time:.2f}s")
+    print(f"  Polarity swaps:   {len(polarity_fixed_pairs)}")
 
     if routed_pairs:
         print(f"  Routed:")
@@ -483,6 +503,11 @@ Examples:
                 print(f"    {pair} ({issue_count} disconnected net{'s' if issue_count != 1 else ''})")
     elif skip_connectivity:
         print(f"\nConnectivity: skipped")
+
+    if polarity_fixed_pairs:
+        print(f"\nNets with P<->N polarity swap:")
+        for pair in sorted(polarity_fixed_pairs):
+            print(f"  - {pair}")
 
     print(f"\nOutput file: {output_pcb}")
     print(f"{'='*60}")
