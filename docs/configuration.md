@@ -111,8 +111,8 @@ class GridRouteConfig:
 
     # Differential pairs
     diff_pair_gap: float = 0.1           # mm between P and N
-    diff_pair_centerline_setback: float = 0.4  # mm in front of stubs
-    fix_polarity: bool = False           # swap target pads if polarity swap needed
+    diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
+    fix_polarity: bool = True            # swap target pads if polarity swap needed
 
     # Debug
     debug_lines: bool = False

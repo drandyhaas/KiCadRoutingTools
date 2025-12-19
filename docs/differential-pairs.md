@@ -100,13 +100,13 @@ This produces routes that:
 
 ### Setback Position Finding
 
-The router finds clear setback positions by scanning angles from -15° to +15° in 15° steps:
+The router uses a fixed setback distance (default: 2× P-N spacing) and scans angles 0°, ±15° to find an unblocked position:
 
 ```python
 angles_deg = [0, 15, -15]  # Prefer straight first
 ```
 
-For each angle at each setback distance:
+For each angle:
 1. Check if the position is blocked in the obstacle map
 2. Check if the connector path from stub center is clear
 
