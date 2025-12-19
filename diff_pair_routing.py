@@ -514,25 +514,49 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         """Find the smallest setback where position and connector path are clear.
 
         Starts from min_sb and increases to max_sb, preferring smaller setbacks
-        to minimize connector length.
-        Checks both the setback position and the connector path from stub center.
-        Returns None if no valid setback is found.
+        to minimize connector length. Scans angles from -45° to +45° in 15° steps,
+        preferring straight (0°) first.
+
+        Returns (setback, gx, gy, actual_dir_x, actual_dir_y) or None if no valid setback found.
         """
+        # Generate rotated directions: 0°, ±15°, ±30°, ±45° (prefer straight first)
+        angles_deg = [0, 15, -15, 30, -30, 45, -45]
+        directions = []
+        for angle_deg in angles_deg:
+            angle_rad = math.radians(angle_deg)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            # Rotate (dir_x, dir_y) by angle
+            rx = dir_x * cos_a - dir_y * sin_a
+            ry = dir_x * sin_a + dir_y * cos_a
+            directions.append((rx, ry, angle_deg))
+
         setback = min_sb
+        debug_reasons = []
         while setback <= max_sb:
-            x = center_x + dir_x * setback
-            y = center_y + dir_y * setback
-            gx, gy = coord.to_grid(x, y)
-            # Check track blocking at setback position
-            if not obstacles.is_blocked(gx, gy, layer_idx):
-                # Also check the connector path from stub center to setback position
-                # Use connector_obstacles (base map) since connectors are single tracks
-                # that don't need the extra diff pair clearance
-                if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
-                    return setback, gx, gy
+            # Try each direction at this setback distance
+            for dx, dy, angle_deg in directions:
+                x = center_x + dx * setback
+                y = center_y + dy * setback
+                gx, gy = coord.to_grid(x, y)
+                # Check track blocking at setback position
+                if obstacles.is_blocked(gx, gy, layer_idx):
+                    debug_reasons.append(f"setback={setback:.2f}mm @{angle_deg:+d}°: pos blocked")
+                else:
+                    # Also check the connector path from stub center to setback position
+                    if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
+                        if angle_deg != 0:
+                            print(f"  {label.capitalize()} setback: using {angle_deg:+d}° offset")
+                        return setback, gx, gy, dx, dy
+                    else:
+                        debug_reasons.append(f"setback={setback:.2f}mm @{angle_deg:+d}°: path blocked")
             setback += step
         # No valid setback found
-        print(f"  Error: {label} - no valid setback found (all positions or connector paths blocked)")
+        print(f"  Error: {label} - no valid setback found (all positions/angles blocked)")
+        for reason in debug_reasons[:5]:
+            print(f"    {reason}")
+        if len(debug_reasons) > 5:
+            print(f"    ... and {len(debug_reasons) - 5} more")
         return None
 
     src_result = find_open_setback(
@@ -549,8 +573,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     if tgt_result is None:
         return None
 
-    src_setback, src_gx, src_gy = src_result
-    tgt_setback, tgt_gx, tgt_gy = tgt_result
+    src_setback, src_gx, src_gy, src_actual_dir_x, src_actual_dir_y = src_result
+    tgt_setback, tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y = tgt_result
 
     print(f"  Centerline setback: src={src_setback:.2f}mm, tgt={tgt_setback:.2f}mm (min={min_setback}mm)")
 
@@ -566,12 +590,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     obstacles.add_source_target_cell(src_gx, src_gy, src_layer)
     obstacles.add_source_target_cell(tgt_gx, tgt_gy, tgt_layer)
 
-    # Convert stub directions to theta_idx for pose-based routing
-    src_theta_idx = direction_to_theta_idx(src_dir_x, src_dir_y)
+    # Convert actual setback directions to theta_idx for pose-based routing
+    # (these may be rotated from stub directions if an angled setback was used)
+    src_theta_idx = direction_to_theta_idx(src_actual_dir_x, src_actual_dir_y)
     # Target direction is the direction we arrive FROM, so negate it
-    tgt_theta_idx = direction_to_theta_idx(-tgt_dir_x, -tgt_dir_y)
+    tgt_theta_idx = direction_to_theta_idx(-tgt_actual_dir_x, -tgt_actual_dir_y)
 
-    print(f"  Pose routing: src_theta={src_theta_idx} ({src_dir_x:.2f},{src_dir_y:.2f}), tgt_theta={tgt_theta_idx} (arriving from {-tgt_dir_x:.2f},{-tgt_dir_y:.2f})")
+    print(f"  Pose routing: src_theta={src_theta_idx} ({src_actual_dir_x:.2f},{src_actual_dir_y:.2f}), tgt_theta={tgt_theta_idx} (arriving from {-tgt_actual_dir_x:.2f},{-tgt_actual_dir_y:.2f})")
 
     # Calculate turning radius in grid units
     min_radius_grid = config.min_turning_radius / config.grid_step
