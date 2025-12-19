@@ -1560,34 +1560,38 @@ impl PoseRouter {
 
             // 2. Move + turn by ±45°: move in the new direction while changing heading
             // With a minimum turning radius, you can't turn in place - must move along an arc
-            for delta in [-1i8, 1i8] {
-                let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
-                let (dx, dy) = DIRECTIONS[new_theta as usize];
-                let nx = current.gx + dx;
-                let ny = current.gy + dy;
+            // CONSTRAINT: First move from start must be straight in src_theta direction
+            // This ensures the route starts heading in the correct direction
+            if current_key != start_key {
+                for delta in [-1i8, 1i8] {
+                    let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
+                    let (dx, dy) = DIRECTIONS[new_theta as usize];
+                    let nx = current.gx + dx;
+                    let ny = current.gy + dy;
 
-                if !obstacles.is_blocked(nx, ny, current.layer as usize) {
-                    let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
-                    let neighbor_key = neighbor.as_key();
+                    if !obstacles.is_blocked(nx, ny, current.layer as usize) {
+                        let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
+                        let neighbor_key = neighbor.as_key();
 
-                    if !closed.contains(&neighbor_key) {
-                        // Cost = movement + turn arc cost
-                        let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
-                        let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny);
-                        let new_g = g + move_cost + self.turn_cost + proximity_cost;
+                        if !closed.contains(&neighbor_key) {
+                            // Cost = movement + turn arc cost
+                            let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                            let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny);
+                            let new_g = g + move_cost + self.turn_cost + proximity_cost;
 
-                        let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
-                        if new_g < existing_g {
-                            g_costs.insert(neighbor_key, new_g);
-                            parents.insert(neighbor_key, current_key);
-                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
-                            open_set.push(PoseOpenEntry {
-                                f_score: new_g + h,
-                                g_score: new_g,
-                                state: neighbor,
-                                counter,
-                            });
-                            counter += 1;
+                            let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                            if new_g < existing_g {
+                                g_costs.insert(neighbor_key, new_g);
+                                parents.insert(neighbor_key, current_key);
+                                let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
+                                open_set.push(PoseOpenEntry {
+                                    f_score: new_g + h,
+                                    g_score: new_g,
+                                    state: neighbor,
+                                    counter,
+                                });
+                                counter += 1;
+                            }
                         }
                     }
                 }
