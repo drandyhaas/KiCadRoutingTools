@@ -424,6 +424,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     src = sources[0]
     tgt = targets[0]
 
+    # Support backwards routing direction
+    if config.direction_order == "backwards":
+        src, tgt = tgt, src
+
     p_src_gx, p_src_gy = src[0], src[1]
     n_src_gx, n_src_gy = src[2], src[3]
     src_layer = src[4]
