@@ -196,8 +196,25 @@ This produces smoother routes that properly respect entry/exit angles at pads.
 
 ## Architecture
 
+### Source Files
+
+```
+src/
+├── lib.rs           # Module declarations, Python bindings
+├── types.rs         # Shared types: GridState, OpenEntry, PoseState, constants
+├── obstacle_map.rs  # GridObstacleMap implementation
+├── router.rs        # GridRouter A* implementation
+├── visual_router.rs # VisualRouter for debugging/visualization
+├── dubins.rs        # Dubins path calculator for orientation heuristic
+└── pose_router.rs   # PoseRouter for orientation-aware routing
+```
+
+### Key Components
+
 - **GridObstacleMap**: Pre-computed obstacle data using FxHashSet for O(1) lookups
 - **GridRouter**: A* implementation with binary heap and packed state keys
+- **PoseRouter**: Orientation-aware A* with Dubins path heuristic
+- **DubinsCalculator**: Computes shortest Dubins path length (LSL, RSR, LSR, RSL, RLR, LRL)
 - **State keys**: Packed into u64 for fast hashing (20 bits x, 20 bits y, 8 bits layer)
 - **Hash function**: Uses rustc-hash (FxHash) for faster integer hashing than default SipHash
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000)
