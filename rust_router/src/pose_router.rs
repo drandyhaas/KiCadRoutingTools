@@ -73,8 +73,12 @@ impl PoseRouter {
         let mut steps_from_source: FxHashMap<u64, i32> = FxHashMap::default();
 
         // Track "steps since last via" - when >0, must continue straight (no turns)
-        // Value: remaining straight steps required (2 after via, decrements each step)
+        // Value: remaining straight steps required (straight_after_via after via, decrements each step)
         let mut straight_steps_remaining: FxHashMap<u64, i32> = FxHashMap::default();
+
+        // Track consecutive straight steps taken (resets to 0 on turn)
+        // Used to require straight approach before via (prevents P/N tracks from curving near each other's vias)
+        let mut straight_steps_taken: FxHashMap<u64, i32> = FxHashMap::default();
 
         // Initialize with start pose
         let start_key = start.as_key();
@@ -89,6 +93,7 @@ impl PoseRouter {
         g_costs.insert(start_key, 0);
         steps_from_source.insert(start_key, 0);
         straight_steps_remaining.insert(start_key, 0);
+        straight_steps_taken.insert(start_key, 0);
 
         let mut iterations: u32 = 0;
 
@@ -117,6 +122,7 @@ impl PoseRouter {
             // Get current constraint state
             let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(0);
             let current_straight_remaining = straight_steps_remaining.get(&current_key).copied().unwrap_or(0);
+            let current_straight_taken = straight_steps_taken.get(&current_key).copied().unwrap_or(0);
 
             // Expand neighbors: can move forward OR turn in place
             // 1. Move forward in current direction
@@ -140,6 +146,7 @@ impl PoseRouter {
                         // Update constraint tracking for straight move
                         steps_from_source.insert(neighbor_key, current_steps + 1);
                         straight_steps_remaining.insert(neighbor_key, (current_straight_remaining - 1).max(0));
+                        straight_steps_taken.insert(neighbor_key, current_straight_taken + 1);
                         let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                         open_set.push(PoseOpenEntry {
                             f_score: new_g + h,
@@ -181,6 +188,8 @@ impl PoseRouter {
                                 // Update constraint tracking for turn move
                                 steps_from_source.insert(neighbor_key, current_steps + 1);
                                 straight_steps_remaining.insert(neighbor_key, 0);
+                                // Reset to 1: this is the first step in the new direction
+                                straight_steps_taken.insert(neighbor_key, 1);
                                 let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                                 open_set.push(PoseOpenEntry {
                                     f_score: new_g + h,
@@ -199,9 +208,12 @@ impl PoseRouter {
             // CONSTRAINTS for collinear vias:
             // - Need at least 2 steps from source before placing a via
             // - Cannot place via while still in post-via straight requirement
-            // - After via, must go straight for 2 steps
+            // - Must approach via straight for min_radius steps (prevents P/N curving near each other's vias)
+            // - After via, must go straight for min_radius steps
             // - If diff_pair_via_spacing is set, check that offset positions are also clear
-            let can_place_via = current_steps >= 2 && current_straight_remaining <= 0;
+            let can_place_via = current_steps >= 2
+                && current_straight_remaining <= 0
+                && current_straight_taken >= self.straight_after_via;
 
             // Check centerline via position
             let mut via_positions_clear = !obstacles.is_via_blocked(current.gx, current.gy);
@@ -305,6 +317,7 @@ impl PoseRouter {
         let mut counter: u32 = 0;
         let mut steps_from_source: FxHashMap<u64, i32> = FxHashMap::default();
         let mut straight_steps_remaining: FxHashMap<u64, i32> = FxHashMap::default();
+        let mut straight_steps_taken: FxHashMap<u64, i32> = FxHashMap::default();
 
         let start_key = start.as_key();
         let h = self.dubins_heuristic(&dubins, &start, &goal);
@@ -313,6 +326,7 @@ impl PoseRouter {
         g_costs.insert(start_key, 0);
         steps_from_source.insert(start_key, 0);
         straight_steps_remaining.insert(start_key, 0);
+        straight_steps_taken.insert(start_key, 0);
 
         let mut iterations: u32 = 0;
 
@@ -335,6 +349,7 @@ impl PoseRouter {
 
             let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(0);
             let current_straight_remaining = straight_steps_remaining.get(&current_key).copied().unwrap_or(0);
+            let current_straight_taken = straight_steps_taken.get(&current_key).copied().unwrap_or(0);
 
             // 1. Move forward in current direction
             let (dx, dy) = current.direction();
@@ -358,6 +373,7 @@ impl PoseRouter {
                         parents.insert(neighbor_key, current_key);
                         steps_from_source.insert(neighbor_key, current_steps + 1);
                         straight_steps_remaining.insert(neighbor_key, (current_straight_remaining - 1).max(0));
+                        straight_steps_taken.insert(neighbor_key, current_straight_taken + 1);
                         let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                         open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
                         counter += 1;
@@ -392,6 +408,7 @@ impl PoseRouter {
                             parents.insert(neighbor_key, current_key);
                             steps_from_source.insert(neighbor_key, current_steps + 1);
                             straight_steps_remaining.insert(neighbor_key, 0);
+                            straight_steps_taken.insert(neighbor_key, 1);
                             let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                             open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
                             counter += 1;
@@ -401,7 +418,9 @@ impl PoseRouter {
             }
 
             // 3. Via to other layer
-            let can_place_via = current_steps >= 2 && current_straight_remaining <= 0;
+            let can_place_via = current_steps >= 2
+                && current_straight_remaining <= 0
+                && current_straight_taken >= self.straight_after_via;
             let mut via_positions_clear = !obstacles.is_via_blocked(current.gx, current.gy);
 
             // Track via blocking for all layers
