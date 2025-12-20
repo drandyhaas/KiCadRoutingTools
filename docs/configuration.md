@@ -42,6 +42,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--via-cost` | 25 | Via penalty in grid steps (doubled for diff pairs) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
 | `--heuristic-weight` | 1.5 | A* greediness (>1 = faster, <1 = more optimal) |
+| `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 
 ### Routing Strategy Options
 
@@ -98,6 +99,7 @@ class GridRouteConfig:
     via_cost: int = 25            # grid steps penalty for via (doubled for diff pairs)
     max_iterations: int = 200000
     heuristic_weight: float = 1.5
+    max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
 
     # Layers
     layers: List[str] = ['F.Cu', 'B.Cu']

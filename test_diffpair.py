@@ -318,143 +318,23 @@ Examples:
     )
     router_output = result.stdout if result.stdout else ""
 
-    # Parse router output to determine which pairs succeeded/failed routing
-    # Router format:
-    #   [1/10] Routing diff pair lvds_rx2_0
-    #   ...
-    #   SUCCESS: X segments, Y vias, Z iterations (T.TTs)
-    # or:
-    #   FAILED: Could not find route (T.TTs)
-    #
-    # With rip-up and reroute:
-    #   FAILED: ...
-    #   Ripping up diff pair X (P and N) to retry...
-    #   RETRY SUCCESS: ...
-    #   ...
-    #   [REROUTE N] Re-routing ripped diff pair X
-    #   SUCCESS: ...
+    # Parse JSON summary from router output
+    import json
+    json_summary = None
+    for line in router_output.split('\n'):
+        if line.startswith('JSON_SUMMARY: '):
+            try:
+                json_summary = json.loads(line[14:])
+            except json.JSONDecodeError:
+                pass
+            break
 
-    routing_results = {}  # diff_pair -> True (routed) or False (failed)
-    routing_stats = {}  # diff_pair -> {'iterations': int, 'vias': int, 'time': float, 'polarity_fixed': bool}
-    failed_stats = {}  # diff_pair -> {'time': float} for failed routes
-    ripped_pairs = set()  # Pairs that were ripped up (need rerouting)
-    retry_success_pairs = set()  # Pairs that succeeded after rip-up retry
+    if not json_summary:
+        print("ERROR: Could not parse JSON_SUMMARY from router output")
+        return 1
 
-    for diff_pair in matched_pairs:
-        # Find the section for this diff pair's initial routing attempt
-        # Pattern: "Routing diff pair {name}" followed by content until next routing or reroute section
-        section_pattern = rf'\[\d+/\d+\]\s+Routing diff pair\s+{re.escape(diff_pair)}\b([\s\S]*?)(?=\[\d+/\d+\]\s+Routing|\[REROUTE|\nRouting complete|$)'
-        section_match = re.search(section_pattern, router_output)
-
-        if section_match:
-            section = section_match.group(1)
-
-            # Check for RETRY SUCCESS (succeeded after ripping up another net)
-            if re.search(r'RETRY SUCCESS:', section):
-                routing_results[diff_pair] = True
-                retry_success_pairs.add(diff_pair)
-                # Parse RETRY SUCCESS line
-                success_match = re.search(r'RETRY SUCCESS:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?', section)
-                if success_match:
-                    routing_stats[diff_pair] = {
-                        'iterations': 0,  # Not reported in RETRY SUCCESS
-                        'vias': int(success_match.group(2)),
-                        'time': 0,
-                        'polarity_fixed': 'Polarity fixed:' in section or 'Polarity swap needed - will swap' in section,
-                        'via_ripup': True
-                    }
-            # Check for regular SUCCESS
-            elif re.search(r'^\s*SUCCESS:', section, re.MULTILINE):
-                routing_results[diff_pair] = True
-                # Parse SUCCESS line: "SUCCESS: X segments, Y vias, Z iterations (T.TTs)"
-                success_match = re.search(r'SUCCESS:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?,\s*(\d+)\s*iterations?\s*\(([0-9.]+)s\)', section)
-                if success_match:
-                    routing_stats[diff_pair] = {
-                        'iterations': int(success_match.group(3)),
-                        'vias': int(success_match.group(2)),
-                        'time': float(success_match.group(4)),
-                        'polarity_fixed': 'Polarity fixed:' in section or 'Polarity swap needed - will swap' in section
-                    }
-            elif re.search(r'^\s*FAILED:', section, re.MULTILINE):
-                routing_results[diff_pair] = False
-                # Parse time from FAILED line: "FAILED: Could not find route (T.TTs)"
-                failed_match = re.search(r'FAILED:.*\(([0-9.]+)s\)', section)
-                if failed_match:
-                    failed_stats[diff_pair] = {'time': float(failed_match.group(1))}
-            else:
-                # No explicit SUCCESS/FAILED found, check for other indicators
-                if 'No route found' in section or 'No valid source' in section or 'No valid target' in section:
-                    routing_results[diff_pair] = False
-                else:
-                    routing_results[diff_pair] = True  # Assume success
-
-            # Check if this pair was ripped up (appears in "Ripping up diff pair X" message)
-            # But only count it as ripped if it wasn't restored due to RETRY FAILED
-            ripped_match = re.search(rf'Ripping up diff pair\s+{re.escape(diff_pair)}\s+\(P and N\)', router_output)
-            if ripped_match:
-                # Check if the rip was reversed (RETRY FAILED: Restoring)
-                # The restore message uses the net name (with _P or _N suffix)
-                restored_match = re.search(rf'RETRY FAILED: Restoring\s+{re.escape(diff_pair)}', router_output)
-                if not restored_match:
-                    ripped_pairs.add(diff_pair)
-        else:
-            # Pair not found in output - assume success (DRC will catch issues)
-            routing_results[diff_pair] = True
-
-    # Parse REROUTE section for ripped pairs
-    for diff_pair in ripped_pairs:
-        reroute_pattern = rf'\[REROUTE\s+\d+\]\s+Re-routing ripped diff pair\s+{re.escape(diff_pair)}\b([\s\S]*?)(?=\[REROUTE|\nRouting complete|$)'
-        reroute_match = re.search(reroute_pattern, router_output)
-
-        if reroute_match:
-            reroute_section = reroute_match.group(1)
-            # REROUTE section uses "REROUTE SUCCESS:" or "REROUTE RETRY SUCCESS (N=X):" format
-            if re.search(r'REROUTE (RETRY )?SUCCESS', reroute_section):
-                routing_results[diff_pair] = True
-                # Parse: "REROUTE SUCCESS: X segments, Y vias (T.TTs)" or "REROUTE RETRY SUCCESS (N=X): X segments, Y vias"
-                success_match = re.search(r'REROUTE (RETRY )?SUCCESS[^:]*:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?(?:\s*\(([0-9.]+)s\))?', reroute_section)
-                if success_match:
-                    time_val = float(success_match.group(4)) if success_match.group(4) else 0.0
-                    routing_stats[diff_pair] = {
-                        'iterations': 0,  # Not reported in REROUTE SUCCESS
-                        'vias': int(success_match.group(3)),
-                        'time': time_val,
-                        'polarity_fixed': False,
-                        'rerouted': True
-                    }
-                else:
-                    # Match found but couldn't parse stats - still mark as rerouted
-                    routing_stats[diff_pair] = {
-                        'iterations': 0,
-                        'vias': 0,
-                        'time': 0,
-                        'polarity_fixed': False,
-                        'rerouted': True
-                    }
-            elif re.search(r'REROUTE FAILED:', reroute_section):
-                routing_results[diff_pair] = False
-                # Parse time from REROUTE FAILED line: "REROUTE FAILED: (T.TTs)"
-                failed_match = re.search(r'REROUTE FAILED:.*\(([0-9.]+)s\)', reroute_section)
-                if failed_match:
-                    failed_stats[diff_pair] = {'time': float(failed_match.group(1))}
-        else:
-            # Ripped but no reroute section found - assume failed
-            routing_results[diff_pair] = False
-
-    # Also check for any REROUTE FAILED for pairs that might have been missed
-    # (e.g., pair was ripped twice - first restored, second failed to reroute)
-    # But only mark as failed if there's no subsequent REROUTE RETRY SUCCESS
-    for diff_pair in matched_pairs:
-        reroute_pattern = rf'\[REROUTE\s+\d+\]\s+Re-routing ripped diff pair\s+{re.escape(diff_pair)}\b([\s\S]*?)(?=\[REROUTE|\nRouting complete|$)'
-        reroute_match = re.search(reroute_pattern, router_output)
-        if reroute_match:
-            reroute_section = reroute_match.group(1)
-            # Only mark as failed if REROUTE FAILED without subsequent REROUTE RETRY SUCCESS
-            if re.search(r'REROUTE FAILED:', reroute_section) and not re.search(r'REROUTE RETRY SUCCESS', reroute_section):
-                routing_results[diff_pair] = False
-
-    routed_pairs = [p for p in matched_pairs if routing_results.get(p, True)]
-    failed_routing_pairs = [p for p in matched_pairs if not routing_results.get(p, True)]
+    routed_pairs = json_summary.get('routed_diff_pairs', [])
+    failed_routing_pairs = json_summary.get('failed_diff_pairs', [])
 
     # Step 3: Run DRC check only on successfully routed pairs (unless skipped)
     drc_results = {}  # diff_pair -> (passed, error_count)
@@ -546,35 +426,30 @@ Examples:
     print("SUMMARY")
     print(f"{'='*60}")
 
-    # Aggregate statistics
-    total_iterations = sum(s.get('iterations', 0) for s in routing_stats.values())
-    total_vias = sum(s.get('vias', 0) for s in routing_stats.values())
-    success_time = sum(s.get('time', 0) for s in routing_stats.values())
-    failed_time = sum(s.get('time', 0) for s in failed_stats.values())
-    total_time = success_time + failed_time
-    polarity_fixed_pairs = [p for p, s in routing_stats.items() if s.get('polarity_fixed', False)]
-    rerouted_pairs_list = [p for p, s in routing_stats.items() if s.get('rerouted', False)]
-    via_ripup_pairs = [p for p, s in routing_stats.items() if s.get('via_ripup', False)]
+    # All values from JSON summary
+    total_iterations = json_summary.get('total_iterations', 0)
+    total_time = json_summary.get('total_time', 0)
+    total_vias = json_summary.get('total_vias', 0)
+    ripup_success_pairs = json_summary.get('ripup_success_pairs', [])
+    rerouted_pairs_list = json_summary.get('rerouted_pairs', [])
+    polarity_swapped_pairs = json_summary.get('polarity_swapped_pairs', [])
 
     # Routing summary
     print(f"\nRouting:")
     print(f"  Succeeded: {len(routed_pairs)}/{len(matched_pairs)}")
     print(f"  Total iterations: {total_iterations:,}")
     print(f"  Total via pairs:  {total_vias // 2}")
-    print(f"  Successful time:  {success_time:.2f}s")
-    if failed_stats:
-        print(f"  Failed time:      {failed_time:.2f}s")
     print(f"  Total time:       {total_time:.2f}s")
-    print(f"  Polarity swaps:   {len(polarity_fixed_pairs)}")
-    if ripped_pairs or via_ripup_pairs:
-        print(f"  Rip-up/reroute:   {len(via_ripup_pairs)} via rip-up, {len(rerouted_pairs_list)} rerouted")
+    print(f"  Polarity swaps:   {len(polarity_swapped_pairs)}")
+    if ripup_success_pairs or rerouted_pairs_list:
+        print(f"  Rip-up/reroute:   {len(ripup_success_pairs)} rip-up success, {len(rerouted_pairs_list)} rerouted")
 
     if routed_pairs:
         print(f"  Routed:")
         for pair in routed_pairs:
             suffix = ""
-            if pair in via_ripup_pairs:
-                suffix = " (via rip-up)"
+            if pair in ripup_success_pairs:
+                suffix = " (rip-up success)"
             elif pair in rerouted_pairs_list:
                 suffix = " (rerouted)"
             print(f"    {pair}{suffix}")
@@ -626,9 +501,9 @@ Examples:
     elif skip_connectivity:
         print(f"\nConnectivity: skipped")
 
-    if polarity_fixed_pairs:
+    if polarity_swapped_pairs:
         print(f"\nNets with P<->N polarity swap:")
-        for pair in sorted(polarity_fixed_pairs):
+        for pair in polarity_swapped_pairs:
             print(f"  - {pair}")
 
     print(f"\nOutput file: {output_pcb}")

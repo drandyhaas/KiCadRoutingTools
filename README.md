@@ -8,7 +8,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
-- **Rip-up and reroute** - When a diff pair fails, automatically rips up blocking routes and retries
+- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max)
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
 - **Batch routing** with incremental obstacle caching (~7x speedup)
 - **Net ordering strategies** - MPS (crossing conflicts), inside-out (BGA), or original order
@@ -119,6 +119,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --via-cost 25           # Via penalty (grid steps, doubled for diff pairs)
 --max-iterations 200000 # A* iteration limit
 --heuristic-weight 1.5  # A* greediness (>1 = faster)
+--max-ripup 3           # Max blockers to rip up at once (1-N progressive)
 
 # Strategy
 --ordering mps          # mps | inside_out | original

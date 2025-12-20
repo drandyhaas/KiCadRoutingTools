@@ -568,6 +568,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     reroute_queue = []  # List of (pair_name, pair) or (net_name, net_id) for ripped-up nets
     polarity_swapped_pairs = set()  # Track pairs that have already had polarity swap applied
     rip_and_retry_history = set()  # Set of (routing_net_id, ripped_net_id) pairs to prevent infinite loops
+    ripup_success_pairs = set()  # Pairs that succeeded after ripping up blockers
+    rerouted_pairs = set()  # Pairs that were ripped up and then successfully rerouted
     remaining_net_ids = list(all_net_ids_to_route)
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
@@ -809,6 +811,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     reroute_queue.append(('single', net_name, net_id))
 
                             ripped_up = True
+                            ripup_success_pairs.add(pair_name)
                             break  # Success! Exit the N loop
                         else:
                             # Retry failed - restore all ripped nets and try N+1
@@ -866,6 +869,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 results.append(result)
                 successful += 1
                 total_iterations += result['iterations']
+                rerouted_pairs.add(ripped_pair_name)
 
                 # Apply polarity swap if needed (same as original route path)
                 # Pass pair_name and set to avoid double-swap if already done before rip-up
@@ -1003,6 +1007,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 results.append(retry_result)
                                 successful += 1
                                 total_iterations += retry_result['iterations']
+                                rerouted_pairs.add(ripped_pair_name)
 
                                 apply_polarity_swap(pcb_data, retry_result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
 
@@ -1180,6 +1185,40 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"Routing complete: {successful} successful, {failed} failed")
     print(f"Total time: {total_time:.2f}s")
     print(f"Total iterations: {total_iterations}")
+
+    # Build and print JSON summary for reliable parsing
+    import json
+    routed_diff_pairs = []
+    failed_diff_pairs = []
+    for pair_name, pair in diff_pair_ids_to_route:
+        if pair.p_net_id in routed_results and pair.n_net_id in routed_results:
+            routed_diff_pairs.append(pair_name)
+        else:
+            failed_diff_pairs.append(pair_name)
+    routed_single = []
+    failed_single = []
+    for net_name, net_id in single_ended_nets:
+        if net_id in routed_results:
+            routed_single.append(net_name)
+        else:
+            failed_single.append(net_name)
+    # Count total vias from results
+    total_vias = sum(len(r.get('new_vias', [])) for r in results)
+    summary = {
+        'routed_diff_pairs': routed_diff_pairs,
+        'failed_diff_pairs': failed_diff_pairs,
+        'routed_single': routed_single,
+        'failed_single': failed_single,
+        'ripup_success_pairs': sorted(ripup_success_pairs),
+        'rerouted_pairs': sorted(rerouted_pairs),
+        'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
+        'successful': successful,
+        'failed': failed,
+        'total_time': round(total_time, 2),
+        'total_iterations': total_iterations,
+        'total_vias': total_vias
+    }
+    print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     if results:
         print(f"\nWriting output to {output_file}...")
