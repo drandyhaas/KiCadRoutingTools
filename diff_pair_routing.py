@@ -513,13 +513,56 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
         return None
 
+    def collect_setback_blocked_cells(center_x, center_y, dir_x, dir_y, layer_idx, sb):
+        """Collect blocked cells at setback positions for rip-up analysis.
+        Called only after find_open_position returns None.
+        """
+        angles_deg = [0, 15, -15, 30, -30]
+        blocked = []
+        step = config.grid_step / 2
+
+        for angle_deg in angles_deg:
+            angle_rad = math.radians(angle_deg)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            dx = dir_x * cos_a - dir_y * sin_a
+            dy = dir_x * sin_a + dir_y * cos_a
+
+            x = center_x + dx * sb
+            y = center_y + dy * sb
+            gx, gy = coord.to_grid(x, y)
+
+            # Collect blocked setback position
+            if obstacles.is_blocked(gx, gy, layer_idx):
+                if (gx, gy, layer_idx) not in blocked:
+                    blocked.append((gx, gy, layer_idx))
+
+            # Collect blocked cells along connector path
+            length = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+            if length > 0:
+                path_dx = (x - center_x) / length
+                path_dy = (y - center_y) / length
+                dist = 0.0
+                while dist <= length:
+                    px = center_x + path_dx * dist
+                    py = center_y + path_dy * dist
+                    pgx, pgy = coord.to_grid(px, py)
+                    if connector_obstacles.is_blocked(pgx, pgy, layer_idx):
+                        if (pgx, pgy, layer_idx) not in blocked:
+                            blocked.append((pgx, pgy, layer_idx))
+                    dist += step
+
+        return blocked
+
     src_result = find_open_position(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source")
     if src_result is None:
-        return None, 0, []
+        blocked = collect_setback_blocked_cells(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback)
+        return None, 0, blocked
 
     tgt_result = find_open_position(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target")
     if tgt_result is None:
-        return None, 0, []
+        blocked = collect_setback_blocked_cells(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback)
+        return None, 0, blocked
 
     src_gx, src_gy, src_actual_dir_x, src_actual_dir_y = src_result
     tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y = tgt_result

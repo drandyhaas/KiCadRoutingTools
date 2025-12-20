@@ -664,17 +664,35 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Find the direction that failed faster (likely more constrained)
                 fwd_iters = result.get('iterations_forward', 0)
                 bwd_iters = result.get('iterations_backward', 0)
-                if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
+                fwd_cells = result.get('blocked_cells_forward', [])
+                bwd_cells = result.get('blocked_cells_backward', [])
+
+                # Check for setback failure (no routing iterations but have blocked cells)
+                is_setback_failure = (fwd_iters == 0 and bwd_iters == 0 and (fwd_cells or bwd_cells))
+
+                if is_setback_failure:
+                    # Combine blocked cells from both directions for setback failures
+                    blocked_cells = list(set(fwd_cells + bwd_cells))
+                    if blocked_cells:
+                        print(f"  Setback blocked ({len(blocked_cells)} blocked cells)")
+                elif fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
                     fastest_dir = 'forward'
-                    blocked_cells = result.get('blocked_cells_forward', [])
+                    blocked_cells = fwd_cells
                     dir_iters = fwd_iters
+                    if blocked_cells:
+                        print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
                 else:
                     fastest_dir = 'backward'
-                    blocked_cells = result.get('blocked_cells_backward', [])
+                    blocked_cells = bwd_cells
                     dir_iters = bwd_iters
+                    if blocked_cells:
+                        print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
 
-                if blocked_cells:
-                    print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
+                # Analyze blocking for backward failures or setback failures (not forward)
+                # Forward failures don't trigger rip-up as the blocked cells are less reliable
+                should_analyze_blocking = (is_setback_failure and blocked_cells) or \
+                                          (not is_setback_failure and blocked_cells and fastest_dir == 'backward')
+                if should_analyze_blocking:
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
                         exclude_net_ids={pair.p_net_id, pair.n_net_id},
