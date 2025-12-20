@@ -419,6 +419,13 @@ Examples:
             # Ripped but no reroute section found - assume failed
             routing_results[diff_pair] = False
 
+    # Also check for any REROUTE FAILED for pairs that might have been missed
+    # (e.g., pair was ripped twice - first restored, second failed to reroute)
+    for diff_pair in matched_pairs:
+        reroute_failed_pattern = rf'\[REROUTE\s+\d+\]\s+Re-routing ripped diff pair\s+{re.escape(diff_pair)}\b[\s\S]*?REROUTE FAILED:'
+        if re.search(reroute_failed_pattern, router_output):
+            routing_results[diff_pair] = False
+
     routed_pairs = [p for p in matched_pairs if routing_results.get(p, True)]
     failed_routing_pairs = [p for p in matched_pairs if not routing_results.get(p, True)]
 
