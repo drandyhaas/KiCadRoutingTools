@@ -749,7 +749,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 routed_results[ripped_pair.p_net_id] = result
                 routed_results[ripped_pair.n_net_id] = result
             else:
-                print(f"  REROUTE FAILED ({elapsed:.2f}s)")
+                print(f"  REROUTE FAILED: ({elapsed:.2f}s)")
                 failed += 1
                 if result:
                     total_iterations += result['iterations']
