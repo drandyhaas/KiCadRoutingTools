@@ -64,7 +64,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--diff-pairs` / `-D` | - | Glob patterns for diff pair nets |
-| `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
+| `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.6 | Minimum turning radius for pose-based routing (mm) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
@@ -110,7 +110,7 @@ class GridRouteConfig:
     direction_order: str = "forward"     # forward, backward, or random
 
     # Differential pairs
-    diff_pair_gap: float = 0.1           # mm between P and N
+    diff_pair_gap: float = 0.101         # mm between P and N
     diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
     fix_polarity: bool = True            # swap target pads if polarity swap needed
 
