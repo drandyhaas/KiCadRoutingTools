@@ -701,7 +701,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print_blocking_analysis(blockers)
 
                     # Filter to only rippable blockers (those in routed_results)
-                    rippable_blockers = [b for b in blockers if b.net_id in routed_results]
+                    # and deduplicate by diff pair (P and N count as one)
+                    rippable_blockers = []
+                    seen_canonical_ids = set()
+                    for b in blockers:
+                        if b.net_id in routed_results:
+                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                            if canonical not in seen_canonical_ids:
+                                seen_canonical_ids.add(canonical)
+                                rippable_blockers.append(b)
 
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     current_canonical = pair.p_net_id  # P is canonical for diff pairs
@@ -738,6 +746,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                         for i in range(N):
                             blocker = rippable_blockers[i]
+                            # Skip if already ripped (e.g., as part of a diff pair)
+                            if blocker.net_id not in routed_results:
+                                continue
                             saved_result, ripped_ids, was_in_results = rip_up_net(
                                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
@@ -932,8 +943,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         )
                         print_blocking_analysis(blockers)
 
-                        # Filter to only rippable blockers
-                        rippable_blockers = [b for b in blockers if b.net_id in routed_results]
+                        # Filter to only rippable blockers and deduplicate by diff pair
+                        rippable_blockers = []
+                        seen_canonical_ids = set()
+                        for b in blockers:
+                            if b.net_id in routed_results:
+                                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                                if canonical not in seen_canonical_ids:
+                                    seen_canonical_ids.add(canonical)
+                                    rippable_blockers.append(b)
                         current_canonical = ripped_pair.p_net_id
 
                         # Progressive rip-up: try N=1, then N=2, etc
@@ -969,6 +987,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                             for i in range(N):
                                 blocker = rippable_blockers[i]
+                                # Skip if already ripped (e.g., as part of a diff pair)
+                                if blocker.net_id not in routed_results:
+                                    continue
                                 saved_result, ripped_ids, was_in_results = rip_up_net(
                                     blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                     routed_results, diff_pair_by_net_id, remaining_net_ids,
