@@ -18,14 +18,15 @@ pub struct PoseRouter {
     h_weight: f32,
     turn_cost: i32,  // Cost per 45° turn
     min_radius_grid: f64,  // Minimum turning radius in grid units
+    via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
 }
 
 #[pymethods]
 impl PoseRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64) -> Self {
-        Self { via_cost, h_weight, turn_cost, min_radius_grid }
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32) -> Self {
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost }
     }
 
     /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
@@ -219,8 +220,9 @@ impl PoseRouter {
                 }
             }
 
-            // Block vias within stub proximity radius (for diff pairs)
-            if via_positions_clear && diff_pair_via_spacing.is_some() {
+            // Block or penalize vias within stub proximity radius (for diff pairs)
+            // If via_proximity_cost is 0, block vias near stubs; otherwise add cost
+            if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
                 if obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0 {
                     via_positions_clear = false;
                 }
@@ -240,7 +242,8 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !closed.contains(&neighbor_key) {
-                        let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * 2;
+                        // Apply via proximity cost (multiplier on stub proximity cost)
+                        let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * self.via_proximity_cost;
                         let new_g = g + self.via_cost + proximity_cost;
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -432,7 +435,8 @@ impl PoseRouter {
                 }
             }
 
-            if via_positions_clear && diff_pair_via_spacing.is_some() {
+            // Block or penalize vias within stub proximity radius (for diff pairs)
+            if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
                 if obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0 {
                     via_positions_clear = false;
                 }
@@ -451,7 +455,8 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !closed.contains(&neighbor_key) {
-                        let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * 2;
+                        // Apply via proximity cost (multiplier on stub proximity cost)
+                        let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * self.via_proximity_cost;
                         let new_g = g + self.via_cost + proximity_cost;
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);

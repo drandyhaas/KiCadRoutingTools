@@ -86,6 +86,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 heuristic_weight: float = 1.5,
                 stub_proximity_radius: float = 5.0,
                 stub_proximity_cost: float = 0.2,
+                via_proximity_cost: float = 10.0,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.101,
                 diff_pair_centerline_setback: float = None,
@@ -163,6 +164,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius,
         stub_proximity_cost=stub_proximity_cost,
+        via_proximity_cost=via_proximity_cost,
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
@@ -1056,6 +1058,8 @@ Differential pair routing:
                         help="Radius around stubs to penalize routing in mm (default: 5.0)")
     parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near stubs in mm equivalent (default: 0.2)")
+    parser.add_argument("--via-proximity-cost", type=float, default=10.0,
+                        help="Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)")
 
     # Differential pair routing
     parser.add_argument("--diff-pairs", "-D", nargs="+",
@@ -1124,6 +1128,7 @@ Differential pair routing:
                 heuristic_weight=args.heuristic_weight,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
+                via_proximity_cost=args.via_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,
