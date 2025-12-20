@@ -5,6 +5,7 @@ Routes differential pairs (P and N nets) together using centerline + offset appr
 """
 
 import math
+import random
 from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
@@ -392,43 +393,14 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
     }
 
 
-def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
-                                    config: GridRouteConfig,
-                                    obstacles: GridObstacleMap,
-                                    base_obstacles: GridObstacleMap = None,
-                                    unrouted_stubs: List[Tuple[float, float]] = None) -> Optional[dict]:
+def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
+                         coord, layer_names, spacing_mm, p_net_id, n_net_id):
     """
-    Route a differential pair using centerline + offset approach.
+    Attempt to route a diff pair in one direction.
 
-    1. Routes a single centerline path using A* (GridRouter)
-    2. Simplifies the path by removing collinear points
-    3. Creates P and N paths using perpendicular offsets from centerline
+    Returns (route_data, iterations) on success, or (None, iterations) on failure.
+    route_data contains all intermediate values needed for result processing.
     """
-    p_net_id = diff_pair.p_net_id
-    n_net_id = diff_pair.n_net_id
-
-    # Find endpoints
-    sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
-    if error:
-        print(f"  {error}")
-        return None
-
-    if not sources or not targets:
-        print(f"  No valid source/target endpoints found")
-        return None
-
-    coord = GridCoord(config.grid_step)
-    layer_names = config.layers
-
-    # Get P and N source/target coordinates
-    src = sources[0]
-    tgt = targets[0]
-
-    # Support backward routing direction
-    routing_backwards = config.direction_order in ("backwards", "backward")
-    if routing_backwards:
-        src, tgt = tgt, src
-
     p_src_gx, p_src_gy = src[0], src[1]
     n_src_gx, n_src_gy = src[2], src[3]
     src_layer = src[4]
@@ -442,10 +414,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_src_x, n_src_y = src[7], src[8]
     p_tgt_x, p_tgt_y = tgt[5], tgt[6]
     n_tgt_x, n_tgt_y = tgt[7], tgt[8]
-
-    # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
-    spacing_mm = (config.track_width + config.diff_pair_gap) / 2
-    print(f"  P-N spacing: {spacing_mm * 2:.3f}mm (offset={spacing_mm:.3f}mm from centerline)")
 
     # Calculate via exclusion radius in grid units
     # When centerline places a via, P/N vias are offset by via_spacing perpendicular to path
@@ -547,11 +515,11 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     src_result = find_open_position(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source")
     if src_result is None:
-        return None
+        return None, 0
 
     tgt_result = find_open_position(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target")
     if tgt_result is None:
-        return None
+        return None, 0
 
     src_gx, src_gy, src_actual_dir_x, src_actual_dir_y = src_result
     tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y = tgt_result
@@ -597,7 +565,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Use 8x iterations for diff pairs due to larger pose-based search space
     # Pass via spacing in grid units so router can check P/N via positions
     via_spacing_grid = max(1, int(via_spacing / config.grid_step + 0.5))
-    pose_path, total_iterations = pose_router.route_pose(
+    pose_path, iterations = pose_router.route_pose(
         obstacles,
         src_gx, src_gy, src_layer, src_theta_idx,
         tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
@@ -606,8 +574,110 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     )
 
     if pose_path is None:
-        print(f"  No route found after {total_iterations} iterations")
+        return None, iterations
+
+    # Return all data needed for result processing
+    route_data = {
+        'pose_path': pose_path,
+        'p_src_x': p_src_x, 'p_src_y': p_src_y,
+        'n_src_x': n_src_x, 'n_src_y': n_src_y,
+        'p_tgt_x': p_tgt_x, 'p_tgt_y': p_tgt_y,
+        'n_tgt_x': n_tgt_x, 'n_tgt_y': n_tgt_y,
+        'src_dir_x': src_dir_x, 'src_dir_y': src_dir_y,
+        'tgt_dir_x': tgt_dir_x, 'tgt_dir_y': tgt_dir_y,
+        'center_src_x': center_src_x, 'center_src_y': center_src_y,
+        'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
+        'via_spacing': via_spacing,
+    }
+    return route_data, iterations
+
+
+def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
+                                    config: GridRouteConfig,
+                                    obstacles: GridObstacleMap,
+                                    base_obstacles: GridObstacleMap = None,
+                                    unrouted_stubs: List[Tuple[float, float]] = None) -> Optional[dict]:
+    """
+    Route a differential pair using centerline + offset approach.
+
+    1. Routes a single centerline path using A* (GridRouter)
+    2. Simplifies the path by removing collinear points
+    3. Creates P and N paths using perpendicular offsets from centerline
+    """
+    p_net_id = diff_pair.p_net_id
+    n_net_id = diff_pair.n_net_id
+
+    # Find endpoints
+    sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
+    if error:
+        print(f"  {error}")
+        return None
+
+    if not sources or not targets:
+        print(f"  No valid source/target endpoints found")
+        return None
+
+    coord = GridCoord(config.grid_step)
+    layer_names = config.layers
+
+    # Get P and N source/target coordinates
+    original_src = sources[0]
+    original_tgt = targets[0]
+
+    # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
+    spacing_mm = (config.track_width + config.diff_pair_gap) / 2
+    print(f"  P-N spacing: {spacing_mm * 2:.3f}mm (offset={spacing_mm:.3f}mm from centerline)")
+
+    # Determine direction order (same as single_ended_routing)
+    if config.direction_order == "random":
+        start_backwards = random.choice([True, False])
+    elif config.direction_order in ("backwards", "backward"):
+        start_backwards = True
+    else:  # "forward" or default
+        start_backwards = False
+
+    # Set up first and second direction
+    if start_backwards:
+        first_src, first_tgt, first_label = original_tgt, original_src, "backward"
+        second_src, second_tgt, second_label = original_src, original_tgt, "forward"
+    else:
+        first_src, first_tgt, first_label = original_src, original_tgt, "forward"
+        second_src, second_tgt, second_label = original_tgt, original_src, "backward"
+
+    # Try first direction
+    route_data, iterations = _try_route_direction(
+        first_src, first_tgt, pcb_data, config, obstacles, base_obstacles,
+        coord, layer_names, spacing_mm, p_net_id, n_net_id
+    )
+    total_iterations = iterations
+
+    if route_data is None:
+        # Try second direction
+        print(f"  No route found after {iterations} iterations ({first_label}), trying {second_label}...")
+        route_data, iterations = _try_route_direction(
+            second_src, second_tgt, pcb_data, config, obstacles, base_obstacles,
+            coord, layer_names, spacing_mm, p_net_id, n_net_id
+        )
+        total_iterations += iterations
+        routing_backwards = (second_label == "backward")
+    else:
+        routing_backwards = (first_label == "backward")
+
+    if route_data is None:
+        print(f"  No route found after {total_iterations} iterations (both directions)")
         return {'failed': True, 'iterations': total_iterations}
+
+    # Extract route data
+    pose_path = route_data['pose_path']
+    p_src_x, p_src_y = route_data['p_src_x'], route_data['p_src_y']
+    n_src_x, n_src_y = route_data['n_src_x'], route_data['n_src_y']
+    p_tgt_x, p_tgt_y = route_data['p_tgt_x'], route_data['p_tgt_y']
+    n_tgt_x, n_tgt_y = route_data['n_tgt_x'], route_data['n_tgt_y']
+    src_dir_x, src_dir_y = route_data['src_dir_x'], route_data['src_dir_y']
+    tgt_dir_x, tgt_dir_y = route_data['tgt_dir_x'], route_data['tgt_dir_y']
+    center_src_x, center_src_y = route_data['center_src_x'], route_data['center_src_y']
+    center_tgt_x, center_tgt_y = route_data['center_tgt_x'], route_data['center_tgt_y']
+    via_spacing = route_data['via_spacing']
 
     # Convert pose path (gx, gy, theta_idx, layer) to grid path (gx, gy, layer)
     # Filter out in-place turns (same position, different theta)
