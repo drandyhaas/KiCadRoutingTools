@@ -567,7 +567,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     diff_pair_by_net_id = {}  # net_id -> (pair_name, pair) for looking up diff pairs
     reroute_queue = []  # List of (pair_name, pair) or (net_name, net_id) for ripped-up nets
     polarity_swapped_pairs = set()  # Track pairs that have already had polarity swap applied
-    rip_and_retry_history = set()  # Set of (routing_net_id, ripped_net_id) pairs to prevent infinite loops
+    rip_and_retry_history = set()  # Set of (routing_net_id, frozenset(ripped_net_ids)) to prevent infinite loops
     ripup_success_pairs = set()  # Pairs that succeeded after ripping up blockers
     rerouted_pairs = set()  # Pairs that were ripped up and then successfully rerouted
     remaining_net_ids = list(all_net_ids_to_route)
@@ -709,27 +709,40 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 rippable_blockers.append(b)
 
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
+                    # Keep nets ripped between N levels to avoid redundant restore/re-rip
                     current_canonical = pair.p_net_id  # P is canonical for diff pairs
+                    ripped_items = []  # Accumulate ripped items across N levels
+                    retry_succeeded = False
 
                     for N in range(1, config.max_rip_up_count + 1):
                         if N > len(rippable_blockers):
                             break  # Not enough blockers to rip
 
-                        # Check loop prevention for all top N blockers
-                        skip_this_N = False
-                        for i in range(N):
-                            blocker_canonical = get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
-                            if (current_canonical, blocker_canonical) in rip_and_retry_history:
-                                print(f"  Skipping N={N}: loop detected with {rippable_blockers[i].net_name}")
-                                skip_this_N = True
-                                break
-
-                        if skip_this_N:
+                        # Build frozenset of all N blocker canonicals for loop check
+                        blocker_canonicals = frozenset(
+                            get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
+                            for i in range(N)
+                        )
+                        if (current_canonical, blocker_canonicals) in rip_and_retry_history:
+                            # Build informative message showing the loop (use pair names for diff pairs)
+                            blocker_names = []
+                            for i in range(N):
+                                b = rippable_blockers[i]
+                                if b.net_id in diff_pair_by_net_id:
+                                    blocker_names.append(diff_pair_by_net_id[b.net_id][0])
+                                else:
+                                    blocker_names.append(b.net_name)
+                            if len(blocker_names) == 1:
+                                blockers_str = blocker_names[0]
+                            else:
+                                blockers_str = "{" + ", ".join(blocker_names) + "}"
+                            print(f"  Skipping N={N}: already tried ripping {blockers_str} for {pair_name}")
                             continue
 
-                        # Rip up top N blockers
-                        ripped_items = []  # List of (net_id, saved_result, ripped_net_ids, was_in_results)
+                        # Rip up only the new blocker(s) for this N level
+                        # (previous blockers are already ripped from N-1)
                         rip_successful = True
+                        new_ripped_this_level = []
 
                         if N == 1:
                             blocker = rippable_blockers[0]
@@ -739,9 +752,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             else:
                                 print(f"  Ripping up {blocker.net_name} to retry...")
                         else:
-                            print(f"  Trying rip-up of top {N} blocker(s)...")
+                            print(f"  Extending to N={N}: ripping additional blocker(s)...")
 
-                        for i in range(N):
+                        for i in range(len(ripped_items), N):
                             blocker = rippable_blockers[i]
                             # Skip if already ripped (e.g., as part of a diff pair)
                             if blocker.net_id not in routed_results:
@@ -755,24 +768,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 rip_successful = False
                                 break
                             ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
+                            new_ripped_this_level.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                             if was_in_results:
                                 successful -= 1
-                            if N > 1:
-                                if blocker.net_id in diff_pair_by_net_id:
-                                    ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
-                                    print(f"    Ripped diff pair {ripped_pair_name_tmp}")
-                                else:
-                                    print(f"    Ripped {blocker.net_name}")
+                            if blocker.net_id in diff_pair_by_net_id:
+                                ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                print(f"    Ripped diff pair {ripped_pair_name_tmp}")
+                            else:
+                                print(f"    Ripped {blocker.net_name}")
 
                         if not rip_successful:
-                            # Restore any nets we already ripped
-                            for net_id, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
+                            # Restore only the nets we just ripped this level
+                            for net_id, saved_result, ripped_ids, was_in_results in reversed(new_ripped_this_level):
                                 restore_net(net_id, saved_result, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
                                            results, config)
                                 if was_in_results:
                                     successful += 1
+                                ripped_items.pop()
                             continue
 
                         # Rebuild obstacles and retry the current route
@@ -824,10 +838,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
 
                             # Queue all ripped-up nets for rerouting and add to history
-                            for net_id, saved_result, ripped_ids, was_in_results in ripped_items:
-                                blocker_canonical = get_canonical_net_id(net_id, diff_pair_by_net_id)
-                                rip_and_retry_history.add((current_canonical, blocker_canonical))
+                            rip_and_retry_history.add((current_canonical, blocker_canonicals))
 
+                            for net_id, saved_result, ripped_ids, was_in_results in ripped_items:
                                 if net_id in diff_pair_by_net_id:
                                     ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id]
                                     reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
@@ -837,18 +850,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     reroute_queue.append(('single', net_name, net_id))
 
                             ripped_up = True
+                            retry_succeeded = True
                             ripup_success_pairs.add(pair_name)
                             break  # Success! Exit the N loop
                         else:
-                            # Retry failed - restore all ripped nets and try N+1
-                            print(f"  RETRY FAILED (N={N}): Restoring {N} net(s)")
-                            for net_id, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
-                                restore_net(net_id, saved_result, ripped_ids, was_in_results,
-                                           pcb_data, routed_net_ids, routed_net_paths,
-                                           routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                           results, config)
-                                if was_in_results:
-                                    successful += 1
+                            # Retry failed - keep nets ripped for N+1 attempt
+                            print(f"  RETRY FAILED (N={N})")
+
+                    # If all N levels failed, restore all ripped nets
+                    if not retry_succeeded and ripped_items:
+                        print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                        for net_id, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
+                            restore_net(net_id, saved_result, ripped_ids, was_in_results,
+                                       pcb_data, routed_net_ids, routed_net_paths,
+                                       routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                       results, config)
+                            if was_in_results:
+                                successful += 1
 
             if not ripped_up:
                 failed += 1
@@ -952,25 +970,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         current_canonical = ripped_pair.p_net_id
 
                         # Progressive rip-up: try N=1, then N=2, etc
+                        # Keep nets ripped between N levels to avoid redundant restore/re-rip
+                        ripped_items = []  # Accumulate ripped items across N levels
+
                         for N in range(1, config.max_rip_up_count + 1):
                             if N > len(rippable_blockers):
                                 break
 
-                            # Check loop prevention
-                            skip_this_N = False
-                            for i in range(N):
-                                blocker_canonical = get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
-                                if (current_canonical, blocker_canonical) in rip_and_retry_history:
-                                    print(f"  Skipping N={N}: loop detected with {rippable_blockers[i].net_name}")
-                                    skip_this_N = True
-                                    break
-
-                            if skip_this_N:
+                            # Build frozenset of all N blocker canonicals for loop check
+                            blocker_canonicals = frozenset(
+                                get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
+                                for i in range(N)
+                            )
+                            if (current_canonical, blocker_canonicals) in rip_and_retry_history:
+                                # Build informative message showing the loop (use pair names for diff pairs)
+                                blocker_names = []
+                                for i in range(N):
+                                    b = rippable_blockers[i]
+                                    if b.net_id in diff_pair_by_net_id:
+                                        blocker_names.append(diff_pair_by_net_id[b.net_id][0])
+                                    else:
+                                        blocker_names.append(b.net_name)
+                                if len(blocker_names) == 1:
+                                    blockers_str = blocker_names[0]
+                                else:
+                                    blockers_str = "{" + ", ".join(blocker_names) + "}"
+                                print(f"  Skipping N={N}: already tried ripping {blockers_str} for {ripped_pair_name}")
                                 continue
 
-                            # Rip up top N blockers
-                            ripped_items = []
+                            # Rip up only the new blocker(s) for this N level
                             rip_successful = True
+                            new_ripped_this_level = []
 
                             if N == 1:
                                 blocker = rippable_blockers[0]
@@ -980,9 +1010,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 else:
                                     print(f"  Ripping up {blocker.net_name} to retry reroute...")
                             else:
-                                print(f"  Trying rip-up of top {N} blocker(s) for reroute...")
+                                print(f"  Extending to N={N}: ripping additional blocker(s) for reroute...")
 
-                            for i in range(N):
+                            for i in range(len(ripped_items), N):
                                 blocker = rippable_blockers[i]
                                 # Skip if already ripped (e.g., as part of a diff pair)
                                 if blocker.net_id not in routed_results:
@@ -996,23 +1026,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     rip_successful = False
                                     break
                                 ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
+                                new_ripped_this_level.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                                 if was_in_results:
                                     successful -= 1
-                                if N > 1:
-                                    if blocker.net_id in diff_pair_by_net_id:
-                                        ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
-                                        print(f"    Ripped diff pair {ripped_pair_name_tmp}")
-                                    else:
-                                        print(f"    Ripped {blocker.net_name}")
+                                if blocker.net_id in diff_pair_by_net_id:
+                                    ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                    print(f"    Ripped diff pair {ripped_pair_name_tmp}")
+                                else:
+                                    print(f"    Ripped {blocker.net_name}")
 
                             if not rip_successful:
-                                for net_id, saved_result_tmp, ripped_ids, was_in_results in reversed(ripped_items):
+                                # Restore only the nets we just ripped this level
+                                for net_id, saved_result_tmp, ripped_ids, was_in_results in reversed(new_ripped_this_level):
                                     restore_net(net_id, saved_result_tmp, ripped_ids, was_in_results,
                                                pcb_data, routed_net_ids, routed_net_paths,
                                                routed_results, diff_pair_by_net_id, remaining_net_ids,
                                                results, config)
                                     if was_in_results:
                                         successful += 1
+                                    ripped_items.pop()
                                 continue
 
                             # Rebuild obstacles and retry
@@ -1064,10 +1096,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
 
                                 # Queue ripped nets and add to history
-                                for net_id, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
-                                    blocker_canonical = get_canonical_net_id(net_id, diff_pair_by_net_id)
-                                    rip_and_retry_history.add((current_canonical, blocker_canonical))
+                                rip_and_retry_history.add((current_canonical, blocker_canonicals))
 
+                                for net_id, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
                                     if net_id in diff_pair_by_net_id:
                                         ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id]
                                         reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
@@ -1079,15 +1110,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 reroute_succeeded = True
                                 break
                             else:
-                                # Retry failed - restore and try N+1
-                                print(f"  REROUTE RETRY FAILED (N={N}): Restoring {N} net(s)")
-                                for net_id, saved_result_tmp, ripped_ids, was_in_results in reversed(ripped_items):
-                                    restore_net(net_id, saved_result_tmp, ripped_ids, was_in_results,
-                                               pcb_data, routed_net_ids, routed_net_paths,
-                                               routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                               results, config)
-                                    if was_in_results:
-                                        successful += 1
+                                # Retry failed - keep nets ripped for N+1 attempt
+                                print(f"  REROUTE RETRY FAILED (N={N})")
+
+                        # If all N levels failed, restore all ripped nets
+                        if not reroute_succeeded and ripped_items:
+                            print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                            for net_id, saved_result_tmp, ripped_ids, was_in_results in reversed(ripped_items):
+                                restore_net(net_id, saved_result_tmp, ripped_ids, was_in_results,
+                                           pcb_data, routed_net_ids, routed_net_paths,
+                                           routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                           results, config)
+                                if was_in_results:
+                                    successful += 1
 
                 if not reroute_succeeded:
                     failed += 1
