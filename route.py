@@ -533,8 +533,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             blocker_result = routed_results[blocker_net_id]
                             print(f"  Ripping up {top_blocker.net_name} to retry...")
 
-                            # Remove the blocking route from pcb_data
+                            # Remove the blocking route from pcb_data and results list
                             remove_route_from_pcb_data(pcb_data, blocker_result)
+                            if blocker_result in results:
+                                results.remove(blocker_result)
+                                successful -= 1  # Adjust count since we removed a successful route
 
                             # Update tracking structures
                             if blocker_net_id in diff_pair_by_net_id:
@@ -548,12 +551,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 routed_net_paths.pop(ripped_pair.n_net_id, None)
                                 routed_results.pop(ripped_pair.p_net_id, None)
                                 routed_results.pop(ripped_pair.n_net_id, None)
+                                # Add back to remaining so stubs are treated as obstacles
+                                if ripped_pair.p_net_id not in remaining_net_ids:
+                                    remaining_net_ids.append(ripped_pair.p_net_id)
+                                if ripped_pair.n_net_id not in remaining_net_ids:
+                                    remaining_net_ids.append(ripped_pair.n_net_id)
                             else:
                                 # Single-ended net
                                 if blocker_net_id in routed_net_ids:
                                     routed_net_ids.remove(blocker_net_id)
                                 routed_net_paths.pop(blocker_net_id, None)
                                 routed_results.pop(blocker_net_id, None)
+                                # Add back to remaining so stubs are treated as obstacles
+                                if blocker_net_id not in remaining_net_ids:
+                                    remaining_net_ids.append(blocker_net_id)
 
                             # Rebuild obstacles and retry the current route
                             retry_obstacles = diff_pair_base_obstacles.clone()
@@ -636,32 +647,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _, ripped_pair_name, ripped_pair = reroute_item
             route_index += 1
             print(f"\n[REROUTE {route_index}] Re-routing ripped diff pair {ripped_pair_name}")
-            print(f"  Avoiding {len(routed_net_ids)} routed net(s)")
             print("-" * 40)
 
             start_time = time.time()
             obstacles = diff_pair_base_obstacles.clone()
-            seg_count = 0
-            via_count = 0
             for routed_id in routed_net_ids:
-                net_segs = [s for s in pcb_data.segments if s.net_id == routed_id]
-                net_vias = [v for v in pcb_data.vias if v.net_id == routed_id]
-                seg_count += len(net_segs)
-                via_count += len(net_vias)
-                # Debug: show segments for nets that were just routed via rip-up retry
-                if len(net_segs) > 0:
-                    net = pcb_data.nets.get(routed_id)
-                    net_name = net.name if net else f"Net {routed_id}"
-                    if 'rx4_10' in net_name:
-                        print(f"  DEBUG: {net_name} has {len(net_segs)} segments, {len(net_vias)} vias")
-                        # Find B.Cu segments around Y=92
-                        bcu_segs = [s for s in net_segs if s.layer == 'B.Cu' and 91 < s.start_y < 93]
-                        for seg in bcu_segs:
-                            print(f"    B.Cu seg: ({seg.start_x:.2f},{seg.start_y:.2f})-({seg.end_x:.2f},{seg.end_y:.2f})")
                 add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                 add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                 add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-            print(f"  Added {seg_count} segments, {via_count} vias as obstacles")
             other_unrouted = [nid for nid in remaining_net_ids
                              if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id]
             for other_net_id in other_unrouted:
