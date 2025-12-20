@@ -32,6 +32,7 @@ class GridRouteConfig:
     via_cost: int = 25  # grid steps equivalent penalty for via
     layers: List[str] = field(default_factory=lambda: ['F.Cu', 'B.Cu'])
     max_iterations: int = 200000
+    max_probe_iterations: int = 5000  # Quick probe per direction to detect stuck routes
     heuristic_weight: float = 1.5
     # BGA exclusion zones (auto-detected from PCB) - vias blocked inside these areas
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)

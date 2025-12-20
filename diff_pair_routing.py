@@ -394,7 +394,8 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
 
 
 def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
-                         coord, layer_names, spacing_mm, p_net_id, n_net_id):
+                         coord, layer_names, spacing_mm, p_net_id, n_net_id,
+                         max_iterations_override=None):
     """
     Attempt to route a diff pair in one direction.
 
@@ -610,11 +611,12 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Use 8x iterations for diff pairs due to larger pose-based search space
     # Pass via spacing in grid units so router can check P/N via positions
     via_spacing_grid = max(1, int(via_spacing / config.grid_step + 0.5))
+    max_iters = max_iterations_override if max_iterations_override is not None else config.max_iterations * 8
     pose_path, iterations, blocked_cells = pose_router.route_pose_with_frontier(
         obstacles,
         src_gx, src_gy, src_layer, src_theta_idx,
         tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
-        config.max_iterations * 8,
+        max_iters,
         diff_pair_via_spacing=via_spacing_grid
     )
 
@@ -689,32 +691,140 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         first_src, first_tgt, first_label = original_src, original_tgt, "forward"
         second_src, second_tgt, second_label = original_tgt, original_src, "backward"
 
-    # Try first direction
-    route_data, iterations, blocked_cells = _try_route_direction(
+    # Quick probe phase: test both directions with limited iterations to detect if stuck
+    probe_iterations = config.max_probe_iterations
+    stuck_threshold = max(100, probe_iterations // 10)  # If < 10% of probe used, direction is likely stuck
+
+    # Probe first direction
+    route_data, first_probe_iters, first_blocked = _try_route_direction(
         first_src, first_tgt, pcb_data, config, obstacles, base_obstacles,
-        coord, layer_names, spacing_mm, p_net_id, n_net_id
+        coord, layer_names, spacing_mm, p_net_id, n_net_id,
+        max_iterations_override=probe_iterations
     )
-    total_iterations = iterations
-    all_blocked_cells = blocked_cells
 
-    first_blocked_cells = blocked_cells
-    first_iterations = iterations
-
-    if route_data is None:
-        # Try second direction
-        print(f"  No route found after {iterations} iterations ({first_label}), trying {second_label}...")
-        route_data, iterations, blocked_cells = _try_route_direction(
-            second_src, second_tgt, pcb_data, config, obstacles, base_obstacles,
-            coord, layer_names, spacing_mm, p_net_id, n_net_id
-        )
-        total_iterations += iterations
-        second_blocked_cells = blocked_cells
-        second_iterations = iterations
-        routing_backwards = (second_label == "backward")
-    else:
+    if route_data is not None:
+        # Found route in probe phase
+        first_blocked_cells = []
+        first_iterations = first_probe_iters
         second_blocked_cells = []
         second_iterations = 0
+        total_iterations = first_probe_iters
         routing_backwards = (first_label == "backward")
+    else:
+        # Probe second direction
+        route_data, second_probe_iters, second_blocked = _try_route_direction(
+            second_src, second_tgt, pcb_data, config, obstacles, base_obstacles,
+            coord, layer_names, spacing_mm, p_net_id, n_net_id,
+            max_iterations_override=probe_iterations
+        )
+
+        if route_data is not None:
+            # Found route in second probe
+            first_blocked_cells = first_blocked
+            first_iterations = first_probe_iters
+            second_blocked_cells = []
+            second_iterations = second_probe_iters
+            total_iterations = first_probe_iters + second_probe_iters
+            routing_backwards = (second_label == "backward")
+        else:
+            # Both probes failed - check if either direction is completely stuck
+            first_stuck = first_probe_iters < stuck_threshold
+            second_stuck = second_probe_iters < stuck_threshold
+
+            if first_stuck and second_stuck:
+                # Both directions are stuck early - fail fast
+                print(f"  Both directions stuck early ({first_label}: {first_probe_iters}, {second_label}: {second_probe_iters} iterations)")
+                return {
+                    'failed': True,
+                    'iterations': first_probe_iters + second_probe_iters,
+                    'blocked_cells_forward': first_blocked if first_label == "forward" else second_blocked,
+                    'blocked_cells_backward': second_blocked if first_label == "forward" else first_blocked,
+                    'iterations_forward': first_probe_iters if first_label == "forward" else second_probe_iters,
+                    'iterations_backward': second_probe_iters if first_label == "forward" else first_probe_iters,
+                }
+
+            # At least one direction made progress - do full search on the more promising one
+            # Try the direction that used more probe iterations first (made more progress)
+            if first_probe_iters >= second_probe_iters:
+                promising_src, promising_tgt, promising_label = first_src, first_tgt, first_label
+                fallback_src, fallback_tgt, fallback_label = second_src, second_tgt, second_label
+                promising_probe_iters, promising_blocked = first_probe_iters, first_blocked
+                fallback_probe_iters, fallback_blocked = second_probe_iters, second_blocked
+            else:
+                promising_src, promising_tgt, promising_label = second_src, second_tgt, second_label
+                fallback_src, fallback_tgt, fallback_label = first_src, first_tgt, first_label
+                promising_probe_iters, promising_blocked = second_probe_iters, second_blocked
+                fallback_probe_iters, fallback_blocked = first_probe_iters, first_blocked
+
+            print(f"  Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {promising_label} with full iterations...")
+
+            # Full search on promising direction
+            route_data, full_iters, blocked_cells = _try_route_direction(
+                promising_src, promising_tgt, pcb_data, config, obstacles, base_obstacles,
+                coord, layer_names, spacing_mm, p_net_id, n_net_id
+            )
+            total_iterations = first_probe_iters + second_probe_iters + full_iters
+
+            if route_data is not None:
+                if promising_label == first_label:
+                    first_blocked_cells = []
+                    first_iterations = promising_probe_iters + full_iters
+                    second_blocked_cells = fallback_blocked
+                    second_iterations = fallback_probe_iters
+                else:
+                    first_blocked_cells = fallback_blocked
+                    first_iterations = fallback_probe_iters
+                    second_blocked_cells = []
+                    second_iterations = promising_probe_iters + full_iters
+                routing_backwards = (promising_label == "backward")
+            else:
+                # Promising direction failed, try fallback if not stuck
+                fallback_stuck = fallback_probe_iters < stuck_threshold
+                if not fallback_stuck:
+                    print(f"  No route found after {full_iters} iterations ({promising_label}), trying {fallback_label}...")
+                    route_data, fallback_full_iters, fallback_full_blocked = _try_route_direction(
+                        fallback_src, fallback_tgt, pcb_data, config, obstacles, base_obstacles,
+                        coord, layer_names, spacing_mm, p_net_id, n_net_id
+                    )
+                    total_iterations += fallback_full_iters
+
+                    if route_data is not None:
+                        if fallback_label == first_label:
+                            first_blocked_cells = []
+                            first_iterations = fallback_probe_iters + fallback_full_iters
+                            second_blocked_cells = blocked_cells
+                            second_iterations = promising_probe_iters + full_iters
+                        else:
+                            first_blocked_cells = blocked_cells
+                            first_iterations = promising_probe_iters + full_iters
+                            second_blocked_cells = []
+                            second_iterations = fallback_probe_iters + fallback_full_iters
+                        routing_backwards = (fallback_label == "backward")
+                    else:
+                        # Both full searches failed
+                        if promising_label == first_label:
+                            first_blocked_cells = blocked_cells
+                            first_iterations = promising_probe_iters + full_iters
+                            second_blocked_cells = fallback_full_blocked
+                            second_iterations = fallback_probe_iters + fallback_full_iters
+                        else:
+                            first_blocked_cells = fallback_full_blocked
+                            first_iterations = fallback_probe_iters + fallback_full_iters
+                            second_blocked_cells = blocked_cells
+                            second_iterations = promising_probe_iters + full_iters
+                else:
+                    # Fallback was stuck, use its probe results
+                    print(f"  {fallback_label} direction stuck ({fallback_probe_iters} iterations), skipping full search")
+                    if promising_label == first_label:
+                        first_blocked_cells = blocked_cells
+                        first_iterations = promising_probe_iters + full_iters
+                        second_blocked_cells = fallback_blocked
+                        second_iterations = fallback_probe_iters
+                    else:
+                        first_blocked_cells = fallback_blocked
+                        first_iterations = fallback_probe_iters
+                        second_blocked_cells = blocked_cells
+                        second_iterations = promising_probe_iters + full_iters
 
     if route_data is None:
         print(f"  No route found after {total_iterations} iterations (both directions)")

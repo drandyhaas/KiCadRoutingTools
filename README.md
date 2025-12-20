@@ -117,9 +117,10 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
 --via-cost 25           # Via penalty (grid steps, doubled for diff pairs)
---max-iterations 200000 # A* iteration limit
---heuristic-weight 1.5  # A* greediness (>1 = faster)
---max-ripup 3           # Max blockers to rip up at once (1-N progressive)
+--max-iterations 200000      # A* iteration limit
+--max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
+--heuristic-weight 1.5       # A* greediness (>1 = faster)
+--max-ripup 3                # Max blockers to rip up at once (1-N progressive)
 
 # Strategy
 --ordering mps          # mps | inside_out | original

@@ -98,6 +98,7 @@ class GridRouteConfig:
     # A* algorithm
     via_cost: int = 25            # grid steps penalty for via (doubled for diff pairs)
     max_iterations: int = 200000
+    max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
     heuristic_weight: float = 1.5
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
 

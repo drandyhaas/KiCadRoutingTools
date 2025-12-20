@@ -275,6 +275,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 grid_step: float = 0.1,
                 via_cost: int = 25,
                 max_iterations: int = 200000,
+                max_probe_iterations: int = 5000,
                 heuristic_weight: float = 1.5,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
@@ -357,6 +358,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_cost=via_cost,
         layers=layers,
         max_iterations=max_iterations,
+        max_probe_iterations=max_probe_iterations,
         heuristic_weight=heuristic_weight,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius,
@@ -1495,6 +1497,8 @@ Differential pair routing:
                         help="Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)")
     parser.add_argument("--max-iterations", type=int, default=200000,
                         help="Max A* iterations before giving up (default: 200000)")
+    parser.add_argument("--max-probe-iterations", type=int, default=5000,
+                        help="Max iterations for quick probe phase per direction (default: 5000)")
     parser.add_argument("--heuristic-weight", type=float, default=1.5,
                         help="A* heuristic weight, higher=faster but less optimal (default: 1.5)")
 
@@ -1580,6 +1584,7 @@ Differential pair routing:
                 grid_step=args.grid_step,
                 via_cost=args.via_cost,
                 max_iterations=args.max_iterations,
+                max_probe_iterations=args.max_probe_iterations,
                 heuristic_weight=args.heuristic_weight,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,

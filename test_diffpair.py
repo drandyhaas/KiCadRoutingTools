@@ -206,6 +206,8 @@ Examples:
                               help='Via cost penalty in grid steps (default: 25)')
     router_group.add_argument('--max-iterations', type=int,
                               help='Max A* iterations (default: 200000)')
+    router_group.add_argument('--max-probe-iterations', type=int,
+                              help='Max iterations for quick probe per direction (default: 5000)')
     router_group.add_argument('--heuristic-weight', type=float,
                               help='A* heuristic weight (default: 1.5)')
     router_group.add_argument('--stub-proximity-radius', type=float,
@@ -319,6 +321,8 @@ Examples:
         router_cmd.extend(["--via-cost", str(args.via_cost)])
     if args.max_iterations is not None:
         router_cmd.extend(["--max-iterations", str(args.max_iterations)])
+    if args.max_probe_iterations is not None:
+        router_cmd.extend(["--max-probe-iterations", str(args.max_probe_iterations)])
     if args.heuristic_weight is not None:
         router_cmd.extend(["--heuristic-weight", str(args.heuristic_weight)])
     if args.stub_proximity_radius is not None:
