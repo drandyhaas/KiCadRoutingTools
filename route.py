@@ -492,14 +492,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             failed += 1
             total_iterations += iterations
             # Analyze which nets are blocking if we have frontier data
-            blocked_cells = result.get('blocked_cells', []) if result else []
-            if blocked_cells and routed_net_paths:
-                blockers = analyze_frontier_blocking(
-                    blocked_cells, pcb_data, config, routed_net_paths,
-                    exclude_net_ids={pair.p_net_id, pair.n_net_id},
-                    extra_clearance=diff_pair_extra_clearance
-                )
-                print_blocking_analysis(blockers)
+            if routed_net_paths and result:
+                for direction in ['forward', 'backward']:
+                    blocked_cells = result.get(f'blocked_cells_{direction}', [])
+                    iterations = result.get(f'iterations_{direction}', 0)
+                    if blocked_cells:
+                        print(f"  {direction.capitalize()} direction ({iterations} iterations, {len(blocked_cells)} blocked cells):")
+                        blockers = analyze_frontier_blocking(
+                            blocked_cells, pcb_data, config, routed_net_paths,
+                            exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                            extra_clearance=diff_pair_extra_clearance
+                        )
+                        print_blocking_analysis(blockers)
 
     # Route single-ended nets
     user_quit = False

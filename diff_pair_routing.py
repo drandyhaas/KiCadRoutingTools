@@ -652,6 +652,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     total_iterations = iterations
     all_blocked_cells = blocked_cells
 
+    first_blocked_cells = blocked_cells
+    first_iterations = iterations
+
     if route_data is None:
         # Try second direction
         print(f"  No route found after {iterations} iterations ({first_label}), trying {second_label}...")
@@ -660,14 +663,24 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             coord, layer_names, spacing_mm, p_net_id, n_net_id
         )
         total_iterations += iterations
-        all_blocked_cells = blocked_cells  # Use second attempt's blocked cells
+        second_blocked_cells = blocked_cells
+        second_iterations = iterations
         routing_backwards = (second_label == "backward")
     else:
+        second_blocked_cells = []
+        second_iterations = 0
         routing_backwards = (first_label == "backward")
 
     if route_data is None:
         print(f"  No route found after {total_iterations} iterations (both directions)")
-        return {'failed': True, 'iterations': total_iterations, 'blocked_cells': all_blocked_cells}
+        return {
+            'failed': True,
+            'iterations': total_iterations,
+            'blocked_cells_forward': first_blocked_cells if first_label == "forward" else second_blocked_cells,
+            'blocked_cells_backward': second_blocked_cells if first_label == "forward" else first_blocked_cells,
+            'iterations_forward': first_iterations if first_label == "forward" else second_iterations,
+            'iterations_backward': second_iterations if first_label == "forward" else first_iterations,
+        }
 
     # Extract route data
     pose_path = route_data['pose_path']

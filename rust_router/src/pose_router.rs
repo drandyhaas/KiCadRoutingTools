@@ -397,6 +397,15 @@ impl PoseRouter {
             let can_place_via = current_steps >= 2 && current_straight_remaining <= 0;
             let mut via_positions_clear = !obstacles.is_via_blocked(current.gx, current.gy);
 
+            // Track via blocking for all layers
+            if !via_positions_clear {
+                for layer in 0..obstacles.num_layers as u8 {
+                    if layer != current.layer {
+                        tracker.track(current.gx, current.gy, layer);
+                    }
+                }
+            }
+
             if via_positions_clear {
                 if let Some(spacing) = diff_pair_via_spacing {
                     let (dx, dy) = current.direction();
@@ -406,8 +415,19 @@ impl PoseRouter {
                     let p_via_y = current.gy + perp_y * spacing;
                     let n_via_x = current.gx - perp_x * spacing;
                     let n_via_y = current.gy - perp_y * spacing;
-                    if obstacles.is_via_blocked(p_via_x, p_via_y) || obstacles.is_via_blocked(n_via_x, n_via_y) {
+                    let p_blocked = obstacles.is_via_blocked(p_via_x, p_via_y);
+                    let n_blocked = obstacles.is_via_blocked(n_via_x, n_via_y);
+                    if p_blocked || n_blocked {
                         via_positions_clear = false;
+                        // Track the blocked via offset positions on all layers
+                        for layer in 0..obstacles.num_layers as u8 {
+                            if p_blocked {
+                                tracker.track(p_via_x, p_via_y, layer);
+                            }
+                            if n_blocked {
+                                tracker.track(n_via_x, n_via_y, layer);
+                            }
+                        }
                     }
                 }
             }
