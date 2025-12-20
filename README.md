@@ -8,10 +8,13 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
+- **Rip-up and reroute** - When a diff pair fails, automatically rips up blocking routes and retries
+- **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
 - **Batch routing** with incremental obstacle caching (~7x speedup)
 - **Net ordering strategies** - MPS (crossing conflicts), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
+- **Via proximity cost** - Configurable cost penalty for vias near stubs (instead of blocking)
 
 ## Quick Start
 
@@ -122,10 +125,16 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --layers F.Cu In1.Cu In2.Cu B.Cu
 --no-bga-zones          # Allow routing through BGA areas
 
+# Stub proximity
+--stub-proximity-radius 5.0  # Radius around stubs to penalize (mm)
+--stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
+--via-proximity-cost 10      # Via cost multiplier near stubs (0=block)
+
 # Differential pairs
 --diff-pairs "*lvds*"   # Pattern for diff pair nets
---diff-pair-gap 0.1     # P-N gap (mm)
+--diff-pair-gap 0.101   # P-N gap (mm)
 --diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
+--min-turning-radius 0.6      # Min turn radius (mm)
 --direction backward    # Route from target to source
 ```
 
@@ -143,7 +152,6 @@ See [Configuration](docs/configuration.md) for complete option reference.
 - Grid-based (0.1mm default) - may miss very tight fits
 - No length matching
 - No push-and-shove (routes around obstacles, doesn't move them)
-- No rip-up and reroute
 
 ## License
 

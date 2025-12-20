@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.7.0**
+**Current Version: 0.8.0**
 
 ## Features
 
@@ -167,7 +167,7 @@ Methods:
 Orientation-aware A* router using Dubins path length as heuristic. Used for differential pair centerline routing where start and end orientations are constrained by stub directions.
 
 ```python
-router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float)
+router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float, via_proximity_cost: int = 10)
 ```
 
 Parameters:
@@ -175,17 +175,21 @@ Parameters:
 - `h_weight`: Heuristic weight (>1 for faster but less optimal routes)
 - `turn_cost`: Cost for 45° in-place turn (typically `min_radius * π/4 * 1000`)
 - `min_radius_grid`: Minimum turning radius in grid units
+- `via_proximity_cost`: Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
 
 Methods:
 - `route_pose(obstacles, src_x, src_y, src_layer, src_theta, tgt_x, tgt_y, tgt_layer, tgt_theta, max_iterations, diff_pair_via_spacing=None)`
   - `src_theta`, `tgt_theta`: Direction indices 0-7 (0=East, 1=NE, 2=North, ..., 7=SE)
   - `diff_pair_via_spacing`: Optional grid units for P/N via offset check. When set, via placement verifies that both +offset and -offset positions perpendicular to heading are clear.
   - Returns `(path, iterations)` where path is `List[(gx, gy, theta_idx, layer)]` or `None`
+- `route_pose_with_frontier(...)` - Same as `route_pose` but returns blocked cells on failure for blocking analysis
+  - Returns `(path, iterations, blocked_cells)` where `blocked_cells` is a list of `(gx, gy, layer)` tuples
 
 Constraints enforced by PoseRouter:
 - **First move straight**: First move from start must be in the start direction (no immediate turn)
-- **Collinear vias**: At least 2 steps before placing a via; after via, must continue straight for 2 steps before turning
+- **Straight after via**: After placing a via, must continue straight for `min_radius_grid + 1` steps before turning (ensures P/N offset tracks clear vias before turning)
 - **Diff pair via clearance**: When `diff_pair_via_spacing` is set, checks that P/N via positions (perpendicular offsets from centerline) are clear
+- **Via proximity cost**: When `via_proximity_cost > 0`, vias near stubs incur a cost penalty instead of being blocked
 
 The Dubins heuristic computes the shortest path length considering:
 - Start and end positions
@@ -221,6 +225,7 @@ src/
 
 ## Version History
 
+- **0.8.0**: Added `via_proximity_cost` parameter to PoseRouter - allows vias near stubs with cost penalty instead of blocking (default: 10, set to 0 for old blocking behavior). Improved turn radius enforcement after vias: `straight_after_via` is now based on `min_radius_grid + 1` instead of hardcoded 2 steps, preventing DRC violations where P/N tracks turn too sharply after vias. Added `route_pose_with_frontier()` method that returns blocked cells on failure for blocking analysis.
 - **0.7.0**: Added `PoseRouter` with Dubins path heuristic for orientation-aware differential pair centerline routing. State space expanded to (x, y, θ, layer) where θ is one of 8 directions (45° increments). Dubins path length used as heuristic for better routing with prescribed start/end orientations.
 - **0.5.1**: Added `via_exclusion_radius` parameter to prevent routes from conflicting with their own vias. Tracks via positions along each path and blocks moves that would cause P/N offset tracks to intersect P/N vias.
 - **0.5.0**: Added `collinear_vias` parameter for differential pair routing - enforces symmetric via geometry: `±45° → D → VIA → D → ±45°` (requires 2 steps before via, approach within ±45° of previous, exit same as approach, then ±45° allowed)
