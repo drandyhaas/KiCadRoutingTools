@@ -179,17 +179,6 @@ impl BlockedCellTracker {
             .collect()
     }
 
-    /// Number of blocked cells tracked
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.blocked.len()
-    }
-
-    /// Check if empty
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.blocked.is_empty()
-    }
 }
 
 impl Default for BlockedCellTracker {

@@ -19,6 +19,7 @@ pub struct PoseRouter {
     turn_cost: i32,  // Cost per 45° turn
     min_radius_grid: f64,  // Minimum turning radius in grid units
     via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
+    straight_after_via: i32,  // Required straight steps after via (derived from min_radius_grid)
 }
 
 #[pymethods]
@@ -26,7 +27,10 @@ impl PoseRouter {
     #[new]
     #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32) -> Self {
-        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost }
+        // After a via, we need enough straight distance to allow the P/N offset tracks
+        // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
+        let straight_after_via = (min_radius_grid.ceil() as i32 + 1).max(3);
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via }
     }
 
     /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
@@ -252,7 +256,7 @@ impl PoseRouter {
                             parents.insert(neighbor_key, current_key);
                             // Via doesn't count as a step, but sets straight requirement
                             steps_from_source.insert(neighbor_key, current_steps);
-                            straight_steps_remaining.insert(neighbor_key, 2);  // Must go straight for 2 steps after via
+                            straight_steps_remaining.insert(neighbor_key, self.straight_after_via);
                             let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                             open_set.push(PoseOpenEntry {
                                 f_score: new_g + h,
@@ -464,7 +468,7 @@ impl PoseRouter {
                             g_costs.insert(neighbor_key, new_g);
                             parents.insert(neighbor_key, current_key);
                             steps_from_source.insert(neighbor_key, current_steps);
-                            straight_steps_remaining.insert(neighbor_key, 2);
+                            straight_steps_remaining.insert(neighbor_key, self.straight_after_via);
                             let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                             open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
                             counter += 1;
