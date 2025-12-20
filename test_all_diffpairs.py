@@ -182,7 +182,7 @@ def main():
     router_group.add_argument('--max-iterations', type=int,
                               help='Max A* iterations (default: 200000)')
     router_group.add_argument('--heuristic-weight', type=float,
-                              help='A* heuristic weight (default: 1.5)')
+                              help='A* heuristic weight (default: 2.0)')
     router_group.add_argument('--stub-proximity-radius', type=float,
                               help='Radius around stubs to penalize in mm (default: 5.0)')
     router_group.add_argument('--stub-proximity-cost', type=float,

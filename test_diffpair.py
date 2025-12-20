@@ -209,7 +209,7 @@ Examples:
     router_group.add_argument('--max-probe-iterations', type=int,
                               help='Max iterations for quick probe per direction (default: 5000)')
     router_group.add_argument('--heuristic-weight', type=float,
-                              help='A* heuristic weight (default: 1.5)')
+                              help='A* heuristic weight (default: 2.0)')
     router_group.add_argument('--stub-proximity-radius', type=float,
                               help='Radius around stubs to penalize in mm (default: 2.0)')
     router_group.add_argument('--stub-proximity-cost', type=float,
