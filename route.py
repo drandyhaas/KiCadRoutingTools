@@ -70,7 +70,8 @@ def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float
     return None
 
 
-def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list) -> bool:
+def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list,
+                        pair_name: str = None, already_swapped: set = None) -> bool:
     """
     Apply polarity swap for a diff pair route result.
 
@@ -79,10 +80,20 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list) -> boo
     2. Swaps net IDs of vias at the target positions
     3. Queues pad swaps for later application to the output file
 
+    If pair_name and already_swapped are provided, skips the swap if this pair
+    was already swapped (e.g., before rip-up and reroute).
+
     Returns True if swap was applied, False if not needed or failed.
     """
     if not result.get('polarity_fixed') or not result.get('swap_target_pads'):
         return False
+
+    # Skip if this pair was already polarity-swapped (prevents double-swap on reroute)
+    if pair_name and already_swapped is not None:
+        if pair_name in already_swapped:
+            print(f"  Polarity swap already applied for {pair_name}, skipping")
+            return False
+        already_swapped.add(pair_name)
 
     swap_info = result['swap_target_pads']
     p_pos = swap_info['p_pos']
@@ -430,6 +441,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_results = {}  # net_id -> result dict (for rip-up)
     diff_pair_by_net_id = {}  # net_id -> (pair_name, pair) for looking up diff pairs
     reroute_queue = []  # List of (pair_name, pair) or (net_name, net_id) for ripped-up nets
+    polarity_swapped_pairs = set()  # Track pairs that have already had polarity swap applied
     remaining_net_ids = list(all_net_ids_to_route)
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
@@ -493,7 +505,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
             # Check if polarity was fixed - need to swap target pad and stub nets
             # Do this BEFORE add_route_to_pcb_data so collapse_appendices sees correct net IDs
-            apply_polarity_swap(pcb_data, result, pad_swaps)
+            apply_polarity_swap(pcb_data, result, pad_swaps, pair_name, polarity_swapped_pairs)
 
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
 
@@ -621,7 +633,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 total_iterations += retry_result['iterations']
 
                                 # Apply polarity swap if needed (same as original route path)
-                                apply_polarity_swap(pcb_data, retry_result, pad_swaps)
+                                apply_polarity_swap(pcb_data, retry_result, pad_swaps, pair_name, polarity_swapped_pairs)
 
                                 add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
                                 if pair.p_net_id in remaining_net_ids:
@@ -720,7 +732,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 total_iterations += result['iterations']
 
                 # Apply polarity swap if needed (same as original route path)
-                apply_polarity_swap(pcb_data, result, pad_swaps)
+                # Pass pair_name and set to avoid double-swap if already done before rip-up
+                apply_polarity_swap(pcb_data, result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
 
                 add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
                 if ripped_pair.p_net_id in remaining_net_ids:
