@@ -605,11 +605,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
             remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
+            # Track path for blocking analysis
+            if result.get('path'):
+                routed_net_paths[net_id] = result['path']
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             failed += 1
             total_iterations += iterations
+            # Analyze which nets are blocking if we have frontier data
+            if routed_net_paths and result:
+                for direction in ['forward', 'backward']:
+                    blocked_cells = result.get(f'blocked_cells_{direction}', [])
+                    dir_iters = result.get(f'iterations_{direction}', 0)
+                    if blocked_cells:
+                        print(f"  {direction.capitalize()} direction ({dir_iters} iterations, {len(blocked_cells)} blocked cells):")
+                        blockers = analyze_frontier_blocking(
+                            blocked_cells, pcb_data, config, routed_net_paths,
+                            exclude_net_ids={net_id},
+                        )
+                        print_blocking_analysis(blockers)
 
     # Notify visualization callback that all routing is complete
     if visualize:

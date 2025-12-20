@@ -245,19 +245,49 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     reversed_path = False
     total_iterations = 0
 
-    path, iterations = router.route_multi(obstacles, first_sources, first_targets, config.max_iterations)
+    # Track blocked cells from both directions for blocking analysis
+    first_blocked_cells = []
+    second_blocked_cells = []
+
+    path, iterations, blocked_cells = router.route_with_frontier(
+        obstacles, first_sources, first_targets, config.max_iterations)
     total_iterations += iterations
+    first_blocked_cells = blocked_cells
+    first_iterations = iterations
 
     if path is None:
         print(f"No route found after {iterations} iterations ({first_label}), trying {second_label}...")
-        path, iterations = router.route_multi(obstacles, second_sources, second_targets, config.max_iterations)
+        path, iterations, blocked_cells = router.route_with_frontier(
+            obstacles, second_sources, second_targets, config.max_iterations)
         total_iterations += iterations
+        second_blocked_cells = blocked_cells
+        second_iterations = iterations
         if path is not None:
             reversed_path = not start_backwards
+    else:
+        second_iterations = 0
 
     if path is None:
         print(f"No route found after {total_iterations} iterations (both directions)")
-        return {'failed': True, 'iterations': total_iterations}
+        # Return blocked cells for each direction (forward/backward labels may be swapped)
+        if first_label == "forward":
+            forward_blocked = first_blocked_cells
+            backward_blocked = second_blocked_cells
+            forward_iters = first_iterations
+            backward_iters = second_iterations
+        else:
+            forward_blocked = second_blocked_cells
+            backward_blocked = first_blocked_cells
+            forward_iters = second_iterations
+            backward_iters = first_iterations
+        return {
+            'failed': True,
+            'iterations': total_iterations,
+            'blocked_cells_forward': forward_blocked,
+            'blocked_cells_backward': backward_blocked,
+            'iterations_forward': forward_iters,
+            'iterations_backward': backward_iters,
+        }
 
     print(f"Route found in {total_iterations} iterations, path length: {len(path)}")
 
