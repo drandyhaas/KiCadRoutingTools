@@ -230,6 +230,8 @@ Examples:
                               help='Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--no-fix-polarity', action='store_true',
                               help="Don't swap target pad nets if polarity swap is needed (default: fix polarity)")
+    router_group.add_argument('--no-stub-layer-swap', action='store_true',
+                              help='Disable stub layer switching optimization')
     router_group.add_argument('--max-ripup', type=int,
                               help='Maximum blockers to rip up at once during rip-up and retry (default: 3)')
 
@@ -345,6 +347,8 @@ Examples:
         router_cmd.append("--debug-lines")
     if args.no_fix_polarity:
         router_cmd.append("--no-fix-polarity")
+    if args.no_stub_layer_swap:
+        router_cmd.append("--no-stub-layer-swap")
     if args.max_ripup is not None:
         router_cmd.extend(["--max-ripup", str(args.max_ripup)])
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])

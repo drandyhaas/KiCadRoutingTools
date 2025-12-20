@@ -647,7 +647,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                                     obstacles: GridObstacleMap,
                                     base_obstacles: GridObstacleMap = None,
                                     unrouted_stubs: List[Tuple[float, float]] = None,
-                                    unrouted_pairs: List[Tuple[str, DiffPair]] = None) -> Optional[dict]:
+                                    unrouted_pairs: List[Tuple[str, DiffPair]] = None,
+                                    enable_layer_switch: bool = True) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
@@ -682,9 +683,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Check if layer switch can avoid vias (source and target on different layers)
     layer_switch_vias = []
     layer_switch_option = None
+    layer_switch_segment_mods = []
     src_layer_idx = original_src[4]
     tgt_layer_idx = original_tgt[4]
-    if src_layer_idx != tgt_layer_idx:
+    if enable_layer_switch and src_layer_idx != tgt_layer_idx:
         src_layer = layer_names[src_layer_idx]
         tgt_layer = layer_names[tgt_layer_idx]
         # Extract stub positions from endpoint tuples
@@ -704,7 +706,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
         if layer_switch_option:
             # Apply the switch now - if routing fails, we'll revert it
-            new_vias, new_layer = apply_layer_switch_option(pcb_data, layer_switch_option, config)
+            new_vias, new_layer, layer_switch_segment_mods = apply_layer_switch_option(pcb_data, layer_switch_option, config)
             layer_switch_vias = new_vias
             switch_desc = "source" if layer_switch_option.switch_source else "target"
             swap_desc = f" (swap with {layer_switch_option.swap_pair.base_name})" if layer_switch_option.swap_pair else ""
@@ -1175,6 +1177,17 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             'p_net_id': p_net_id,  # P net ID to find target pad
             'n_net_id': n_net_id,  # N net ID to find target pad
         }
+
+    # Track if we used a swap - the swap pair's stubs have been modified
+    if layer_switch_option and layer_switch_option.swap_pair:
+        result['swapped_pair_net_ids'] = (
+            layer_switch_option.swap_pair.p_net_id,
+            layer_switch_option.swap_pair.n_net_id
+        )
+
+    # Track segment layer modifications for file writing
+    if layer_switch_segment_mods:
+        result['segment_modifications'] = layer_switch_segment_mods
 
     return result
 

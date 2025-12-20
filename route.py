@@ -22,7 +22,8 @@ from kicad_parser import (
 )
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
-    swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content
+    swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content,
+    modify_segment_layers
 )
 
 # Import from refactored modules
@@ -289,6 +290,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 debug_lines: bool = False,
                 fix_polarity: bool = True,
                 max_rip_up_count: int = 3,
+                enable_layer_switch: bool = True,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -581,6 +583,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     route_index = 0
 
+    # Track net IDs of pairs whose stubs have been modified by layer swap
+    # These pairs should not be used as swap candidates again
+    swapped_pair_net_ids = set()
+
+    # Track all segment layer modifications for file output
+    all_segment_modifications = []
+
     # Route differential pairs first (they're more constrained)
     for pair_name, pair in diff_pair_ids_to_route:
         route_index += 1
@@ -624,11 +633,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
         # Also pass unrouted stubs for finding clear extension endpoints
         # Build list of remaining unrouted pairs for layer swap optimization
+        # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
         remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
                           if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
-                          and p.p_net_id != pair.p_net_id]
+                          and p.p_net_id != pair.p_net_id
+                          and p.p_net_id not in swapped_pair_net_ids]
         result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles,
-                                                 unrouted_stubs, unrouted_pairs=remaining_pairs)
+                                                 unrouted_stubs, unrouted_pairs=remaining_pairs,
+                                                 enable_layer_switch=enable_layer_switch)
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -660,6 +672,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             routed_results[pair.n_net_id] = result  # Both P and N share the same result
             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
             diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+
+            # Track if this route used a swap - the swap pair should not be used for future swaps
+            if result.get('swapped_pair_net_ids'):
+                swap_p, swap_n = result['swapped_pair_net_ids']
+                swapped_pair_net_ids.add(swap_p)
+                swapped_pair_net_ids.add(swap_n)
+
+            # Collect segment layer modifications for file output
+            if result.get('segment_modifications'):
+                all_segment_modifications.extend(result['segment_modifications'])
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
@@ -817,7 +839,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
 
-                        retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs)
+                        retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs, enable_layer_switch=enable_layer_switch)
 
                         if retry_result and not retry_result.get('failed'):
                             print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
@@ -843,6 +865,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             routed_results[pair.n_net_id] = retry_result
                             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
                             diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+
+                            # Track if this route used a swap
+                            if retry_result.get('swapped_pair_net_ids'):
+                                swap_p, swap_n = retry_result['swapped_pair_net_ids']
+                                swapped_pair_net_ids.add(swap_p)
+                                swapped_pair_net_ids.add(swap_n)
+
+                            # Collect segment layer modifications for file output
+                            if retry_result.get('segment_modifications'):
+                                all_segment_modifications.extend(retry_result['segment_modifications'])
 
                             # Queue all ripped-up nets for rerouting and add to history
                             rip_and_retry_history.add((current_canonical, blocker_canonicals))
@@ -912,10 +944,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
 
             # Build list of remaining unrouted pairs for layer swap optimization
+            # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
             remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
                               if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
-                              and p.p_net_id != ripped_pair.p_net_id]
-            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs)
+                              and p.p_net_id != ripped_pair.p_net_id
+                              and p.p_net_id not in swapped_pair_net_ids]
+            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs, enable_layer_switch=enable_layer_switch)
             elapsed = time.time() - start_time
             total_time += elapsed
 
@@ -945,6 +979,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 routed_results[ripped_pair.n_net_id] = result
                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
+
+                # Track if this route used a swap
+                if result.get('swapped_pair_net_ids'):
+                    swap_p, swap_n = result['swapped_pair_net_ids']
+                    swapped_pair_net_ids.add(swap_p)
+                    swapped_pair_net_ids.add(swap_n)
+
+                # Collect segment layer modifications for file output
+                if result.get('segment_modifications'):
+                    all_segment_modifications.extend(result['segment_modifications'])
             else:
                 # Reroute failed - try rip-up and retry with progressive N+1
                 iterations = result['iterations'] if result else 0
@@ -1080,10 +1124,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.n_net_id, config)
 
                             # Build list of remaining unrouted pairs for layer swap optimization
+                            # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
                             remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
                                               if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
-                                              and p.p_net_id != ripped_pair.p_net_id]
-                            retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs)
+                                              and p.p_net_id != ripped_pair.p_net_id
+                                              and p.p_net_id not in swapped_pair_net_ids]
+                            retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs, enable_layer_switch=enable_layer_switch)
 
                             if retry_result and not retry_result.get('failed'):
                                 print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
@@ -1109,6 +1155,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 routed_results[ripped_pair.n_net_id] = retry_result
                                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
                                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
+
+                                # Track if this route used a swap
+                                if retry_result.get('swapped_pair_net_ids'):
+                                    swap_p, swap_n = retry_result['swapped_pair_net_ids']
+                                    swapped_pair_net_ids.add(swap_p)
+                                    swapped_pair_net_ids.add(swap_n)
+
+                                # Collect segment layer modifications for file output
+                                if retry_result.get('segment_modifications'):
+                                    all_segment_modifications.extend(retry_result['segment_modifications'])
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))
@@ -1310,6 +1366,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
+
+        # Apply segment layer modifications from stub layer switching BEFORE polarity swaps
+        # (so we can find segments by their original net_id)
+        if all_segment_modifications:
+            content, mod_count = modify_segment_layers(content, all_segment_modifications)
+            print(f"Applied {mod_count} segment layer modifications (layer switching)")
 
         # Apply pad and stub net swaps for polarity fixes
         if pad_swaps:
@@ -1540,6 +1602,8 @@ Differential pair routing:
                         help="Minimum turning radius for pose-based routing in mm (default: 0.2)")
     parser.add_argument("--no-fix-polarity", action="store_true",
                         help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
+    parser.add_argument("--no-stub-layer-swap", action="store_true",
+                        help="Disable stub layer switching optimization that tries to avoid vias by moving stubs to different layers")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -1611,4 +1675,5 @@ Differential pair routing:
                 debug_lines=args.debug_lines,
                 fix_polarity=not args.no_fix_polarity,
                 max_rip_up_count=args.max_ripup,
+                enable_layer_switch=not args.no_stub_layer_swap,
                 vis_callback=vis_callback)

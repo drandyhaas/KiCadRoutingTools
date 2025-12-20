@@ -525,7 +525,7 @@ def find_layer_switch_options(pcb_data: PCBData,
 
 
 def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
-                             config: GridRouteConfig) -> List[Via]:
+                             config: GridRouteConfig, debug: bool = True) -> Tuple[List[Via], List[Dict]]:
     """
     Switch a stub to a new layer by modifying segment layers.
 
@@ -534,14 +534,37 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
         stub: StubInfo for the stub to switch
         new_layer: Target layer name
         config: Routing configuration
+        debug: If True, print debug info about modified segments
 
     Returns:
-        List of new vias created (pad vias if switching from F.Cu)
+        Tuple of (new_vias, segment_modifications):
+        - new_vias: List of new vias created (pad vias if switching from F.Cu)
+        - segment_modifications: List of dicts with segment layer changes for writing to file
     """
     new_vias = []
+    segment_mods = []
 
-    # Modify segment layers
+    if debug:
+        print(f"      apply_stub_layer_switch: net={stub.net_id}, from {stub.layer} to {new_layer}")
+        print(f"        Stub at ({stub.x:.2f}, {stub.y:.2f}), pad at ({stub.pad_x:.2f}, {stub.pad_y:.2f})")
+        print(f"        Modifying {len(stub.segments)} segments:")
+
+    # Collect modifications and modify segment layers
     for seg in stub.segments:
+        old_layer = seg.layer
+        if debug:
+            print(f"          ({seg.start_x:.2f},{seg.start_y:.2f})->({seg.end_x:.2f},{seg.end_y:.2f}) {old_layer} -> {new_layer}")
+
+        # Record modification for file writing
+        segment_mods.append({
+            'start': (seg.start_x, seg.start_y),
+            'end': (seg.end_x, seg.end_y),
+            'net_id': seg.net_id,
+            'old_layer': old_layer,
+            'new_layer': new_layer
+        })
+
+        # Modify in memory
         seg.layer = new_layer
 
     # Create pad via if needed (switching from F.Cu without existing via)
@@ -557,7 +580,7 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
         new_vias.append(via)
         pcb_data.vias.append(via)
 
-    return new_vias
+    return new_vias, segment_mods
 
 
 def revert_layer_switch_option(pcb_data: PCBData, option: LayerSwitchOption,
@@ -602,7 +625,7 @@ def revert_layer_switch_option(pcb_data: PCBData, option: LayerSwitchOption,
 
 
 def apply_layer_switch_option(pcb_data: PCBData, option: LayerSwitchOption,
-                               config: GridRouteConfig) -> Tuple[List[Via], str]:
+                               config: GridRouteConfig) -> Tuple[List[Via], str, List[Dict]]:
     """
     Apply a layer switch option to the PCB data.
 
@@ -612,19 +635,31 @@ def apply_layer_switch_option(pcb_data: PCBData, option: LayerSwitchOption,
         config: Routing configuration
 
     Returns:
-        Tuple of (new_vias, new_common_layer)
+        Tuple of (new_vias, new_common_layer, segment_modifications)
+        - new_vias: Vias created for the switch
+        - new_common_layer: The layer both stubs are now on
+        - segment_modifications: List of dicts with segment layer changes for writing to file
     """
     new_vias = []
+    all_segment_mods = []
     new_common_layer = None
 
     if option.switch_source:
-        new_vias.extend(apply_stub_layer_switch(pcb_data, option.src_p_stub, option.new_layer, config))
-        new_vias.extend(apply_stub_layer_switch(pcb_data, option.src_n_stub, option.new_layer, config))
+        vias, mods = apply_stub_layer_switch(pcb_data, option.src_p_stub, option.new_layer, config)
+        new_vias.extend(vias)
+        all_segment_mods.extend(mods)
+        vias, mods = apply_stub_layer_switch(pcb_data, option.src_n_stub, option.new_layer, config)
+        new_vias.extend(vias)
+        all_segment_mods.extend(mods)
         new_common_layer = option.tgt_p_stub.layer  # Target layer is now common
 
     if option.switch_target:
-        new_vias.extend(apply_stub_layer_switch(pcb_data, option.tgt_p_stub, option.new_layer, config))
-        new_vias.extend(apply_stub_layer_switch(pcb_data, option.tgt_n_stub, option.new_layer, config))
+        vias, mods = apply_stub_layer_switch(pcb_data, option.tgt_p_stub, option.new_layer, config)
+        new_vias.extend(vias)
+        all_segment_mods.extend(mods)
+        vias, mods = apply_stub_layer_switch(pcb_data, option.tgt_n_stub, option.new_layer, config)
+        new_vias.extend(vias)
+        all_segment_mods.extend(mods)
         new_common_layer = option.src_p_stub.layer  # Source layer is now common
 
     # If this is a swap, also switch the other pair's stubs
@@ -638,10 +673,14 @@ def apply_layer_switch_option(pcb_data: PCBData, option: LayerSwitchOption,
             # We moved from tgt_layer to src_layer, they move from src_layer to tgt_layer
             their_new_layer = option.tgt_p_stub.layer  # Our original target layer
 
-        new_vias.extend(apply_stub_layer_switch(pcb_data, their_p_stub, their_new_layer, config))
-        new_vias.extend(apply_stub_layer_switch(pcb_data, their_n_stub, their_new_layer, config))
+        vias, mods = apply_stub_layer_switch(pcb_data, their_p_stub, their_new_layer, config)
+        new_vias.extend(vias)
+        all_segment_mods.extend(mods)
+        vias, mods = apply_stub_layer_switch(pcb_data, their_n_stub, their_new_layer, config)
+        new_vias.extend(vias)
+        all_segment_mods.extend(mods)
 
-    return new_vias, new_common_layer
+    return new_vias, new_common_layer, all_segment_mods
 
 
 def find_blocking_stubs_at_position(pcb_data: PCBData, x: float, y: float,
