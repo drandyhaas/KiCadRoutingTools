@@ -187,7 +187,9 @@ impl PoseRouter {
                                 parents.insert(neighbor_key, current_key);
                                 // Update constraint tracking for turn move
                                 steps_from_source.insert(neighbor_key, current_steps + 1);
-                                straight_steps_remaining.insert(neighbor_key, 0);
+                                // After a turn, require min_radius_grid straight steps before next turn
+                                // This enforces the minimum turning radius constraint
+                                straight_steps_remaining.insert(neighbor_key, self.min_radius_grid.ceil() as i32);
                                 // Reset to 1: this is the first step in the new direction
                                 straight_steps_taken.insert(neighbor_key, 1);
                                 let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
@@ -407,7 +409,8 @@ impl PoseRouter {
                             g_costs.insert(neighbor_key, new_g);
                             parents.insert(neighbor_key, current_key);
                             steps_from_source.insert(neighbor_key, current_steps + 1);
-                            straight_steps_remaining.insert(neighbor_key, 0);
+                            // After a turn, require min_radius_grid straight steps before next turn
+                            straight_steps_remaining.insert(neighbor_key, self.min_radius_grid.ceil() as i32);
                             straight_steps_taken.insert(neighbor_key, 1);
                             let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                             open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
