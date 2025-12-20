@@ -531,7 +531,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # Check if this is a routed net we can rip up
                         if blocker_net_id in routed_results:
                             blocker_result = routed_results[blocker_net_id]
-                            print(f"  Ripping up {top_blocker.net_name} to retry...")
+
+                            # Determine what we're ripping up for the message
+                            if blocker_net_id in diff_pair_by_net_id:
+                                ripped_pair_name, ripped_pair = diff_pair_by_net_id[blocker_net_id]
+                                print(f"  Ripping up diff pair {ripped_pair_name} (P and N) to retry...")
+                            else:
+                                print(f"  Ripping up {top_blocker.net_name} to retry...")
 
                             # Remove the blocking route from pcb_data and results list
                             remove_route_from_pcb_data(pcb_data, blocker_result)
@@ -623,9 +629,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 # Retry failed - restore the ripped route
                                 print(f"  RETRY FAILED: Restoring {top_blocker.net_name}")
                                 add_route_to_pcb_data(pcb_data, blocker_result, debug_lines=config.debug_lines)
+                                # Add back to results list so it gets written to output
+                                results.append(blocker_result)
+                                successful += 1
                                 if blocker_net_id in diff_pair_by_net_id:
                                     routed_net_ids.append(ripped_pair.p_net_id)
                                     routed_net_ids.append(ripped_pair.n_net_id)
+                                    # Remove from remaining_net_ids since they're back to routed
+                                    if ripped_pair.p_net_id in remaining_net_ids:
+                                        remaining_net_ids.remove(ripped_pair.p_net_id)
+                                    if ripped_pair.n_net_id in remaining_net_ids:
+                                        remaining_net_ids.remove(ripped_pair.n_net_id)
                                     if blocker_result.get('p_path'):
                                         routed_net_paths[ripped_pair.p_net_id] = blocker_result['p_path']
                                     if blocker_result.get('n_path'):
@@ -634,6 +648,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     routed_results[ripped_pair.n_net_id] = blocker_result
                                 else:
                                     routed_net_ids.append(blocker_net_id)
+                                    if blocker_net_id in remaining_net_ids:
+                                        remaining_net_ids.remove(blocker_net_id)
                                     if blocker_result.get('path'):
                                         routed_net_paths[blocker_net_id] = blocker_result['path']
                                     routed_results[blocker_net_id] = blocker_result
