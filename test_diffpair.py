@@ -27,18 +27,52 @@ from typing import List, Set, Tuple, Optional
 
 
 def run_command(cmd, description, capture_output=False):
-    """Run a command and print its output."""
+    """Run a command and print its output.
+
+    When capture_output=True, streams output line-by-line as it's produced
+    while also capturing it for later use.
+    """
     print(f"\n{'='*60}")
     print(f"{description}")
     print(f"{'='*60}")
-    print(f"Running: {' '.join(cmd)}\n")
+    print(f"Running: {' '.join(cmd)}")
+    sys.stdout.flush()
 
-    result = subprocess.run(cmd, capture_output=capture_output, text=True)
-    if capture_output and result.stdout:
-        print(result.stdout)
-    if capture_output and result.stderr:
-        print(result.stderr, file=sys.stderr)
-    return result
+    if capture_output:
+        # Use Popen to stream output in real-time while capturing
+        # Set PYTHONUNBUFFERED to force the child process to flush output immediately
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr into stdout for unified streaming
+            text=True,
+            bufsize=1,  # Line buffered
+            env=env
+        )
+
+        stdout_lines = []
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                print(line, end='', flush=True)
+                stdout_lines.append(line)
+
+        process.wait()
+
+        # Create a result-like object
+        class Result:
+            def __init__(self, returncode, stdout):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = None
+
+        return Result(process.returncode, ''.join(stdout_lines))
+    else:
+        return subprocess.run(cmd, text=True)
 
 
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
