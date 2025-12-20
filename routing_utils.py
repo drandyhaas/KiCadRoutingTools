@@ -1035,6 +1035,58 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     result['new_segments'] = cleaned_segments
 
 
+def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
+    """Remove routed segments and vias from PCB data (for rip-up and reroute)."""
+    segments_to_remove = result.get('new_segments', [])
+    vias_to_remove = result.get('new_vias', [])
+
+    if not segments_to_remove and not vias_to_remove:
+        return
+
+    # Build sets of segment signatures (start, end, layer, net_id) for fast lookup
+    seg_signatures = set()
+    for seg in segments_to_remove:
+        # Normalize segment direction (smaller point first)
+        p1 = (round(seg.start_x, 3), round(seg.start_y, 3))
+        p2 = (round(seg.end_x, 3), round(seg.end_y, 3))
+        if p1 > p2:
+            p1, p2 = p2, p1
+        sig = (p1, p2, seg.layer, seg.net_id)
+        seg_signatures.add(sig)
+
+    # Build set of via signatures (x, y, net_id) for fast lookup
+    via_signatures = set()
+    for via in vias_to_remove:
+        sig = (round(via.x, 3), round(via.y, 3), via.net_id)
+        via_signatures.add(sig)
+
+    # Remove matching segments
+    new_segments = []
+    removed_seg_count = 0
+    for seg in pcb_data.segments:
+        p1 = (round(seg.start_x, 3), round(seg.start_y, 3))
+        p2 = (round(seg.end_x, 3), round(seg.end_y, 3))
+        if p1 > p2:
+            p1, p2 = p2, p1
+        sig = (p1, p2, seg.layer, seg.net_id)
+        if sig in seg_signatures:
+            removed_seg_count += 1
+        else:
+            new_segments.append(seg)
+    pcb_data.segments = new_segments
+
+    # Remove matching vias
+    new_vias = []
+    removed_via_count = 0
+    for via in pcb_data.vias:
+        sig = (round(via.x, 3), round(via.y, 3), via.net_id)
+        if sig in via_signatures:
+            removed_via_count += 1
+        else:
+            new_vias.append(via)
+    pcb_data.vias = new_vias
+
+
 def find_pad_nearest_to_position(pcb_data: PCBData, net_id: int, x: float, y: float) -> Optional[Pad]:
     """Find the pad for a given net that is nearest to the specified position."""
     pads = pcb_data.pads_by_net.get(net_id, [])
