@@ -688,11 +688,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if blocked_cells:
                         print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
 
-                # Analyze blocking for backward failures or setback failures (not forward)
-                # Forward failures don't trigger rip-up as the blocked cells are less reliable
-                should_analyze_blocking = (is_setback_failure and blocked_cells) or \
-                                          (not is_setback_failure and blocked_cells and fastest_dir == 'backward')
-                if should_analyze_blocking:
+                # Analyze blocking for all failure types (setback, forward, backward)
+                if blocked_cells:
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
                         exclude_net_ids={pair.p_net_id, pair.n_net_id},
