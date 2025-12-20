@@ -70,6 +70,70 @@ def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float
     return None
 
 
+def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list) -> bool:
+    """
+    Apply polarity swap for a diff pair route result.
+
+    When a diff pair route requires P/N polarity swap at the target, this function:
+    1. Swaps net IDs of stub segments at the target positions
+    2. Swaps net IDs of vias at the target positions
+    3. Queues pad swaps for later application to the output file
+
+    Returns True if swap was applied, False if not needed or failed.
+    """
+    if not result.get('polarity_fixed') or not result.get('swap_target_pads'):
+        return False
+
+    swap_info = result['swap_target_pads']
+    p_pos = swap_info['p_pos']
+    n_pos = swap_info['n_pos']
+    p_net_id = swap_info['p_net_id']
+    n_net_id = swap_info['n_net_id']
+
+    # Find segments connected to each stub position and swap their net IDs
+    p_stub_positions = find_connected_segment_positions(pcb_data, p_pos[0], p_pos[1], p_net_id)
+    n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
+
+    for seg in pcb_data.segments:
+        seg_start = (round(seg.start_x, 2), round(seg.start_y, 2))
+        seg_end = (round(seg.end_x, 2), round(seg.end_y, 2))
+        if seg.net_id == p_net_id and (seg_start in p_stub_positions or seg_end in p_stub_positions):
+            seg.net_id = n_net_id
+        elif seg.net_id == n_net_id and (seg_start in n_stub_positions or seg_end in n_stub_positions):
+            seg.net_id = p_net_id
+
+    # Also swap via net IDs at stub positions
+    for via in pcb_data.vias:
+        via_pos = (round(via.x, 2), round(via.y, 2))
+        if via.net_id == p_net_id and via_pos in p_stub_positions:
+            via.net_id = n_net_id
+        elif via.net_id == n_net_id and via_pos in n_stub_positions:
+            via.net_id = p_net_id
+
+    # Find the target pads for swap
+    pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_pos[0], p_pos[1])
+    pad_n = find_pad_nearest_to_position(pcb_data, n_net_id, n_pos[0], n_pos[1])
+
+    if pad_p and pad_n:
+        pad_swaps.append({
+            'pad_p': pad_p,
+            'pad_n': pad_n,
+            'p_net_id': p_net_id,
+            'n_net_id': n_net_id,
+            'p_stub_positions': p_stub_positions,
+            'n_stub_positions': n_stub_positions,
+        })
+        print(f"  Polarity fixed: will swap nets of {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
+        return True
+    else:
+        print(f"  WARNING: Could not find target pads to swap for polarity fix")
+        if not pad_p:
+            print(f"    Missing P pad (net {p_net_id}) near {p_pos}")
+        if not pad_n:
+            print(f"    Missing N pad (net {n_net_id}) near {n_pos}")
+        return False
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -429,54 +493,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
             # Check if polarity was fixed - need to swap target pad and stub nets
             # Do this BEFORE add_route_to_pcb_data so collapse_appendices sees correct net IDs
-            if result.get('polarity_fixed') and result.get('swap_target_pads'):
-                swap_info = result['swap_target_pads']
-                p_pos = swap_info['p_pos']  # Original P target stub position
-                n_pos = swap_info['n_pos']  # Original N target stub position
-                p_net_id = swap_info['p_net_id']
-                n_net_id = swap_info['n_net_id']
-
-                # Swap stub net IDs in pcb_data.segments so collapse_appendices works correctly
-                # Find segments connected to each stub position and swap their net IDs
-                p_stub_positions = find_connected_segment_positions(pcb_data, p_pos[0], p_pos[1], p_net_id)
-                n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
-                for seg in pcb_data.segments:
-                    seg_start = (round(seg.start_x, 2), round(seg.start_y, 2))
-                    seg_end = (round(seg.end_x, 2), round(seg.end_y, 2))
-                    if seg.net_id == p_net_id and (seg_start in p_stub_positions or seg_end in p_stub_positions):
-                        seg.net_id = n_net_id
-                    elif seg.net_id == n_net_id and (seg_start in n_stub_positions or seg_end in n_stub_positions):
-                        seg.net_id = p_net_id
-
-                # Also swap via net IDs at stub positions
-                for via in pcb_data.vias:
-                    via_pos = (round(via.x, 2), round(via.y, 2))
-                    if via.net_id == p_net_id and via_pos in p_stub_positions:
-                        via.net_id = n_net_id
-                    elif via.net_id == n_net_id and via_pos in n_stub_positions:
-                        via.net_id = p_net_id
-
-                # Find the target pads by net ID and proximity to stub positions
-                pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_pos[0], p_pos[1])
-                pad_n = find_pad_nearest_to_position(pcb_data, n_net_id, n_pos[0], n_pos[1])
-
-                if pad_p and pad_n:
-                    pad_swaps.append({
-                        'pad_p': pad_p,
-                        'pad_n': pad_n,
-                        'p_net_id': p_net_id,
-                        'n_net_id': n_net_id,
-                        # Store positions now before pcb_data net IDs are swapped
-                        'p_stub_positions': p_stub_positions,
-                        'n_stub_positions': n_stub_positions,
-                    })
-                    print(f"  Polarity fixed: will swap nets of {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
-                else:
-                    print(f"  WARNING: Could not find target pads to swap for polarity fix")
-                    if not pad_p:
-                        print(f"    Missing P pad (net {p_net_id}) near {p_pos}")
-                    if not pad_n:
-                        print(f"    Missing N pad (net {n_net_id}) near {n_pos}")
+            apply_polarity_swap(pcb_data, result, pad_swaps)
 
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
 
@@ -602,6 +619,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 results.append(retry_result)
                                 successful += 1
                                 total_iterations += retry_result['iterations']
+
+                                # Apply polarity swap if needed (same as original route path)
+                                apply_polarity_swap(pcb_data, retry_result, pad_swaps)
+
                                 add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
                                 if pair.p_net_id in remaining_net_ids:
                                     remaining_net_ids.remove(pair.p_net_id)
@@ -697,6 +718,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 results.append(result)
                 successful += 1
                 total_iterations += result['iterations']
+
+                # Apply polarity swap if needed (same as original route path)
+                apply_polarity_swap(pcb_data, result, pad_swaps)
+
                 add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
                 if ripped_pair.p_net_id in remaining_net_ids:
                     remaining_net_ids.remove(ripped_pair.p_net_id)
