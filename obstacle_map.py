@@ -52,6 +52,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 for gy in range(gmin_y, gmax_y + 1):
                     obstacles.add_blocked_cell(gx, gy, layer_idx)
 
+    # Add BGA proximity costs (penalize routing near BGA edges)
+    add_bga_proximity_costs(obstacles, config)
+
     # Precompute grid expansions (with extra clearance)
     expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
@@ -315,6 +318,42 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
                     obstacles.set_stub_proximity(gcx + dx, gcy + dy, cost)
 
 
+def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig):
+    """Add BGA proximity costs around zone edges (outside the zones).
+
+    Penalizes routing near BGA edges with linear falloff from max cost at edge
+    to zero at bga_proximity_radius distance.
+    """
+    if config.bga_proximity_radius <= 0:
+        return  # Feature disabled
+
+    coord = GridCoord(config.grid_step)
+    radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
+    cost_grid = int(config.bga_proximity_cost * 1000 / config.grid_step)
+
+    for min_x, min_y, max_x, max_y in config.bga_exclusion_zones:
+        gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+        gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+
+        # Iterate over cells within radius of BGA zone edges (outside the zone)
+        for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):
+            for gy in range(gmin_y - radius_grid, gmax_y + radius_grid + 1):
+                # Skip if inside BGA zone (already blocked)
+                if gmin_x <= gx <= gmax_x and gmin_y <= gy <= gmax_y:
+                    continue
+
+                # Calculate distance to nearest edge of rectangle
+                # Clamp point to rect, then calculate distance from original to clamped
+                cx = max(gmin_x, min(gx, gmax_x))
+                cy = max(gmin_y, min(gy, gmax_y))
+                dist = ((gx - cx) ** 2 + (gy - cy) ** 2) ** 0.5
+
+                if dist <= radius_grid:
+                    proximity = 1.0 - (dist / radius_grid)
+                    cost = int(proximity * cost_grid)
+                    obstacles.set_stub_proximity(gx, gy, cost)
+
+
 def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                        exclude_net_id: int, unrouted_stubs: Optional[List[Tuple[float, float]]] = None) -> GridObstacleMap:
     """Build Rust obstacle map from PCB data (legacy function for compatibility)."""
@@ -376,6 +415,9 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
                 for gy in range(gmin_y, gmax_y + 1):
                     obstacles.add_blocked_cell(gx, gy, layer_idx)
                     blocked_cells[layer_idx].add((gx, gy))
+
+    # Add BGA proximity costs (penalize routing near BGA edges)
+    add_bga_proximity_costs(obstacles, config)
 
     # Precompute grid expansions (with extra clearance)
     expansion_mm = config.track_width / 2 + config.clearance + extra_clearance

@@ -52,12 +52,15 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--layers` / `-l` | F.Cu In1.Cu In2.Cu B.Cu | Routing layers |
 | `--no-bga-zones` | false | Disable BGA exclusion zone detection |
 
-### Stub Proximity Options
+### Proximity Penalty Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--stub-proximity-radius` | 5.0 | Radius around stubs to penalize (mm) |
+| `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty at stub center (mm equivalent) |
+| `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize (mm) |
+| `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
+| `--via-proximity-cost` | 10.0 | Via cost multiplier near stubs/BGAs (0=block) |
 
 ### Differential Pair Options
 

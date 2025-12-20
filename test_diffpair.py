@@ -175,11 +175,15 @@ Examples:
     router_group.add_argument('--heuristic-weight', type=float,
                               help='A* heuristic weight (default: 1.5)')
     router_group.add_argument('--stub-proximity-radius', type=float,
-                              help='Radius around stubs to penalize in mm (default: 5.0)')
+                              help='Radius around stubs to penalize in mm (default: 2.0)')
     router_group.add_argument('--stub-proximity-cost', type=float,
                               help='Cost penalty near stubs in mm equivalent (default: 0.2)')
     router_group.add_argument('--via-proximity-cost', type=float,
                               help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)')
+    router_group.add_argument('--bga-proximity-radius', type=float,
+                              help='Radius around BGA edges to penalize in mm (default: 10.0)')
+    router_group.add_argument('--bga-proximity-cost', type=float,
+                              help='Cost penalty near BGA edges in mm equivalent (default: 0.2)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.101)')
     router_group.add_argument('--diff-pair-centerline-setback', type=float,
@@ -287,6 +291,10 @@ Examples:
         router_cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
     if args.via_proximity_cost is not None:
         router_cmd.extend(["--via-proximity-cost", str(args.via_proximity_cost)])
+    if args.bga_proximity_radius is not None:
+        router_cmd.extend(["--bga-proximity-radius", str(args.bga_proximity_radius)])
+    if args.bga_proximity_cost is not None:
+        router_cmd.extend(["--bga-proximity-cost", str(args.bga_proximity_cost)])
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
     if args.diff_pair_centerline_setback is not None:

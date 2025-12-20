@@ -159,9 +159,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 via_cost: int = 25,
                 max_iterations: int = 200000,
                 heuristic_weight: float = 1.5,
-                stub_proximity_radius: float = 5.0,
+                stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
                 via_proximity_cost: float = 10.0,
+                bga_proximity_radius: float = 10.0,
+                bga_proximity_cost: float = 0.2,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.101,
                 diff_pair_centerline_setback: float = None,
@@ -193,8 +195,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_cost: Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)
         max_iterations: Max A* iterations before giving up (default: 200000)
         heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.5)
-        stub_proximity_radius: Radius around stubs to penalize in mm (default: 5.0)
+        stub_proximity_radius: Radius around stubs to penalize in mm (default: 2.0)
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 0.2)
+        bga_proximity_radius: Radius around BGA edges to penalize in mm (default: 10.0)
+        bga_proximity_cost: Cost penalty near BGA edges in mm equivalent (default: 0.2)
         diff_pair_patterns: Glob patterns for nets to route as differential pairs
         diff_pair_gap: Gap between P and N traces in differential pairs (default: 0.1mm)
         debug_lines: Output debug geometry on User.2/3/8/9 layers
@@ -240,6 +244,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_radius=stub_proximity_radius,
         stub_proximity_cost=stub_proximity_cost,
         via_proximity_cost=via_proximity_cost,
+        bga_proximity_radius=bga_proximity_radius,
+        bga_proximity_cost=bga_proximity_cost,
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
@@ -1092,12 +1098,18 @@ Differential pair routing:
                         help="A* heuristic weight, higher=faster but less optimal (default: 1.5)")
 
     # Stub proximity penalty
-    parser.add_argument("--stub-proximity-radius", type=float, default=5.0,
-                        help="Radius around stubs to penalize routing in mm (default: 5.0)")
+    parser.add_argument("--stub-proximity-radius", type=float, default=2.0,
+                        help="Radius around stubs to penalize routing in mm (default: 2.0)")
     parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near stubs in mm equivalent (default: 0.2)")
     parser.add_argument("--via-proximity-cost", type=float, default=10.0,
                         help="Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)")
+
+    # BGA proximity penalty
+    parser.add_argument("--bga-proximity-radius", type=float, default=10.0,
+                        help="Radius around BGA edges to penalize routing in mm (default: 10.0)")
+    parser.add_argument("--bga-proximity-cost", type=float, default=0.2,
+                        help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 
     # Differential pair routing
     parser.add_argument("--diff-pairs", "-D", nargs="+",
@@ -1167,6 +1179,8 @@ Differential pair routing:
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
                 via_proximity_cost=args.via_proximity_cost,
+                bga_proximity_radius=args.bga_proximity_radius,
+                bga_proximity_cost=args.bga_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,

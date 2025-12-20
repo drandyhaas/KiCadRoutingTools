@@ -125,10 +125,12 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --layers F.Cu In1.Cu In2.Cu B.Cu
 --no-bga-zones          # Allow routing through BGA areas
 
-# Stub proximity
---stub-proximity-radius 5.0  # Radius around stubs to penalize (mm)
+# Proximity penalties
+--stub-proximity-radius 2.0  # Radius around stubs to penalize (mm)
 --stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
---via-proximity-cost 10      # Via cost multiplier near stubs (0=block)
+--bga-proximity-radius 10.0  # Radius around BGA edges to penalize (mm)
+--bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
+--via-proximity-cost 10      # Via cost multiplier near stubs/BGAs (0=block)
 
 # Differential pairs
 --diff-pairs "*lvds*"   # Pattern for diff pair nets

@@ -277,8 +277,11 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
-| `--stub-proximity-radius` | 5.0 | Radius around stubs to penalize routing (mm) |
+| `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
+| `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |
+| `--bga-proximity-cost` | 0.2 | Cost penalty near BGA edges (mm equivalent) |
+| `--via-proximity-cost` | 10.0 | Via cost multiplier near stubs/BGAs (0=block) |
 
 ## Limitations
 
