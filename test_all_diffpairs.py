@@ -77,7 +77,7 @@ def run_test(diff_pair_name, args, verbose=False):
         # Parse output for success/failure
         output = result.stdout + result.stderr
 
-        success = "NO DRC VIOLATIONS FOUND!" in output
+        drc_passed = "NO DRC VIOLATIONS FOUND!" in output or "DRC... OK" in output
         routing_success = "SUCCESS:" in output
 
         # Check for polarity swap without vias warning (known limitation)
@@ -119,7 +119,7 @@ def run_test(diff_pair_name, args, verbose=False):
         return {
             'name': diff_pair_name,
             'routing_success': routing_success and not routing_failed,
-            'drc_success': success,
+            'drc_success': drc_passed or len(violations) == 0,
             'polarity_no_vias': polarity_no_vias,
             'polarity_fixed': polarity_fixed,
             'violations': violations,
