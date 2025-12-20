@@ -324,6 +324,7 @@ Examples:
 
     routing_results = {}  # diff_pair -> True (routed) or False (failed)
     routing_stats = {}  # diff_pair -> {'iterations': int, 'vias': int, 'time': float, 'polarity_fixed': bool}
+    failed_stats = {}  # diff_pair -> {'time': float} for failed routes
     ripped_pairs = set()  # Pairs that were ripped up (need rerouting)
     retry_success_pairs = set()  # Pairs that succeeded after rip-up retry
 
@@ -364,6 +365,10 @@ Examples:
                     }
             elif re.search(r'^\s*FAILED:', section, re.MULTILINE):
                 routing_results[diff_pair] = False
+                # Parse time from FAILED line: "FAILED: Could not find route (T.TTs)"
+                failed_match = re.search(r'FAILED:.*\(([0-9.]+)s\)', section)
+                if failed_match:
+                    failed_stats[diff_pair] = {'time': float(failed_match.group(1))}
             else:
                 # No explicit SUCCESS/FAILED found, check for other indicators
                 if 'No route found' in section or 'No valid source' in section or 'No valid target' in section:
@@ -415,6 +420,10 @@ Examples:
                     }
             elif re.search(r'REROUTE FAILED:', reroute_section):
                 routing_results[diff_pair] = False
+                # Parse time from REROUTE FAILED line: "REROUTE FAILED: (T.TTs)"
+                failed_match = re.search(r'REROUTE FAILED:.*\(([0-9.]+)s\)', reroute_section)
+                if failed_match:
+                    failed_stats[diff_pair] = {'time': float(failed_match.group(1))}
         else:
             # Ripped but no reroute section found - assume failed
             routing_results[diff_pair] = False
@@ -522,7 +531,9 @@ Examples:
     # Aggregate statistics
     total_iterations = sum(s.get('iterations', 0) for s in routing_stats.values())
     total_vias = sum(s.get('vias', 0) for s in routing_stats.values())
-    total_time = sum(s.get('time', 0) for s in routing_stats.values())
+    success_time = sum(s.get('time', 0) for s in routing_stats.values())
+    failed_time = sum(s.get('time', 0) for s in failed_stats.values())
+    total_time = success_time + failed_time
     polarity_fixed_pairs = [p for p, s in routing_stats.items() if s.get('polarity_fixed', False)]
     rerouted_pairs_list = [p for p, s in routing_stats.items() if s.get('rerouted', False)]
     via_ripup_pairs = [p for p, s in routing_stats.items() if s.get('via_ripup', False)]
@@ -532,6 +543,9 @@ Examples:
     print(f"  Succeeded: {len(routed_pairs)}/{len(matched_pairs)}")
     print(f"  Total iterations: {total_iterations:,}")
     print(f"  Total via pairs:  {total_vias // 2}")
+    print(f"  Successful time:  {success_time:.2f}s")
+    if failed_stats:
+        print(f"  Failed time:      {failed_time:.2f}s")
     print(f"  Total time:       {total_time:.2f}s")
     print(f"  Polarity swaps:   {len(polarity_fixed_pairs)}")
     if ripped_pairs or via_ripup_pairs:
