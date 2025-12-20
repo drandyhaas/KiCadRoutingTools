@@ -154,7 +154,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.101,
                 diff_pair_centerline_setback: float = None,
-                min_turning_radius: float = 0.6,
+                min_turning_radius: float = 0.2,
                 debug_lines: bool = False,
                 fix_polarity: bool = True,
                 vis_callback=None) -> Tuple[int, int, float]:
@@ -1093,8 +1093,8 @@ Differential pair routing:
                         help="Gap between P and N traces of differential pairs in mm (default: 0.101)")
     parser.add_argument("--diff-pair-centerline-setback", type=float, default=None,
                         help="Distance in front of stubs to start centerline route in mm (default: 2x P-N spacing)")
-    parser.add_argument("--min-turning-radius", type=float, default=0.6,
-                        help="Minimum turning radius for pose-based routing in mm (default: 0.6)")
+    parser.add_argument("--min-turning-radius", type=float, default=0.2,
+                        help="Minimum turning radius for pose-based routing in mm (default: 0.2)")
     parser.add_argument("--no-fix-polarity", action="store_true",
                         help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
 

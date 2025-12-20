@@ -185,7 +185,7 @@ Examples:
     router_group.add_argument('--diff-pair-centerline-setback', type=float,
                               help='Distance in front of stubs to start route in mm (default: 2x P-N spacing)')
     router_group.add_argument('--min-turning-radius', type=float,
-                              help='Minimum turning radius for pose-based routing in mm (default: 0.6)')
+                              help='Minimum turning radius for pose-based routing in mm (default: 0.2)')
     router_group.add_argument('--debug-lines', action='store_true',
                               help='Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--no-fix-polarity', action='store_true',

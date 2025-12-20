@@ -134,7 +134,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --diff-pairs "*lvds*"   # Pattern for diff pair nets
 --diff-pair-gap 0.101   # P-N gap (mm)
 --diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
---min-turning-radius 0.6      # Min turn radius (mm)
+--min-turning-radius 0.2      # Min turn radius (mm)
 --direction backward    # Route from target to source
 ```
 
