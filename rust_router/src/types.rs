@@ -1,6 +1,7 @@
 //! Shared types and constants for the grid router.
 
 use std::cmp::Ordering;
+use rustc_hash::FxHashSet;
 
 /// 8 directions for octilinear routing
 pub const DIRECTIONS: [(i32, i32); 8] = [
@@ -139,5 +140,60 @@ impl Ord for PoseOpenEntry {
 impl PartialOrd for PoseOpenEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+/// Tracks blocked cells encountered during A* search.
+/// Used by both GridRouter and PoseRouter to report frontier on failure.
+pub struct BlockedCellTracker {
+    blocked: FxHashSet<u64>,
+}
+
+impl BlockedCellTracker {
+    pub fn new() -> Self {
+        Self {
+            blocked: FxHashSet::default(),
+        }
+    }
+
+    /// Track a blocked cell (using GridState key format: 20 bits x, 20 bits y, 8 bits layer)
+    #[inline]
+    pub fn track(&mut self, gx: i32, gy: i32, layer: u8) {
+        let key = GridState::new(gx, gy, layer).as_key();
+        self.blocked.insert(key);
+    }
+
+    /// Get all blocked cells as (gx, gy, layer) tuples
+    pub fn get_blocked(&self) -> Vec<(i32, i32, u8)> {
+        self.blocked
+            .iter()
+            .map(|&key| {
+                let layer = (key & 0xFF) as u8;
+                let y = ((key >> 8) & 0xFFFFF) as i32;
+                let x = ((key >> 28) & 0xFFFFF) as i32;
+                // Sign extension for negative coordinates
+                let x = if x & 0x80000 != 0 { x | !0xFFFFF_i32 } else { x };
+                let y = if y & 0x80000 != 0 { y | !0xFFFFF_i32 } else { y };
+                (x, y, layer)
+            })
+            .collect()
+    }
+
+    /// Number of blocked cells tracked
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.blocked.len()
+    }
+
+    /// Check if empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.blocked.is_empty()
+    }
+}
+
+impl Default for BlockedCellTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }

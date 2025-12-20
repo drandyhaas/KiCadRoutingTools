@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""
+Blocking analysis for failed routes.
+
+When a route fails, analyzes which previously-routed nets are blocking.
+Uses frontier data from the router (cells that the A* search tried to
+expand into but found blocked) for accurate analysis.
+
+Usage:
+    from blocking_analysis import analyze_frontier_blocking
+
+    # After a route fails with frontier data:
+    path, iterations, blocked_cells = router.route_with_frontier(...)
+
+    if path is None:
+        blockers = analyze_frontier_blocking(
+            blocked_cells,      # From router
+            pcb_data, config,
+            routed_net_paths,   # Dict of net_id -> path
+        )
+        print_blocking_analysis(blockers)
+"""
+
+from typing import List, Tuple, Dict, Set, Optional
+from dataclasses import dataclass
+from collections import defaultdict
+
+from kicad_parser import PCBData, Segment, Via
+from routing_config import GridRouteConfig, GridCoord
+
+
+@dataclass
+class BlockingInfo:
+    """Information about how much a net blocks a route."""
+    net_id: int
+    net_name: str
+    blocked_count: int  # Number of frontier cells blocked by this net
+    track_cells: int    # Cells blocked by tracks
+    via_cells: int      # Cells blocked by vias
+    details: str        # Human-readable details
+
+
+def compute_net_obstacle_cells(
+    pcb_data: PCBData,
+    net_id: int,
+    path: Optional[List[Tuple[int, int, int]]],
+    config: GridRouteConfig,
+    extra_clearance: float = 0.0,
+) -> Tuple[Set[Tuple[int, int, int]], Set[Tuple[int, int, int]]]:
+    """
+    Compute all obstacle cells for a net (tracks and vias).
+
+    Returns (track_cells, via_cells) where each cell is (gx, gy, layer).
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    num_layers = len(config.layers)
+
+    # Match the expansion used in obstacle_map.py add_net_stubs_as_obstacles
+    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
+    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+    via_expansion_grid = max(1, coord.to_grid_dist(
+        config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+
+    track_cells = set()
+    via_cells = set()
+
+    # Add cells from routed path
+    if path:
+        for i in range(len(path) - 1):
+            gx1, gy1, layer1 = path[i]
+            gx2, gy2, layer2 = path[i + 1]
+
+            if layer1 != layer2:
+                # Via - blocks all layers
+                for ex in range(-via_expansion_grid, via_expansion_grid + 1):
+                    for ey in range(-via_expansion_grid, via_expansion_grid + 1):
+                        if ex*ex + ey*ey <= via_expansion_grid * via_expansion_grid:
+                            for layer_idx in range(num_layers):
+                                via_cells.add((gx1 + ex, gy1 + ey, layer_idx))
+            else:
+                # Track segment
+                dx = abs(gx2 - gx1)
+                dy = abs(gy2 - gy1)
+                sx = 1 if gx1 < gx2 else -1
+                sy = 1 if gy1 < gy2 else -1
+                err = dx - dy
+
+                gx, gy = gx1, gy1
+                while True:
+                    for ex in range(-expansion_grid, expansion_grid + 1):
+                        for ey in range(-expansion_grid, expansion_grid + 1):
+                            track_cells.add((gx + ex, gy + ey, layer1))
+
+                    if gx == gx2 and gy == gy2:
+                        break
+                    e2 = 2 * err
+                    if e2 > -dy:
+                        err -= dy
+                        gx += sx
+                    if e2 < dx:
+                        err += dx
+                        gy += sy
+
+    # Add cells from original stubs
+    for seg in pcb_data.segments:
+        if seg.net_id != net_id:
+            continue
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+
+        gx, gy = gx1, gy1
+        while True:
+            for ex in range(-expansion_grid, expansion_grid + 1):
+                for ey in range(-expansion_grid, expansion_grid + 1):
+                    track_cells.add((gx + ex, gy + ey, layer_idx))
+
+            if gx == gx2 and gy == gy2:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+
+    # Add cells from existing vias
+    for via in pcb_data.vias:
+        if via.net_id != net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+        for ex in range(-via_expansion_grid, via_expansion_grid + 1):
+            for ey in range(-via_expansion_grid, via_expansion_grid + 1):
+                if ex*ex + ey*ey <= via_expansion_grid * via_expansion_grid:
+                    for layer_idx in range(num_layers):
+                        via_cells.add((gx + ex, gy + ey, layer_idx))
+
+    return track_cells, via_cells
+
+
+def analyze_frontier_blocking(
+    blocked_cells: List[Tuple[int, int, int]],
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    routed_net_paths: Dict[int, List[Tuple[int, int, int]]],
+    exclude_net_ids: Optional[Set[int]] = None,
+    extra_clearance: float = 0.0,
+) -> List[BlockingInfo]:
+    """
+    Analyze which nets are blocking based on frontier data.
+
+    Args:
+        blocked_cells: List of (gx, gy, layer) cells that blocked the search
+                      (from router's route_with_frontier)
+        pcb_data: PCB data with segments, vias, etc.
+        config: Routing configuration
+        routed_net_paths: Dict mapping net_id -> routed path for previously routed nets
+        exclude_net_ids: Net IDs to exclude from analysis (e.g., the current net)
+
+    Returns:
+        List of BlockingInfo sorted by blocked_count (highest first)
+    """
+    if not blocked_cells:
+        return []
+
+    exclude_net_ids = exclude_net_ids or set()
+    blocked_set = set(blocked_cells)
+
+    results = []
+
+    # Check each routed net
+    for net_id, path in routed_net_paths.items():
+        if net_id in exclude_net_ids:
+            continue
+
+        net = pcb_data.nets.get(net_id)
+        net_name = net.name if net else f"Net {net_id}"
+
+        # Get all obstacle cells for this net
+        track_cells, via_cells = compute_net_obstacle_cells(
+            pcb_data, net_id, path, config, extra_clearance
+        )
+        all_cells = track_cells | via_cells
+
+        # Count how many blocked frontier cells this net is responsible for
+        blocking_track = blocked_set & track_cells
+        blocking_via = blocked_set & via_cells
+        blocking_total = blocked_set & all_cells
+
+        if len(blocking_total) > 0:
+            details = f"{len(blocking_track)} track, {len(blocking_via)} via cells on frontier"
+            results.append(BlockingInfo(
+                net_id=net_id,
+                net_name=net_name,
+                blocked_count=len(blocking_total),
+                track_cells=len(blocking_track),
+                via_cells=len(blocking_via),
+                details=details
+            ))
+
+    # Sort by blocked count (most blocking first)
+    results.sort(key=lambda x: x.blocked_count, reverse=True)
+
+    return results
+
+
+def print_blocking_analysis(
+    blockers: List[BlockingInfo],
+    max_display: int = 10
+):
+    """Print blocking analysis results."""
+    if not blockers:
+        print("  No previously-routed nets blocking (likely blocked by pads/stubs/zones)")
+        return
+
+    total_blocked = sum(b.blocked_count for b in blockers)
+    print(f"  Frontier blocked by {len(blockers)} nets ({total_blocked} total cells)")
+    print(f"  Top blockers:")
+    for i, info in enumerate(blockers[:max_display]):
+        pct = 100.0 * info.blocked_count / total_blocked if total_blocked > 0 else 0
+        print(f"    {i+1}. {info.net_name}: {info.blocked_count} cells ({pct:.1f}%) - {info.details}")
+
+    if len(blockers) > max_display:
+        remaining = sum(b.blocked_count for b in blockers[max_display:])
+        print(f"    ... and {len(blockers) - max_display} more nets ({remaining} cells)")
+
+
+if __name__ == "__main__":
+    print("Blocking analysis module")
+    print("Use analyze_frontier_blocking() with data from route_with_frontier()")

@@ -515,11 +515,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     src_result = find_open_position(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source")
     if src_result is None:
-        return None, 0
+        return None, 0, []
 
     tgt_result = find_open_position(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target")
     if tgt_result is None:
-        return None, 0
+        return None, 0, []
 
     src_gx, src_gy, src_actual_dir_x, src_actual_dir_y = src_result
     tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y = tgt_result
@@ -565,7 +565,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Use 8x iterations for diff pairs due to larger pose-based search space
     # Pass via spacing in grid units so router can check P/N via positions
     via_spacing_grid = max(1, int(via_spacing / config.grid_step + 0.5))
-    pose_path, iterations = pose_router.route_pose(
+    pose_path, iterations, blocked_cells = pose_router.route_pose_with_frontier(
         obstacles,
         src_gx, src_gy, src_layer, src_theta_idx,
         tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
@@ -574,9 +574,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     )
 
     if pose_path is None:
-        return None, iterations
+        return None, iterations, blocked_cells
 
-    # Return all data needed for result processing
+    # Return all data needed for result processing (empty blocked_cells on success)
     route_data = {
         'pose_path': pose_path,
         'p_src_x': p_src_x, 'p_src_y': p_src_y,
@@ -589,7 +589,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
         'via_spacing': via_spacing,
     }
-    return route_data, iterations
+    return route_data, iterations, []  # Empty blocked_cells on success
 
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
@@ -645,27 +645,29 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         second_src, second_tgt, second_label = original_tgt, original_src, "backward"
 
     # Try first direction
-    route_data, iterations = _try_route_direction(
+    route_data, iterations, blocked_cells = _try_route_direction(
         first_src, first_tgt, pcb_data, config, obstacles, base_obstacles,
         coord, layer_names, spacing_mm, p_net_id, n_net_id
     )
     total_iterations = iterations
+    all_blocked_cells = blocked_cells
 
     if route_data is None:
         # Try second direction
         print(f"  No route found after {iterations} iterations ({first_label}), trying {second_label}...")
-        route_data, iterations = _try_route_direction(
+        route_data, iterations, blocked_cells = _try_route_direction(
             second_src, second_tgt, pcb_data, config, obstacles, base_obstacles,
             coord, layer_names, spacing_mm, p_net_id, n_net_id
         )
         total_iterations += iterations
+        all_blocked_cells = blocked_cells  # Use second attempt's blocked cells
         routing_backwards = (second_label == "backward")
     else:
         routing_backwards = (first_label == "backward")
 
     if route_data is None:
         print(f"  No route found after {total_iterations} iterations (both directions)")
-        return {'failed': True, 'iterations': total_iterations}
+        return {'failed': True, 'iterations': total_iterations, 'blocked_cells': all_blocked_cells}
 
     # Extract route data
     pose_path = route_data['pose_path']

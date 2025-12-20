@@ -40,6 +40,7 @@ from obstacle_map import (
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis
 import re
 
 # Add rust_router directory to path for importing the compiled module
@@ -359,6 +360,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Track which nets have been routed (their segments/vias are now in pcb_data)
     routed_net_ids = []
+    routed_net_paths = {}  # net_id -> path (grid coords) for blocking analysis
     remaining_net_ids = list(all_net_ids_to_route)
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
@@ -479,11 +481,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 remaining_net_ids.remove(pair.n_net_id)
             routed_net_ids.append(pair.p_net_id)
             routed_net_ids.append(pair.n_net_id)
+            # Track paths for blocking analysis
+            if result.get('p_path'):
+                routed_net_paths[pair.p_net_id] = result['p_path']
+            if result.get('n_path'):
+                routed_net_paths[pair.n_net_id] = result['n_path']
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             failed += 1
             total_iterations += iterations
+            # Analyze which nets are blocking if we have frontier data
+            blocked_cells = result.get('blocked_cells', []) if result else []
+            if blocked_cells and routed_net_paths:
+                blockers = analyze_frontier_blocking(
+                    blocked_cells, pcb_data, config, routed_net_paths,
+                    exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                    extra_clearance=diff_pair_extra_clearance
+                )
+                print_blocking_analysis(blockers)
 
     # Route single-ended nets
     user_quit = False

@@ -5,7 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
 
 use crate::obstacle_map::GridObstacleMap;
-use crate::types::{GridState, OpenEntry, DIRECTIONS, ORTHO_COST, DIAG_COST};
+use crate::types::{GridState, OpenEntry, BlockedCellTracker, DIRECTIONS, ORTHO_COST, DIAG_COST};
 
 /// Grid A* Router
 #[pyclass]
@@ -397,6 +397,249 @@ impl GridRouter {
         }
 
         (None, iterations)
+    }
+
+    /// Route with frontier analysis - returns blocked cells on failure.
+    ///
+    /// Same as route_multi but on failure returns the set of blocked cells
+    /// that were encountered during the search. This helps diagnose which
+    /// obstacles are preventing the route.
+    ///
+    /// Returns (path, iterations, blocked_cells) where:
+    /// - On success: path is Some, blocked_cells is empty
+    /// - On failure: path is None, blocked_cells contains cells that blocked expansion
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2))]
+    pub fn route_with_frontier(
+        &self,
+        obstacles: &GridObstacleMap,
+        sources: Vec<(i32, i32, u8)>,
+        targets: Vec<(i32, i32, u8)>,
+        max_iterations: u32,
+        collinear_vias: bool,
+        via_exclusion_radius: i32,
+        start_direction: Option<(i32, i32)>,
+        end_direction: Option<(f64, f64)>,
+        direction_steps: i32,
+    ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
+        let mut tracker = BlockedCellTracker::new();
+
+        let target_set: FxHashSet<u64> = targets
+            .iter()
+            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer).as_key())
+            .collect();
+
+        let target_states: Vec<GridState> = targets
+            .iter()
+            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer))
+            .collect();
+
+        let mut open_set = BinaryHeap::new();
+        let mut g_costs: FxHashMap<u64, i32> = FxHashMap::default();
+        let mut parents: FxHashMap<u64, u64> = FxHashMap::default();
+        let mut closed: FxHashSet<u64> = FxHashSet::default();
+        let mut counter: u32 = 0;
+        let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
+        let mut steps_from_source: FxHashMap<u64, i32> = FxHashMap::default();
+
+        let norm_start_dir: Option<(i32, i32)> = start_direction.map(|(dx, dy)| {
+            let ndx = if dx != 0 { dx / dx.abs() } else { 0 };
+            let ndy = if dy != 0 { dy / dy.abs() } else { 0 };
+            (ndx, ndy)
+        });
+
+        let norm_end_dir: Option<(f64, f64)> = end_direction.map(|(dx, dy)| {
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) }
+        });
+
+        let check_via_exclusion = |nx: i32, ny: i32, current_gx: i32, current_gy: i32, vias: &[(i32, i32)], radius: i32| -> bool {
+            if radius <= 0 { return false; }
+            for &(vx, vy) in vias {
+                let dist_to_neighbor = (nx - vx).abs().max((ny - vy).abs());
+                let dist_to_current = (current_gx - vx).abs().max((current_gy - vy).abs());
+                if dist_to_neighbor <= radius && dist_to_current > radius { return true; }
+                if dist_to_current <= radius && dist_to_neighbor <= dist_to_current {
+                    if dist_to_neighbor < dist_to_current { return true; }
+                    if dist_to_neighbor == dist_to_current && dist_to_current > 0 {
+                        let dx_from_via = (nx - vx).abs() - (current_gx - vx).abs();
+                        let dy_from_via = (ny - vy).abs() - (current_gy - vy).abs();
+                        if (dx_from_via > 0 && dy_from_via < 0) || (dx_from_via < 0 && dy_from_via > 0) {
+                            if dist_to_current <= radius / 2 { return true; }
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        for (gx, gy, layer) in sources {
+            let state = GridState::new(gx, gy, layer);
+            let key = state.as_key();
+            let h = self.heuristic_to_targets(&state, &target_states);
+            open_set.push(OpenEntry { f_score: h, g_score: 0, state, counter });
+            counter += 1;
+            g_costs.insert(key, 0);
+            if via_exclusion_radius > 0 { path_vias.insert(key, Vec::new()); }
+            steps_from_source.insert(key, 0);
+        }
+
+        let mut iterations: u32 = 0;
+
+        while let Some(current_entry) = open_set.pop() {
+            if iterations >= max_iterations { break; }
+            iterations += 1;
+
+            let current = current_entry.state;
+            let current_key = current.as_key();
+            let g = current_entry.g_score;
+
+            if closed.contains(&current_key) { continue; }
+
+            if target_set.contains(&current_key) {
+                let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
+                    if let Some(&parent_key) = parents.get(&current_key) {
+                        let (px, py, _) = Self::unpack_key(parent_key);
+                        let arrive_dx = (current.gx - px) as f64;
+                        let arrive_dy = (current.gy - py) as f64;
+                        let arrive_len = (arrive_dx * arrive_dx + arrive_dy * arrive_dy).sqrt();
+                        if arrive_len > 0.0 {
+                            let dot = (arrive_dx / arrive_len) * end_dx + (arrive_dy / arrive_len) * end_dy;
+                            dot >= -0.5
+                        } else { true }
+                    } else { true }
+                } else { true };
+
+                if arrival_ok {
+                    let path = self.reconstruct_path(&parents, current_key, &g_costs);
+                    return (Some(path), iterations, Vec::new());
+                }
+                continue;
+            }
+
+            closed.insert(current_key);
+
+            let (required_direction, allowed_45deg_from) = if collinear_vias {
+                self.get_via_direction_constraints(&parents, current_key, &current)
+            } else { (None, None) };
+
+            let current_vias: Vec<(i32, i32)> = if via_exclusion_radius > 0 {
+                path_vias.get(&current_key).cloned().unwrap_or_default()
+            } else { Vec::new() };
+
+            let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(i32::MAX);
+
+            for (dx, dy) in DIRECTIONS {
+                if let Some((req_dx, req_dy)) = required_direction {
+                    if dx != req_dx || dy != req_dy { continue; }
+                } else if let Some((base_dx, base_dy)) = allowed_45deg_from {
+                    if !Self::is_within_45_degrees(dx, dy, base_dx, base_dy) { continue; }
+                }
+
+                if let Some((start_dx, start_dy)) = norm_start_dir {
+                    if current_steps < direction_steps && !Self::is_within_45_degrees(dx, dy, start_dx, start_dy) {
+                        continue;
+                    }
+                }
+
+                let ngx = current.gx + dx;
+                let ngy = current.gy + dy;
+
+                if obstacles.is_blocked(ngx, ngy, current.layer as usize) {
+                    tracker.track(ngx, ngy, current.layer);
+                    continue;
+                }
+
+                if check_via_exclusion(ngx, ngy, current.gx, current.gy, &current_vias, via_exclusion_radius) {
+                    continue;
+                }
+
+                let neighbor = GridState::new(ngx, ngy, current.layer);
+                let neighbor_key = neighbor.as_key();
+
+                if closed.contains(&neighbor_key) { continue; }
+
+                let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy);
+                let new_g = g + move_cost + proximity_cost;
+
+                let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                if new_g < existing_g {
+                    g_costs.insert(neighbor_key, new_g);
+                    parents.insert(neighbor_key, current_key);
+                    if via_exclusion_radius > 0 { path_vias.insert(neighbor_key, current_vias.clone()); }
+                    steps_from_source.insert(neighbor_key, current_steps + 1);
+                    let h = self.heuristic_to_targets(&neighbor, &target_states);
+                    open_set.push(OpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
+                    counter += 1;
+                }
+            }
+
+            // Via expansion
+            let can_place_via = if collinear_vias {
+                if let Some(&parent_key) = parents.get(&current_key) {
+                    if let Some(&grandparent_key) = parents.get(&parent_key) {
+                        if !parents.contains_key(&grandparent_key) { false }
+                        else {
+                            let (parent_x, parent_y, _) = Self::unpack_key(parent_key);
+                            let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
+                            let prev_dx = parent_x - gp_x;
+                            let prev_dy = parent_y - gp_y;
+                            let approach_dx = current.gx - parent_x;
+                            let approach_dy = current.gy - parent_y;
+                            if (prev_dx != 0 || prev_dy != 0) && (approach_dx != 0 || approach_dy != 0) {
+                                let norm_prev_dx = if prev_dx != 0 { prev_dx / prev_dx.abs() } else { 0 };
+                                let norm_prev_dy = if prev_dy != 0 { prev_dy / prev_dy.abs() } else { 0 };
+                                let norm_approach_dx = if approach_dx != 0 { approach_dx / approach_dx.abs() } else { 0 };
+                                let norm_approach_dy = if approach_dy != 0 { approach_dy / approach_dy.abs() } else { 0 };
+                                Self::is_within_45_degrees(norm_approach_dx, norm_approach_dy, norm_prev_dx, norm_prev_dy)
+                            } else { false }
+                        }
+                    } else { false }
+                } else { false }
+            } else { true };
+
+            let via_too_close = if via_exclusion_radius > 0 {
+                current_vias.iter().any(|&(vx, vy)| {
+                    (current.gx - vx).abs().max((current.gy - vy).abs()) <= via_exclusion_radius * 2
+                })
+            } else { false };
+
+            if can_place_via && !via_too_close && !obstacles.is_via_blocked(current.gx, current.gy) {
+                for layer in 0..obstacles.num_layers as u8 {
+                    if layer == current.layer { continue; }
+
+                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
+                        tracker.track(current.gx, current.gy, layer);
+                        continue;
+                    }
+
+                    let neighbor = GridState::new(current.gx, current.gy, layer);
+                    let neighbor_key = neighbor.as_key();
+
+                    if closed.contains(&neighbor_key) { continue; }
+
+                    let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * 2;
+                    let new_g = g + self.via_cost + proximity_cost;
+
+                    let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                    if new_g < existing_g {
+                        g_costs.insert(neighbor_key, new_g);
+                        parents.insert(neighbor_key, current_key);
+                        if via_exclusion_radius > 0 {
+                            let mut new_vias = current_vias.clone();
+                            new_vias.push((current.gx, current.gy));
+                            path_vias.insert(neighbor_key, new_vias);
+                        }
+                        steps_from_source.insert(neighbor_key, current_steps);
+                        let h = self.heuristic_to_targets(&neighbor, &target_states);
+                        open_set.push(OpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
+                        counter += 1;
+                    }
+                }
+            }
+        }
+
+        (None, iterations, tracker.get_blocked())
     }
 }
 
