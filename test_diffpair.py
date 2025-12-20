@@ -445,25 +445,29 @@ Examples:
     if skip_drc:
         print("\nSkipping DRC checks (--skip-drc)")
     else:
+        print(f"\nStep 3: DRC checks for {len(routed_pairs)} routed pair(s)")
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
-            drc_cmd = [sys.executable, "check_drc.py", output_pcb, "--nets", net_pattern]
+            drc_cmd = [sys.executable, "check_drc.py", output_pcb, "--nets", net_pattern, "--quiet"]
             if args.debug_lines:
                 drc_cmd.append("--debug-lines")
-            result = run_command(
-                drc_cmd,
-                f"Step 3: DRC check for {diff_pair}",
-                capture_output=True
-            )
+            result = subprocess.run(drc_cmd, capture_output=True, text=True)
+
+            # Print the quiet-mode output from the script
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
 
             # Parse DRC output to count errors
             output = result.stdout if result.stdout else ""
             error_count = 0
 
             # Look for violation counts in output
-            # Format: "FOUND 8 DRC VIOLATIONS" or "X violations" or "X violation"
+            # Format: "FOUND 8 DRC VIOLATIONS" or "X violations" or "X violation" or "FAILED (N violations)"
             patterns = [
-                r'FOUND\s+(\d+)\s+DRC\s+VIOLATION',  # "FOUND 8 DRC VIOLATIONS"
+                r'FAILED\s+\((\d+)\s+violation',      # "FAILED (8 violations)"
+                r'FOUND\s+(\d+)\s+DRC\s+VIOLATION',   # "FOUND 8 DRC VIOLATIONS"
                 r'(\d+)\s+DRC\s+violation',           # "8 DRC violations"
                 r'(\d+)\s+violation',                 # "8 violations"
             ]
@@ -473,17 +477,6 @@ Examples:
                 if match:
                     error_count = int(match.group(1))
                     break
-
-            # If no pattern matched but "violation" mentioned (and not "no violations" or "0")
-            if error_count == 0 and "violation" in output.lower():
-                # Check for explicit "no violations" messages (check_drc.py outputs "NO DRC VIOLATIONS FOUND!")
-                no_violations = ("no drc violations" in output.lower() or
-                                 "no violation" in output.lower() or
-                                 "0 violation" in output.lower())
-                if not no_violations:
-                    # Count individual violation lines as fallback
-                    violation_lines = re.findall(r'violation|error', output, re.IGNORECASE)
-                    error_count = len(violation_lines) if violation_lines else 1
 
             passed = result.returncode == 0 and error_count == 0
             drc_results[diff_pair] = (passed, error_count)
@@ -495,21 +488,28 @@ Examples:
     if skip_connectivity:
         print("\nSkipping connectivity checks" + (" (--debug-lines)" if args.debug_lines else " (--skip-connectivity)"))
     else:
+        print(f"\nStep 4: Connectivity checks for {len(routed_pairs)} routed pair(s)")
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
-            result = run_command(
-                [sys.executable, "check_connected.py", output_pcb, "--nets", net_pattern],
-                f"Step 4: Connectivity check for {diff_pair}",
-                capture_output=True
+            result = subprocess.run(
+                [sys.executable, "check_connected.py", output_pcb, "--nets", net_pattern, "--quiet"],
+                capture_output=True, text=True
             )
+
+            # Print the quiet-mode output from the script
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
 
             # Parse connectivity output to count issues
             output = result.stdout if result.stdout else ""
             issue_count = 0
 
             # Look for issue counts in output
-            # Format: "FOUND X CONNECTIVITY ISSUES" or "ALL NETS FULLY CONNECTED!"
+            # Format: "FOUND X CONNECTIVITY ISSUES" or "ALL NETS FULLY CONNECTED!" or "FAILED (N issues)"
             patterns = [
+                r'FAILED\s+\((\d+)\s+issue',              # "FAILED (2 issues)"
                 r'FOUND\s+(\d+)\s+CONNECTIVITY\s+ISSUE',  # "FOUND 2 CONNECTIVITY ISSUES"
                 r'(\d+)\s+connectivity\s+issue',          # "2 connectivity issues"
             ]

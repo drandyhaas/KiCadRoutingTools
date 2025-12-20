@@ -259,7 +259,7 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
 
 
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
-            debug_output: bool = False):
+            debug_output: bool = False, quiet: bool = False):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -268,11 +268,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         net_patterns: Optional list of net name patterns (fnmatch style) to focus on.
                      If provided, only checks involving at least one matching net are reported.
         debug_output: If True, write debug lines to User.7 layer showing violation locations
+        quiet: If True, only print a summary line unless there are violations
     """
-    print(f"Loading {pcb_file}...")
+    if quiet and net_patterns:
+        # Print a brief summary line in quiet mode
+        print(f"Checking {', '.join(net_patterns)} for DRC...", end=" ", flush=True)
+    elif not quiet:
+        print(f"Loading {pcb_file}...")
+
     pcb_data = parse_kicad_pcb(pcb_file)
 
-    print(f"Found {len(pcb_data.segments)} segments and {len(pcb_data.vias)} vias")
+    if not quiet:
+        print(f"Found {len(pcb_data.segments)} segments and {len(pcb_data.vias)} vias")
 
     # Helper to check if a net_id matches the filter patterns
     def net_matches_filter(net_id: int) -> bool:
@@ -289,7 +296,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             return True
         return matches_any_pattern(net1_str, net_patterns) or matches_any_pattern(net2_str, net_patterns)
 
-    if net_patterns:
+    if net_patterns and not quiet:
         print(f"Filtering to nets matching: {net_patterns}")
 
     # Group segments and vias by net
@@ -308,13 +315,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     violations = []
 
     # Check segment-to-segment violations (different nets only)
-    print("\nChecking segment-to-segment clearances...")
+    if not quiet:
+        print("\nChecking segment-to-segment clearances...")
     net_ids = list(segments_by_net.keys())
 
     # If filtering, only check pairs where at least one net matches
     if net_patterns:
         matching_seg_nets = [n for n in net_ids if net_matches_filter(n)]
-        print(f"  Found {len(matching_seg_nets)} matching segment nets out of {len(net_ids)}")
+        if not quiet:
+            print(f"  Found {len(matching_seg_nets)} matching segment nets out of {len(net_ids)}")
     else:
         matching_seg_nets = None
 
@@ -364,7 +373,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         })
 
     # Check for same-net segment crossings (self-intersections)
-    print("Checking for same-net segment crossings...")
+    if not quiet:
+        print("Checking for same-net segment crossings...")
     for net_id in net_ids:
         if matching_seg_nets is not None and net_id not in matching_seg_nets:
             continue
@@ -387,14 +397,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     })
 
     # Check via-to-segment violations (different nets only)
-    print("Checking via-to-segment clearances...")
+    if not quiet:
+        print("Checking via-to-segment clearances...")
     via_net_ids = list(vias_by_net.keys())
 
     # Pre-compute matching via nets
     if net_patterns:
         matching_via_nets = set(n for n in via_net_ids if net_matches_filter(n))
         matching_seg_net_set = set(matching_seg_nets) if matching_seg_nets else set()
-        print(f"  Found {len(matching_via_nets)} matching via nets out of {len(via_net_ids)}")
+        if not quiet:
+            print(f"  Found {len(matching_via_nets)} matching via nets out of {len(via_net_ids)}")
     else:
         matching_via_nets = None
         matching_seg_net_set = None
@@ -427,7 +439,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         })
 
     # Check via-to-via violations (all nets, including same-net)
-    print("Checking via-to-via clearances...")
+    if not quiet:
+        print("Checking via-to-via clearances...")
     for i, net1 in enumerate(via_net_ids):
         net1_matches = matching_via_nets is None or net1 in matching_via_nets
         for net2 in via_net_ids[i+1:]:
@@ -475,49 +488,58 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         })
 
     # Report violations
-    print("\n" + "=" * 60)
-    if violations:
-        print(f"FOUND {len(violations)} DRC VIOLATIONS:\n")
+    if quiet:
+        if violations:
+            print(f"FAILED ({len(violations)} violations)")
+        else:
+            print("OK")
+            return violations
 
-        # Group by type
-        by_type = {}
-        for v in violations:
-            t = v['type']
-            if t not in by_type:
-                by_type[t] = []
-            by_type[t].append(v)
+    # Print detailed results (always for non-quiet, or when violations in quiet mode)
+    if not quiet or violations:
+        print("\n" + "=" * 60 if not quiet else "=" * 60)
+        if violations:
+            print(f"FOUND {len(violations)} DRC VIOLATIONS:\n")
 
-        for vtype, vlist in by_type.items():
-            print(f"\n{vtype.upper()} violations ({len(vlist)}):")
-            print("-" * 40)
-            for v in vlist[:20]:  # Show first 20 of each type
-                if vtype == 'segment-segment':
-                    print(f"  {v['net1']} <-> {v['net2']}")
-                    print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
-                    print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
-                    print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
-                elif vtype == 'via-segment':
-                    print(f"  Via:{v['net1']} <-> Seg:{v['net2']}")
-                    print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
-                    print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
-                    print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
-                elif vtype == 'via-via':
-                    print(f"  {v['net1']} <-> {v['net2']}")
-                    print(f"    Overlap: {v['overlap_mm']:.3f}mm")
-                    print(f"    Via1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})")
-                    print(f"    Via2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})")
-                elif vtype in ('segment-crossing', 'segment-crossing-same-net'):
-                    print(f"  {v['net1']} <-> {v['net2']}")
-                    print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
-                    print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
-                    print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
+            # Group by type
+            by_type = {}
+            for v in violations:
+                t = v['type']
+                if t not in by_type:
+                    by_type[t] = []
+                by_type[t].append(v)
 
-            if len(vlist) > 20:
-                print(f"  ... and {len(vlist) - 20} more")
-    else:
-        print("NO DRC VIOLATIONS FOUND!")
+            for vtype, vlist in by_type.items():
+                print(f"\n{vtype.upper()} violations ({len(vlist)}):")
+                print("-" * 40)
+                for v in vlist[:20]:  # Show first 20 of each type
+                    if vtype == 'segment-segment':
+                        print(f"  {v['net1']} <-> {v['net2']}")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
+                        print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
+                    elif vtype == 'via-segment':
+                        print(f"  Via:{v['net1']} <-> Seg:{v['net2']}")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'via-via':
+                        print(f"  {v['net1']} <-> {v['net2']}")
+                        print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Via1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})")
+                        print(f"    Via2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})")
+                    elif vtype in ('segment-crossing', 'segment-crossing-same-net'):
+                        print(f"  {v['net1']} <-> {v['net2']}")
+                        print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
+                        print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
+                        print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
 
-    print("=" * 60)
+                if len(vlist) > 20:
+                    print(f"  ... and {len(vlist) - 20} more")
+        else:
+            print("NO DRC VIOLATIONS FOUND!")
+
+        print("=" * 60)
 
     # Write debug lines if requested
     if debug_output and violations:
@@ -535,7 +557,10 @@ if __name__ == "__main__":
                         help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
     parser.add_argument('--debug-lines', '-d', action='store_true',
                         help='Write debug lines to User.7 layer showing violation locations')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help='Only print a summary line unless there are violations')
 
     args = parser.parse_args()
 
-    run_drc(args.pcb, args.clearance, args.nets, args.debug_lines)
+    violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet)
+    sys.exit(1 if violations else 0)

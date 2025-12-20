@@ -163,22 +163,29 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
 
 
 def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = None,
-                           tolerance: float = 0.1) -> List[Dict]:
+                           tolerance: float = 0.1, quiet: bool = False) -> List[Dict]:
     """Run connectivity checks on the PCB file.
 
     Args:
         pcb_file: Path to the KiCad PCB file
         net_patterns: Optional list of net name patterns (fnmatch style) to check.
         tolerance: Connection tolerance in mm (default: 0.01mm)
+        quiet: If True, only print a summary line unless there are issues
 
     Returns:
         List of connectivity issues found
     """
-    print(f"Loading {pcb_file}...")
+    if quiet and net_patterns:
+        # Print a brief summary line in quiet mode
+        print(f"Checking {', '.join(net_patterns)} for connectivity...", end=" ", flush=True)
+    elif not quiet:
+        print(f"Loading {pcb_file}...")
+
     pcb_data = parse_kicad_pcb(pcb_file)
 
-    total_pads = sum(len(pads) for pads in pcb_data.pads_by_net.values())
-    print(f"Found {len(pcb_data.segments)} segments, {len(pcb_data.vias)} vias, {total_pads} pads")
+    if not quiet:
+        total_pads = sum(len(pads) for pads in pcb_data.pads_by_net.values())
+        print(f"Found {len(pcb_data.segments)} segments, {len(pcb_data.vias)} vias, {total_pads} pads")
 
     # Group segments by net
     segments_by_net = defaultdict(list)
@@ -204,10 +211,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             if net_id in segments_by_net and net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
 
-    if net_patterns:
-        print(f"Checking {len(nets_to_check)} nets matching: {net_patterns}")
-    else:
-        print(f"Checking {len(nets_to_check)} routed nets")
+    if not quiet:
+        if net_patterns:
+            print(f"Checking {len(nets_to_check)} nets matching: {net_patterns}")
+        else:
+            print(f"Checking {len(nets_to_check)} routed nets")
 
     issues = []
 
@@ -231,26 +239,35 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             })
 
     # Report results
-    print("\n" + "=" * 60)
-    if issues:
-        print(f"FOUND {len(issues)} CONNECTIVITY ISSUES:\n")
+    if quiet:
+        if issues:
+            print(f"FAILED ({len(issues)} issues)")
+        else:
+            print("OK")
+            return issues
 
-        for issue in issues:
-            print(f"\n  {issue['net_name']} (net {issue['net_id']}):")
-            print(f"    Segments: {issue['num_segments']}, Vias: {issue['num_vias']}, Pads: {issue['num_pads']}")
-            print(f"    Disconnected components: {issue['num_components']}")
-            if issue['disconnected_pads']:
-                print(f"    Disconnected pads:")
-                for loc in issue['disconnected_pads'][:5]:
-                    print(f"      ({loc[0]:.2f}, {loc[1]:.2f}) on {loc[2]} [{loc[3]}]")
-                if len(issue['disconnected_pads']) > 5:
-                    print(f"      ... and {len(issue['disconnected_pads']) - 5} more")
-            if issue.get('message'):
-                print(f"    Note: {issue['message']}")
-    else:
-        print("ALL NETS FULLY CONNECTED!")
+    # Print detailed results (always for non-quiet, or when issues in quiet mode)
+    if not quiet or issues:
+        print("\n" + "=" * 60 if not quiet else "=" * 60)
+        if issues:
+            print(f"FOUND {len(issues)} CONNECTIVITY ISSUES:\n")
 
-    print("=" * 60)
+            for issue in issues:
+                print(f"\n  {issue['net_name']} (net {issue['net_id']}):")
+                print(f"    Segments: {issue['num_segments']}, Vias: {issue['num_vias']}, Pads: {issue['num_pads']}")
+                print(f"    Disconnected components: {issue['num_components']}")
+                if issue['disconnected_pads']:
+                    print(f"    Disconnected pads:")
+                    for loc in issue['disconnected_pads'][:5]:
+                        print(f"      ({loc[0]:.2f}, {loc[1]:.2f}) on {loc[2]} [{loc[3]}]")
+                    if len(issue['disconnected_pads']) > 5:
+                        print(f"      ... and {len(issue['disconnected_pads']) - 5} more")
+                if issue.get('message'):
+                    print(f"    Note: {issue['message']}")
+        else:
+            print("ALL NETS FULLY CONNECTED!")
+
+        print("=" * 60)
     return issues
 
 
@@ -261,8 +278,10 @@ if __name__ == "__main__":
                         help='Net name patterns to check (fnmatch wildcards supported, e.g., "*lvds*")')
     parser.add_argument('--tolerance', '-t', type=float, default=0.01,
                         help='Connection tolerance in mm (default: 0.01)')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help='Only print a summary line unless there are issues')
 
     args = parser.parse_args()
 
-    issues = run_connectivity_check(args.pcb, args.nets, args.tolerance)
+    issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet)
     sys.exit(1 if issues else 0)
