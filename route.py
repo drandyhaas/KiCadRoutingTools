@@ -633,8 +633,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
         # Also pass unrouted stubs for finding clear extension endpoints
         # Build list of remaining unrouted pairs for layer swap optimization
+        # Use ALL diff pairs (not just those being routed) as potential swap candidates
         # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
-        remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
+        remaining_pairs = [(pn, p) for pn, p in diff_pairs.items()
                           if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
                           and p.p_net_id != pair.p_net_id
                           and p.p_net_id not in swapped_pair_net_ids]
@@ -945,7 +946,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
             # Build list of remaining unrouted pairs for layer swap optimization
             # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
-            remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
+            remaining_pairs = [(pn, p) for pn, p in diff_pairs.items()
                               if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
                               and p.p_net_id != ripped_pair.p_net_id
                               and p.p_net_id not in swapped_pair_net_ids]
@@ -1125,7 +1126,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                             # Build list of remaining unrouted pairs for layer swap optimization
                             # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
-                            remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
+                            remaining_pairs = [(pn, p) for pn, p in diff_pairs.items()
                                               if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
                                               and p.p_net_id != ripped_pair.p_net_id
                                               and p.p_net_id not in swapped_pair_net_ids]
