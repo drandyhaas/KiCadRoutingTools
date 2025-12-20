@@ -1746,13 +1746,10 @@ impl PoseRouter {
     }
 }
 
-/// Module version
-const VERSION: &str = "0.7.0";
-
 /// Python module
 #[pymodule]
 fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", VERSION)?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<GridObstacleMap>()?;
     m.add_class::<GridRouter>()?;
     m.add_class::<PoseRouter>()?;
