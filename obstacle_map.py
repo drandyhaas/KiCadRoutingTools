@@ -648,6 +648,28 @@ def check_line_clearance(obstacles: GridObstacleMap,
     return True
 
 
+def check_stub_layer_clearance(obstacles: GridObstacleMap,
+                                stub_segments: List[Segment],
+                                target_layer_idx: int,
+                                config: GridRouteConfig) -> bool:
+    """Check if all stub segments can be placed on target_layer without conflicts.
+
+    Args:
+        obstacles: The obstacle map to check against
+        stub_segments: List of segments that form the stub
+        target_layer_idx: Layer index to check clearance on
+        config: Routing configuration
+
+    Returns:
+        True if all segments are clear on target_layer, False otherwise
+    """
+    for seg in stub_segments:
+        if not check_line_clearance(obstacles, seg.start_x, seg.start_y,
+                                     seg.end_x, seg.end_y, target_layer_idx, config):
+            return False
+    return True
+
+
 def add_connector_region_via_blocking(obstacles: GridObstacleMap,
                                        center_x: float, center_y: float,
                                        dir_x: float, dir_y: float,

@@ -623,7 +623,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Route the differential pair
         # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
         # Also pass unrouted stubs for finding clear extension endpoints
-        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles, unrouted_stubs)
+        # Build list of remaining unrouted pairs for layer swap optimization
+        remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
+                          if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
+                          and p.p_net_id != pair.p_net_id]
+        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles,
+                                                 unrouted_stubs, unrouted_pairs=remaining_pairs)
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -812,7 +817,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
 
-                        retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
+                        retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs)
 
                         if retry_result and not retry_result.get('failed'):
                             print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
@@ -906,7 +911,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
 
-            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs)
+            # Build list of remaining unrouted pairs for layer swap optimization
+            remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
+                              if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
+                              and p.p_net_id != ripped_pair.p_net_id]
+            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs)
             elapsed = time.time() - start_time
             total_time += elapsed
 
@@ -1070,7 +1079,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.p_net_id, config)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.n_net_id, config)
 
-                            retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
+                            # Build list of remaining unrouted pairs for layer swap optimization
+                            remaining_pairs = [(pn, p) for pn, p in diff_pair_ids_to_route
+                                              if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
+                                              and p.p_net_id != ripped_pair.p_net_id]
+                            retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs)
 
                             if retry_result and not retry_result.get('failed'):
                                 print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")

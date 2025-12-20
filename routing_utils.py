@@ -223,6 +223,72 @@ def get_stub_direction(segments: List[Segment], stub_x: float, stub_y: float, st
     return (0, 0)
 
 
+def get_stub_segments(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
+                      stub_layer: str, tolerance: float = 0.05) -> List[Segment]:
+    """
+    Get all segments that form a stub (from free end back to pad).
+
+    Walks backwards from the stub free end through connected segments until
+    reaching a pad or the segment chain ends.
+
+    Args:
+        pcb_data: PCB data containing segments and pads
+        net_id: Net ID of the stub
+        stub_x, stub_y: Position of the stub free end
+        stub_layer: Layer of the stub
+        tolerance: Distance tolerance for matching endpoints
+
+    Returns:
+        List of segments forming the stub, ordered from free end to pad
+    """
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == stub_layer]
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    pad_positions = [(p.global_x, p.global_y) for p in net_pads]
+
+    result = []
+    visited = set()
+    current_x, current_y = stub_x, stub_y
+
+    while True:
+        # Find segment connected at current position
+        found = None
+        for seg in net_segments:
+            if id(seg) in visited:
+                continue
+
+            # Check if start matches current position
+            if abs(seg.start_x - current_x) < tolerance and abs(seg.start_y - current_y) < tolerance:
+                found = seg
+                next_x, next_y = seg.end_x, seg.end_y
+                break
+
+            # Check if end matches current position
+            if abs(seg.end_x - current_x) < tolerance and abs(seg.end_y - current_y) < tolerance:
+                found = seg
+                next_x, next_y = seg.start_x, seg.start_y
+                break
+
+        if found is None:
+            break
+
+        result.append(found)
+        visited.add(id(found))
+
+        # Check if next position is at a pad (we've reached the pad end)
+        at_pad = False
+        for px, py in pad_positions:
+            if abs(next_x - px) < tolerance and abs(next_y - py) < tolerance:
+                at_pad = True
+                break
+
+        if at_pad:
+            break
+
+        current_x, current_y = next_x, next_y
+
+    return result
+
+
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """

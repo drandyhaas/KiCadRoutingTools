@@ -14,6 +14,9 @@ from routing_utils import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints
 )
 from obstacle_map import check_line_clearance
+from stub_layer_switching import (
+    find_layer_switch_for_diff_pair, apply_layer_switch_option, revert_layer_switch_option, LayerSwitchOption
+)
 
 # Import Rust router
 import sys
@@ -643,7 +646,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap,
                                     base_obstacles: GridObstacleMap = None,
-                                    unrouted_stubs: List[Tuple[float, float]] = None) -> Optional[dict]:
+                                    unrouted_stubs: List[Tuple[float, float]] = None,
+                                    unrouted_pairs: List[Tuple[str, DiffPair]] = None) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
@@ -674,6 +678,47 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
     print(f"  P-N spacing: {spacing_mm * 2:.3f}mm (offset={spacing_mm:.3f}mm from centerline)")
+
+    # Check if layer switch can avoid vias (source and target on different layers)
+    layer_switch_vias = []
+    layer_switch_option = None
+    src_layer_idx = original_src[4]
+    tgt_layer_idx = original_tgt[4]
+    if src_layer_idx != tgt_layer_idx:
+        src_layer = layer_names[src_layer_idx]
+        tgt_layer = layer_names[tgt_layer_idx]
+        # Extract stub positions from endpoint tuples
+        p_src_x, p_src_y = original_src[5], original_src[6]
+        n_src_x, n_src_y = original_src[7], original_src[8]
+        p_tgt_x, p_tgt_y = original_tgt[5], original_tgt[6]
+        n_tgt_x, n_tgt_y = original_tgt[7], original_tgt[8]
+
+        layer_switch_option = find_layer_switch_for_diff_pair(
+            pcb_data, p_net_id, n_net_id,
+            src_layer, tgt_layer,
+            p_src_x, p_src_y, n_src_x, n_src_y,
+            p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
+            obstacles, config,
+            unrouted_pairs=unrouted_pairs, debug=True
+        )
+
+        if layer_switch_option:
+            # Apply the switch now - if routing fails, we'll revert it
+            new_vias, new_layer = apply_layer_switch_option(pcb_data, layer_switch_option, config)
+            layer_switch_vias = new_vias
+            switch_desc = "source" if layer_switch_option.switch_source else "target"
+            swap_desc = f" (swap with {layer_switch_option.swap_pair.base_name})" if layer_switch_option.swap_pair else ""
+            print(f"    Layer switch: Applying {switch_desc} stubs to {layer_switch_option.new_layer}{swap_desc}")
+            # Re-fetch endpoints since layer info may have changed
+            sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
+            if error:
+                print(f"  After layer switch: {error}")
+                # Revert the layer switch since we can't proceed
+                revert_layer_switch_option(pcb_data, layer_switch_option, config, layer_switch_vias)
+                print(f"    Layer switch reverted due to endpoint error")
+                return None
+            original_src = sources[0]
+            original_tgt = targets[0]
 
     # Determine direction order (same as single_ended_routing)
     if config.direction_order == "random":
@@ -734,6 +779,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             if first_stuck and second_stuck:
                 # Both directions are stuck early - fail fast
                 print(f"  Both directions stuck early ({first_label}: {first_probe_iters}, {second_label}: {second_probe_iters} iterations)")
+                # Revert layer switch if we applied one
+                if layer_switch_option:
+                    revert_layer_switch_option(pcb_data, layer_switch_option, config, layer_switch_vias)
+                    print(f"    Layer switch reverted due to routing failure")
                 return {
                     'failed': True,
                     'iterations': first_probe_iters + second_probe_iters,
@@ -828,6 +877,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     if route_data is None:
         print(f"  No route found after {total_iterations} iterations (both directions)")
+        # Revert layer switch if we applied one
+        if layer_switch_option:
+            revert_layer_switch_option(pcb_data, layer_switch_option, config, layer_switch_vias)
+            print(f"    Layer switch reverted due to routing failure")
         return {
             'failed': True,
             'iterations': total_iterations,
@@ -1048,6 +1101,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
     debug_connector_lines.extend(n_conn_lines)
+
+    # Add any vias from layer switching (pad vias when switching from F.Cu)
+    new_vias.extend(layer_switch_vias)
 
     # Convert float paths back to grid format for return value
     p_path = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
