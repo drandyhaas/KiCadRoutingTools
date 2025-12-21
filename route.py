@@ -645,6 +645,98 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if swap_count > 0:
             print(f"Applied {swap_count} source layer swap(s)")
 
+        # Now try target-side segment overlap swaps for remaining pairs
+        target_swap_count = 0
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+
+            # Get our target stub info
+            tgt_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       targets[0][5], targets[0][6], tgt_layer)
+            tgt_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       targets[0][7], targets[0][8], tgt_layer)
+
+            if not tgt_p_stub or not tgt_n_stub:
+                continue
+
+            swap_partner = None
+            swap_partner_stubs = None
+
+            # Find which nets on source layer actually overlap with our target stub segments
+            overlapping_nets = set()
+            our_stubs = tgt_p_stub.segments + tgt_n_stub.segments
+            for stub_seg in our_stubs:
+                stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - 0.2
+                stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + 0.2
+                stub_x_min = min(stub_seg.start_x, stub_seg.end_x)
+                stub_x_max = max(stub_seg.start_x, stub_seg.end_x)
+
+                for seg in pcb_data.segments:
+                    if seg.layer != src_layer:
+                        continue
+                    seg_y_min = min(seg.start_y, seg.end_y)
+                    seg_y_max = max(seg.start_y, seg.end_y)
+                    seg_x_min = min(seg.start_x, seg.end_x)
+                    seg_x_max = max(seg.start_x, seg.end_x)
+
+                    # Check Y and X overlap
+                    if seg_y_max >= stub_y_min and seg_y_min <= stub_y_max:
+                        if seg_x_max >= stub_x_min and seg_x_min <= stub_x_max:
+                            overlapping_nets.add(seg.net_id)
+
+            # Find which diff pair the overlapping nets belong to
+            for other_name, other_info in all_pair_layer_info.items():
+                if other_name == pair_name:
+                    continue
+                other_src_layer, other_tgt_layer, other_sources, other_targets, other_pair = other_info
+
+                # Check if their target is on our source layer and overlaps
+                if other_tgt_layer != src_layer:
+                    continue
+                if other_pair.p_net_id not in overlapping_nets and other_pair.n_net_id not in overlapping_nets:
+                    continue
+
+                # Get their target stub info
+                other_tgt_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                 other_targets[0][5], other_targets[0][6], other_tgt_layer)
+                other_tgt_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                 other_targets[0][7], other_targets[0][8], other_tgt_layer)
+
+                if other_tgt_p_stub and other_tgt_n_stub:
+                    swap_partner = other_name
+                    swap_partner_stubs = (other_tgt_p_stub, other_tgt_n_stub, other_tgt_layer)
+                    break
+
+            if swap_partner and swap_partner_stubs:
+                # Found a swap partner! Swap target layers
+                other_tgt_p_stub, other_tgt_n_stub, other_tgt_layer = swap_partner_stubs
+
+                # Check if swap would move stubs to F.Cu (top layer)
+                # Skip if can_swap_to_top_layer is False and either destination is F.Cu
+                if not can_swap_to_top_layer and (src_layer == 'F.Cu' or tgt_layer == 'F.Cu'):
+                    # Skip this swap - would move stubs to top layer
+                    continue
+
+                # Our target: tgt_layer -> src_layer
+                # Their target: other_tgt_layer (=src_layer) -> tgt_layer
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
+                vias3, mods3 = apply_stub_layer_switch(pcb_data, other_tgt_p_stub, tgt_layer, config, debug=False)
+                vias4, mods4 = apply_stub_layer_switch(pcb_data, other_tgt_n_stub, tgt_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                all_vias = vias1 + vias2 + vias3 + vias4
+                all_swap_vias.extend(all_vias)
+
+                applied_swaps.add(pair_name)
+                applied_swaps.add(swap_partner)
+                target_swap_count += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Target swap: {pair_name} ({tgt_layer}->{src_layer}) <-> {swap_partner} ({other_tgt_layer}->{tgt_layer}){via_msg}")
+
+        if target_swap_count > 0:
+            print(f"Applied {target_swap_count} target layer swap(s)")
+
         # Now try two-pair swaps for remaining pairs that weren't handled
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
             if pair_name in applied_swaps:
