@@ -425,111 +425,35 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("No valid nets to route!")
         return 0, 0, 0.0
 
-    # Apply net ordering strategy
-    if ordering_strategy == "mps":
-        # Use Maximum Planar Subset algorithm to minimize crossing conflicts
-        print(f"\nUsing MPS ordering strategy...")
-        all_net_ids = [nid for _, nid in net_ids]
-        ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids)
-        # Rebuild net_ids in the new order
-        id_to_name = {nid: name for name, nid in net_ids}
-        net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
-
-    elif ordering_strategy == "inside_out" and bga_exclusion_zones:
-        # Sort nets inside-out from BGA center(s) for better escape routing
-        # Only applies to nets that have pads inside a BGA zone
-        def pad_in_bga_zone(pad):
-            """Check if a pad is inside any BGA zone."""
-            for zone in bga_exclusion_zones:
-                if zone[0] <= pad.global_x <= zone[2] and zone[1] <= pad.global_y <= zone[3]:
-                    return True
-            return False
-
-        def get_min_distance_to_bga_center(net_id):
-            """Get minimum distance from any BGA pad of this net to its BGA center."""
-            pads = pcb_data.pads_by_net.get(net_id, [])
-            if not pads:
-                return float('inf')
-
-            min_dist = float('inf')
-            for zone in bga_exclusion_zones:
-                center_x = (zone[0] + zone[2]) / 2
-                center_y = (zone[1] + zone[3]) / 2
-                for pad in pads:
-                    # Only consider pads that are inside this BGA zone
-                    if zone[0] <= pad.global_x <= zone[2] and zone[1] <= pad.global_y <= zone[3]:
-                        dist = ((pad.global_x - center_x) ** 2 + (pad.global_y - center_y) ** 2) ** 0.5
-                        min_dist = min(min_dist, dist)
-            return min_dist
-
-        # Separate BGA nets from non-BGA nets
-        bga_nets = []
-        non_bga_nets = []
-        for net_name, net_id in net_ids:
-            pads = pcb_data.pads_by_net.get(net_id, [])
-            has_bga_pad = any(pad_in_bga_zone(pad) for pad in pads)
-            if has_bga_pad:
-                bga_nets.append((net_name, net_id))
-            else:
-                non_bga_nets.append((net_name, net_id))
-
-        # Sort BGA nets inside-out, keep non-BGA nets in original order
-        bga_nets.sort(key=lambda x: get_min_distance_to_bga_center(x[1]))
-        net_ids = bga_nets + non_bga_nets
-
-        if bga_nets:
-            print(f"\nSorted {len(bga_nets)} BGA nets inside-out ({len(non_bga_nets)} non-BGA nets unchanged)")
-
-    elif ordering_strategy == "original":
-        print(f"\nUsing original net order (no sorting)")
-
-    # Separate single-ended nets from differential pairs
-    single_ended_nets = []
-    diff_pair_ids_to_route = []  # (pair_name, pair) tuples
-    processed_pair_net_ids = set()
-
-    for net_name, net_id in net_ids:
-        if net_id in diff_pair_net_ids and net_id not in processed_pair_net_ids:
-            # Find the differential pair this net belongs to
-            for pair_name, pair in diff_pairs.items():
-                if pair.p_net_id == net_id or pair.n_net_id == net_id:
-                    diff_pair_ids_to_route.append((pair_name, pair))
-                    processed_pair_net_ids.add(pair.p_net_id)
-                    processed_pair_net_ids.add(pair.n_net_id)
-                    break
-        elif net_id not in diff_pair_net_ids:
-            single_ended_nets.append((net_name, net_id))
-
-    total_routes = len(single_ended_nets) + len(diff_pair_ids_to_route)
-    print(f"\nRouting {total_routes} items ({len(single_ended_nets)} single-ended nets, {len(diff_pair_ids_to_route)} differential pairs)...")
-    print("=" * 60)
-
-    results = []
-    pad_swaps = []  # List of (pad1, pad2) tuples for nets that need swapping
-    successful = 0
-    failed = 0
-    total_time = 0
-    total_iterations = 0
-
     # Track all segment layer modifications for file output
     all_segment_modifications = []
     # Track all vias added during stub layer swapping
     all_swap_vias = []
 
+    # Identify which diff pairs we'll be routing BEFORE ordering
+    # (Layer swaps must happen before MPS ordering since ordering depends on layers)
+    diff_pair_ids_to_route_set = []  # (pair_name, pair) tuples - unordered
+    processed_pair_net_ids_early = set()
+    for net_name, net_id in net_ids:
+        if net_id in diff_pair_net_ids and net_id not in processed_pair_net_ids_early:
+            for pair_name, pair in diff_pairs.items():
+                if pair.p_net_id == net_id or pair.n_net_id == net_id:
+                    diff_pair_ids_to_route_set.append((pair_name, pair))
+                    processed_pair_net_ids_early.add(pair.p_net_id)
+                    processed_pair_net_ids_early.add(pair.n_net_id)
+                    break
+
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
-    # BEFORE building obstacle maps, so obstacles reflect correct segment layers
-    if enable_layer_switch and diff_pair_ids_to_route:
+    # BEFORE MPS ordering, so ordering sees correct segment layers
+    if enable_layer_switch and diff_pair_ids_to_route_set:
         from stub_layer_switching import get_stub_info, apply_stub_layer_switch
         from diff_pair_routing import get_diff_pair_endpoints
 
-        print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route)} diff pair(s)...")
-
-        # Build set of pair names being routed
-        pairs_being_routed = {name for name, _ in diff_pair_ids_to_route}
+        print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route_set)} diff pair(s)...")
 
         # Collect layer info for pairs we're routing
-        pair_layer_info = {}  # pair_name -> (src_layer, tgt_layer, sources, targets)
-        for pair_name, pair in diff_pair_ids_to_route:
+        pair_layer_info = {}  # pair_name -> (src_layer, tgt_layer, sources, targets, pair)
+        for pair_name, pair in diff_pair_ids_to_route_set:
             sources, targets, error = get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
             if error or not sources or not targets:
                 continue
@@ -852,6 +776,92 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
             if pair_name not in applied_swaps:
                 print(f"  No swap found: {pair_name} ({src_layer}->{tgt_layer}) - will need via")
+
+    # Apply net ordering strategy
+    if ordering_strategy == "mps":
+        # Use Maximum Planar Subset algorithm to minimize crossing conflicts
+        print(f"\nUsing MPS ordering strategy...")
+        all_net_ids = [nid for _, nid in net_ids]
+        ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids)
+        # Rebuild net_ids in the new order
+        id_to_name = {nid: name for name, nid in net_ids}
+        net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
+
+    elif ordering_strategy == "inside_out" and bga_exclusion_zones:
+        # Sort nets inside-out from BGA center(s) for better escape routing
+        # Only applies to nets that have pads inside a BGA zone
+        def pad_in_bga_zone(pad):
+            """Check if a pad is inside any BGA zone."""
+            for zone in bga_exclusion_zones:
+                if zone[0] <= pad.global_x <= zone[2] and zone[1] <= pad.global_y <= zone[3]:
+                    return True
+            return False
+
+        def get_min_distance_to_bga_center(net_id):
+            """Get minimum distance from any BGA pad of this net to its BGA center."""
+            pads = pcb_data.pads_by_net.get(net_id, [])
+            if not pads:
+                return float('inf')
+
+            min_dist = float('inf')
+            for zone in bga_exclusion_zones:
+                center_x = (zone[0] + zone[2]) / 2
+                center_y = (zone[1] + zone[3]) / 2
+                for pad in pads:
+                    # Only consider pads that are inside this BGA zone
+                    if zone[0] <= pad.global_x <= zone[2] and zone[1] <= pad.global_y <= zone[3]:
+                        dist = ((pad.global_x - center_x) ** 2 + (pad.global_y - center_y) ** 2) ** 0.5
+                        min_dist = min(min_dist, dist)
+            return min_dist
+
+        # Separate BGA nets from non-BGA nets
+        bga_nets = []
+        non_bga_nets = []
+        for net_name, net_id in net_ids:
+            pads = pcb_data.pads_by_net.get(net_id, [])
+            has_bga_pad = any(pad_in_bga_zone(pad) for pad in pads)
+            if has_bga_pad:
+                bga_nets.append((net_name, net_id))
+            else:
+                non_bga_nets.append((net_name, net_id))
+
+        # Sort BGA nets inside-out, keep non-BGA nets in original order
+        bga_nets.sort(key=lambda x: get_min_distance_to_bga_center(x[1]))
+        net_ids = bga_nets + non_bga_nets
+
+        if bga_nets:
+            print(f"\nSorted {len(bga_nets)} BGA nets inside-out ({len(non_bga_nets)} non-BGA nets unchanged)")
+
+    elif ordering_strategy == "original":
+        print(f"\nUsing original net order (no sorting)")
+
+    # Separate single-ended nets from differential pairs
+    single_ended_nets = []
+    diff_pair_ids_to_route = []  # (pair_name, pair) tuples
+    processed_pair_net_ids = set()
+
+    for net_name, net_id in net_ids:
+        if net_id in diff_pair_net_ids and net_id not in processed_pair_net_ids:
+            # Find the differential pair this net belongs to
+            for pair_name, pair in diff_pairs.items():
+                if pair.p_net_id == net_id or pair.n_net_id == net_id:
+                    diff_pair_ids_to_route.append((pair_name, pair))
+                    processed_pair_net_ids.add(pair.p_net_id)
+                    processed_pair_net_ids.add(pair.n_net_id)
+                    break
+        elif net_id not in diff_pair_net_ids:
+            single_ended_nets.append((net_name, net_id))
+
+    total_routes = len(single_ended_nets) + len(diff_pair_ids_to_route)
+    print(f"\nRouting {total_routes} items ({len(single_ended_nets)} single-ended nets, {len(diff_pair_ids_to_route)} differential pairs)...")
+    print("=" * 60)
+
+    results = []
+    pad_swaps = []  # List of (pad1, pad2) tuples for nets that need swapping
+    successful = 0
+    failed = 0
+    total_time = 0
+    total_iterations = 0
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
