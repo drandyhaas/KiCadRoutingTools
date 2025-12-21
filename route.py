@@ -520,7 +520,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE building obstacle maps, so obstacles reflect correct segment layers
     if enable_layer_switch and diff_pair_ids_to_route:
-        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, find_layer_switch_options
+        from stub_layer_switching import get_stub_info, apply_stub_layer_switch
         from diff_pair_routing import get_diff_pair_endpoints
 
         print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route)} diff pair(s)...")
@@ -568,11 +568,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
             if not src_p_stub or not src_n_stub:
                 continue
-
-            # Look for a swap partner: another pair with source stubs on our TARGET layer
-            # at a similar position (they would be blocking us if we try to switch)
-            src_center_x = (sources[0][5] + sources[0][7]) / 2
-            src_center_y = (sources[0][6] + sources[0][8]) / 2
 
             swap_partner = None
             swap_partner_stubs = None
@@ -873,10 +868,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     route_index = 0
 
-    # Track net IDs of pairs whose stubs have been modified by layer swap
-    # These pairs should not be used as swap candidates again
-    swapped_pair_net_ids = set()
-
     # Route differential pairs first (they're more constrained)
     for pair_name, pair in diff_pair_ids_to_route:
         route_index += 1
@@ -919,16 +910,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Route the differential pair
         # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
         # Also pass unrouted stubs for finding clear extension endpoints
-        # Build list of remaining unrouted pairs for layer swap optimization
-        # Use ALL diff pairs (not just those being routed) as potential swap candidates
-        # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
-        remaining_pairs = [(pn, p) for pn, p in diff_pairs.items()
-                          if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
-                          and p.p_net_id != pair.p_net_id
-                          and p.p_net_id not in swapped_pair_net_ids]
+        # Note: Layer switching is now done upfront before routing starts
         result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles,
-                                                 unrouted_stubs, unrouted_pairs=remaining_pairs,
-                                                 enable_layer_switch=False)  # Swaps done upfront
+                                                 unrouted_stubs)
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -960,16 +944,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             routed_results[pair.n_net_id] = result  # Both P and N share the same result
             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
             diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
-
-            # Track if this route used a swap - the swap pair should not be used for future swaps
-            if result.get('swapped_pair_net_ids'):
-                swap_p, swap_n = result['swapped_pair_net_ids']
-                swapped_pair_net_ids.add(swap_p)
-                swapped_pair_net_ids.add(swap_n)
-
-            # Collect segment layer modifications for file output
-            if result.get('segment_modifications'):
-                all_segment_modifications.extend(result['segment_modifications'])
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
@@ -1127,7 +1101,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
 
-                        retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs, enable_layer_switch=False)
+                        retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
                         if retry_result and not retry_result.get('failed'):
                             print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
@@ -1153,16 +1127,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             routed_results[pair.n_net_id] = retry_result
                             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
                             diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
-
-                            # Track if this route used a swap
-                            if retry_result.get('swapped_pair_net_ids'):
-                                swap_p, swap_n = retry_result['swapped_pair_net_ids']
-                                swapped_pair_net_ids.add(swap_p)
-                                swapped_pair_net_ids.add(swap_n)
-
-                            # Collect segment layer modifications for file output
-                            if retry_result.get('segment_modifications'):
-                                all_segment_modifications.extend(retry_result['segment_modifications'])
 
                             # Queue all ripped-up nets for rerouting and add to history
                             rip_and_retry_history.add((current_canonical, blocker_canonicals))
@@ -1231,13 +1195,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
 
-            # Build list of remaining unrouted pairs for layer swap optimization
-            # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
-            remaining_pairs = [(pn, p) for pn, p in diff_pairs.items()
-                              if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
-                              and p.p_net_id != ripped_pair.p_net_id
-                              and p.p_net_id not in swapped_pair_net_ids]
-            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs, enable_layer_switch=False)
+            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs)
             elapsed = time.time() - start_time
             total_time += elapsed
 
@@ -1267,16 +1225,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 routed_results[ripped_pair.n_net_id] = result
                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
-
-                # Track if this route used a swap
-                if result.get('swapped_pair_net_ids'):
-                    swap_p, swap_n = result['swapped_pair_net_ids']
-                    swapped_pair_net_ids.add(swap_p)
-                    swapped_pair_net_ids.add(swap_n)
-
-                # Collect segment layer modifications for file output
-                if result.get('segment_modifications'):
-                    all_segment_modifications.extend(result['segment_modifications'])
             else:
                 # Reroute failed - try rip-up and retry with progressive N+1
                 iterations = result['iterations'] if result else 0
@@ -1411,13 +1359,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.p_net_id, config)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.n_net_id, config)
 
-                            # Build list of remaining unrouted pairs for layer swap optimization
-                            # Exclude pairs that have been routed, the current pair, and pairs whose stubs were already swapped
-                            remaining_pairs = [(pn, p) for pn, p in diff_pairs.items()
-                                              if p.p_net_id not in routed_net_ids and p.n_net_id not in routed_net_ids
-                                              and p.p_net_id != ripped_pair.p_net_id
-                                              and p.p_net_id not in swapped_pair_net_ids]
-                            retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs, unrouted_pairs=remaining_pairs, enable_layer_switch=False)
+                            retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
                             if retry_result and not retry_result.get('failed'):
                                 print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
@@ -1443,16 +1385,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 routed_results[ripped_pair.n_net_id] = retry_result
                                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
                                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
-
-                                # Track if this route used a swap
-                                if retry_result.get('swapped_pair_net_ids'):
-                                    swap_p, swap_n = retry_result['swapped_pair_net_ids']
-                                    swapped_pair_net_ids.add(swap_p)
-                                    swapped_pair_net_ids.add(swap_n)
-
-                                # Collect segment layer modifications for file output
-                                if retry_result.get('segment_modifications'):
-                                    all_segment_modifications.extend(retry_result['segment_modifications'])
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))
