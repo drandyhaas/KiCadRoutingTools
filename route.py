@@ -1631,7 +1631,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     }
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
-    if results:
+    # Write output if we have results OR if we have layer swap modifications to show
+    if results or all_segment_modifications or all_swap_vias:
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
