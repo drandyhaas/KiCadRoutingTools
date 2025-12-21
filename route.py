@@ -512,6 +512,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Track all segment layer modifications for file output
     all_segment_modifications = []
+    # Track all vias added during stub layer swapping
+    all_swap_vias = []
     # Track swap details for potential revert if routing fails
     swap_details = {}
 
@@ -536,55 +538,111 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             tgt_layer = config.layers[targets[0][4]]
             pair_layer_info[pair_name] = (src_layer, tgt_layer, sources, targets, pair)
 
+        # Build layer info for ALL diff pairs (for finding swap partners)
+        all_pair_layer_info = {}  # pair_name -> (src_layer, tgt_layer, sources, targets, pair)
+        for pair_name, pair in diff_pairs.items():
+            sources, targets, error = get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+            if error or not sources or not targets:
+                continue
+            src_layer = config.layers[sources[0][4]]
+            tgt_layer = config.layers[targets[0][4]]
+            all_pair_layer_info[pair_name] = (src_layer, tgt_layer, sources, targets, pair)
+
         # Find pairs that need layer switches (src != tgt layer)
         pairs_needing_via = [(name, info) for name, info in pair_layer_info.items()
                             if info[0] != info[1]]
 
-        # First, try single-pair layer switches (no swap partner needed)
-        # This is simpler and should be tried before looking for swap partners
+        # Try to find swap partners for pairs needing via
         applied_swaps = set()
         swap_count = 0
-        single_switch_count = 0
 
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
             if pair_name in applied_swaps:
                 continue
 
-            # Try single-pair layer switch first (move source to target layer OR target to source layer)
-            # Get stub info for all four stubs
+            # Get our source stub info
             src_p_stub = get_stub_info(pcb_data, pair.p_net_id,
                                        sources[0][5], sources[0][6], src_layer)
             src_n_stub = get_stub_info(pcb_data, pair.n_net_id,
                                        sources[0][7], sources[0][8], src_layer)
-            tgt_p_stub = get_stub_info(pcb_data, pair.p_net_id,
-                                       targets[0][5], targets[0][6], tgt_layer)
-            tgt_n_stub = get_stub_info(pcb_data, pair.n_net_id,
-                                       targets[0][7], targets[0][8], tgt_layer)
 
-            if src_p_stub and src_n_stub and tgt_p_stub and tgt_n_stub:
-                # Try Option 1: Move target stubs to source layer (preferred - keeps source position)
-                # This makes both ends on the source layer
-                tgt_original_layer = tgt_layer
-                _, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
-                _, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
-                all_segment_modifications.extend(mods1 + mods2)
+            if not src_p_stub or not src_n_stub:
+                continue
+
+            # Look for a swap partner: another pair with source stubs on our TARGET layer
+            # at a similar position (they would be blocking us if we try to switch)
+            src_center_x = (sources[0][5] + sources[0][7]) / 2
+            src_center_y = (sources[0][6] + sources[0][8]) / 2
+
+            swap_partner = None
+            swap_partner_stubs = None
+
+            for other_name, other_info in all_pair_layer_info.items():
+                if other_name == pair_name:
+                    continue
+                other_src_layer, other_tgt_layer, other_sources, other_targets, other_pair = other_info
+
+                # Check if their source is on our target layer (blocking our switch)
+                if other_src_layer != tgt_layer:
+                    continue
+
+                # Check if their source is at a similar position to ours
+                other_src_center_x = (other_sources[0][5] + other_sources[0][7]) / 2
+                other_src_center_y = (other_sources[0][6] + other_sources[0][8]) / 2
+                dist = ((src_center_x - other_src_center_x) ** 2 + (src_center_y - other_src_center_y) ** 2) ** 0.5
+
+                if dist < 1.0:  # Within 1mm, likely overlapping
+                    # Get their source stub info
+                    other_src_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                     other_sources[0][5], other_sources[0][6], other_src_layer)
+                    other_src_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                     other_sources[0][7], other_sources[0][8], other_src_layer)
+
+                    if other_src_p_stub and other_src_n_stub:
+                        swap_partner = other_name
+                        swap_partner_stubs = (other_src_p_stub, other_src_n_stub, other_src_layer)
+                        break
+
+            if swap_partner and swap_partner_stubs:
+                # Found a swap partner! Swap source layers
+                other_src_p_stub, other_src_n_stub, other_src_layer = swap_partner_stubs
+
+                # Our source: src_layer -> tgt_layer
+                # Their source: other_src_layer (=tgt_layer) -> src_layer
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
+                vias3, mods3 = apply_stub_layer_switch(pcb_data, other_src_p_stub, src_layer, config, debug=False)
+                vias4, mods4 = apply_stub_layer_switch(pcb_data, other_src_n_stub, src_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                all_vias = vias1 + vias2 + vias3 + vias4
+                all_swap_vias.extend(all_vias)
 
                 # Track swap details for potential revert
                 swap_details[pair_name] = {
-                    'original_layer': tgt_original_layer,
-                    'stubs': (tgt_p_stub, tgt_n_stub),
-                    'partner': None,  # Single-pair switch, no partner
+                    'original_layer': src_layer,
+                    'stubs': (src_p_stub, src_n_stub),
+                    'partner': swap_partner,
                     'mods': mods1 + mods2,
-                    'switch_type': 'target_to_source'
+                    'vias': vias1 + vias2,
+                    'switch_type': 'source_swap'
+                }
+                swap_details[swap_partner] = {
+                    'original_layer': other_src_layer,
+                    'stubs': (other_src_p_stub, other_src_n_stub),
+                    'partner': pair_name,
+                    'mods': mods3 + mods4,
+                    'vias': vias3 + vias4,
+                    'switch_type': 'source_swap'
                 }
 
                 applied_swaps.add(pair_name)
-                single_switch_count += 1
-                print(f"  Single switch: {pair_name} target stubs {tgt_layer} -> {src_layer}")
-                continue  # Move to next pair
+                applied_swaps.add(swap_partner)
+                swap_count += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Source swap: {pair_name} ({src_layer}->{tgt_layer}) <-> {swap_partner} ({other_src_layer}->{src_layer}){via_msg}")
 
-        if single_switch_count > 0:
-            print(f"Applied {single_switch_count} single-pair layer switch(es)")
+        if swap_count > 0:
+            print(f"Applied {swap_count} source layer swap(s)")
 
         # Now try two-pair swaps for remaining pairs that weren't handled
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
@@ -1652,6 +1710,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     seg.width, seg.layer, seg.net_id
                 ) + "\n"
             for via in result['new_vias']:
+                routing_text += generate_via_sexpr(
+                    via.x, via.y, via.size, via.drill,
+                    via.layers, via.net_id
+                ) + "\n"
+
+        # Add vias from stub layer swapping
+        if all_swap_vias:
+            print(f"Adding {len(all_swap_vias)} via(s) from stub layer swapping")
+            for via in all_swap_vias:
                 routing_text += generate_via_sexpr(
                     via.x, via.y, via.size, via.drill,
                     via.layers, via.net_id
