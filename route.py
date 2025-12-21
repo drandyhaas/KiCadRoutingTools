@@ -514,8 +514,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     all_segment_modifications = []
     # Track all vias added during stub layer swapping
     all_swap_vias = []
-    # Track swap details for potential revert if routing fails
-    swap_details = {}
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE building obstacle maps, so obstacles reflect correct segment layers
@@ -631,24 +629,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 all_vias = vias1 + vias2 + vias3 + vias4
                 all_swap_vias.extend(all_vias)
 
-                # Track swap details for potential revert
-                swap_details[pair_name] = {
-                    'original_layer': src_layer,
-                    'stubs': (src_p_stub, src_n_stub),
-                    'partner': swap_partner,
-                    'mods': mods1 + mods2,
-                    'vias': vias1 + vias2,
-                    'switch_type': 'source_swap'
-                }
-                swap_details[swap_partner] = {
-                    'original_layer': other_src_layer,
-                    'stubs': (other_src_p_stub, other_src_n_stub),
-                    'partner': pair_name,
-                    'mods': mods3 + mods4,
-                    'vias': vias3 + vias4,
-                    'switch_type': 'source_swap'
-                }
-
                 applied_swaps.add(pair_name)
                 applied_swaps.add(swap_partner)
                 swap_count += 1
@@ -717,30 +697,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 # Try swap if we have valid stubs, otherwise try the other side
                 if swap_type and our_stubs[0] and our_stubs[1] and their_stubs[0] and their_stubs[1]:
-                    # Track original layers before swap
-                    our_original_layer = our_stubs[0].layer
-                    their_original_layer = their_stubs[0].layer
-
                     # Apply swaps
                     _, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
                     _, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
                     _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
                     _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
                     all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
-
-                    # Track swap details for potential revert
-                    swap_details[pair_name] = {
-                        'original_layer': our_original_layer,
-                        'stubs': our_stubs,
-                        'partner': other_name,
-                        'mods': mods1 + mods2
-                    }
-                    swap_details[other_name] = {
-                        'original_layer': their_original_layer,
-                        'stubs': their_stubs,
-                        'partner': pair_name,
-                        'mods': mods3 + mods4
-                    }
 
                     applied_swaps.add(pair_name)
                     applied_swaps.add(other_name)
@@ -762,29 +724,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                                     other_targets[0][7], other_targets[0][8], other_tgt)
 
                         if p_stub and n_stub and other_p_stub and other_n_stub:
-                            # Track original layers before swap
-                            our_original_layer = p_stub.layer
-                            their_original_layer = other_p_stub.layer
-
                             _, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
                             _, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
                             _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
                             _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
                             all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
-
-                            # Track swap details for potential revert
-                            swap_details[pair_name] = {
-                                'original_layer': our_original_layer,
-                                'stubs': (p_stub, n_stub),
-                                'partner': other_name,
-                                'mods': mods1 + mods2
-                            }
-                            swap_details[other_name] = {
-                                'original_layer': their_original_layer,
-                                'stubs': (other_p_stub, other_n_stub),
-                                'partner': pair_name,
-                                'mods': mods3 + mods4
-                            }
 
                             applied_swaps.add(pair_name)
                             applied_swaps.add(other_name)
@@ -1587,34 +1531,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
-
-        # Revert layer swaps for failed pairs to avoid DRC issues with their stubs
-        if swap_details and failed_diff_pairs:
-            reverted_pairs = set()
-            for pair_name in failed_diff_pairs:
-                if pair_name in swap_details and pair_name not in reverted_pairs:
-                    details = swap_details[pair_name]
-                    original_layer = details['original_layer']
-
-                    # Remove the swap modifications for this pair
-                    mods_to_remove = details['mods']
-                    for mod in mods_to_remove:
-                        if mod in all_segment_modifications:
-                            all_segment_modifications.remove(mod)
-
-                    # Add reverse modifications to restore original layer
-                    for mod in mods_to_remove:
-                        reverse_mod = {
-                            'start': mod['start'],
-                            'end': mod['end'],
-                            'net_id': mod['net_id'],
-                            'old_layer': mod['new_layer'],  # Current layer after swap
-                            'new_layer': original_layer      # Original layer to restore
-                        }
-                        all_segment_modifications.append(reverse_mod)
-
-                    reverted_pairs.add(pair_name)
-                    print(f"  Reverted layer swap for failed pair {pair_name} (stubs back to {original_layer})")
 
         # Apply segment layer modifications from stub layer switching BEFORE polarity swaps
         # (so we can find segments by their original net_id)
