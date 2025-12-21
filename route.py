@@ -848,6 +848,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if swap_count > 0:
             print(f"Applied {swap_count} layer swap(s)")
 
+        # Report pairs that need vias but couldn't be swapped
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name not in applied_swaps:
+                print(f"  No swap found: {pair_name} ({src_layer}->{tgt_layer}) - will need via")
+
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
     print("Building base obstacle map...")
