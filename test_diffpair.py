@@ -232,6 +232,8 @@ Examples:
                               help="Don't swap target pad nets if polarity swap is needed (default: fix polarity)")
     router_group.add_argument('--stub-layer-swap', action='store_true',
                               help='Enable stub layer switching optimization (experimental)')
+    router_group.add_argument('--can-swap-to-top-layer', action='store_true',
+                              help='Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.')
     router_group.add_argument('--max-ripup', type=int,
                               help='Maximum blockers to rip up at once during rip-up and retry (default: 3)')
 
@@ -349,6 +351,8 @@ Examples:
         router_cmd.append("--no-fix-polarity")
     if args.stub_layer_swap:
         router_cmd.append("--stub-layer-swap")
+    if args.can_swap_to_top_layer:
+        router_cmd.append("--can-swap-to-top-layer")
     if args.max_ripup is not None:
         router_cmd.extend(["--max-ripup", str(args.max_ripup)])
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])

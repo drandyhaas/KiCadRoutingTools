@@ -291,6 +291,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 fix_polarity: bool = True,
                 max_rip_up_count: int = 3,
                 enable_layer_switch: bool = True,
+                can_swap_to_top_layer: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -619,6 +620,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Found a swap partner! Swap source layers
                 other_src_p_stub, other_src_n_stub, other_src_layer = swap_partner_stubs
 
+                # Check if swap would move stubs to F.Cu (top layer)
+                # Skip if can_swap_to_top_layer is False and either destination is F.Cu
+                if not can_swap_to_top_layer and (tgt_layer == 'F.Cu' or src_layer == 'F.Cu'):
+                    # Skip this swap - would move stubs to top layer
+                    continue
+
                 # Our source: src_layer -> tgt_layer
                 # Their source: other_src_layer (=tgt_layer) -> src_layer
                 vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
@@ -697,19 +704,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 # Try swap if we have valid stubs, otherwise try the other side
                 if swap_type and our_stubs[0] and our_stubs[1] and their_stubs[0] and their_stubs[1]:
-                    # Apply swaps
-                    _, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
-                    _, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
-                    _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
-                    _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
-                    all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                    # Check if swap would move stubs to F.Cu (top layer)
+                    if not can_swap_to_top_layer and (our_new_layer == 'F.Cu' or their_new_layer == 'F.Cu'):
+                        # Skip this swap - would move stubs to top layer
+                        pass
+                    else:
+                        # Apply swaps
+                        _, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
+                        _, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
+                        _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
+                        _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
+                        all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
 
-                    applied_swaps.add(pair_name)
-                    applied_swaps.add(other_name)
-                    swap_count += 1
-                    print(f"  Swap {swap_type}s: {pair_name} <-> {other_name}")
-                    break
-                elif swap_type == "source":
+                        applied_swaps.add(pair_name)
+                        applied_swaps.add(other_name)
+                        swap_count += 1
+                        print(f"  Swap {swap_type}s: {pair_name} <-> {other_name}")
+                        break
+                if swap_type == "source":
                     # Source swap failed, try target swap with same pair
                     if other_tgt == src_layer and tgt_layer == other_src:
                         # Our target stubs
@@ -724,17 +736,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                                     other_targets[0][7], other_targets[0][8], other_tgt)
 
                         if p_stub and n_stub and other_p_stub and other_n_stub:
-                            _, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
-                            _, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
-                            _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
-                            _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
-                            all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                            # Check if swap would move stubs to F.Cu (top layer)
+                            if not can_swap_to_top_layer and (src_layer == 'F.Cu' or tgt_layer == 'F.Cu'):
+                                # Skip this swap - would move stubs to top layer
+                                pass
+                            else:
+                                _, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
+                                _, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
+                                _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
+                                _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
+                                all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
 
-                            applied_swaps.add(pair_name)
-                            applied_swaps.add(other_name)
-                            swap_count += 1
-                            print(f"  Swap targets: {pair_name} <-> {other_name}")
-                            break
+                                applied_swaps.add(pair_name)
+                                applied_swaps.add(other_name)
+                                swap_count += 1
+                                print(f"  Swap targets: {pair_name} <-> {other_name}")
+                                break
 
         if swap_count > 0:
             print(f"Applied {swap_count} layer swap(s)")
@@ -1778,6 +1795,8 @@ Differential pair routing:
                         help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
     parser.add_argument("--stub-layer-swap", action="store_true",
                         help="Enable stub layer switching optimization that tries to avoid vias by moving stubs to different layers (experimental)")
+    parser.add_argument("--can-swap-to-top-layer", action="store_true",
+                        help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -1850,4 +1869,5 @@ Differential pair routing:
                 fix_polarity=not args.no_fix_polarity,
                 max_rip_up_count=args.max_ripup,
                 enable_layer_switch=args.stub_layer_swap,
+                can_swap_to_top_layer=args.can_swap_to_top_layer,
                 vis_callback=vis_callback)
