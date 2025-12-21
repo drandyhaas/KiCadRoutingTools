@@ -577,31 +577,50 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             swap_partner = None
             swap_partner_stubs = None
 
+            # Find which nets on target layer actually overlap with our stub segments
+            overlapping_nets = set()
+            our_stubs = src_p_stub.segments + src_n_stub.segments
+            for stub_seg in our_stubs:
+                stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - 0.2
+                stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + 0.2
+                stub_x_min = min(stub_seg.start_x, stub_seg.end_x)
+                stub_x_max = max(stub_seg.start_x, stub_seg.end_x)
+
+                for seg in pcb_data.segments:
+                    if seg.layer != tgt_layer:
+                        continue
+                    seg_y_min = min(seg.start_y, seg.end_y)
+                    seg_y_max = max(seg.start_y, seg.end_y)
+                    seg_x_min = min(seg.start_x, seg.end_x)
+                    seg_x_max = max(seg.start_x, seg.end_x)
+
+                    # Check Y and X overlap
+                    if seg_y_max >= stub_y_min and seg_y_min <= stub_y_max:
+                        if seg_x_max >= stub_x_min and seg_x_min <= stub_x_max:
+                            overlapping_nets.add(seg.net_id)
+
+            # Find which diff pair the overlapping nets belong to
             for other_name, other_info in all_pair_layer_info.items():
                 if other_name == pair_name:
                     continue
                 other_src_layer, other_tgt_layer, other_sources, other_targets, other_pair = other_info
 
-                # Check if their source is on our target layer (blocking our switch)
+                # Check if their source is on our target layer and overlaps
                 if other_src_layer != tgt_layer:
                     continue
+                if other_pair.p_net_id not in overlapping_nets and other_pair.n_net_id not in overlapping_nets:
+                    continue
 
-                # Check if their source is at a similar position to ours
-                other_src_center_x = (other_sources[0][5] + other_sources[0][7]) / 2
-                other_src_center_y = (other_sources[0][6] + other_sources[0][8]) / 2
-                dist = ((src_center_x - other_src_center_x) ** 2 + (src_center_y - other_src_center_y) ** 2) ** 0.5
+                # Get their source stub info
+                other_src_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                 other_sources[0][5], other_sources[0][6], other_src_layer)
+                other_src_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                 other_sources[0][7], other_sources[0][8], other_src_layer)
 
-                if dist < 1.0:  # Within 1mm, likely overlapping
-                    # Get their source stub info
-                    other_src_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
-                                                     other_sources[0][5], other_sources[0][6], other_src_layer)
-                    other_src_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
-                                                     other_sources[0][7], other_sources[0][8], other_src_layer)
-
-                    if other_src_p_stub and other_src_n_stub:
-                        swap_partner = other_name
-                        swap_partner_stubs = (other_src_p_stub, other_src_n_stub, other_src_layer)
-                        break
+                if other_src_p_stub and other_src_n_stub:
+                    swap_partner = other_name
+                    swap_partner_stubs = (other_src_p_stub, other_src_n_stub, other_src_layer)
+                    break
 
             if swap_partner and swap_partner_stubs:
                 # Found a swap partner! Swap source layers
