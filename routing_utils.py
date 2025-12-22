@@ -745,6 +745,28 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             a1, a2 = a2, a1
         unit_angles[unit_id] = (a1, a2)
 
+    # Build layer information for each unit from stub segments
+    unit_layers = {}  # unit_id -> (source_layers: set, target_layers: set)
+    for unit_id in unit_ids:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+        src_layers = set()
+        tgt_layers = set()
+
+        for net_id in unit_net_ids:
+            # Get segments for this net
+            net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+            if net_segments:
+                stub_groups = find_connected_groups(net_segments)
+                if len(stub_groups) >= 2:
+                    # Source stub layers (first group)
+                    for seg in stub_groups[0]:
+                        src_layers.add(seg.layer)
+                    # Target stub layers (second group)
+                    for seg in stub_groups[1]:
+                        tgt_layers.add(seg.layer)
+
+        unit_layers[unit_id] = (src_layers, tgt_layers)
+
     # Step 4: Detect crossing conflicts
     # Two units cross if their intervals on the circle interleave
     # Unit A with (a1, a2) and Unit B with (b1, b2) cross if:
@@ -756,11 +778,22 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
 
         # Check interleaving: one unit's interval partially overlaps the other's
         # a1 < b1 < a2 < b2 means A starts, B starts, A ends, B ends = crossing
-        if a1 < b1 < a2 < b2:
-            return True
-        if b1 < a1 < b2 < a2:
-            return True
-        return False
+        angles_cross = (a1 < b1 < a2 < b2) or (b1 < a1 < b2 < a2)
+        if not angles_cross:
+            return False
+
+        # Check if layers overlap - if no overlap, no real conflict
+        a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+        b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+
+        a_all = a_src | a_tgt
+        b_all = b_src | b_tgt
+
+        # If both have known layers and they don't overlap, no conflict
+        if a_all and b_all and not (a_all & b_all):
+            return False
+
+        return True
 
     # Build conflict graph
     unit_list = list(unit_angles.keys())
