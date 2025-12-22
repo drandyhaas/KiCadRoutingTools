@@ -15,6 +15,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
+- **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
 - **Via proximity cost** - Configurable cost penalty for vias near stubs (instead of blocking)
 - **Adaptive setback angles** - Evaluates multiple setback angles (0°, ±max/2, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced
 
@@ -123,8 +124,9 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --via-cost 25           # Via penalty (grid steps, doubled for diff pairs)
 --max-iterations 200000      # A* iteration limit
 --max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
---heuristic-weight 2.0       # A* greediness (>1 = faster)
+--heuristic-weight 1.9       # A* greediness (>1 = faster)
 --max-ripup 3                # Max blockers to rip up at once (1-N progressive)
+--max-setback-angle 45       # Max angle for setback search (degrees)
 
 # Strategy
 --ordering mps          # mps | inside_out | original
@@ -136,18 +138,19 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
 --bga-proximity-radius 10.0  # Radius around BGA edges to penalize (mm)
 --bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
---via-proximity-cost 10      # Via cost multiplier near stubs/BGAs (0=block)
+--via-proximity-cost 20      # Via cost multiplier near stubs/BGAs (0=block)
+--track-proximity-distance 1.0  # Radius around routed tracks to penalize (mm, same layer)
+--track-proximity-cost 0.2   # Cost penalty near routed tracks (mm equivalent)
 
 # Differential pairs
 --diff-pairs "*lvds*"   # Pattern for diff pair nets
 --diff-pair-gap 0.101   # P-N gap (mm)
 --diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
 --min-turning-radius 0.2      # Min turn radius (mm)
---max-setback-angle 22.5      # Max angle for setback search (degrees)
 --direction backward    # Route from target to source
 
-# Layer optimization
---stub-layer-swap       # Enable stub layer switching (experimental)
+# Layer optimization (stub layer swap enabled by default)
+--no-stub-layer-swap    # Disable stub layer switching
 --can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
 ```
 
