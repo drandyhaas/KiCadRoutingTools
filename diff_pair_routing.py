@@ -635,6 +635,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         'n_tgt_x': n_tgt_x, 'n_tgt_y': n_tgt_y,
         'src_dir_x': src_dir_x, 'src_dir_y': src_dir_y,
         'tgt_dir_x': tgt_dir_x, 'tgt_dir_y': tgt_dir_y,
+        'src_actual_dir_x': src_actual_dir_x, 'src_actual_dir_y': src_actual_dir_y,
+        'tgt_actual_dir_x': tgt_actual_dir_x, 'tgt_actual_dir_y': tgt_actual_dir_y,
         'center_src_x': center_src_x, 'center_src_y': center_src_y,
         'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
         'via_spacing': via_spacing,
@@ -848,6 +850,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_tgt_x, n_tgt_y = route_data['n_tgt_x'], route_data['n_tgt_y']
     src_dir_x, src_dir_y = route_data['src_dir_x'], route_data['src_dir_y']
     tgt_dir_x, tgt_dir_y = route_data['tgt_dir_x'], route_data['tgt_dir_y']
+    src_actual_dir_x, src_actual_dir_y = route_data['src_actual_dir_x'], route_data['src_actual_dir_y']
+    tgt_actual_dir_x, tgt_actual_dir_y = route_data['tgt_actual_dir_x'], route_data['tgt_actual_dir_y']
     center_src_x, center_src_y = route_data['center_src_x'], route_data['center_src_y']
     center_tgt_x, center_tgt_y = route_data['center_tgt_x'], route_data['center_tgt_y']
     via_spacing = route_data['via_spacing']
@@ -944,9 +948,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     n_sign = -p_sign
 
     # Create P and N paths using perpendicular offsets from centerline
-    # Use stub directions at endpoints so perpendicular offsets align with stub P-N axis
-    start_stub_dir = (src_dir_x, src_dir_y)
-    end_stub_dir = (-tgt_dir_x, -tgt_dir_y)  # Negate because we arrive at target stubs
+    # Use actual setback directions at endpoints so perpendicular offsets maintain
+    # proper spacing along the connector segments (especially when setback angle is used)
+    start_stub_dir = (src_actual_dir_x, src_actual_dir_y)
+    end_stub_dir = (-tgt_actual_dir_x, -tgt_actual_dir_y)  # Negate because we arrive at target stubs
     p_float_path = create_parallel_path_float(simplified_path, coord, sign=p_sign, spacing_mm=spacing_mm,
                                                start_dir=start_stub_dir, end_dir=end_stub_dir)
     n_float_path = create_parallel_path_float(simplified_path, coord, sign=n_sign, spacing_mm=spacing_mm,
