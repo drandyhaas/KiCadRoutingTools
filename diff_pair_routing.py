@@ -669,161 +669,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         src_combos = src_candidates[:1]
         tgt_combos = tgt_candidates[:1]
 
-    # During probe, find working angles for source and target independently
-    # Try each source angle until one succeeds or reaches max iterations
-    # Then try each target angle until one succeeds or reaches max iterations
-    selected_src = src_combos[0]
-    selected_tgt = tgt_combos[0]
-
-    if is_probe and len(src_combos) > 1:
-        # Find working source angle (try with first target angle)
-        stuck_threshold = max(100, max_iters // 10)
-        for src_candidate in src_combos:
-            src_gx, src_gy, src_actual_dir_x, src_actual_dir_y, src_angle, src_dist = src_candidate
-            tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y, tgt_angle, tgt_dist = tgt_combos[0]
-
-            # Add allowed cells
-            for dx in range(-allow_radius, allow_radius + 1):
-                for dy in range(-allow_radius, allow_radius + 1):
-                    obstacles.add_allowed_cell(src_gx + dx, src_gy + dy)
-                    obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
-            obstacles.add_source_target_cell(src_gx, src_gy, src_layer)
-            obstacles.add_source_target_cell(tgt_gx, tgt_gy, tgt_layer)
-
-            src_theta_idx = direction_to_theta_idx(src_actual_dir_x, src_actual_dir_y)
-            tgt_theta_idx = direction_to_theta_idx(-tgt_actual_dir_x, -tgt_actual_dir_y)
-
-            if src_angle != 0:
-                src_info = f"{src_angle:+.1f}° (sep:{src_dist:.2f}mm)" if src_dist < float('inf') else f"{src_angle:+.1f}°"
-                print(f"  Probing source angle: {src_info}")
-
-            pose_path, iterations, blocked_cells = pose_router.route_pose_with_frontier(
-                obstacles, src_gx, src_gy, src_layer, src_theta_idx,
-                tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
-                max_iters, diff_pair_via_spacing=via_spacing_grid
-            )
-            total_iterations += iterations
-
-            if pose_path is not None or iterations >= max_iters - stuck_threshold:
-                # This source angle works (found route or made good progress)
-                selected_src = src_candidate
-                if pose_path is not None:
-                    # Found route during source probe!
-                    route_data = {
-                        'pose_path': pose_path,
-                        'p_src_x': p_src_x, 'p_src_y': p_src_y,
-                        'n_src_x': n_src_x, 'n_src_y': n_src_y,
-                        'p_tgt_x': p_tgt_x, 'p_tgt_y': p_tgt_y,
-                        'n_tgt_x': n_tgt_x, 'n_tgt_y': n_tgt_y,
-                        'src_dir_x': src_dir_x, 'src_dir_y': src_dir_y,
-                        'tgt_dir_x': tgt_dir_x, 'tgt_dir_y': tgt_dir_y,
-                        'src_actual_dir_x': src_actual_dir_x, 'src_actual_dir_y': src_actual_dir_y,
-                        'tgt_actual_dir_x': tgt_actual_dir_x, 'tgt_actual_dir_y': tgt_actual_dir_y,
-                        'center_src_x': center_src_x, 'center_src_y': center_src_y,
-                        'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
-                        'via_spacing': via_spacing,
-                        'best_src_angle': src_angle, 'best_tgt_angle': tgt_angle,
-                    }
-                    return route_data, total_iterations, [], None
-                break
-            else:
-                print(f"    Source angle stuck ({iterations} iters), trying next...")
-
-        # Find working target angle (try with selected source angle)
-        if len(tgt_combos) > 1:
-            src_gx, src_gy, src_actual_dir_x, src_actual_dir_y, src_angle, src_dist = selected_src
-            for tgt_candidate in tgt_combos:
-                tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y, tgt_angle, tgt_dist = tgt_candidate
-
-                # Add allowed cells
-                for dx in range(-allow_radius, allow_radius + 1):
-                    for dy in range(-allow_radius, allow_radius + 1):
-                        obstacles.add_allowed_cell(src_gx + dx, src_gy + dy)
-                        obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
-                obstacles.add_source_target_cell(src_gx, src_gy, src_layer)
-                obstacles.add_source_target_cell(tgt_gx, tgt_gy, tgt_layer)
-
-                src_theta_idx = direction_to_theta_idx(src_actual_dir_x, src_actual_dir_y)
-                tgt_theta_idx = direction_to_theta_idx(-tgt_actual_dir_x, -tgt_actual_dir_y)
-
-                if tgt_angle != 0:
-                    tgt_info = f"{tgt_angle:+.1f}° (sep:{tgt_dist:.2f}mm)" if tgt_dist < float('inf') else f"{tgt_angle:+.1f}°"
-                    print(f"  Probing target angle: {tgt_info}")
-
-                pose_path, iterations, blocked_cells = pose_router.route_pose_with_frontier(
-                    obstacles, src_gx, src_gy, src_layer, src_theta_idx,
-                    tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
-                    max_iters, diff_pair_via_spacing=via_spacing_grid
-                )
-                total_iterations += iterations
-
-                if pose_path is not None or iterations >= max_iters - stuck_threshold:
-                    # This target angle works
-                    selected_tgt = tgt_candidate
-                    if pose_path is not None:
-                        # Found route during target probe!
-                        tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y, tgt_angle, tgt_dist = selected_tgt
-                        route_data = {
-                            'pose_path': pose_path,
-                            'p_src_x': p_src_x, 'p_src_y': p_src_y,
-                            'n_src_x': n_src_x, 'n_src_y': n_src_y,
-                            'p_tgt_x': p_tgt_x, 'p_tgt_y': p_tgt_y,
-                            'n_tgt_x': n_tgt_x, 'n_tgt_y': n_tgt_y,
-                            'src_dir_x': src_dir_x, 'src_dir_y': src_dir_y,
-                            'tgt_dir_x': tgt_dir_x, 'tgt_dir_y': tgt_dir_y,
-                            'src_actual_dir_x': src_actual_dir_x, 'src_actual_dir_y': src_actual_dir_y,
-                            'tgt_actual_dir_x': tgt_actual_dir_x, 'tgt_actual_dir_y': tgt_actual_dir_y,
-                            'center_src_x': center_src_x, 'center_src_y': center_src_y,
-                            'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
-                            'via_spacing': via_spacing,
-                            'best_src_angle': src_angle, 'best_tgt_angle': tgt_angle,
-                        }
-                        return route_data, total_iterations, [], None
-                    break
-                else:
-                    print(f"    Target angle stuck ({iterations} iters), trying next...")
-
-        # Return the selected angles for full search
-        best_probe_combo = (0, 0, selected_src, selected_tgt)
-        return None, total_iterations, last_blocked_cells, best_probe_combo
-
-    # Non-probe path or single angle: just use selected angles
-    src_gx, src_gy, src_actual_dir_x, src_actual_dir_y, src_angle, src_dist = selected_src
-    tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y, tgt_angle, tgt_dist = selected_tgt
-
-    # Print which angles we're using
-    if src_angle != 0 or tgt_angle != 0:
-        src_info = f"{src_angle:+.1f}° (sep:{src_dist:.2f}mm)" if src_dist < float('inf') else f"{src_angle:+.1f}°"
-        tgt_info = f"{tgt_angle:+.1f}° (sep:{tgt_dist:.2f}mm)" if tgt_dist < float('inf') else f"{tgt_angle:+.1f}°"
-        print(f"  Source setback: using {src_info}")
-        print(f"  Target setback: using {tgt_info}")
-
-    # Add allowed cells around source and target
-    for dx in range(-allow_radius, allow_radius + 1):
-        for dy in range(-allow_radius, allow_radius + 1):
-            obstacles.add_allowed_cell(src_gx + dx, src_gy + dy)
-            obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
-    obstacles.add_source_target_cell(src_gx, src_gy, src_layer)
-    obstacles.add_source_target_cell(tgt_gx, tgt_gy, tgt_layer)
-
-    # Convert actual setback directions to theta_idx for pose-based routing
-    src_theta_idx = direction_to_theta_idx(src_actual_dir_x, src_actual_dir_y)
-    tgt_theta_idx = direction_to_theta_idx(-tgt_actual_dir_x, -tgt_actual_dir_y)
-
-    print(f"  Pose routing: src_theta={src_theta_idx} ({src_actual_dir_x:.2f},{src_actual_dir_y:.2f}), tgt_theta={tgt_theta_idx} (arriving from {-tgt_actual_dir_x:.2f},{-tgt_actual_dir_y:.2f})")
-
-    pose_path, iterations, blocked_cells = pose_router.route_pose_with_frontier(
-        obstacles,
-        src_gx, src_gy, src_layer, src_theta_idx,
-        tgt_gx, tgt_gy, tgt_layer, tgt_theta_idx,
-        max_iters,
-        diff_pair_via_spacing=via_spacing_grid
-    )
-    total_iterations += iterations
-
-    if pose_path is not None:
-        # Success! Return the result
-        route_data = {
+    # Helper to build route_data dict
+    def make_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle):
+        return {
             'pose_path': pose_path,
             'p_src_x': p_src_x, 'p_src_y': p_src_y,
             'n_src_x': n_src_x, 'n_src_y': n_src_y,
@@ -831,18 +679,95 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             'n_tgt_x': n_tgt_x, 'n_tgt_y': n_tgt_y,
             'src_dir_x': src_dir_x, 'src_dir_y': src_dir_y,
             'tgt_dir_x': tgt_dir_x, 'tgt_dir_y': tgt_dir_y,
-            'src_actual_dir_x': src_actual_dir_x, 'src_actual_dir_y': src_actual_dir_y,
-            'tgt_actual_dir_x': tgt_actual_dir_x, 'tgt_actual_dir_y': tgt_actual_dir_y,
+            'src_actual_dir_x': src_actual_dir[0], 'src_actual_dir_y': src_actual_dir[1],
+            'tgt_actual_dir_x': tgt_actual_dir[0], 'tgt_actual_dir_y': tgt_actual_dir[1],
             'center_src_x': center_src_x, 'center_src_y': center_src_y,
             'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
             'via_spacing': via_spacing,
-            'best_src_angle': src_angle,
-            'best_tgt_angle': tgt_angle,
+            'best_src_angle': src_angle, 'best_tgt_angle': tgt_angle,
         }
-        return route_data, total_iterations, [], None
 
-    # Failed - return None with blocked cells
-    return None, total_iterations, blocked_cells, None
+    # Helper to setup and run a single route attempt
+    def try_route(src_cand, tgt_cand):
+        s_gx, s_gy, s_dx, s_dy, s_ang, _ = src_cand
+        t_gx, t_gy, t_dx, t_dy, t_ang, _ = tgt_cand
+
+        # Add allowed cells around source and target
+        for dx in range(-allow_radius, allow_radius + 1):
+            for dy in range(-allow_radius, allow_radius + 1):
+                obstacles.add_allowed_cell(s_gx + dx, s_gy + dy)
+                obstacles.add_allowed_cell(t_gx + dx, t_gy + dy)
+        obstacles.add_source_target_cell(s_gx, s_gy, src_layer)
+        obstacles.add_source_target_cell(t_gx, t_gy, tgt_layer)
+
+        s_theta = direction_to_theta_idx(s_dx, s_dy)
+        t_theta = direction_to_theta_idx(-t_dx, -t_dy)
+
+        path, iters, blocked = pose_router.route_pose_with_frontier(
+            obstacles, s_gx, s_gy, src_layer, s_theta,
+            t_gx, t_gy, tgt_layer, t_theta,
+            max_iters, diff_pair_via_spacing=via_spacing_grid
+        )
+        return path, iters, blocked, (s_dx, s_dy), (t_dx, t_dy), s_ang, t_ang
+
+    # Select best angles - during probe, try angles sequentially until one works
+    selected_src = src_combos[0]
+    selected_tgt = tgt_combos[0]
+    stuck_threshold = max(100, max_iters // 10)
+
+    if is_probe and len(src_combos) > 1:
+        # Probe source angles with first target angle
+        for src_cand in src_combos:
+            if src_cand[4] != 0:  # angle != 0
+                print(f"  Probing source angle: {src_cand[4]:+.1f}° (sep:{src_cand[5]:.2f}mm)")
+
+            path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(src_cand, tgt_combos[0])
+            total_iterations += iters
+
+            if path is not None:
+                return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
+            if iters >= max_iters - stuck_threshold:
+                selected_src = src_cand
+                break
+            print(f"    Source angle stuck ({iters} iters), trying next...")
+
+        # Probe target angles with selected source angle
+        if len(tgt_combos) > 1:
+            for tgt_cand in tgt_combos:
+                if tgt_cand[4] != 0:  # angle != 0
+                    print(f"  Probing target angle: {tgt_cand[4]:+.1f}° (sep:{tgt_cand[5]:.2f}mm)")
+
+                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(selected_src, tgt_cand)
+                total_iterations += iters
+
+                if path is not None:
+                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
+                if iters >= max_iters - stuck_threshold:
+                    selected_tgt = tgt_cand
+                    break
+                print(f"    Target angle stuck ({iters} iters), trying next...")
+
+        # Return selected angles for full search
+        return None, total_iterations, [], (0, 0, selected_src, selected_tgt)
+
+    # Non-probe: run single route attempt with selected angles
+    src_gx, src_gy, src_actual_dir_x, src_actual_dir_y, src_angle, src_dist = selected_src
+    tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y, tgt_angle, tgt_dist = selected_tgt
+
+    if src_angle != 0 or tgt_angle != 0:
+        print(f"  Source setback: using {src_angle:+.1f}° (sep:{src_dist:.2f}mm)")
+        print(f"  Target setback: using {tgt_angle:+.1f}° (sep:{tgt_dist:.2f}mm)")
+
+    src_theta_idx = direction_to_theta_idx(src_actual_dir_x, src_actual_dir_y)
+    tgt_theta_idx = direction_to_theta_idx(-tgt_actual_dir_x, -tgt_actual_dir_y)
+    print(f"  Pose routing: src_theta={src_theta_idx} ({src_actual_dir_x:.2f},{src_actual_dir_y:.2f}), tgt_theta={tgt_theta_idx} (arriving from {-tgt_actual_dir_x:.2f},{-tgt_actual_dir_y:.2f})")
+
+    path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(selected_src, selected_tgt)
+    total_iterations += iters
+
+    if path is not None:
+        return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
+    return None, total_iterations, blocked, None
 
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
