@@ -69,8 +69,28 @@ def run_test(diff_pair_name, args, verbose=False):
             cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
         if args.diff_pair_centerline_setback is not None:
             cmd.extend(["--diff-pair-centerline-setback", str(args.diff_pair_centerline_setback)])
+        if args.min_turning_radius is not None:
+            cmd.extend(["--min-turning-radius", str(args.min_turning_radius)])
+        if args.max_probe_iterations is not None:
+            cmd.extend(["--max-probe-iterations", str(args.max_probe_iterations)])
+        if args.via_proximity_cost is not None:
+            cmd.extend(["--via-proximity-cost", str(args.via_proximity_cost)])
+        if args.bga_proximity_radius is not None:
+            cmd.extend(["--bga-proximity-radius", str(args.bga_proximity_radius)])
+        if args.bga_proximity_cost is not None:
+            cmd.extend(["--bga-proximity-cost", str(args.bga_proximity_cost)])
+        if args.debug_lines:
+            cmd.append("--debug-lines")
         if args.no_fix_polarity:
             cmd.append("--no-fix-polarity")
+        if args.stub_layer_swap:
+            cmd.append("--stub-layer-swap")
+        if args.can_swap_to_top_layer:
+            cmd.append("--can-swap-to-top-layer")
+        if args.max_ripup is not None:
+            cmd.extend(["--max-ripup", str(args.max_ripup)])
+        if args.max_setback_angle is not None:
+            cmd.extend(["--max-setback-angle", str(args.max_setback_angle)])
 
         result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -191,8 +211,28 @@ def main():
                               help='Gap between P/N traces in mm (default: 0.101)')
     router_group.add_argument('--diff-pair-centerline-setback', type=float,
                               help='Distance in front of stubs to start route in mm (default: 2x P-N spacing)')
+    router_group.add_argument('--min-turning-radius', type=float,
+                              help='Minimum turning radius for pose-based routing in mm (default: 0.2)')
+    router_group.add_argument('--max-probe-iterations', type=int,
+                              help='Max iterations for quick probe per direction (default: 5000)')
+    router_group.add_argument('--via-proximity-cost', type=float,
+                              help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)')
+    router_group.add_argument('--bga-proximity-radius', type=float,
+                              help='Radius around BGA edges to penalize in mm (default: 10.0)')
+    router_group.add_argument('--bga-proximity-cost', type=float,
+                              help='Cost penalty near BGA edges in mm equivalent (default: 0.2)')
+    router_group.add_argument('--debug-lines', action='store_true',
+                              help='Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--no-fix-polarity', action='store_true',
                               help="Don't swap target pad nets when polarity swap needed (default: fix polarity)")
+    router_group.add_argument('--stub-layer-swap', action='store_true',
+                              help='Enable stub layer switching optimization (experimental)')
+    router_group.add_argument('--can-swap-to-top-layer', action='store_true',
+                              help='Allow swapping stubs to F.Cu (top layer). Off by default.')
+    router_group.add_argument('--max-ripup', type=int,
+                              help='Maximum blockers to rip up at once during rip-up and retry (default: 3)')
+    router_group.add_argument('--max-setback-angle', type=float,
+                              help='Maximum angle (degrees) for setback position search (default: 22.5)')
 
     args = parser.parse_args()
 
