@@ -486,11 +486,12 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     def find_open_position(center_x, center_y, dir_x, dir_y, layer_idx, sb, label):
         """Find an open position at the given setback distance.
 
-        Scans angles 0°, ±15°, ±30° from the stub direction, preferring straight first.
+        Scans 5 angles (0, ±max/2, ±max), preferring small angles first.
         Returns (gx, gy, actual_dir_x, actual_dir_y) or None if all angles blocked.
         """
-        # Generate rotated directions: 0°, ±15°, ±30° (prefer straight first)
-        angles_deg = [0, 15, -15, 30, -30]
+        # Generate 5 angles, preferring small angles first: 0, ±max/2, ±max
+        max_angle = config.max_setback_angle
+        angles_deg = [0, max_angle / 2, -max_angle / 2, max_angle, -max_angle]
 
         for angle_deg in angles_deg:
             angle_rad = math.radians(angle_deg)
@@ -509,7 +510,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                 # Also check the connector path from stub center to setback position
                 if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
                     if angle_deg != 0:
-                        print(f"  {label.capitalize()} setback: using {angle_deg:+d}° offset")
+                        print(f"  {label.capitalize()} setback: using {angle_deg:+.1f}° offset")
                     return gx, gy, dx, dy
 
         print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
@@ -519,7 +520,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         """Collect blocked cells at setback positions for rip-up analysis.
         Called only after find_open_position returns None.
         """
-        angles_deg = [0, 15, -15, 30, -30]
+        max_angle = config.max_setback_angle
+        angles_deg = [0, max_angle / 2, -max_angle / 2, max_angle, -max_angle]
         blocked = []
         step = config.grid_step / 2
 

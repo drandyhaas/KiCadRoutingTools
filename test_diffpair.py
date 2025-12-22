@@ -236,6 +236,8 @@ Examples:
                               help='Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.')
     router_group.add_argument('--max-ripup', type=int,
                               help='Maximum blockers to rip up at once during rip-up and retry (default: 3)')
+    router_group.add_argument('--max-setback-angle', type=float,
+                              help='Maximum angle (degrees) for setback position search (default: 22.5)')
 
     args = parser.parse_args()
 
@@ -355,6 +357,8 @@ Examples:
         router_cmd.append("--can-swap-to-top-layer")
     if args.max_ripup is not None:
         router_cmd.extend(["--max-ripup", str(args.max_ripup)])
+    if args.max_setback_angle is not None:
+        router_cmd.extend(["--max-setback-angle", str(args.max_setback_angle)])
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(

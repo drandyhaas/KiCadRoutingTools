@@ -50,6 +50,7 @@ class GridRouteConfig:
     fix_polarity: bool = True  # Swap target pad nets if polarity swap needed
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
+    max_setback_angle: float = 22.5  # Maximum angle (degrees) for setback position search
 
 
 class GridCoord:

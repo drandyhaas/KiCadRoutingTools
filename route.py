@@ -290,6 +290,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 debug_lines: bool = False,
                 fix_polarity: bool = True,
                 max_rip_up_count: int = 3,
+                max_setback_angle: float = 22.5,
                 enable_layer_switch: bool = True,
                 can_swap_to_top_layer: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
@@ -375,6 +376,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         debug_lines=debug_lines,
         fix_polarity=fix_polarity,
         max_rip_up_count=max_rip_up_count,
+        max_setback_angle=max_setback_angle,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -2116,6 +2118,8 @@ Differential pair routing:
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
+    parser.add_argument("--max-setback-angle", type=float, default=22.5,
+                        help="Maximum angle (degrees) for setback position search (default: 22.5)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
@@ -2183,6 +2187,7 @@ Differential pair routing:
                 debug_lines=args.debug_lines,
                 fix_polarity=not args.no_fix_polarity,
                 max_rip_up_count=args.max_ripup,
+                max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=args.stub_layer_swap,
                 can_swap_to_top_layer=args.can_swap_to_top_layer,
                 vis_callback=vis_callback)
