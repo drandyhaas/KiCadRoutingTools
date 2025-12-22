@@ -396,7 +396,7 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
 
 def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                          coord, layer_names, spacing_mm, p_net_id, n_net_id,
-                         max_iterations_override=None):
+                         max_iterations_override=None, neighbor_stubs=None):
     """
     Attempt to route a diff pair in one direction.
 
@@ -486,13 +486,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     def find_open_position(center_x, center_y, dir_x, dir_y, layer_idx, sb, label):
         """Find an open position at the given setback distance.
 
-        Scans 5 angles (0, ±max/2, ±max), preferring small angles first.
+        Scans 5 angles (0, ±max/2, ±max) and chooses the one that maximizes
+        separation from neighboring stub endpoints.
         Returns (gx, gy, actual_dir_x, actual_dir_y) or None if all angles blocked.
         """
-        # Generate 5 angles, preferring small angles first: 0, ±max/2, ±max
+        # Generate 5 angles: 0, ±max/2, ±max
         max_angle = config.max_setback_angle
         angles_deg = [0, max_angle / 2, -max_angle / 2, max_angle, -max_angle]
 
+        # Collect all valid candidates: (angle_deg, gx, gy, dx, dy, x, y)
+        valid_candidates = []
         for angle_deg in angles_deg:
             angle_rad = math.radians(angle_deg)
             cos_a = math.cos(angle_rad)
@@ -509,12 +512,42 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             if not obstacles.is_blocked(gx, gy, layer_idx):
                 # Also check the connector path from stub center to setback position
                 if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
-                    if angle_deg != 0:
-                        print(f"  {label.capitalize()} setback: using {angle_deg:+.1f}° offset")
-                    return gx, gy, dx, dy
+                    valid_candidates.append((angle_deg, gx, gy, dx, dy, x, y))
 
-        print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
-        return None
+        if not valid_candidates:
+            print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
+            return None
+
+        # If we have neighbor stubs, choose angle that maximizes min distance to neighbors
+        if neighbor_stubs and len(valid_candidates) > 1:
+            best_candidate = None
+            best_min_dist = -1
+            for angle_deg, gx, gy, dx, dy, x, y in valid_candidates:
+                # Find minimum distance to any neighbor stub
+                min_dist = float('inf')
+                for stub_x, stub_y in neighbor_stubs:
+                    dist = math.sqrt((x - stub_x)**2 + (y - stub_y)**2)
+                    min_dist = min(min_dist, dist)
+                # Prefer larger minimum distance; break ties by preferring smaller angle
+                if min_dist > best_min_dist or (min_dist == best_min_dist and abs(angle_deg) < abs(best_candidate[0])):
+                    best_min_dist = min_dist
+                    best_candidate = (angle_deg, gx, gy, dx, dy, x, y)
+
+            angle_deg, gx, gy, dx, dy, x, y = best_candidate
+            if angle_deg != 0:
+                print(f"  {label.capitalize()} setback: using {angle_deg:+.1f}° offset (separation: {best_min_dist:.2f}mm)")
+            return gx, gy, dx, dy
+
+        # No neighbor stubs or only one valid candidate - prefer 0° if valid
+        for angle_deg, gx, gy, dx, dy, x, y in valid_candidates:
+            if angle_deg == 0:
+                return gx, gy, dx, dy
+
+        # Fall back to first valid candidate
+        angle_deg, gx, gy, dx, dy, x, y = valid_candidates[0]
+        if angle_deg != 0:
+            print(f"  {label.capitalize()} setback: using {angle_deg:+.1f}° offset")
+        return gx, gy, dx, dy
 
     def collect_setback_blocked_cells(center_x, center_y, dir_x, dir_y, layer_idx, sb):
         """Collect blocked cells at setback positions for rip-up analysis.
@@ -704,7 +737,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     route_data, first_probe_iters, first_blocked = _try_route_direction(
         first_src, first_tgt, pcb_data, config, obstacles, base_obstacles,
         coord, layer_names, spacing_mm, p_net_id, n_net_id,
-        max_iterations_override=probe_iterations
+        max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs
     )
 
     if route_data is not None:
@@ -720,7 +753,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         route_data, second_probe_iters, second_blocked = _try_route_direction(
             second_src, second_tgt, pcb_data, config, obstacles, base_obstacles,
             coord, layer_names, spacing_mm, p_net_id, n_net_id,
-            max_iterations_override=probe_iterations
+            max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs
         )
 
         if route_data is not None:
@@ -766,7 +799,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             # Full search on promising direction
             route_data, full_iters, blocked_cells = _try_route_direction(
                 promising_src, promising_tgt, pcb_data, config, obstacles, base_obstacles,
-                coord, layer_names, spacing_mm, p_net_id, n_net_id
+                coord, layer_names, spacing_mm, p_net_id, n_net_id,
+                neighbor_stubs=unrouted_stubs
             )
             total_iterations = first_probe_iters + second_probe_iters + full_iters
 
@@ -789,7 +823,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                     print(f"  No route found after {full_iters} iterations ({promising_label}), trying {fallback_label}...")
                     route_data, fallback_full_iters, fallback_full_blocked = _try_route_direction(
                         fallback_src, fallback_tgt, pcb_data, config, obstacles, base_obstacles,
-                        coord, layer_names, spacing_mm, p_net_id, n_net_id
+                        coord, layer_names, spacing_mm, p_net_id, n_net_id,
+                        neighbor_stubs=unrouted_stubs
                     )
                     total_iterations += fallback_full_iters
 
