@@ -1004,59 +1004,54 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     debug_connector_lines = []  # For User.3 layer (connectors)
 
     def float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
-                                src_stub_dir, src_actual_dir, tgt_stub_dir, tgt_actual_dir):
+                                src_stub_dir, tgt_stub_dir):
         """Convert floating-point path (x, y, layer) to segments and vias.
 
-        Adds extension segments on the 'outside' of bends when setback angle causes
-        a turn between stub direction and actual route direction.
+        Adds extension segments on the 'outside' of bends when connector angle differs
+        significantly from stub direction.
 
         Args:
             sign: +1 or -1 indicating which side of centerline this track is on
-            src_stub_dir: (dx, dy) original stub direction at source
-            src_actual_dir: (dx, dy) actual route direction at source (may differ due to setback angle)
-            tgt_stub_dir: (dx, dy) original stub direction at target
-            tgt_actual_dir: (dx, dy) actual route direction at target
+            src_stub_dir: (dx, dy) stub direction at source (pointing into route area)
+            tgt_stub_dir: (dx, dy) stub direction at target (pointing into route area)
         """
         segs = []
         vias = []
         connector_lines = []  # Debug lines for connectors
         num_segments = len(float_path) - 1
 
-        def calculate_extension(stub_dir, actual_dir, track_sign, is_arriving=False):
-            """Calculate extension length for outside track of a bend.
+        def calculate_connector_extension(stub_dir, connector_dir, track_sign):
+            """Calculate extension length for outside track of a connector bend.
+
+            Args:
+                stub_dir: (dx, dy) normalized direction of stub (pointing into route area)
+                connector_dir: (dx, dy) normalized direction of connector segment
+                track_sign: +1 or -1 indicating which side of centerline this track is on
 
             Returns extension length > 0 if this track needs an extension, 0 otherwise.
-            The 'outside' track is the one that travels farther around the bend.
             """
             sdx, sdy = stub_dir
-            adx, ady = actual_dir
+            cdx, cdy = connector_dir
 
-            # Cross product determines turn direction
-            # For source: positive cross = left turn (actual turns left from stub)
-            # For target (arriving): we're reversing, so flip the logic
-            cross = sdx * ady - sdy * adx
-            if is_arriving:
-                cross = -cross  # Arriving, so reverse turn direction
+            # Cross product: stub_dir × connector_dir
+            # Positive = connector turns LEFT from stub
+            # Negative = connector turns RIGHT from stub
+            cross = sdx * cdy - sdy * cdx
 
-            # For a left turn (cross > 0), track on right (sign > 0) is outside
-            # For a right turn (cross < 0), track on left (sign < 0) is outside
-            is_outside = (cross > 0 and track_sign > 0) or (cross < 0 and track_sign < 0)
-
-            if not is_outside or abs(cross) < 0.01:
-                return 0.0
-
-            # Calculate angle between stub and actual directions
-            dot = sdx * adx + sdy * ady
-            # Clamp to avoid numerical issues with acos
+            # Calculate angle between stub and connector directions
+            dot = sdx * cdx + sdy * cdy
             dot = max(-1.0, min(1.0, dot))
-            angle = math.acos(dot)  # Angle in radians
+            angle = math.acos(dot)
 
-            if angle < 0.1:  # Less than ~6 degrees, no extension needed
+            # Perpendicular offset convention: (-sdy, sdx) * sign
+            # The "outside" track needs the extension to maintain spacing.
+            is_outside = (cross > 0 and track_sign < 0) or (cross < 0 and track_sign > 0)
+
+            if not is_outside or abs(cross) < 0.01 or angle < 0.1:
                 return 0.0
 
-            # Extension length: spacing * tan(angle/2) creates a symmetric miter
-            # This makes the turn split evenly between stub->extension and extension->route
-            extension = spacing_mm * math.tan(angle / 2)
+            # Extension length for miter
+            extension = 2 * spacing_mm * math.tan(angle / 2)
             return extension
 
         # Add connecting segment from original start if needed
@@ -1064,8 +1059,14 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             first_x, first_y, first_layer = float_path[0]
             orig_x, orig_y = original_start
             if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
-                # Check if we need an extension segment on the outside of the bend
-                extension_len = calculate_extension(src_stub_dir, src_actual_dir, sign, is_arriving=False)
+                # Calculate actual connector direction
+                conn_len = math.sqrt((first_x - orig_x)**2 + (first_y - orig_y)**2)
+                if conn_len > 0.001:
+                    conn_dir = ((first_x - orig_x) / conn_len, (first_y - orig_y) / conn_len)
+                else:
+                    conn_dir = src_stub_dir
+
+                extension_len = calculate_connector_extension(src_stub_dir, conn_dir, sign)
 
                 if extension_len > 0.001:
                     # Add extension segment in stub direction
@@ -1131,15 +1132,24 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             last_x, last_y, last_layer = float_path[-1]
             orig_x, orig_y = original_end
             if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
-                # Check if we need an extension segment on the outside of the bend
-                extension_len = calculate_extension(tgt_stub_dir, tgt_actual_dir, sign, is_arriving=True)
+                # Calculate actual connector direction (from route end toward stub)
+                conn_len = math.sqrt((orig_x - last_x)**2 + (orig_y - last_y)**2)
+                if conn_len > 0.001:
+                    conn_dir = ((orig_x - last_x) / conn_len, (orig_y - last_y) / conn_len)
+                else:
+                    conn_dir = tgt_stub_dir
+
+                # Use -tgt_stub_dir for angle calculation (direction track continues into chip).
+                # Negate sign to compensate: perpendicular(-stub_dir) = -perpendicular(stub_dir)
+                incoming_stub_dir = (-tgt_stub_dir[0], -tgt_stub_dir[1])
+                extension_len = calculate_connector_extension(incoming_stub_dir, conn_dir, -sign)
 
                 if extension_len > 0.001:
-                    # Add extension segment in stub direction (pointing into the stub)
+                    # Extend along stub direction (toward route area)
                     ext_x = orig_x + tgt_stub_dir[0] * extension_len
                     ext_y = orig_y + tgt_stub_dir[1] * extension_len
 
-                    # Connector from route to extension
+                    # Connector from route to extension point
                     segs.append(Segment(
                         start_x=last_x, start_y=last_y,
                         end_x=ext_x, end_y=ext_y,
@@ -1147,7 +1157,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                         layer=layer_names[last_layer],
                         net_id=net_id
                     ))
-                    # Extension to stub
+                    # Extension back to stub endpoint
                     segs.append(Segment(
                         start_x=ext_x, start_y=ext_y,
                         end_x=orig_x, end_y=orig_y,
@@ -1184,19 +1194,14 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         p_end = (p_tgt_x, p_tgt_y)
         n_end = (n_tgt_x, n_tgt_y)
 
-    # Prepare direction tuples for extension calculation
-    # At source: stub_dir and actual_dir both point away from stub (into route)
-    # At target: stub_dir points into route, actual_dir needs to be negated (we arrive, not depart)
+    # Prepare stub direction tuples for extension calculation
     src_stub_dir_tuple = (src_dir_x, src_dir_y)
-    src_actual_dir_tuple = (src_actual_dir_x, src_actual_dir_y)
     tgt_stub_dir_tuple = (tgt_dir_x, tgt_dir_y)
-    # Negate target actual_dir because we're arriving at target, not departing
-    tgt_actual_dir_tuple = (-tgt_actual_dir_x, -tgt_actual_dir_y)
 
     # Convert P path
     p_segs, p_vias, p_conn_lines = float_path_to_geometry(
         p_float_path, p_net_id, p_start, p_end, p_sign,
-        src_stub_dir_tuple, src_actual_dir_tuple, tgt_stub_dir_tuple, tgt_actual_dir_tuple
+        src_stub_dir_tuple, tgt_stub_dir_tuple
     )
     new_segments.extend(p_segs)
     new_vias.extend(p_vias)
@@ -1205,7 +1210,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Convert N path
     n_segs, n_vias, n_conn_lines = float_path_to_geometry(
         n_float_path, n_net_id, n_start, n_end, n_sign,
-        src_stub_dir_tuple, src_actual_dir_tuple, tgt_stub_dir_tuple, tgt_actual_dir_tuple
+        src_stub_dir_tuple, tgt_stub_dir_tuple
     )
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
