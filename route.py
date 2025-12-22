@@ -1376,6 +1376,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             # Retry failed - keep nets ripped for N+1 attempt
                             print(f"  RETRY FAILED (N={N})")
 
+                            # Re-analyze blockers from retry result to find new rippable nets
+                            if retry_result:
+                                retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
+                                retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+
+                                if retry_blocked_cells:
+                                    new_blockers = analyze_frontier_blocking(
+                                        retry_blocked_cells, pcb_data, config, routed_net_paths,
+                                        exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                                        extra_clearance=diff_pair_extra_clearance
+                                    )
+                                    # Add any new rippable blockers not already in the list
+                                    for b in new_blockers:
+                                        if b.net_id in routed_results:
+                                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                                            if canonical not in seen_canonical_ids:
+                                                seen_canonical_ids.add(canonical)
+                                                rippable_blockers.append(b)
+                                                if b.net_id in diff_pair_by_net_id:
+                                                    print(f"    New blocker found: {diff_pair_by_net_id[b.net_id][0]}")
+                                                else:
+                                                    print(f"    New blocker found: {b.net_name}")
+
                     # If all N levels failed, restore all ripped nets
                     if not retry_succeeded and ripped_items:
                         print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
@@ -1631,6 +1655,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             else:
                                 # Retry failed - keep nets ripped for N+1 attempt
                                 print(f"  REROUTE RETRY FAILED (N={N})")
+
+                                # Re-analyze blockers from retry result to find new rippable nets
+                                if retry_result:
+                                    retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
+                                    retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                    retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+
+                                    if retry_blocked_cells:
+                                        new_blockers = analyze_frontier_blocking(
+                                            retry_blocked_cells, pcb_data, config, routed_net_paths,
+                                            exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
+                                            extra_clearance=diff_pair_extra_clearance
+                                        )
+                                        # Add any new rippable blockers not already in the list
+                                        for b in new_blockers:
+                                            if b.net_id in routed_results:
+                                                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                                                if canonical not in seen_canonical_ids:
+                                                    seen_canonical_ids.add(canonical)
+                                                    rippable_blockers.append(b)
+                                                    if b.net_id in diff_pair_by_net_id:
+                                                        print(f"    New blocker found: {diff_pair_by_net_id[b.net_id][0]}")
+                                                    else:
+                                                        print(f"    New blocker found: {b.net_name}")
 
                         # If all N levels failed, restore all ripped nets
                         if not reroute_succeeded and ripped_items:
