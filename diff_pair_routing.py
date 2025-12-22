@@ -721,6 +721,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     if is_probe and len(src_combos) > 1:
         # Probe angles at the routing source (first endpoint we're routing from)
+        found_first = False
         for src_cand in src_combos:
             path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(src_cand, tgt_combos[0])
             total_iterations += iters
@@ -729,12 +730,17 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                 return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
             if iters >= max_iters:
                 selected_src = src_cand
-                if src_cand[4] != 0:
-                    print(f"    {first_label} {src_cand[4]:+.1f}° OK")
+                found_first = True
+                print(f"    {first_label} {src_cand[4]:+.1f}° OK")
                 break
-            print(f"    {first_label} {src_cand[4]:+.1f}° stuck ({iters} iters)")
+            print(f"    {first_label} {src_cand[4]:+.1f}° blocked")
+
+        if not found_first:
+            # All angles got blocked during probe - will use first candidate
+            pass
 
         # Probe angles at the routing target (second endpoint)
+        found_second = False
         if len(tgt_combos) > 1:
             for tgt_cand in tgt_combos:
                 path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(selected_src, tgt_cand)
@@ -744,10 +750,14 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                     return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
                 if iters >= max_iters:
                     selected_tgt = tgt_cand
-                    if tgt_cand[4] != 0:
-                        print(f"    {second_label} {tgt_cand[4]:+.1f}° OK")
+                    found_second = True
+                    print(f"    {second_label} {tgt_cand[4]:+.1f}° OK")
                     break
-                print(f"    {second_label} {tgt_cand[4]:+.1f}° stuck ({iters} iters)")
+                print(f"    {second_label} {tgt_cand[4]:+.1f}° blocked")
+
+            if not found_second:
+                # All angles got blocked during probe - will use first candidate
+                pass
 
         # Return selected angles for full search
         return None, total_iterations, [], (0, 0, selected_src, selected_tgt)
