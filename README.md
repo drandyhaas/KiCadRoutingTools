@@ -8,10 +8,11 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
-- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max)
+- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
+- **Stub layer switching** - Experimental optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Finds compatible pairs to swap or moves stubs solo when safe.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
-- **Net ordering strategies** - MPS (crossing conflicts), inside-out (BGA), or original order
+- **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Via proximity cost** - Configurable cost penalty for vias near stubs (instead of blocking)
@@ -71,6 +72,7 @@ KiCadRoutingTools/
 ├── diff_pair_routing.py      # Differential pair routing
 ├── kicad_parser.py           # KiCad .kicad_pcb file parser
 ├── kicad_writer.py           # KiCad S-expression generator
+├── stub_layer_switching.py   # Stub layer swap optimization
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
 ├── bga_fanout.py             # BGA differential pair fanout generator
@@ -88,12 +90,13 @@ KiCadRoutingTools/
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
-| `routing_config.py` | 65 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
-| `routing_utils.py` | 1136 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
-| `obstacle_map.py` | 330 | Obstacle map building from PCB data |
-| `single_ended_routing.py` | 343 | Single-ended net routing with A* |
-| `diff_pair_routing.py` | 1091 | Differential pair centerline + offset routing |
-| `route.py` | 643 | CLI and batch routing orchestration |
+| `routing_config.py` | 72 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
+| `routing_utils.py` | 1273 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
+| `obstacle_map.py` | 767 | Obstacle map building from PCB data |
+| `single_ended_routing.py` | 589 | Single-ended net routing with A* |
+| `diff_pair_routing.py` | 1275 | Differential pair centerline + offset routing |
+| `stub_layer_switching.py` | 428 | Stub layer swap optimization for diff pairs |
+| `route.py` | 2193 | CLI and batch routing orchestration |
 
 ## Performance
 
@@ -139,7 +142,12 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --diff-pair-gap 0.101   # P-N gap (mm)
 --diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
 --min-turning-radius 0.2      # Min turn radius (mm)
+--max-setback-angle 22.5      # Max angle for setback search (degrees)
 --direction backward    # Route from target to source
+
+# Layer optimization
+--stub-layer-swap       # Enable stub layer switching (experimental)
+--can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.
