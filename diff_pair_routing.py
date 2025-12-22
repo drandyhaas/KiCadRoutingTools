@@ -617,12 +617,12 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     src_candidates = find_open_positions(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source")
     if not src_candidates:
         blocked = collect_setback_blocked_cells(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback)
-        return None, 0, blocked
+        return None, 0, blocked, None
 
     tgt_candidates = find_open_positions(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target")
     if not tgt_candidates:
         blocked = collect_setback_blocked_cells(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback)
-        return None, 0, blocked
+        return None, 0, blocked, None
 
     print(f"  Centerline setback: {setback:.2f}mm")
 
