@@ -8,7 +8,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
-- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery.
+- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
 - **Stub layer switching** - Experimental optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Finds compatible pairs to swap or moves stubs solo when safe.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
@@ -16,6 +16,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Via proximity cost** - Configurable cost penalty for vias near stubs (instead of blocking)
+- **Adaptive setback angles** - Evaluates multiple setback angles (0°, ±max/2, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced
 
 ## Quick Start
 
@@ -80,7 +81,7 @@ KiCadRoutingTools/
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
 ├── test_diffpair.py          # Test single/multiple diff pairs with DRC
-├── test_all_diffpairs.py     # Batch test all diff pairs (parallel)
+├── test_all_diffpairs.py     # Batch test all diff pairs (parallel, extensive options)
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
 └── docs/                     # Documentation
@@ -91,12 +92,12 @@ KiCadRoutingTools/
 | Module | Lines | Purpose |
 |--------|-------|---------|
 | `routing_config.py` | 72 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
-| `routing_utils.py` | 1273 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
+| `routing_utils.py` | 1272 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
 | `obstacle_map.py` | 767 | Obstacle map building from PCB data |
 | `single_ended_routing.py` | 589 | Single-ended net routing with A* |
-| `diff_pair_routing.py` | 1275 | Differential pair centerline + offset routing |
+| `diff_pair_routing.py` | 1649 | Differential pair centerline + offset routing |
 | `stub_layer_switching.py` | 428 | Stub layer swap optimization for diff pairs |
-| `route.py` | 2193 | CLI and batch routing orchestration |
+| `route.py` | 2297 | CLI and batch routing orchestration |
 
 ## Performance
 
