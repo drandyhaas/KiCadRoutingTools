@@ -33,12 +33,12 @@ class GridRouteConfig:
     layers: List[str] = field(default_factory=lambda: ['F.Cu', 'B.Cu'])
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # Quick probe per direction to detect stuck routes
-    heuristic_weight: float = 2.0
+    heuristic_weight: float = 1.9
     # BGA exclusion zones (auto-detected from PCB) - vias blocked inside these areas
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
     stub_proximity_radius: float = 2.0  # mm - radius around stubs to penalize
     stub_proximity_cost: float = 0.2  # mm equivalent cost at stub center
-    via_proximity_cost: float = 10.0  # multiplier on stub_proximity_cost for vias near stubs (0 = block vias)
+    via_proximity_cost: float = 20.0  # multiplier on stub_proximity_cost for vias near stubs (0 = block vias)
     bga_proximity_radius: float = 10.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
     # Direction search order: "forward", "backward", or "random"
@@ -50,8 +50,9 @@ class GridRouteConfig:
     fix_polarity: bool = True  # Swap target pad nets if polarity swap needed
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
-    max_setback_angle: float = 22.5  # Maximum angle (degrees) for setback position search
-    track_proximity_distance: float = 10.0  # mm - radius around routed tracks to penalize (same layer)
+    max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
+    track_proximity_distance: float = 1.0  # mm - radius around routed tracks to penalize (same layer)
+    stub_layer_swap: bool = True  # Enable stub layer switching optimization
     track_proximity_cost: float = 0.2  # mm equivalent cost at track center
 
 

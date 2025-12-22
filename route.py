@@ -2315,16 +2315,16 @@ Differential pair routing:
                         help="Max A* iterations before giving up (default: 200000)")
     parser.add_argument("--max-probe-iterations", type=int, default=5000,
                         help="Max iterations for quick probe phase per direction (default: 5000)")
-    parser.add_argument("--heuristic-weight", type=float, default=2.0,
-                        help="A* heuristic weight, higher=faster but less optimal (default: 2.0)")
+    parser.add_argument("--heuristic-weight", type=float, default=1.9,
+                        help="A* heuristic weight, higher=faster but less optimal (default: 1.9)")
 
     # Stub proximity penalty
     parser.add_argument("--stub-proximity-radius", type=float, default=2.0,
                         help="Radius around stubs to penalize routing in mm (default: 2.0)")
     parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near stubs in mm equivalent (default: 0.2)")
-    parser.add_argument("--via-proximity-cost", type=float, default=10.0,
-                        help="Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)")
+    parser.add_argument("--via-proximity-cost", type=float, default=20.0,
+                        help="Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 20.0)")
 
     # BGA proximity penalty
     parser.add_argument("--bga-proximity-radius", type=float, default=10.0,
@@ -2333,8 +2333,8 @@ Differential pair routing:
                         help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 
     # Track proximity penalty (same layer only)
-    parser.add_argument("--track-proximity-distance", type=float, default=10.0,
-                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 10.0)")
+    parser.add_argument("--track-proximity-distance", type=float, default=1.0,
+                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 1.0)")
     parser.add_argument("--track-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near routed tracks in mm equivalent (default: 0.2)")
 
@@ -2349,16 +2349,16 @@ Differential pair routing:
                         help="Minimum turning radius for pose-based routing in mm (default: 0.2)")
     parser.add_argument("--no-fix-polarity", action="store_true",
                         help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
-    parser.add_argument("--stub-layer-swap", action="store_true",
-                        help="Enable stub layer switching optimization that tries to avoid vias by moving stubs to different layers (experimental)")
+    parser.add_argument("--no-stub-layer-swap", action="store_true",
+                        help="Disable stub layer switching optimization (enabled by default)")
     parser.add_argument("--can-swap-to-top-layer", action="store_true",
                         help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
-    parser.add_argument("--max-setback-angle", type=float, default=22.5,
-                        help="Maximum angle (degrees) for setback position search (default: 22.5)")
+    parser.add_argument("--max-setback-angle", type=float, default=45.0,
+                        help="Maximum angle (degrees) for setback position search (default: 45.0)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
@@ -2429,6 +2429,6 @@ Differential pair routing:
                 fix_polarity=not args.no_fix_polarity,
                 max_rip_up_count=args.max_ripup,
                 max_setback_angle=args.max_setback_angle,
-                enable_layer_switch=args.stub_layer_swap,
+                enable_layer_switch=not args.no_stub_layer_swap,
                 can_swap_to_top_layer=args.can_swap_to_top_layer,
                 vis_callback=vis_callback)

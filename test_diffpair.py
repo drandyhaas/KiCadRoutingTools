@@ -209,19 +209,19 @@ Examples:
     router_group.add_argument('--max-probe-iterations', type=int,
                               help='Max iterations for quick probe per direction (default: 5000)')
     router_group.add_argument('--heuristic-weight', type=float,
-                              help='A* heuristic weight (default: 2.0)')
+                              help='A* heuristic weight (default: 1.9)')
     router_group.add_argument('--stub-proximity-radius', type=float,
                               help='Radius around stubs to penalize in mm (default: 2.0)')
     router_group.add_argument('--stub-proximity-cost', type=float,
                               help='Cost penalty near stubs in mm equivalent (default: 0.2)')
     router_group.add_argument('--via-proximity-cost', type=float,
-                              help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)')
+                              help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 20.0)')
     router_group.add_argument('--bga-proximity-radius', type=float,
                               help='Radius around BGA edges to penalize in mm (default: 10.0)')
     router_group.add_argument('--bga-proximity-cost', type=float,
                               help='Cost penalty near BGA edges in mm equivalent (default: 0.2)')
     router_group.add_argument('--track-proximity-distance', type=float,
-                              help='Distance around routed tracks to penalize on same layer in mm (default: 10.0)')
+                              help='Distance around routed tracks to penalize on same layer in mm (default: 1.0)')
     router_group.add_argument('--track-proximity-cost', type=float,
                               help='Cost penalty near routed tracks in mm equivalent (default: 0.2)')
     router_group.add_argument('--diff-pair-gap', type=float,
@@ -234,14 +234,14 @@ Examples:
                               help='Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--no-fix-polarity', action='store_true',
                               help="Don't swap target pad nets if polarity swap is needed (default: fix polarity)")
-    router_group.add_argument('--stub-layer-swap', action='store_true',
-                              help='Enable stub layer switching optimization (experimental)')
+    router_group.add_argument('--no-stub-layer-swap', action='store_true',
+                              help='Disable stub layer switching optimization (enabled by default)')
     router_group.add_argument('--can-swap-to-top-layer', action='store_true',
                               help='Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.')
     router_group.add_argument('--max-ripup', type=int,
                               help='Maximum blockers to rip up at once during rip-up and retry (default: 3)')
     router_group.add_argument('--max-setback-angle', type=float,
-                              help='Maximum angle (degrees) for setback position search (default: 22.5)')
+                              help='Maximum angle (degrees) for setback position search (default: 45.0)')
 
     args = parser.parse_args()
 
@@ -359,8 +359,8 @@ Examples:
         router_cmd.append("--debug-lines")
     if args.no_fix_polarity:
         router_cmd.append("--no-fix-polarity")
-    if args.stub_layer_swap:
-        router_cmd.append("--stub-layer-swap")
+    if args.no_stub_layer_swap:
+        router_cmd.append("--no-stub-layer-swap")
     if args.can_swap_to_top_layer:
         router_cmd.append("--can-swap-to-top-layer")
     if args.max_ripup is not None:
