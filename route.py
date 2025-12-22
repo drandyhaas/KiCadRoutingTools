@@ -1618,7 +1618,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if reroute_item[0] == 'diff_pair':
             _, ripped_pair_name, ripped_pair = reroute_item
             route_index += 1
-            print(f"\n[REROUTE {route_index}] Re-routing ripped diff pair {ripped_pair_name}")
+            current_total = total_routes + len(reroute_queue)
+            print(f"\n[REROUTE {route_index}/{current_total}] Re-routing ripped diff pair {ripped_pair_name}")
             print("-" * 40)
 
             start_time = time.time()
