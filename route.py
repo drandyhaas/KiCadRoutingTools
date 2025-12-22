@@ -2015,6 +2015,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
             remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
+            routed_results[net_id] = result  # Track for summary
             # Track path for blocking analysis
             if result.get('path'):
                 routed_net_paths[net_id] = result['path']
