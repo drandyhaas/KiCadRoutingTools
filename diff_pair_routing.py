@@ -236,22 +236,42 @@ def create_parallel_path_float(centerline_path, coord, sign, spacing_mm=0.1, sta
 
         use_corner_scale = True  # Only apply corner scaling for bisector calculations
         if i == 0:
-            # First point: use start_dir if provided, else perpendicular to first segment
+            # First point: bisector between start_dir (if provided) and first segment
+            next_x, next_y = coord.to_float(centerline_path[1][0], centerline_path[1][1])
+            seg_dx, seg_dy = next_x - x, next_y - y
+            seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy) or 1
+            seg_dx, seg_dy = seg_dx/seg_len, seg_dy/seg_len
+
             if start_dir is not None:
-                dx, dy = start_dir
-                use_corner_scale = False  # Provided direction, no corner scaling
+                # Normalize start_dir
+                dir_len = math.sqrt(start_dir[0]**2 + start_dir[1]**2) or 1
+                norm_start_dx = start_dir[0] / dir_len
+                norm_start_dy = start_dir[1] / dir_len
+                # Bisector between start_dir and first segment direction
+                dx = norm_start_dx + seg_dx
+                dy = norm_start_dy + seg_dy
+                use_corner_scale = True  # Apply corner scaling at junction
             else:
-                next_x, next_y = coord.to_float(centerline_path[1][0], centerline_path[1][1])
-                dx, dy = next_x - x, next_y - y
+                dx, dy = seg_dx, seg_dy
                 use_corner_scale = False  # Single segment, no corner scaling
         elif i == len(centerline_path) - 1:
-            # Last point: use end_dir if provided, else perpendicular to last segment
+            # Last point: bisector between last segment and end_dir (if provided)
+            prev_x, prev_y = coord.to_float(centerline_path[i-1][0], centerline_path[i-1][1])
+            seg_dx, seg_dy = x - prev_x, y - prev_y
+            seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy) or 1
+            seg_dx, seg_dy = seg_dx/seg_len, seg_dy/seg_len
+
             if end_dir is not None:
-                dx, dy = end_dir
-                use_corner_scale = False  # Provided direction, no corner scaling
+                # Normalize end_dir
+                dir_len = math.sqrt(end_dir[0]**2 + end_dir[1]**2) or 1
+                norm_end_dx = end_dir[0] / dir_len
+                norm_end_dy = end_dir[1] / dir_len
+                # Bisector between last segment direction and end_dir
+                dx = seg_dx + norm_end_dx
+                dy = seg_dy + norm_end_dy
+                use_corner_scale = True  # Apply corner scaling at junction
             else:
-                prev_x, prev_y = coord.to_float(centerline_path[i-1][0], centerline_path[i-1][1])
-                dx, dy = x - prev_x, y - prev_y
+                dx, dy = seg_dx, seg_dy
                 use_corner_scale = False  # Single segment, no corner scaling
         else:
             # Corner: use bisector of incoming and outgoing directions
