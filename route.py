@@ -334,6 +334,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 max_setback_angle: float = 22.5,
                 enable_layer_switch: bool = True,
                 can_swap_to_top_layer: bool = False,
+                swappable_net_patterns: Optional[List[str]] = None,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -480,6 +481,169 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     processed_pair_net_ids_early.add(pair.p_net_id)
                     processed_pair_net_ids_early.add(pair.n_net_id)
                     break
+
+    # Apply target swaps for swappable-nets feature
+    # This swaps net IDs at targets BEFORE routing, so routing sees the swapped configuration
+    target_swaps: Dict[str, str] = {}  # pair_name -> swapped_target_pair_name
+    target_swap_info: List[Dict] = []  # Info needed to apply swaps to output file
+    if swappable_net_patterns and diff_pair_ids_to_route_set:
+        from diff_pair_routing import get_diff_pair_endpoints
+
+        swappable_diff_pairs = find_differential_pairs(pcb_data, swappable_net_patterns)
+        # Only include pairs that are also being routed (not just in diff_pairs, but in the route set)
+        pairs_being_routed = {name for name, pair in diff_pair_ids_to_route_set}
+        swappable_pairs = [(name, pair) for name, pair in swappable_diff_pairs.items()
+                          if name in pairs_being_routed]
+
+        # Part 1: Swap first two swappable pairs
+        if len(swappable_pairs) >= 2:
+            p1_name, p1_pair = swappable_pairs[0]
+            p2_name, p2_pair = swappable_pairs[1]
+            target_swaps[p1_name] = p2_name
+            target_swaps[p2_name] = p1_name
+
+            print(f"\nApplying target swap: {p1_name} <-> {p2_name}")
+
+            # Get target endpoints for both pairs
+            _, p1_targets, p1_err = get_diff_pair_endpoints(pcb_data, p1_pair.p_net_id, p1_pair.n_net_id, config)
+            _, p2_targets, p2_err = get_diff_pair_endpoints(pcb_data, p2_pair.p_net_id, p2_pair.n_net_id, config)
+
+            if p1_err or p2_err or not p1_targets or not p2_targets:
+                print(f"  Warning: Could not get endpoints for swap: {p1_err or p2_err or 'no targets'}")
+            else:
+                # Target tuple: (p_gx, p_gy, n_gx, n_gy, layer_idx, p_x, p_y, n_x, n_y)
+                p1_tgt = p1_targets[0]
+                p2_tgt = p2_targets[0]
+                p1_p_pos = (p1_tgt[5], p1_tgt[6])  # P target position for pair 1
+                p1_n_pos = (p1_tgt[7], p1_tgt[8])  # N target position for pair 1
+                p2_p_pos = (p2_tgt[5], p2_tgt[6])  # P target position for pair 2
+                p2_n_pos = (p2_tgt[7], p2_tgt[8])  # N target position for pair 2
+
+                # Find all segment positions connected to each target stub
+                p1_p_positions = find_connected_segment_positions(pcb_data, p1_p_pos[0], p1_p_pos[1], p1_pair.p_net_id)
+                p1_n_positions = find_connected_segment_positions(pcb_data, p1_n_pos[0], p1_n_pos[1], p1_pair.n_net_id)
+                p2_p_positions = find_connected_segment_positions(pcb_data, p2_p_pos[0], p2_p_pos[1], p2_pair.p_net_id)
+                p2_n_positions = find_connected_segment_positions(pcb_data, p2_n_pos[0], p2_n_pos[1], p2_pair.n_net_id)
+
+                # Swap net IDs in pcb_data segments at target positions
+                # p1's target stubs: change from p1's nets to p2's nets
+                # p2's target stubs: change from p2's nets to p1's nets
+                p1_p_seg_count = 0
+                p1_n_seg_count = 0
+                p2_p_seg_count = 0
+                p2_n_seg_count = 0
+
+                for seg in pcb_data.segments:
+                    seg_positions = {(round(seg.start_x, 4), round(seg.start_y, 4)),
+                                    (round(seg.end_x, 4), round(seg.end_y, 4))}
+                    # p1 target: p1_pair.p_net_id -> p2_pair.p_net_id
+                    if seg.net_id == p1_pair.p_net_id and seg_positions & p1_p_positions:
+                        seg.net_id = p2_pair.p_net_id
+                        p1_p_seg_count += 1
+                    elif seg.net_id == p1_pair.n_net_id and seg_positions & p1_n_positions:
+                        seg.net_id = p2_pair.n_net_id
+                        p1_n_seg_count += 1
+                    # p2 target: p2_pair.p_net_id -> p1_pair.p_net_id
+                    elif seg.net_id == p2_pair.p_net_id and seg_positions & p2_p_positions:
+                        seg.net_id = p1_pair.p_net_id
+                        p2_p_seg_count += 1
+                    elif seg.net_id == p2_pair.n_net_id and seg_positions & p2_n_positions:
+                        seg.net_id = p1_pair.n_net_id
+                        p2_n_seg_count += 1
+
+                print(f"  Swapped segments: {p1_name} target: {p1_p_seg_count}P+{p1_n_seg_count}N, {p2_name} target: {p2_p_seg_count}P+{p2_n_seg_count}N")
+
+                # Swap net IDs in pcb_data vias at target positions
+                p1_p_via_count = 0
+                p1_n_via_count = 0
+                p2_p_via_count = 0
+                p2_n_via_count = 0
+
+                for via in pcb_data.vias:
+                    via_pos = (round(via.x, 4), round(via.y, 4))
+                    if via.net_id == p1_pair.p_net_id and via_pos in p1_p_positions:
+                        via.net_id = p2_pair.p_net_id
+                        p1_p_via_count += 1
+                    elif via.net_id == p1_pair.n_net_id and via_pos in p1_n_positions:
+                        via.net_id = p2_pair.n_net_id
+                        p1_n_via_count += 1
+                    elif via.net_id == p2_pair.p_net_id and via_pos in p2_p_positions:
+                        via.net_id = p1_pair.p_net_id
+                        p2_p_via_count += 1
+                    elif via.net_id == p2_pair.n_net_id and via_pos in p2_n_positions:
+                        via.net_id = p1_pair.n_net_id
+                        p2_n_via_count += 1
+
+                if p1_p_via_count + p1_n_via_count + p2_p_via_count + p2_n_via_count > 0:
+                    print(f"  Swapped vias: {p1_name} target: {p1_p_via_count}P+{p1_n_via_count}N, {p2_name} target: {p2_p_via_count}P+{p2_n_via_count}N")
+
+                # Find pads connected to the target stubs (anywhere along the stub chain)
+                def find_pad_in_positions(pads, positions, threshold=0.5):
+                    """Find a pad that's near any position in the stub chain."""
+                    for pad in pads:
+                        pad_pos = (round(pad.global_x, 4), round(pad.global_y, 4))
+                        # Check if pad is near any position in the stub chain
+                        for pos in positions:
+                            if abs(pad.global_x - pos[0]) < threshold and abs(pad.global_y - pos[1]) < threshold:
+                                return pad
+                    return None
+
+                p1_p_pads = pcb_data.pads_by_net.get(p1_pair.p_net_id, [])
+                p1_n_pads = pcb_data.pads_by_net.get(p1_pair.n_net_id, [])
+                p2_p_pads = pcb_data.pads_by_net.get(p2_pair.p_net_id, [])
+                p2_n_pads = pcb_data.pads_by_net.get(p2_pair.n_net_id, [])
+
+                # Find pads connected anywhere along the target stub chains
+                p1_p_pad = find_pad_in_positions(p1_p_pads, p1_p_positions)
+                p1_n_pad = find_pad_in_positions(p1_n_pads, p1_n_positions)
+                p2_p_pad = find_pad_in_positions(p2_p_pads, p2_p_positions)
+                p2_n_pad = find_pad_in_positions(p2_n_pads, p2_n_positions)
+
+                # Swap pad net IDs
+                if p1_p_pad and p2_p_pad:
+                    p1_p_pad.net_id, p2_p_pad.net_id = p2_p_pad.net_id, p1_p_pad.net_id
+                    p1_p_pad.net_name, p2_p_pad.net_name = p2_p_pad.net_name, p1_p_pad.net_name
+                    print(f"  Swapped P pads: {p1_p_pad.component_ref}:{p1_p_pad.pad_number} <-> {p2_p_pad.component_ref}:{p2_p_pad.pad_number}")
+                if p1_n_pad and p2_n_pad:
+                    p1_n_pad.net_id, p2_n_pad.net_id = p2_n_pad.net_id, p1_n_pad.net_id
+                    p1_n_pad.net_name, p2_n_pad.net_name = p2_n_pad.net_name, p1_n_pad.net_name
+                    print(f"  Swapped N pads: {p1_n_pad.component_ref}:{p1_n_pad.pad_number} <-> {p2_n_pad.component_ref}:{p2_n_pad.pad_number}")
+
+                # Also update pads_by_net dictionary
+                if p1_p_pad:
+                    if p1_pair.p_net_id in pcb_data.pads_by_net:
+                        pcb_data.pads_by_net[p1_pair.p_net_id] = [p for p in pcb_data.pads_by_net[p1_pair.p_net_id] if p != p1_p_pad]
+                    pcb_data.pads_by_net.setdefault(p2_pair.p_net_id, []).append(p1_p_pad)
+                if p2_p_pad:
+                    if p2_pair.p_net_id in pcb_data.pads_by_net:
+                        pcb_data.pads_by_net[p2_pair.p_net_id] = [p for p in pcb_data.pads_by_net[p2_pair.p_net_id] if p != p2_p_pad]
+                    pcb_data.pads_by_net.setdefault(p1_pair.p_net_id, []).append(p2_p_pad)
+                if p1_n_pad:
+                    if p1_pair.n_net_id in pcb_data.pads_by_net:
+                        pcb_data.pads_by_net[p1_pair.n_net_id] = [p for p in pcb_data.pads_by_net[p1_pair.n_net_id] if p != p1_n_pad]
+                    pcb_data.pads_by_net.setdefault(p2_pair.n_net_id, []).append(p1_n_pad)
+                if p2_n_pad:
+                    if p2_pair.n_net_id in pcb_data.pads_by_net:
+                        pcb_data.pads_by_net[p2_pair.n_net_id] = [p for p in pcb_data.pads_by_net[p2_pair.n_net_id] if p != p2_n_pad]
+                    pcb_data.pads_by_net.setdefault(p1_pair.n_net_id, []).append(p2_n_pad)
+
+                # Store swap info for output file writing
+                target_swap_info.append({
+                    'p1_name': p1_name,
+                    'p2_name': p2_name,
+                    'p1_p_net_id': p1_pair.p_net_id,
+                    'p1_n_net_id': p1_pair.n_net_id,
+                    'p2_p_net_id': p2_pair.p_net_id,
+                    'p2_n_net_id': p2_pair.n_net_id,
+                    'p1_p_positions': p1_p_positions,
+                    'p1_n_positions': p1_n_positions,
+                    'p2_p_positions': p2_p_positions,
+                    'p2_n_positions': p2_n_positions,
+                    'p1_p_pad': p1_p_pad,
+                    'p1_n_pad': p1_n_pad,
+                    'p2_p_pad': p2_p_pad,
+                    'p2_n_pad': p2_n_pad,
+                })
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
@@ -1330,7 +1494,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             total_iterations += result['iterations']
 
             # Check if polarity was fixed - need to swap target pad and stub nets
-            # Do this BEFORE add_route_to_pcb_data so collapse_appendices sees correct net IDs
+            # Do this BEFORE add_route_to_pcb_data so segment processing sees correct net IDs
             apply_polarity_swap(pcb_data, result, pad_swaps, pair_name, polarity_swapped_pairs)
 
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
@@ -2403,6 +2567,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"  Rerouted:      {len(rerouted_pairs)} (ripped nets re-routed)")
     if polarity_swapped_pairs:
         print(f"  Polarity swaps: {len(polarity_swapped_pairs)}")
+    if target_swaps:
+        # Print unique swaps (each pair shown once)
+        swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
+        print(f"  Target swaps:  {len(swap_pairs)}")
+        for p1, p2 in swap_pairs:
+            print(f"    {p1} <-> {p2}")
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
@@ -2414,6 +2584,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
+        'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
         'successful': successful,
         'failed': failed,
         'total_time': round(total_time, 2),
@@ -2422,8 +2593,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     }
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
-    # Write output if we have results OR if we have layer swap modifications to show
-    if results or all_segment_modifications or all_swap_vias:
+    # Write output if we have results OR if we have layer swap/target swap modifications to show
+    if results or all_segment_modifications or all_swap_vias or target_swap_info:
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -2433,6 +2604,42 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if all_segment_modifications:
             content, mod_count = modify_segment_layers(content, all_segment_modifications)
             print(f"Applied {mod_count} segment layer modifications (layer switching)")
+
+        # Apply target swaps for swappable-nets feature
+        if target_swap_info:
+            print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
+            for swap in target_swap_info:
+                # Swap segments at p1's target: p1 net -> p2 net
+                content, p1_p_seg = swap_segment_nets_at_positions(
+                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'])
+                content, p1_n_seg = swap_segment_nets_at_positions(
+                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'])
+                # Swap segments at p2's target: p2 net -> p1 net
+                content, p2_p_seg = swap_segment_nets_at_positions(
+                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'])
+                content, p2_n_seg = swap_segment_nets_at_positions(
+                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'])
+
+                # Swap vias at p1's target
+                content, p1_p_via = swap_via_nets_at_positions(
+                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'])
+                content, p1_n_via = swap_via_nets_at_positions(
+                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'])
+                # Swap vias at p2's target
+                content, p2_p_via = swap_via_nets_at_positions(
+                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'])
+                content, p2_n_via = swap_via_nets_at_positions(
+                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'])
+
+                # Swap pads if they exist
+                if swap['p1_p_pad'] and swap['p2_p_pad']:
+                    content = swap_pad_nets_in_content(content, swap['p1_p_pad'], swap['p2_p_pad'])
+                if swap['p1_n_pad'] and swap['p2_n_pad']:
+                    content = swap_pad_nets_in_content(content, swap['p1_n_pad'], swap['p2_n_pad'])
+
+                total_seg = p1_p_seg + p1_n_seg + p2_p_seg + p2_n_seg
+                total_via = p1_p_via + p1_n_via + p2_p_via + p2_n_via
+                print(f"  {swap['p1_name']} <-> {swap['p2_name']}: {total_seg} segments, {total_via} vias")
 
         # Apply pad and stub net swaps for polarity fixes
         if pad_swaps:
@@ -2682,6 +2889,8 @@ Differential pair routing:
                         help="Disable stub layer switching optimization (enabled by default)")
     parser.add_argument("--can-swap-to-top-layer", action="store_true",
                         help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
+    parser.add_argument("--swappable-nets", nargs="+",
+                        help="Glob patterns for diff pair nets that can have targets swapped (e.g., 'rx1_*')")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -2760,4 +2969,5 @@ Differential pair routing:
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,
                 can_swap_to_top_layer=args.can_swap_to_top_layer,
+                swappable_net_patterns=args.swappable_nets,
                 vis_callback=vis_callback)
