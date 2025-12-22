@@ -388,17 +388,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(pcb_data, diff_pair_patterns)
         if diff_pairs:
-            print(f"\nFound {len(diff_pairs)} differential pairs:")
-            for pair_name, pair in list(diff_pairs.items())[:5]:
-                print(f"  {pair_name}: {pair.p_net_name} / {pair.n_net_name}")
-            if len(diff_pairs) > 5:
-                print(f"  ... and {len(diff_pairs) - 5} more")
             # Track which net IDs are part of pairs
             for pair in diff_pairs.values():
                 diff_pair_net_ids.add(pair.p_net_id)
                 diff_pair_net_ids.add(pair.n_net_id)
-        else:
-            print(f"\nNo differential pairs found matching patterns: {diff_pair_patterns}")
 
     # Find net IDs - check both pcb.nets and pads_by_net
     net_ids = []
