@@ -446,7 +446,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
     if enable_layer_switch and diff_pair_ids_to_route_set:
-        from stub_layer_switching import get_stub_info, apply_stub_layer_switch
+        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer, validate_swap
         from diff_pair_routing import get_diff_pair_endpoints
 
         print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route_set)} diff pair(s)...")
@@ -470,6 +470,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             src_layer = config.layers[sources[0][4]]
             tgt_layer = config.layers[targets[0][4]]
             all_pair_layer_info[pair_name] = (src_layer, tgt_layer, sources, targets, pair)
+
+        # Pre-collect all stub segments by layer for validation
+        all_stubs_by_layer = collect_stubs_by_layer(pcb_data, all_pair_layer_info, config)
 
         # Find pairs that need layer switches (src != tgt layer)
         pairs_needing_via = [(name, info) for name, info in pair_layer_info.items()
@@ -543,6 +546,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if swap_partner and swap_partner_stubs:
                 # Found a swap partner! Swap source layers
                 other_src_p_stub, other_src_n_stub, other_src_layer = swap_partner_stubs
+                _, _, _, _, other_pair = all_pair_layer_info[swap_partner]
+
+                # Validate swap before applying
+                our_valid, our_reason = validate_swap(
+                    src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=swap_partner,
+                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                )
+                partner_valid, partner_reason = validate_swap(
+                    other_src_p_stub, other_src_n_stub, src_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=pair_name,
+                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                )
+
+                if not our_valid or not partner_valid:
+                    reason = our_reason if not our_valid else partner_reason
+                    print(f"    Source swap validation failed for {pair_name}: {reason}")
+                    continue  # Try target swap later
 
                 # Check if swap would move stubs to F.Cu (top layer)
                 # Skip if can_swap_to_top_layer is False and either destination is F.Cu
@@ -568,6 +589,50 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         if swap_count > 0:
             print(f"Applied {swap_count} source layer swap(s)")
+
+        # Try solo source layer switches (no partner needed) for remaining pairs
+        solo_src_count = 0
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+
+            # Check if we can move source stubs to target layer without a partner
+            src_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       sources[0][5], sources[0][6], src_layer)
+            src_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       sources[0][7], sources[0][8], src_layer)
+
+            if not src_p_stub or not src_n_stub:
+                continue
+
+            # Check if swap would move stubs to F.Cu (top layer)
+            if not can_swap_to_top_layer and tgt_layer == 'F.Cu':
+                continue
+
+            # Validate solo switch: source stubs move to target layer
+            valid, reason = validate_swap(
+                src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
+                pcb_data, config, swap_partner_name=None,
+                swap_partner_net_ids=set()
+            )
+
+            if valid:
+                # Apply solo source switch
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2)
+                all_vias = vias1 + vias2
+                all_swap_vias.extend(all_vias)
+
+                applied_swaps.add(pair_name)
+                solo_src_count += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Solo source switch: {pair_name} ({src_layer}->{tgt_layer}){via_msg}")
+            else:
+                print(f"    Solo source switch validation failed for {pair_name}: {reason}")
+
+        if solo_src_count > 0:
+            print(f"Applied {solo_src_count} solo source layer switch(es)")
 
         # Now try target-side segment overlap swaps for remaining pairs
         target_swap_count = 0
@@ -635,6 +700,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if swap_partner and swap_partner_stubs:
                 # Found a swap partner! Swap target layers
                 other_tgt_p_stub, other_tgt_n_stub, other_tgt_layer = swap_partner_stubs
+                _, _, _, _, other_pair = all_pair_layer_info[swap_partner]
+
+                # Validate swap before applying
+                our_valid, our_reason = validate_swap(
+                    tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=swap_partner,
+                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                )
+                partner_valid, partner_reason = validate_swap(
+                    other_tgt_p_stub, other_tgt_n_stub, tgt_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=pair_name,
+                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                )
+
+                if not our_valid or not partner_valid:
+                    reason = our_reason if not our_valid else partner_reason
+                    print(f"    Target swap validation failed for {pair_name}: {reason}")
+                    continue
 
                 # Check if swap would move stubs to F.Cu (top layer)
                 # Skip if can_swap_to_top_layer is False and either destination is F.Cu
@@ -660,6 +743,50 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         if target_swap_count > 0:
             print(f"Applied {target_swap_count} target layer swap(s)")
+
+        # Try solo target layer switches (no partner needed) for remaining pairs
+        solo_switch_count = 0
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+
+            # Check if we can move target stubs to source layer without a partner
+            tgt_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       targets[0][5], targets[0][6], tgt_layer)
+            tgt_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       targets[0][7], targets[0][8], tgt_layer)
+
+            if not tgt_p_stub or not tgt_n_stub:
+                continue
+
+            # Check if swap would move stubs to F.Cu (top layer)
+            if not can_swap_to_top_layer and src_layer == 'F.Cu':
+                continue
+
+            # Validate solo switch: target stubs move to source layer
+            valid, reason = validate_swap(
+                tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
+                pcb_data, config, swap_partner_name=None,
+                swap_partner_net_ids=set()
+            )
+
+            if valid:
+                # Apply solo target switch
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2)
+                all_vias = vias1 + vias2
+                all_swap_vias.extend(all_vias)
+
+                applied_swaps.add(pair_name)
+                solo_switch_count += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Solo target switch: {pair_name} ({tgt_layer}->{src_layer}){via_msg}")
+            else:
+                print(f"    Solo target switch validation failed for {pair_name}: {reason}")
+
+        if solo_switch_count > 0:
+            print(f"Applied {solo_switch_count} solo target layer switch(es)")
 
         # Now try two-pair swaps for remaining pairs that weren't handled
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
@@ -725,18 +852,35 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # Skip this swap - would move stubs to top layer
                         pass
                     else:
-                        # Apply swaps
-                        _, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
-                        _, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
-                        _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
-                        _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
-                        all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                        # Validate swap before applying
+                        our_valid, our_reason = validate_swap(
+                            our_stubs[0], our_stubs[1], our_new_layer, all_stubs_by_layer,
+                            pcb_data, config, swap_partner_name=other_name,
+                            swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                        )
+                        their_valid, their_reason = validate_swap(
+                            their_stubs[0], their_stubs[1], their_new_layer, all_stubs_by_layer,
+                            pcb_data, config, swap_partner_name=pair_name,
+                            swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                        )
 
-                        applied_swaps.add(pair_name)
-                        applied_swaps.add(other_name)
-                        swap_count += 1
-                        print(f"  Swap {swap_type}s: {pair_name} <-> {other_name}")
-                        break
+                        if not our_valid or not their_valid:
+                            reason = our_reason if not our_valid else their_reason
+                            print(f"    Two-pair {swap_type} swap validation failed for {pair_name}: {reason}")
+                            # Don't break - continue to try fallback target swap
+                        else:
+                            # Apply swaps
+                            _, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
+                            _, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
+                            _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
+                            _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
+                            all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+
+                            applied_swaps.add(pair_name)
+                            applied_swaps.add(other_name)
+                            swap_count += 1
+                            print(f"  Swap {swap_type}s: {pair_name} <-> {other_name}")
+                            break
                 if swap_type == "source":
                     # Source swap failed, try target swap with same pair
                     if other_tgt == src_layer and tgt_layer == other_src:
@@ -757,17 +901,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 # Skip this swap - would move stubs to top layer
                                 pass
                             else:
-                                _, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
-                                _, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
-                                _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
-                                _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
-                                all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                                # Validate fallback target swap before applying
+                                our_valid, our_reason = validate_swap(
+                                    p_stub, n_stub, src_layer, all_stubs_by_layer,
+                                    pcb_data, config, swap_partner_name=other_name,
+                                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                                )
+                                their_valid, their_reason = validate_swap(
+                                    other_p_stub, other_n_stub, tgt_layer, all_stubs_by_layer,
+                                    pcb_data, config, swap_partner_name=pair_name,
+                                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                                )
 
-                                applied_swaps.add(pair_name)
-                                applied_swaps.add(other_name)
-                                swap_count += 1
-                                print(f"  Swap targets: {pair_name} <-> {other_name}")
-                                break
+                                if not our_valid or not their_valid:
+                                    reason = our_reason if not our_valid else their_reason
+                                    print(f"    Fallback target swap validation failed for {pair_name}: {reason}")
+                                else:
+                                    _, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
+                                    _, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
+                                    _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
+                                    _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
+                                    all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+
+                                    applied_swaps.add(pair_name)
+                                    applied_swaps.add(other_name)
+                                    swap_count += 1
+                                    print(f"  Swap targets: {pair_name} <-> {other_name}")
+                                    break
 
         if swap_count > 0:
             print(f"Applied {swap_count} layer swap(s)")
