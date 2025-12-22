@@ -2039,12 +2039,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if visualize:
         vis_callback.on_routing_complete(successful, failed, total_iterations)
 
-    print("\n" + "=" * 60)
-    print(f"Routing complete: {successful} successful, {failed} failed")
-    print(f"Total time: {total_time:.2f}s")
-    print(f"Total iterations: {total_iterations}")
-
-    # Build and print JSON summary for reliable parsing
+    # Build summary data
     import json
     routed_diff_pairs = []
     failed_diff_pairs = []
@@ -2062,6 +2057,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             failed_single.append(net_name)
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
+
+    # Print human-readable summary
+    print("\n" + "=" * 60)
+    print("Routing complete")
+    print("=" * 60)
+    if diff_pair_ids_to_route:
+        print(f"  Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed")
+    if single_ended_nets:
+        print(f"  Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed")
+    if ripup_success_pairs:
+        print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
+    if rerouted_pairs:
+        print(f"  Rerouted:      {len(rerouted_pairs)} (ripped nets re-routed)")
+    if polarity_swapped_pairs:
+        print(f"  Polarity swaps: {len(polarity_swapped_pairs)}")
+    print(f"  Total vias:    {total_vias}")
+    print(f"  Total time:    {total_time:.2f}s")
+    print(f"  Iterations:    {total_iterations:,}")
     summary = {
         'routed_diff_pairs': routed_diff_pairs,
         'failed_diff_pairs': failed_diff_pairs,
