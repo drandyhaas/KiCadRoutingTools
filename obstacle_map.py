@@ -446,6 +446,80 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
                     obstacles.set_stub_proximity(gx, gy, cost)
 
 
+def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
+                               routed_net_ids: List[int], config: GridRouteConfig,
+                               layer_map: Dict[str, int]):
+    """Add track proximity costs around previously routed tracks (same layer only).
+
+    Penalizes routing near existing tracks with linear falloff from max cost at track
+    to zero at track_proximity_distance.
+
+    Args:
+        obstacles: The obstacle map to add costs to
+        pcb_data: PCB data containing routed segments
+        routed_net_ids: Net IDs that have been routed (to find their segments)
+        config: Routing configuration with track_proximity_distance and track_proximity_cost
+        layer_map: Mapping of layer names to layer indices
+    """
+    if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
+        return  # Feature disabled
+
+    coord = GridCoord(config.grid_step)
+    radius_grid = coord.to_grid_dist(config.track_proximity_distance)
+    cost_grid = int(config.track_proximity_cost * 1000 / config.grid_step)
+
+    # Sample every ~1mm along segments (not every grid step) for performance
+    sample_interval = max(1, int(1.0 / config.grid_step))
+
+    routed_net_set = set(routed_net_ids)
+
+    for seg in pcb_data.segments:
+        if seg.net_id not in routed_net_set:
+            continue
+
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        # Walk along segment using Bresenham, sampling every sample_interval points
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+
+        gx, gy = gx1, gy1
+        step_count = 0
+
+        while True:
+            # Only process every sample_interval'th point
+            if step_count % sample_interval == 0:
+                # Add proximity costs around this track point
+                for ex in range(-radius_grid, radius_grid + 1):
+                    for ey in range(-radius_grid, radius_grid + 1):
+                        dist_sq = ex * ex + ey * ey
+                        if dist_sq <= radius_grid * radius_grid:
+                            dist = dist_sq ** 0.5
+                            proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
+                            cost = int(proximity * cost_grid)
+                            obstacles.set_layer_proximity(gx + ex, gy + ey, layer_idx, cost)
+
+            if gx == gx2 and gy == gy2:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+            step_count += 1
+
+
 def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                        exclude_net_id: int, unrouted_stubs: Optional[List[Tuple[float, float]]] = None) -> GridObstacleMap:
     """Build Rust obstacle map from PCB data (legacy function for compatibility)."""

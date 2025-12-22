@@ -38,7 +38,8 @@ from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
-    VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles
+    VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
+    add_track_proximity_costs
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -307,6 +308,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 via_proximity_cost: float = 10.0,
                 bga_proximity_radius: float = 10.0,
                 bga_proximity_cost: float = 0.2,
+                track_proximity_distance: float = 10.0,
+                track_proximity_cost: float = 0.2,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.101,
                 diff_pair_centerline_setback: float = None,
@@ -394,6 +397,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_proximity_cost=via_proximity_cost,
         bga_proximity_radius=bga_proximity_radius,
         bga_proximity_cost=bga_proximity_cost,
+        track_proximity_distance=track_proximity_distance,
+        track_proximity_cost=track_proximity_cost,
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
@@ -1149,6 +1154,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+        # Add track proximity costs for previously routed tracks (same layer only)
+        layer_map = {name: idx for idx, name in enumerate(config.layers)}
+        add_track_proximity_costs(obstacles, pcb_data, routed_net_ids, config, layer_map)
 
         # Add same-net via clearance for both P and N
         add_same_net_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
@@ -1454,6 +1462,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
                         if unrouted_stubs:
                             add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
+                        layer_map = {name: idx for idx, name in enumerate(config.layers)}
+                        add_track_proximity_costs(retry_obstacles, pcb_data, routed_net_ids, config, layer_map)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
                         add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
@@ -1581,6 +1591,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
             if unrouted_stubs:
                 add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+            layer_map = {name: idx for idx, name in enumerate(config.layers)}
+            add_track_proximity_costs(obstacles, pcb_data, routed_net_ids, config, layer_map)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
             add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
@@ -1751,6 +1763,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
                             if unrouted_stubs:
                                 add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
+                            layer_map = {name: idx for idx, name in enumerate(config.layers)}
+                            add_track_proximity_costs(retry_obstacles, pcb_data, routed_net_ids, config, layer_map)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.p_net_id, config)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.n_net_id, config)
                             add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
@@ -1899,6 +1913,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+        # Add track proximity costs for previously routed tracks (same layer only)
+        layer_map = {name: idx for idx, name in enumerate(config.layers)}
+        add_track_proximity_costs(obstacles, pcb_data, routed_net_ids, config, layer_map)
 
         # Add same-net via clearance blocking (for DRC - vias can't be too close even on same net)
         add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
@@ -2249,6 +2266,12 @@ Differential pair routing:
     parser.add_argument("--bga-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 
+    # Track proximity penalty (same layer only)
+    parser.add_argument("--track-proximity-distance", type=float, default=10.0,
+                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 10.0)")
+    parser.add_argument("--track-proximity-cost", type=float, default=0.2,
+                        help="Cost penalty near routed tracks in mm equivalent (default: 0.2)")
+
     # Differential pair routing
     parser.add_argument("--diff-pairs", "-D", nargs="+",
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
@@ -2330,6 +2353,8 @@ Differential pair routing:
                 via_proximity_cost=args.via_proximity_cost,
                 bga_proximity_radius=args.bga_proximity_radius,
                 bga_proximity_cost=args.bga_proximity_cost,
+                track_proximity_distance=args.track_proximity_distance,
+                track_proximity_cost=args.track_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,

@@ -51,6 +51,8 @@ class GridRouteConfig:
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
     max_setback_angle: float = 22.5  # Maximum angle (degrees) for setback position search
+    track_proximity_distance: float = 10.0  # mm - radius around routed tracks to penalize (same layer)
+    track_proximity_cost: float = 0.2  # mm equivalent cost at track center
 
 
 class GridCoord:

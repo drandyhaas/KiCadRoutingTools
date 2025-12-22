@@ -14,6 +14,8 @@ pub struct GridObstacleMap {
     pub blocked_vias: FxHashSet<u64>,
     /// Stub proximity costs: (gx, gy) -> cost
     pub stub_proximity: FxHashMap<u64, i32>,
+    /// Layer-specific proximity costs (for track proximity on same layer)
+    pub layer_proximity_costs: Vec<FxHashMap<u64, i32>>,
     /// Number of layers
     #[pyo3(get)]
     pub num_layers: usize,
@@ -35,6 +37,7 @@ impl GridObstacleMap {
             blocked_cells: (0..num_layers).map(|_| FxHashSet::default()).collect(),
             blocked_vias: FxHashSet::default(),
             stub_proximity: FxHashMap::default(),
+            layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             num_layers,
             bga_zones: Vec::new(),
             allowed_cells: FxHashSet::default(),
@@ -63,6 +66,7 @@ impl GridObstacleMap {
             blocked_cells: self.blocked_cells.clone(),
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
+            layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
             bga_zones: self.bga_zones.clone(),
             allowed_cells: self.allowed_cells.clone(),
@@ -173,5 +177,33 @@ impl GridObstacleMap {
     #[inline]
     pub fn get_stub_proximity_cost(&self, gx: i32, gy: i32) -> i32 {
         self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0)
+    }
+
+    /// Set layer-specific proximity cost (for track proximity on same layer)
+    pub fn set_layer_proximity(&mut self, gx: i32, gy: i32, layer: usize, cost: i32) {
+        if layer < self.num_layers && cost > 0 {
+            let key = pack_xy(gx, gy);
+            let entry = self.layer_proximity_costs[layer].entry(key).or_insert(0);
+            *entry = (*entry).max(cost);
+        }
+    }
+
+    /// Get layer-specific proximity cost
+    #[inline]
+    pub fn get_layer_proximity_cost(&self, gx: i32, gy: i32, layer: usize) -> i32 {
+        if layer >= self.num_layers {
+            return 0;
+        }
+        self.layer_proximity_costs[layer]
+            .get(&pack_xy(gx, gy))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Clear layer-specific proximity costs
+    pub fn clear_layer_proximity(&mut self) {
+        for layer_map in &mut self.layer_proximity_costs {
+            layer_map.clear();
+        }
     }
 }

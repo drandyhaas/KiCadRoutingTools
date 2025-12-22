@@ -220,6 +220,10 @@ Examples:
                               help='Radius around BGA edges to penalize in mm (default: 10.0)')
     router_group.add_argument('--bga-proximity-cost', type=float,
                               help='Cost penalty near BGA edges in mm equivalent (default: 0.2)')
+    router_group.add_argument('--track-proximity-distance', type=float,
+                              help='Distance around routed tracks to penalize on same layer in mm (default: 10.0)')
+    router_group.add_argument('--track-proximity-cost', type=float,
+                              help='Cost penalty near routed tracks in mm equivalent (default: 0.2)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.101)')
     router_group.add_argument('--diff-pair-centerline-setback', type=float,
@@ -341,6 +345,10 @@ Examples:
         router_cmd.extend(["--bga-proximity-radius", str(args.bga_proximity_radius)])
     if args.bga_proximity_cost is not None:
         router_cmd.extend(["--bga-proximity-cost", str(args.bga_proximity_cost)])
+    if args.track_proximity_distance is not None:
+        router_cmd.extend(["--track-proximity-distance", str(args.track_proximity_distance)])
+    if args.track_proximity_cost is not None:
+        router_cmd.extend(["--track-proximity-cost", str(args.track_proximity_cost)])
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
     if args.diff_pair_centerline_setback is not None:
