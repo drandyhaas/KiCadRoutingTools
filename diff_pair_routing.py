@@ -719,28 +719,37 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     first_label = "target" if is_backward else "source"
     second_label = "source" if is_backward else "target"
 
-    if is_probe and len(src_combos) > 1:
+    if is_probe:
         # Probe angles at the routing source (first endpoint we're routing from)
         found_first = False
-        for src_cand in src_combos:
-            path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(src_cand, tgt_combos[0])
-            total_iterations += iters
+        first_blocked_cells = []
+        if len(src_combos) > 1:
+            for src_cand in src_combos:
+                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(src_cand, tgt_combos[0])
+                total_iterations += iters
 
-            if path is not None:
-                return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
-            if iters >= max_iters:
-                selected_src = src_cand
-                found_first = True
-                print(f"    {first_label} {src_cand[4]:+.1f}° OK")
-                break
-            print(f"    {first_label} {src_cand[4]:+.1f}° blocked")
+                if path is not None:
+                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
+                if iters >= max_iters:
+                    selected_src = src_cand
+                    found_first = True
+                    print(f"    {first_label} {src_cand[4]:+.1f}° OK")
+                    break
+                print(f"    {first_label} {src_cand[4]:+.1f}° blocked")
+                # Collect blocked cells from this attempt
+                first_blocked_cells.extend(blocked)
 
-        if not found_first:
-            # All angles got blocked during probe - will use first candidate
-            pass
+            if not found_first:
+                # All source angles blocked - return probe_blocked state for rip-up
+                return None, total_iterations, first_blocked_cells, ('probe_blocked', 'first', selected_src, selected_tgt)
+        else:
+            # Only one source option - print OK for it
+            print(f"    {first_label} {src_combos[0][4]:+.1f}° OK")
+            found_first = True
 
         # Probe angles at the routing target (second endpoint)
         found_second = False
+        second_blocked_cells = []
         if len(tgt_combos) > 1:
             for tgt_cand in tgt_combos:
                 path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(selected_src, tgt_cand)
@@ -754,10 +763,15 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                     print(f"    {second_label} {tgt_cand[4]:+.1f}° OK")
                     break
                 print(f"    {second_label} {tgt_cand[4]:+.1f}° blocked")
+                # Collect blocked cells from this attempt
+                second_blocked_cells.extend(blocked)
 
             if not found_second:
-                # All angles got blocked during probe - will use first candidate
-                pass
+                # All target angles blocked - return probe_blocked state for rip-up
+                return None, total_iterations, second_blocked_cells, ('probe_blocked', 'second', selected_src, selected_tgt)
+        else:
+            # Only one target option - print OK for it
+            print(f"    {second_label} {tgt_combos[0][4]:+.1f}° OK")
 
         # Return selected angles for full search
         return None, total_iterations, [], (0, 0, selected_src, selected_tgt)
@@ -847,6 +861,25 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         direction_label=first_label, is_backward=(first_label == "backward")
     )
 
+    # Check if first probe was blocked (all angles failed)
+    if first_best_combo and isinstance(first_best_combo[0], str) and first_best_combo[0] == 'probe_blocked':
+        # Map 'first'/'second' to physical 'source'/'target'
+        blocked_endpoint = first_best_combo[1]  # 'first' or 'second'
+        if first_label == 'backward':
+            # backward: first=target, second=source
+            physical_endpoint = 'target' if blocked_endpoint == 'first' else 'source'
+        else:
+            # forward: first=source, second=target
+            physical_endpoint = 'source' if blocked_endpoint == 'first' else 'target'
+        print(f"  Probe {first_label} blocked at {physical_endpoint}")
+        return {
+            'probe_blocked': True,
+            'blocked_at': physical_endpoint,
+            'blocked_cells': first_blocked,
+            'iterations': first_probe_iters,
+            'direction': first_label,
+        }
+
     if route_data is not None:
         # Found route in probe phase
         first_blocked_cells = []
@@ -863,6 +896,25 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
             direction_label=second_label, is_backward=(second_label == "backward")
         )
+
+        # Check if second probe was blocked (all angles failed)
+        if second_best_combo and isinstance(second_best_combo[0], str) and second_best_combo[0] == 'probe_blocked':
+            # Map 'first'/'second' to physical 'source'/'target'
+            blocked_endpoint = second_best_combo[1]  # 'first' or 'second'
+            if second_label == 'backward':
+                # backward: first=target, second=source
+                physical_endpoint = 'target' if blocked_endpoint == 'first' else 'source'
+            else:
+                # forward: first=source, second=target
+                physical_endpoint = 'source' if blocked_endpoint == 'first' else 'target'
+            print(f"  Probe {second_label} blocked at {physical_endpoint}")
+            return {
+                'probe_blocked': True,
+                'blocked_at': physical_endpoint,
+                'blocked_cells': second_blocked,
+                'iterations': first_probe_iters + second_probe_iters,
+                'direction': second_label,
+            }
 
         if route_data is not None:
             # Found route in second probe

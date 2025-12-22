@@ -1136,6 +1136,107 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Note: Layer switching is now done upfront before routing starts
         result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles,
                                                  unrouted_stubs)
+
+        # Handle probe_blocked: try progressive rip-up before full route
+        probe_ripup_attempts = 0
+        while result and result.get('probe_blocked') and probe_ripup_attempts < config.max_rip_up_count:
+            blocked_at = result.get('blocked_at', 'unknown')
+            blocked_cells = result.get('blocked_cells', [])
+            probe_direction = result.get('direction', 'unknown')
+
+            if not blocked_cells:
+                print(f"  Probe {probe_direction} blocked at {blocked_at} but no blocked cells to analyze")
+                break
+
+            # Analyze which routed nets are blocking
+            blockers = analyze_frontier_blocking(
+                blocked_cells, pcb_data, config, routed_net_paths,
+                exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                extra_clearance=config.diff_pair_gap / 2
+            )
+
+            # Filter to rippable blockers (only those we've routed)
+            rippable_blockers = []
+            seen_canonical_ids = set()
+            for b in blockers:
+                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                if canonical not in seen_canonical_ids and b.net_id in routed_results:
+                    seen_canonical_ids.add(canonical)
+                    rippable_blockers.append(b)
+
+            if not rippable_blockers:
+                print(f"  Probe {probe_direction} blocked at {blocked_at} but no rippable blockers found")
+                # Convert to failed result so normal failure handling takes over
+                result = {
+                    'failed': True,
+                    'iterations': result.get('iterations', 0),
+                    'blocked_cells_forward': blocked_cells if probe_direction == 'forward' else [],
+                    'blocked_cells_backward': blocked_cells if probe_direction == 'backward' else [],
+                }
+                break
+
+            probe_ripup_attempts += 1
+            print(f"  Probe blocked at {blocked_at}, rip-up attempt {probe_ripup_attempts}/{config.max_rip_up_count}")
+
+            # Rip up the top blocker
+            blocker = rippable_blockers[0]
+            print(f"    Ripping up {blocker.net_name} ({blocker.blocked_count} blocked cells)")
+
+            saved_result, ripped_ids, was_in_results = rip_up_net(
+                blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
+                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                results, config
+            )
+
+            # Rebuild obstacles without ripped net
+            retry_obstacles = diff_pair_base_obstacles.clone()
+            for routed_id in routed_net_ids:
+                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
+            add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
+            add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
+
+            # Retry the route
+            result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles,
+                                                     unrouted_stubs)
+
+            # If retry succeeded, queue ripped net for re-routing
+            if result and not result.get('failed') and not result.get('probe_blocked'):
+                # Success! Queue ripped net for re-routing later
+                if blocker.net_id in diff_pair_by_net_id:
+                    ripped_pair_name, ripped_pair = diff_pair_by_net_id[blocker.net_id]
+                    reroute_queue.append((ripped_pair_name, ripped_pair))
+                else:
+                    reroute_queue.append((blocker.net_name, blocker.net_id))
+                ripup_success_pairs.add(pair_name)
+                print(f"    Probe rip-up succeeded, {blocker.net_name} queued for re-routing")
+            elif result and result.get('probe_blocked'):
+                # Still probe_blocked, will loop and try next rip-up
+                print(f"    Still blocked after rip-up, trying next...")
+            else:
+                # Route failed completely, restore ripped net
+                print(f"    Probe rip-up didn't help, restoring {blocker.net_name}")
+                # Restore the ripped net
+                if saved_result:
+                    add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
+                    for rid in ripped_ids:
+                        if rid not in routed_net_ids:
+                            routed_net_ids.append(rid)
+                        if rid in remaining_net_ids:
+                            remaining_net_ids.remove(rid)
+                        routed_results[rid] = saved_result
+                    if was_in_results:
+                        results.append(saved_result)
+
+        # If probe rip-up exhausted attempts without success, mark as failed
+        if result and result.get('probe_blocked'):
+            print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, route FAILED")
+            result = {
+                'failed': True,
+                'iterations': result.get('iterations', 0),
+                'blocked_cells_forward': result.get('blocked_cells', []) if result.get('direction') == 'forward' else [],
+                'blocked_cells_backward': result.get('blocked_cells', []) if result.get('direction') == 'backward' else [],
+            }
+
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -1326,7 +1427,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                         retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
-                        if retry_result and not retry_result.get('failed'):
+                        if retry_result and not retry_result.get('failed') and not retry_result.get('probe_blocked'):
                             print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
                             results.append(retry_result)
                             successful += 1
@@ -1373,9 +1474,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                             # Re-analyze blockers from retry result to find new rippable nets
                             if retry_result:
-                                retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
-                                retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
-                                retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+                                if retry_result.get('probe_blocked'):
+                                    # Probe was blocked - use blocked_cells from probe result
+                                    retry_blocked_cells = retry_result.get('blocked_cells', [])
+                                else:
+                                    # Full route failed - use blocked_cells from both directions
+                                    retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
+                                    retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                    retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
 
                                 if retry_blocked_cells:
                                     new_blockers = analyze_frontier_blocking(
@@ -1608,7 +1714,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                             retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
-                            if retry_result and not retry_result.get('failed'):
+                            if retry_result and not retry_result.get('failed') and not retry_result.get('probe_blocked'):
                                 print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
                                 results.append(retry_result)
                                 successful += 1
@@ -1653,9 +1759,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                                 # Re-analyze blockers from retry result to find new rippable nets
                                 if retry_result:
-                                    retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
-                                    retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
-                                    retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+                                    if retry_result.get('probe_blocked'):
+                                        # Probe was blocked - use blocked_cells from probe result
+                                        retry_blocked_cells = retry_result.get('blocked_cells', [])
+                                    else:
+                                        # Full route failed - use blocked_cells from both directions
+                                        retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
+                                        retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                        retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
 
                                     if retry_blocked_cells:
                                         new_blockers = analyze_frontier_blocking(
