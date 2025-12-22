@@ -1552,7 +1552,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             elapsed = time.time() - start_time
             total_time += elapsed
 
-            if result and not result.get('failed'):
+            if result and not result.get('failed') and not result.get('probe_blocked'):
                 print(f"  REROUTE SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias ({elapsed:.2f}s)")
                 results.append(result)
                 successful += 1
@@ -1587,12 +1587,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 reroute_succeeded = False
                 if routed_net_paths and result:
                     # Find blocked cells from the failed route
-                    fwd_iters = result.get('iterations_forward', 0)
-                    bwd_iters = result.get('iterations_backward', 0)
-                    if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
-                        blocked_cells = result.get('blocked_cells_forward', [])
+                    if result.get('probe_blocked'):
+                        # Probe was blocked - use blocked_cells from probe result
+                        blocked_cells = result.get('blocked_cells', [])
                     else:
-                        blocked_cells = result.get('blocked_cells_backward', [])
+                        # Full route failed - use blocked_cells from direction with more progress
+                        fwd_iters = result.get('iterations_forward', 0)
+                        bwd_iters = result.get('iterations_backward', 0)
+                        if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
+                            blocked_cells = result.get('blocked_cells_forward', [])
+                        else:
+                            blocked_cells = result.get('blocked_cells_backward', [])
 
                     if blocked_cells:
                         blockers = analyze_frontier_blocking(
