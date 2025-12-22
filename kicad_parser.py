@@ -177,8 +177,9 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
     found = False
 
     # Look for gr_rect on Edge.Cuts
-    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\).*?\(layer\s+"Edge\.Cuts"\)'
-    for m in re.finditer(rect_pattern, content, re.DOTALL):
+    # Use [^)]* instead of .*? to avoid catastrophic backtracking with many gr_rect elements
+    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)[^)]*\)[^)]*\)\s+\(layer\s+"Edge\.Cuts"\)'
+    for m in re.finditer(rect_pattern, content):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         min_x = min(min_x, x1, x2)
         min_y = min(min_y, y1, y2)
@@ -187,8 +188,9 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
         found = True
 
     # Look for gr_line on Edge.Cuts
-    line_pattern = r'\(gr_line\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\).*?\(layer\s+"Edge\.Cuts"\)'
-    for m in re.finditer(line_pattern, content, re.DOTALL):
+    # Use [^)]* instead of .*? to avoid catastrophic backtracking with many gr_line elements
+    line_pattern = r'\(gr_line\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)[^)]*\)[^)]*\)\s+\(layer\s+"Edge\.Cuts"\)'
+    for m in re.finditer(line_pattern, content):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         min_x = min(min_x, x1, x2)
         min_y = min(min_y, y1, y2)
