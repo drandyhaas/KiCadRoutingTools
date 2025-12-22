@@ -31,13 +31,14 @@ from routing_config import GridRouteConfig, GridCoord, DiffPair
 from routing_utils import (
     find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints,
     compute_mps_net_ordering, add_route_to_pcb_data, remove_route_from_pcb_data,
-    find_pad_nearest_to_position, find_connected_segment_positions
+    find_pad_nearest_to_position, find_connected_segment_positions,
+    find_stub_free_ends, find_connected_groups
 )
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
-    VisualizationData, add_connector_region_via_blocking
+    VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -155,6 +156,29 @@ def get_canonical_net_id(net_id: int, diff_pair_by_net_id: dict) -> int:
         _, pair = diff_pair_by_net_id[net_id]
         return pair.p_net_id
     return net_id
+
+
+def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
+                                              config, extra_clearance: float):
+    """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
+
+    This is a helper function to avoid duplicating code in multiple places.
+    """
+    p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
+    n_segments = [s for s in pcb_data.segments if s.net_id == n_net_id]
+    if not p_segments and not n_segments:
+        return
+
+    p_pads = pcb_data.pads_by_net.get(p_net_id, [])
+    n_pads = pcb_data.pads_by_net.get(n_net_id, [])
+    p_stub_ends = find_stub_free_ends(p_segments, p_pads)
+    n_stub_ends = find_stub_free_ends(n_segments, n_pads)
+    stub_endpoints = [(x, y) for x, y, _ in p_stub_ends + n_stub_ends]
+
+    add_diff_pair_own_stubs_as_obstacles(
+        obstacles, pcb_data, p_net_id, n_net_id, config,
+        exclude_endpoints=stub_endpoints, extra_clearance=extra_clearance
+    )
 
 
 def rip_up_net(net_id: int, pcb_data, routed_net_ids: list, routed_net_paths: dict,
@@ -1130,6 +1154,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         add_same_net_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
         add_same_net_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
 
+        # Add the diff pair's own stub segments as obstacles to prevent the centerline
+        # from routing through them. Exclude the stub endpoints where we need to connect.
+        add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
+
         # Route the differential pair
         # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
         # Also pass unrouted stubs for finding clear extension endpoints
@@ -1194,6 +1222,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
+            add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, config.diff_pair_gap / 2)
 
             # Retry the route
             result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles,
@@ -1427,6 +1456,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
+                        add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
 
                         retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
@@ -1553,6 +1583,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 add_stub_proximity_costs(obstacles, unrouted_stubs, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
+            add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
 
             result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs)
             elapsed = time.time() - start_time
@@ -1722,6 +1753,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.p_net_id, config)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.n_net_id, config)
+                            add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
 
                             retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 

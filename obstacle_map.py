@@ -110,6 +110,98 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid)
 
 
+def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                                          p_net_id: int, n_net_id: int,
+                                          config: GridRouteConfig,
+                                          exclude_endpoints: List[Tuple[float, float]] = None,
+                                          extra_clearance: float = 0.0):
+    """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
+
+    This is different from add_net_stubs_as_obstacles which adds OTHER nets' stubs.
+    Here we add the SAME pair's stubs so the centerline route avoids crossing them,
+    but we exclude the stub endpoints where we need to connect.
+
+    Args:
+        obstacles: The obstacle map to modify
+        pcb_data: PCB data containing segments
+        p_net_id: Net ID of P net
+        n_net_id: Net ID of N net
+        config: Routing configuration
+        exclude_endpoints: List of (x, y) positions to exclude from blocking (stub connection points)
+        extra_clearance: Additional clearance to add
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+
+    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
+    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
+    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
+
+    # Convert exclude endpoints to grid coordinates with some radius
+    exclude_grid_cells = set()
+    exclude_radius = max(2, coord.to_grid_dist(config.track_width * 2))  # 2x track width radius
+    if exclude_endpoints:
+        for ex, ey in exclude_endpoints:
+            gex, gey = coord.to_grid(ex, ey)
+            for dx in range(-exclude_radius, exclude_radius + 1):
+                for dy in range(-exclude_radius, exclude_radius + 1):
+                    if dx*dx + dy*dy <= exclude_radius * exclude_radius:
+                        exclude_grid_cells.add((gex + dx, gey + dy))
+
+    for seg in pcb_data.segments:
+        if seg.net_id != p_net_id and seg.net_id != n_net_id:
+            continue
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        # Add segment as obstacle, but skip cells in excluded regions
+        _add_segment_obstacle_with_exclusion(
+            obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
+            exclude_grid_cells
+        )
+
+
+def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,
+                                          layer_idx: int, expansion_grid: int, via_block_grid: int,
+                                          exclude_cells: Set[Tuple[int, int]]):
+    """Add a segment as obstacle, excluding certain grid cells."""
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+    # Bresenham line with expansion
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+    err = dx - dy
+
+    gx, gy = gx1, gy1
+    while True:
+        # Skip if this cell is in the exclusion zone
+        if (gx, gy) not in exclude_cells:
+            for ex in range(-expansion_grid, expansion_grid + 1):
+                for ey in range(-expansion_grid, expansion_grid + 1):
+                    if (gx + ex, gy + ey) not in exclude_cells:
+                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+            for ex in range(-via_block_grid, via_block_grid + 1):
+                for ey in range(-via_block_grid, via_block_grid + 1):
+                    if ex*ex + ey*ey <= via_block_grid * via_block_grid:
+                        if (gx + ex, gy + ey) not in exclude_cells:
+                            obstacles.add_blocked_via(gx + ex, gy + ey)
+
+        if gx == gx2 and gy == gy2:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            gx += sx
+        if e2 < dx:
+            err += dx
+            gy += sy
+
+
 def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
                                extra_clearance: float = 0.0):
