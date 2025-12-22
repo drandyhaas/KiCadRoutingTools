@@ -417,7 +417,7 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
 def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                          coord, layer_names, spacing_mm, p_net_id, n_net_id,
                          max_iterations_override=None, neighbor_stubs=None,
-                         preferred_angles=None):
+                         preferred_angles=None, direction_label=None, is_backward=False):
     """
     Attempt to route a diff pair in one direction.
 
@@ -502,7 +502,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     else:
         setback = spacing_mm * 4  # Default: 4x the P-N half-spacing = 2x total P-N distance
 
-    print(f"  Source direction: ({src_dir_x:.2f}, {src_dir_y:.2f}), target direction: ({tgt_dir_x:.2f}, {tgt_dir_y:.2f})")
+    if direction_label:
+        print(f"  Probing {direction_label}...")
 
     # Use base_obstacles for connector clearance checks if available
     # (connectors are single tracks that don't need diff pair extra clearance)
@@ -624,8 +625,6 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         blocked = collect_setback_blocked_cells(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback)
         return None, 0, blocked, None
 
-    print(f"  Centerline setback: {setback:.2f}mm")
-
     # Calculate turning radius in grid units
     min_radius_grid = config.min_turning_radius / config.grid_step
 
@@ -715,37 +714,40 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     selected_tgt = tgt_combos[0]
     stuck_threshold = max(100, max_iters // 10)
 
-    if is_probe and len(src_combos) > 1:
-        # Probe source angles with first target angle
-        for src_cand in src_combos:
-            if src_cand[4] != 0:  # angle != 0
-                print(f"  Probing source angle: {src_cand[4]:+.1f}° (sep:{src_cand[5]:.2f}mm)")
+    # When routing backward, the "source" in routing terms is the physical target
+    # Use physical terminology: source = physical source end, target = physical target end
+    first_label = "target" if is_backward else "source"
+    second_label = "source" if is_backward else "target"
 
+    if is_probe and len(src_combos) > 1:
+        # Probe angles at the routing source (first endpoint we're routing from)
+        for src_cand in src_combos:
             path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(src_cand, tgt_combos[0])
             total_iterations += iters
 
             if path is not None:
                 return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
-            if iters >= max_iters - stuck_threshold:
+            if iters >= max_iters:
                 selected_src = src_cand
+                if src_cand[4] != 0:
+                    print(f"    {first_label} {src_cand[4]:+.1f}° OK")
                 break
-            print(f"    Source angle stuck ({iters} iters), trying next...")
+            print(f"    {first_label} {src_cand[4]:+.1f}° stuck ({iters} iters)")
 
-        # Probe target angles with selected source angle
+        # Probe angles at the routing target (second endpoint)
         if len(tgt_combos) > 1:
             for tgt_cand in tgt_combos:
-                if tgt_cand[4] != 0:  # angle != 0
-                    print(f"  Probing target angle: {tgt_cand[4]:+.1f}° (sep:{tgt_cand[5]:.2f}mm)")
-
                 path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(selected_src, tgt_cand)
                 total_iterations += iters
 
                 if path is not None:
                     return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
-                if iters >= max_iters - stuck_threshold:
+                if iters >= max_iters:
                     selected_tgt = tgt_cand
+                    if tgt_cand[4] != 0:
+                        print(f"    {second_label} {tgt_cand[4]:+.1f}° OK")
                     break
-                print(f"    Target angle stuck ({iters} iters), trying next...")
+                print(f"    {second_label} {tgt_cand[4]:+.1f}° stuck ({iters} iters)")
 
         # Return selected angles for full search
         return None, total_iterations, [], (0, 0, selected_src, selected_tgt)
@@ -755,8 +757,10 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y, tgt_angle, tgt_dist = selected_tgt
 
     if src_angle != 0 or tgt_angle != 0:
-        print(f"  Source setback: using {src_angle:+.1f}° (sep:{src_dist:.2f}mm)")
-        print(f"  Target setback: using {tgt_angle:+.1f}° (sep:{tgt_dist:.2f}mm)")
+        # Use physical terminology (routing src/tgt swap when backward)
+        src_label = "target" if is_backward else "source"
+        tgt_label = "source" if is_backward else "target"
+        print(f"  {src_label.capitalize()} setback: {src_angle:+.1f}°, {tgt_label} setback: {tgt_angle:+.1f}°")
 
     src_theta_idx = direction_to_theta_idx(src_actual_dir_x, src_actual_dir_y)
     tgt_theta_idx = direction_to_theta_idx(-tgt_actual_dir_x, -tgt_actual_dir_y)
@@ -804,7 +808,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
-    print(f"  P-N spacing: {spacing_mm * 2:.3f}mm (offset={spacing_mm:.3f}mm from centerline)")
 
     # Determine direction order (same as single_ended_routing)
     if config.direction_order == "random":
@@ -830,7 +833,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     route_data, first_probe_iters, first_blocked, first_best_combo = _try_route_direction(
         first_src, first_tgt, pcb_data, config, obstacles, base_obstacles,
         coord, layer_names, spacing_mm, p_net_id, n_net_id,
-        max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs
+        max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
+        direction_label=first_label, is_backward=(first_label == "backward")
     )
 
     if route_data is not None:
@@ -846,7 +850,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         route_data, second_probe_iters, second_blocked, second_best_combo = _try_route_direction(
             second_src, second_tgt, pcb_data, config, obstacles, base_obstacles,
             coord, layer_names, spacing_mm, p_net_id, n_net_id,
-            max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs
+            max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
+            direction_label=second_label, is_backward=(second_label == "backward")
         )
 
         if route_data is not None:
@@ -875,8 +880,19 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 }
 
             # At least one direction made progress - do full search on the more promising one
-            # Try the direction that used more probe iterations first (made more progress)
-            if first_probe_iters >= second_probe_iters:
+            # Prefer forward direction when both reached max_iters, otherwise pick higher iteration count
+            first_reached_max = first_probe_iters >= probe_iterations
+            second_reached_max = second_probe_iters >= probe_iterations
+
+            # Prefer first direction (forward by default) when both succeed or have equal iterations
+            if first_reached_max and second_reached_max:
+                prefer_first = True  # Both succeeded, prefer forward
+            elif first_probe_iters >= second_probe_iters:
+                prefer_first = True
+            else:
+                prefer_first = False
+
+            if prefer_first:
                 promising_src, promising_tgt, promising_label = first_src, first_tgt, first_label
                 fallback_src, fallback_tgt, fallback_label = second_src, second_tgt, second_label
                 promising_probe_iters, promising_blocked = first_probe_iters, first_blocked
@@ -891,15 +907,24 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
             print(f"  Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {promising_label} with full iterations...")
 
-            # Extract preferred angles from best probe combo (if available)
+            # Mix best angles from both probes:
+            # - Forward probe's selected_src is best angle at physical source
+            # - Backward probe's selected_src is best angle at physical target
             # best_combo is (src_idx, tgt_idx, src_candidate, tgt_candidate)
-            preferred = (promising_best_combo[2], promising_best_combo[3]) if promising_best_combo else None
+            if promising_best_combo and fallback_best_combo:
+                # Use promising direction's source angle + fallback direction's source angle (as target)
+                preferred = (promising_best_combo[2], fallback_best_combo[2])
+            elif promising_best_combo:
+                preferred = (promising_best_combo[2], promising_best_combo[3])
+            else:
+                preferred = None
 
             # Full search on promising direction with best angles from probe
             route_data, full_iters, blocked_cells, _ = _try_route_direction(
                 promising_src, promising_tgt, pcb_data, config, obstacles, base_obstacles,
                 coord, layer_names, spacing_mm, p_net_id, n_net_id,
-                neighbor_stubs=unrouted_stubs, preferred_angles=preferred
+                neighbor_stubs=unrouted_stubs, preferred_angles=preferred,
+                direction_label=None, is_backward=(promising_label == "backward")
             )
             total_iterations = first_probe_iters + second_probe_iters + full_iters
 
@@ -920,12 +945,18 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 fallback_stuck = fallback_probe_iters < stuck_threshold
                 if not fallback_stuck:
                     print(f"  No route found after {full_iters} iterations ({promising_label}), trying {fallback_label}...")
-                    # Use best angles from fallback probe
-                    fallback_preferred = (fallback_best_combo[2], fallback_best_combo[3]) if fallback_best_combo else None
+                    # Mix best angles: fallback's source + promising's source (as target)
+                    if fallback_best_combo and promising_best_combo:
+                        fallback_preferred = (fallback_best_combo[2], promising_best_combo[2])
+                    elif fallback_best_combo:
+                        fallback_preferred = (fallback_best_combo[2], fallback_best_combo[3])
+                    else:
+                        fallback_preferred = None
                     route_data, fallback_full_iters, fallback_full_blocked, _ = _try_route_direction(
                         fallback_src, fallback_tgt, pcb_data, config, obstacles, base_obstacles,
                         coord, layer_names, spacing_mm, p_net_id, n_net_id,
-                        neighbor_stubs=unrouted_stubs, preferred_angles=fallback_preferred
+                        neighbor_stubs=unrouted_stubs, preferred_angles=fallback_preferred,
+                        direction_label=None, is_backward=(fallback_label == "backward")
                     )
                     total_iterations += fallback_full_iters
 
@@ -1079,8 +1110,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     # Always use source polarity
     p_sign = src_p_sign
-    print(f"  Polarity: src_p_sign={src_p_sign}, tgt_p_sign={tgt_p_sign}, swap_needed={polarity_swap_needed}, has_vias={has_layer_change}")
-
     n_sign = -p_sign
 
     # Create P and N paths using perpendicular offsets from centerline
@@ -1321,36 +1350,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         p_end, n_end, p_tgt_route, n_tgt_route,
         tgt_stub_dir_tuple, p_sign
     )
-
-    # Debug: verify connector parallelism
-    def debug_connector_parallelism(label, p_stub, n_stub, p_route, n_route, stub_dir, p_ext, n_ext):
-        import math
-        # Calculate actual connector start points after extension
-        p_conn_start = (p_stub[0] + stub_dir[0] * p_ext, p_stub[1] + stub_dir[1] * p_ext)
-        n_conn_start = (n_stub[0] + stub_dir[0] * n_ext, n_stub[1] + stub_dir[1] * n_ext)
-        # Connector vectors
-        p_vec = (p_route[0] - p_conn_start[0], p_route[1] - p_conn_start[1])
-        n_vec = (n_route[0] - n_conn_start[0], n_route[1] - n_conn_start[1])
-        # Normalize
-        p_len = math.sqrt(p_vec[0]**2 + p_vec[1]**2) or 1
-        n_len = math.sqrt(n_vec[0]**2 + n_vec[1]**2) or 1
-        p_dir = (p_vec[0]/p_len, p_vec[1]/p_len)
-        n_dir = (n_vec[0]/n_len, n_vec[1]/n_len)
-        # Cross product (should be ~0 if parallel)
-        cross = p_dir[0] * n_dir[1] - p_dir[1] * n_dir[0]
-        dot = p_dir[0] * n_dir[0] + p_dir[1] * n_dir[1]
-        angle_deg = math.degrees(math.acos(max(-1, min(1, dot)))) if abs(dot) <= 1 else 0
-        print(f"  {label} connectors:")
-        print(f"    P stub: ({p_stub[0]:.3f}, {p_stub[1]:.3f}) ext={p_ext:.4f} -> conn_start: ({p_conn_start[0]:.3f}, {p_conn_start[1]:.3f})")
-        print(f"    N stub: ({n_stub[0]:.3f}, {n_stub[1]:.3f}) ext={n_ext:.4f} -> conn_start: ({n_conn_start[0]:.3f}, {n_conn_start[1]:.3f})")
-        print(f"    P route: ({p_route[0]:.3f}, {p_route[1]:.3f}), N route: ({n_route[0]:.3f}, {n_route[1]:.3f})")
-        print(f"    P dir: ({p_dir[0]:.4f}, {p_dir[1]:.4f}), N dir: ({n_dir[0]:.4f}, {n_dir[1]:.4f})")
-        print(f"    Cross product: {cross:.6f}, Angle: {angle_deg:.2f}° {'PARALLEL' if abs(cross) < 0.01 else 'NOT PARALLEL'}")
-
-    debug_connector_parallelism("Source", p_start, n_start, p_src_route, n_src_route,
-                                 src_stub_dir_tuple, src_p_ext, src_n_ext)
-    debug_connector_parallelism("Target", p_end, n_end, p_tgt_route, n_tgt_route,
-                                 tgt_stub_dir_tuple, tgt_p_ext, tgt_n_ext)
 
     # Convert P path
     p_segs, p_vias, p_conn_lines = float_path_to_geometry(
