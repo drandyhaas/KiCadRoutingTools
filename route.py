@@ -1202,11 +1202,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # If retry succeeded, queue ripped net for re-routing
             if result and not result.get('failed') and not result.get('probe_blocked'):
                 # Success! Queue ripped net for re-routing later
+                # Decrement successful count - will be re-counted when rerouted
+                if was_in_results:
+                    successful -= 1
                 if blocker.net_id in diff_pair_by_net_id:
                     ripped_pair_name, ripped_pair = diff_pair_by_net_id[blocker.net_id]
-                    reroute_queue.append((ripped_pair_name, ripped_pair))
+                    reroute_queue.append(('diff_pair', ripped_pair_name, ripped_pair))
                 else:
-                    reroute_queue.append((blocker.net_name, blocker.net_id))
+                    reroute_queue.append(('single', blocker.net_name, blocker.net_id))
                 ripup_success_pairs.add(pair_name)
                 print(f"    Probe rip-up succeeded, {blocker.net_name} queued for re-routing")
             elif result and result.get('probe_blocked'):
@@ -1456,6 +1459,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             rip_and_retry_history.add((current_canonical, blocker_canonicals))
 
                             for net_id, saved_result, ripped_ids, was_in_results in ripped_items:
+                                # Decrement successful count - will be re-counted when rerouted
+                                if was_in_results:
+                                    successful -= 1
                                 if net_id in diff_pair_by_net_id:
                                     ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id]
                                     reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
@@ -1748,6 +1754,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))
 
                                 for net_id, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
+                                    # Decrement successful count - will be re-counted when rerouted
+                                    if was_in_results:
+                                        successful -= 1
                                     if net_id in diff_pair_by_net_id:
                                         ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id]
                                         reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
