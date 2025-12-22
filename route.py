@@ -39,7 +39,7 @@ from obstacle_map import (
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
     VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
-    add_track_proximity_costs
+    compute_track_proximity_for_net, merge_track_proximity_costs
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -184,7 +184,7 @@ def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int,
 
 def rip_up_net(net_id: int, pcb_data, routed_net_ids: list, routed_net_paths: dict,
                routed_results: dict, diff_pair_by_net_id: dict, remaining_net_ids: list,
-               results: list, config) -> tuple:
+               results: list, config, track_proximity_cache: dict = None) -> tuple:
     """Rip up a routed net (or diff pair), removing it from pcb_data and tracking structures.
 
     Returns:
@@ -221,6 +221,10 @@ def rip_up_net(net_id: int, pcb_data, routed_net_ids: list, routed_net_paths: di
         routed_net_paths.pop(ripped_pair.n_net_id, None)
         routed_results.pop(ripped_pair.p_net_id, None)
         routed_results.pop(ripped_pair.n_net_id, None)
+        # Remove from track proximity cache
+        if track_proximity_cache is not None:
+            track_proximity_cache.pop(ripped_pair.p_net_id, None)
+            track_proximity_cache.pop(ripped_pair.n_net_id, None)
         # Add back to remaining so stubs are treated as obstacles
         if ripped_pair.p_net_id not in remaining_net_ids:
             remaining_net_ids.append(ripped_pair.p_net_id)
@@ -234,6 +238,9 @@ def rip_up_net(net_id: int, pcb_data, routed_net_ids: list, routed_net_paths: di
             routed_net_ids.remove(net_id)
         routed_net_paths.pop(net_id, None)
         routed_results.pop(net_id, None)
+        # Remove from track proximity cache
+        if track_proximity_cache is not None:
+            track_proximity_cache.pop(net_id, None)
         # Add back to remaining so stubs are treated as obstacles
         if net_id not in remaining_net_ids:
             remaining_net_ids.append(net_id)
@@ -244,7 +251,7 @@ def rip_up_net(net_id: int, pcb_data, routed_net_ids: list, routed_net_paths: di
 def restore_net(net_id: int, saved_result: dict, ripped_net_ids: list, was_in_results: bool,
                 pcb_data, routed_net_ids: list, routed_net_paths: dict,
                 routed_results: dict, diff_pair_by_net_id: dict, remaining_net_ids: list,
-                results: list, config):
+                results: list, config, track_proximity_cache: dict = None, layer_map: dict = None):
     """Restore a previously ripped net to pcb_data and tracking structures."""
 
     if saved_result is None:
@@ -277,6 +284,10 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: list, was_in_re
             routed_net_paths[ripped_pair.n_net_id] = saved_result['n_path']
         routed_results[ripped_pair.p_net_id] = saved_result
         routed_results[ripped_pair.n_net_id] = saved_result
+        # Restore track proximity cache
+        if track_proximity_cache is not None and layer_map is not None:
+            track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
+            track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
     else:
         # Single-ended net
         if net_id not in routed_net_ids:
@@ -286,6 +297,9 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: list, was_in_re
         if saved_result.get('path'):
             routed_net_paths[net_id] = saved_result['path']
         routed_results[net_id] = saved_result
+        # Restore track proximity cache
+        if track_proximity_cache is not None and layer_map is not None:
+            track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
 
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
@@ -1106,6 +1120,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_net_paths = {}  # net_id -> path (grid coords) for blocking analysis
     routed_results = {}  # net_id -> result dict (for rip-up)
     diff_pair_by_net_id = {}  # net_id -> (pair_name, pair) for looking up diff pairs
+    # Cache for track proximity costs: net_id -> {layer_idx -> {(gx,gy) -> cost}}
+    # Computed once when route succeeds, removed when ripped up
+    track_proximity_cache = {}
+    layer_map = {name: idx for idx, name in enumerate(config.layers)}
     reroute_queue = []  # List of (pair_name, pair) or (net_name, net_id) for ripped-up nets
     polarity_swapped_pairs = set()  # Track pairs that have already had polarity swap applied
     rip_and_retry_history = set()  # Set of (routing_net_id, frozenset(ripped_net_ids)) to prevent infinite loops
@@ -1155,8 +1173,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
         # Add track proximity costs for previously routed tracks (same layer only)
-        layer_map = {name: idx for idx, name in enumerate(config.layers)}
-        add_track_proximity_costs(obstacles, pcb_data, routed_net_ids, config, layer_map)
+        merge_track_proximity_costs(obstacles, track_proximity_cache)
 
         # Add same-net via clearance for both P and N
         add_same_net_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
@@ -1175,6 +1192,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         # Handle probe_blocked: try progressive rip-up before full route
         probe_ripup_attempts = 0
+        probe_ripped_items = []  # Track all nets ripped during probe phase for potential restore
         while result and result.get('probe_blocked') and probe_ripup_attempts < config.max_rip_up_count:
             blocked_at = result.get('blocked_at', 'unknown')
             blocked_cells = result.get('blocked_cells', [])
@@ -1221,8 +1239,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             saved_result, ripped_ids, was_in_results = rip_up_net(
                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                 routed_results, diff_pair_by_net_id, remaining_net_ids,
-                results, config
+                results, config, track_proximity_cache
             )
+            # Track this ripped item for potential restore on total failure
+            probe_ripped_items.append((blocker, saved_result, ripped_ids, was_in_results))
 
             # Rebuild obstacles without ripped net
             retry_obstacles = diff_pair_base_obstacles.clone()
@@ -1236,40 +1256,61 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles,
                                                      unrouted_stubs)
 
-            # If retry succeeded, queue ripped net for re-routing
+            # If retry succeeded, queue ALL ripped nets for re-routing
             if result and not result.get('failed') and not result.get('probe_blocked'):
-                # Success! Queue ripped net for re-routing later
-                # Decrement successful count - will be re-counted when rerouted
-                if was_in_results:
-                    successful -= 1
-                if blocker.net_id in diff_pair_by_net_id:
-                    ripped_pair_name, ripped_pair = diff_pair_by_net_id[blocker.net_id]
-                    reroute_queue.append(('diff_pair', ripped_pair_name, ripped_pair))
-                else:
-                    reroute_queue.append(('single', blocker.net_name, blocker.net_id))
+                # Success! Queue all ripped nets for re-routing later
+                for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in probe_ripped_items:
+                    if ripped_was_in_results:
+                        successful -= 1
+                    if ripped_blocker.net_id in diff_pair_by_net_id:
+                        ripped_pair_name, ripped_pair = diff_pair_by_net_id[ripped_blocker.net_id]
+                        reroute_queue.append(('diff_pair', ripped_pair_name, ripped_pair))
+                    else:
+                        reroute_queue.append(('single', ripped_blocker.net_name, ripped_blocker.net_id))
                 ripup_success_pairs.add(pair_name)
-                print(f"    Probe rip-up succeeded, {blocker.net_name} queued for re-routing")
+                print(f"    Probe rip-up succeeded, {len(probe_ripped_items)} net(s) queued for re-routing")
             elif result and result.get('probe_blocked'):
                 # Still probe_blocked, will loop and try next rip-up
                 print(f"    Still blocked after rip-up, trying next...")
             else:
-                # Route failed completely, restore ripped net
-                print(f"    Probe rip-up didn't help, restoring {blocker.net_name}")
-                # Restore the ripped net
-                if saved_result:
-                    add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
-                    for rid in ripped_ids:
+                # Route failed completely - restore ALL ripped nets and exit loop
+                print(f"    Probe rip-up didn't help, restoring {len(probe_ripped_items)} net(s)")
+                for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
+                    if ripped_saved:
+                        add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                        for rid in ripped_ids_item:
+                            if rid not in routed_net_ids:
+                                routed_net_ids.append(rid)
+                            if rid in remaining_net_ids:
+                                remaining_net_ids.remove(rid)
+                            routed_results[rid] = ripped_saved
+                        if ripped_was_in_results:
+                            results.append(ripped_saved)
+                        # Restore track proximity cache
+                        if track_proximity_cache is not None and layer_map is not None:
+                            for rid in ripped_ids_item:
+                                track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
+                probe_ripped_items.clear()
+                break
+
+        # If probe rip-up exhausted attempts without success, restore all and mark as failed
+        if result and result.get('probe_blocked'):
+            print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), route FAILED")
+            for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
+                if ripped_saved:
+                    add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                    for rid in ripped_ids_item:
                         if rid not in routed_net_ids:
                             routed_net_ids.append(rid)
                         if rid in remaining_net_ids:
                             remaining_net_ids.remove(rid)
-                        routed_results[rid] = saved_result
-                    if was_in_results:
-                        results.append(saved_result)
-
-        # If probe rip-up exhausted attempts without success, mark as failed
-        if result and result.get('probe_blocked'):
-            print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, route FAILED")
+                        routed_results[rid] = ripped_saved
+                    if ripped_was_in_results:
+                        results.append(ripped_saved)
+                    # Restore track proximity cache
+                    if track_proximity_cache is not None and layer_map is not None:
+                        for rid in ripped_ids_item:
+                            track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
             result = {
                 'failed': True,
                 'iterations': result.get('iterations', 0),
@@ -1298,6 +1339,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 remaining_net_ids.remove(pair.n_net_id)
             routed_net_ids.append(pair.p_net_id)
             routed_net_ids.append(pair.n_net_id)
+            # Compute and cache track proximity costs for the newly routed nets
+            track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
+            track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
             # Track paths for blocking analysis
             if result.get('p_path'):
                 routed_net_paths[pair.p_net_id] = result['p_path']
@@ -1417,7 +1461,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             saved_result, ripped_ids, was_in_results = rip_up_net(
                                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                results, config
+                                results, config, track_proximity_cache
                             )
                             if saved_result is None:
                                 rip_successful = False
@@ -1438,7 +1482,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 restore_net(net_id, saved_result, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                           results, config)
+                                           results, config, track_proximity_cache, layer_map)
                                 if was_in_results:
                                     successful += 1
                                 ripped_items.pop()
@@ -1462,8 +1506,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
                         if unrouted_stubs:
                             add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
-                        layer_map = {name: idx for idx, name in enumerate(config.layers)}
-                        add_track_proximity_costs(retry_obstacles, pcb_data, routed_net_ids, config, layer_map)
+                        merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
                         add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
                         add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
@@ -1486,6 +1529,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 remaining_net_ids.remove(pair.n_net_id)
                             routed_net_ids.append(pair.p_net_id)
                             routed_net_ids.append(pair.n_net_id)
+                            # Compute and cache track proximity costs
+                            track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
+                            track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
                             if retry_result.get('p_path'):
                                 routed_net_paths[pair.p_net_id] = retry_result['p_path']
                             if retry_result.get('n_path'):
@@ -1554,7 +1600,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             restore_net(net_id, saved_result, ripped_ids, was_in_results,
                                        pcb_data, routed_net_ids, routed_net_paths,
                                        routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                       results, config)
+                                       results, config, track_proximity_cache, layer_map)
                             if was_in_results:
                                 successful += 1
 
@@ -1591,8 +1637,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
             if unrouted_stubs:
                 add_stub_proximity_costs(obstacles, unrouted_stubs, config)
-            layer_map = {name: idx for idx, name in enumerate(config.layers)}
-            add_track_proximity_costs(obstacles, pcb_data, routed_net_ids, config, layer_map)
+            merge_track_proximity_costs(obstacles, track_proximity_cache)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
             add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
@@ -1627,6 +1672,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 routed_results[ripped_pair.n_net_id] = result
                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
+                # Add to track proximity cache
+                track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
+                track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
             else:
                 # Reroute failed - try rip-up and retry with progressive N+1
                 iterations = result['iterations'] if result else 0
@@ -1718,7 +1766,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 saved_result, ripped_ids, was_in_results = rip_up_net(
                                     blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                     routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                    results, config
+                                    results, config, track_proximity_cache
                                 )
                                 if saved_result is None:
                                     rip_successful = False
@@ -1739,7 +1787,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     restore_net(net_id, saved_result_tmp, ripped_ids, was_in_results,
                                                pcb_data, routed_net_ids, routed_net_paths,
                                                routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                               results, config)
+                                               results, config, track_proximity_cache, layer_map)
                                     if was_in_results:
                                         successful += 1
                                     ripped_items.pop()
@@ -1763,8 +1811,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
                             if unrouted_stubs:
                                 add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
-                            layer_map = {name: idx for idx, name in enumerate(config.layers)}
-                            add_track_proximity_costs(retry_obstacles, pcb_data, routed_net_ids, config, layer_map)
+                            merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.p_net_id, config)
                             add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.n_net_id, config)
                             add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
@@ -1795,6 +1842,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 routed_results[ripped_pair.n_net_id] = retry_result
                                 diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
                                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
+                                # Add to track proximity cache
+                                track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
+                                track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))
@@ -1853,7 +1903,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 restore_net(net_id, saved_result_tmp, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                           results, config)
+                                           results, config, track_proximity_cache, layer_map)
                                 if was_in_results:
                                     successful += 1
 
@@ -1914,8 +1964,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
         # Add track proximity costs for previously routed tracks (same layer only)
-        layer_map = {name: idx for idx, name in enumerate(config.layers)}
-        add_track_proximity_costs(obstacles, pcb_data, routed_net_ids, config, layer_map)
+        merge_track_proximity_costs(obstacles, track_proximity_cache)
 
         # Add same-net via clearance blocking (for DRC - vias can't be too close even on same net)
         add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
@@ -1966,6 +2015,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Track path for blocking analysis
             if result.get('path'):
                 routed_net_paths[net_id] = result['path']
+            # Add to track proximity cache
+            track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")

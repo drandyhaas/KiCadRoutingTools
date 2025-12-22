@@ -446,23 +446,26 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
                     obstacles.set_stub_proximity(gx, gy, cost)
 
 
-def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
-                               routed_net_ids: List[int], config: GridRouteConfig,
-                               layer_map: Dict[str, int]):
-    """Add track proximity costs around previously routed tracks (same layer only).
+def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                                     layer_map: Dict[str, int]) -> Dict[int, Dict[Tuple[int, int], int]]:
+    """Compute track proximity costs for a single net's segments.
 
-    Penalizes routing near existing tracks with linear falloff from max cost at track
-    to zero at track_proximity_distance.
+    Returns a dict of layer_idx -> {(gx, gy) -> cost} that can be stored and merged later.
+    This allows incremental updates: compute once when route succeeds, remove when ripped up.
 
     Args:
-        obstacles: The obstacle map to add costs to
         pcb_data: PCB data containing routed segments
-        routed_net_ids: Net IDs that have been routed (to find their segments)
+        net_id: Net ID to compute proximity for
         config: Routing configuration with track_proximity_distance and track_proximity_cost
         layer_map: Mapping of layer names to layer indices
+
+    Returns:
+        Dict mapping layer_idx -> {(gx, gy) -> cost}
     """
+    result: Dict[int, Dict[Tuple[int, int], int]] = {}
+
     if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
-        return  # Feature disabled
+        return result  # Feature disabled
 
     coord = GridCoord(config.grid_step)
     radius_grid = coord.to_grid_dist(config.track_proximity_distance)
@@ -471,15 +474,17 @@ def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
     # Sample every ~1mm along segments (not every grid step) for performance
     sample_interval = max(1, int(1.0 / config.grid_step))
 
-    routed_net_set = set(routed_net_ids)
-
     for seg in pcb_data.segments:
-        if seg.net_id not in routed_net_set:
+        if seg.net_id != net_id:
             continue
 
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
+
+        if layer_idx not in result:
+            result[layer_idx] = {}
+        layer_costs = result[layer_idx]
 
         # Walk along segment using Bresenham, sampling every sample_interval points
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -505,7 +510,10 @@ def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
                             dist = dist_sq ** 0.5
                             proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
                             cost = int(proximity * cost_grid)
-                            obstacles.set_layer_proximity(gx + ex, gy + ey, layer_idx, cost)
+                            cell = (gx + ex, gy + ey)
+                            # Store max cost at each cell
+                            if cell not in layer_costs or cost > layer_costs[cell]:
+                                layer_costs[cell] = cost
 
             if gx == gx2 and gy == gy2:
                 break
@@ -518,6 +526,43 @@ def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
                 err += dx
                 gy += sy
             step_count += 1
+
+    return result
+
+
+def merge_track_proximity_costs(obstacles: GridObstacleMap,
+                                 per_net_costs: Dict[int, Dict[int, Dict[Tuple[int, int], int]]]):
+    """Merge pre-computed per-net track proximity costs into the obstacle map.
+
+    Args:
+        obstacles: The obstacle map to add costs to
+        per_net_costs: Dict of net_id -> layer_idx -> {(gx, gy) -> cost}
+    """
+    for net_id, layer_costs in per_net_costs.items():
+        for layer_idx, cells in layer_costs.items():
+            for (gx, gy), cost in cells.items():
+                obstacles.set_layer_proximity(gx, gy, layer_idx, cost)
+
+
+def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
+                               routed_net_ids: List[int], config: GridRouteConfig,
+                               layer_map: Dict[str, int]):
+    """Add track proximity costs around previously routed tracks (same layer only).
+
+    DEPRECATED: Use compute_track_proximity_for_net() + merge_track_proximity_costs()
+    for better performance with incremental updates.
+
+    Penalizes routing near existing tracks with linear falloff from max cost at track
+    to zero at track_proximity_distance.
+    """
+    if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
+        return  # Feature disabled
+
+    # Compute and merge costs for all routed nets
+    per_net_costs = {}
+    for net_id in routed_net_ids:
+        per_net_costs[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+    merge_track_proximity_costs(obstacles, per_net_costs)
 
 
 def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
