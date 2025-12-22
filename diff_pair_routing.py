@@ -1003,75 +1003,91 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     new_vias = []
     debug_connector_lines = []  # For User.3 layer (connectors)
 
+    def calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_sign):
+        """Calculate extensions for P and N tracks to make their connectors parallel.
+
+        The key insight: for connectors to be parallel, the extending track must
+        extend along the stub direction until its connector is parallel to the
+        non-extended track's connector.
+
+        Formula derivation:
+        - V_p = R_p - S_p (direct connector for P)
+        - V_n = R_n - S_n (direct connector for N)
+        - For P extended by E: V_p' = V_p - E*D
+        - For V_p' || V_n: (V_p - E*D) × V_n = 0
+        - E = (V_p × V_n) / (D × V_n)
+
+        Returns (p_extension, n_extension) where one will be positive, the other 0.
+        """
+        dx, dy = stub_dir
+
+        # Direct connector vectors
+        v_p = (p_route[0] - p_stub[0], p_route[1] - p_stub[1])
+        v_n = (n_route[0] - n_stub[0], n_route[1] - n_stub[1])
+
+        # Cross product of connector vectors: tells us if connectors are already parallel
+        # and which direction the divergence is
+        v_cross = v_p[0] * v_n[1] - v_p[1] * v_n[0]
+
+        # If connectors are nearly parallel, no extension needed
+        if abs(v_cross) < 0.0001:
+            return 0.0, 0.0
+
+        # Cross product D × V_n (for extending P)
+        d_cross_vn = dx * v_n[1] - dy * v_n[0]
+        # Cross product D × V_p (for extending N)
+        d_cross_vp = dx * v_p[1] - dy * v_p[0]
+
+        # Calculate extensions for both tracks
+        # E_p = (V_p × V_n) / (D × V_n) makes V_p' parallel to V_n
+        # E_n = (V_n × V_p) / (D × V_p) = -v_cross / d_cross_vp makes V_n' parallel to V_p
+        p_ext = v_cross / d_cross_vn if abs(d_cross_vn) > 0.0001 else 0.0
+        n_ext = -v_cross / d_cross_vp if abs(d_cross_vp) > 0.0001 else 0.0
+
+        # Use whichever extension is positive (extending in stub direction)
+        # If both are positive, prefer the one for the "outside" track
+        if p_ext > 0.001 and n_ext > 0.001:
+            # Both positive - use the outside track based on geometry
+            is_p_outside = (v_cross > 0 and p_sign < 0) or (v_cross < 0 and p_sign > 0)
+            if is_p_outside:
+                return p_ext, 0.0
+            else:
+                return 0.0, n_ext
+        elif p_ext > 0.001:
+            return p_ext, 0.0
+        elif n_ext > 0.001:
+            return 0.0, n_ext
+
+        return 0.0, 0.0
+
     def float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
-                                src_stub_dir, tgt_stub_dir):
+                                src_stub_dir, tgt_stub_dir, src_extension, tgt_extension):
         """Convert floating-point path (x, y, layer) to segments and vias.
 
-        Adds extension segments on the 'outside' of bends when connector angle differs
-        significantly from stub direction.
+        Adds extension segments to ensure P and N connectors are parallel.
 
         Args:
             sign: +1 or -1 indicating which side of centerline this track is on
             src_stub_dir: (dx, dy) stub direction at source (pointing into route area)
             tgt_stub_dir: (dx, dy) stub direction at target (pointing into route area)
+            src_extension: pre-calculated extension length at source end
+            tgt_extension: pre-calculated extension length at target end
         """
         segs = []
         vias = []
         connector_lines = []  # Debug lines for connectors
         num_segments = len(float_path) - 1
 
-        def calculate_connector_extension(stub_dir, connector_dir, track_sign):
-            """Calculate extension length for outside track of a connector bend.
-
-            Args:
-                stub_dir: (dx, dy) normalized direction of stub (pointing into route area)
-                connector_dir: (dx, dy) normalized direction of connector segment
-                track_sign: +1 or -1 indicating which side of centerline this track is on
-
-            Returns extension length > 0 if this track needs an extension, 0 otherwise.
-            """
-            sdx, sdy = stub_dir
-            cdx, cdy = connector_dir
-
-            # Cross product: stub_dir × connector_dir
-            # Positive = connector turns LEFT from stub
-            # Negative = connector turns RIGHT from stub
-            cross = sdx * cdy - sdy * cdx
-
-            # Calculate angle between stub and connector directions
-            dot = sdx * cdx + sdy * cdy
-            dot = max(-1.0, min(1.0, dot))
-            angle = math.acos(dot)
-
-            # Perpendicular offset convention: (-sdy, sdx) * sign
-            # The "outside" track needs the extension to maintain spacing.
-            is_outside = (cross > 0 and track_sign < 0) or (cross < 0 and track_sign > 0)
-
-            if not is_outside or abs(cross) < 0.01 or angle < 0.1:
-                return 0.0
-
-            # Extension length for miter
-            extension = 2 * spacing_mm * math.tan(angle / 2)
-            return extension
-
         # Add connecting segment from original start if needed
         if original_start and len(float_path) > 0:
             first_x, first_y, first_layer = float_path[0]
             orig_x, orig_y = original_start
             if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
-                # Calculate actual connector direction
-                conn_len = math.sqrt((first_x - orig_x)**2 + (first_y - orig_y)**2)
-                if conn_len > 0.001:
-                    conn_dir = ((first_x - orig_x) / conn_len, (first_y - orig_y) / conn_len)
-                else:
-                    conn_dir = src_stub_dir
-
-                extension_len = calculate_connector_extension(src_stub_dir, conn_dir, sign)
-
-                if extension_len > 0.001:
+                # Use pre-calculated extension to make P and N connectors parallel
+                if src_extension > 0.001:
                     # Add extension segment in stub direction
-                    ext_x = orig_x + src_stub_dir[0] * extension_len
-                    ext_y = orig_y + src_stub_dir[1] * extension_len
+                    ext_x = orig_x + src_stub_dir[0] * src_extension
+                    ext_y = orig_y + src_stub_dir[1] * src_extension
 
                     segs.append(Segment(
                         start_x=orig_x, start_y=orig_y,
@@ -1132,22 +1148,11 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             last_x, last_y, last_layer = float_path[-1]
             orig_x, orig_y = original_end
             if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
-                # Calculate actual connector direction (from route end toward stub)
-                conn_len = math.sqrt((orig_x - last_x)**2 + (orig_y - last_y)**2)
-                if conn_len > 0.001:
-                    conn_dir = ((orig_x - last_x) / conn_len, (orig_y - last_y) / conn_len)
-                else:
-                    conn_dir = tgt_stub_dir
-
-                # Use -tgt_stub_dir for angle calculation (direction track continues into chip).
-                # Negate sign to compensate: perpendicular(-stub_dir) = -perpendicular(stub_dir)
-                incoming_stub_dir = (-tgt_stub_dir[0], -tgt_stub_dir[1])
-                extension_len = calculate_connector_extension(incoming_stub_dir, conn_dir, -sign)
-
-                if extension_len > 0.001:
+                # Use pre-calculated extension to make P and N connectors parallel
+                if tgt_extension > 0.001:
                     # Extend along stub direction (toward route area)
-                    ext_x = orig_x + tgt_stub_dir[0] * extension_len
-                    ext_y = orig_y + tgt_stub_dir[1] * extension_len
+                    ext_x = orig_x + tgt_stub_dir[0] * tgt_extension
+                    ext_y = orig_y + tgt_stub_dir[1] * tgt_extension
 
                     # Connector from route to extension point
                     segs.append(Segment(
@@ -1198,10 +1203,58 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     src_stub_dir_tuple = (src_dir_x, src_dir_y)
     tgt_stub_dir_tuple = (tgt_dir_x, tgt_dir_y)
 
+    # Pre-calculate extensions for source and target connectors
+    # These ensure P and N connector segments are parallel
+    # Source end
+    p_src_route = p_float_path[0][:2] if p_float_path else p_start
+    n_src_route = n_float_path[0][:2] if n_float_path else n_start
+    src_p_ext, src_n_ext = calculate_parallel_extension(
+        p_start, n_start, p_src_route, n_src_route,
+        src_stub_dir_tuple, p_sign
+    )
+
+    # Target end
+    p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
+    n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
+    tgt_p_ext, tgt_n_ext = calculate_parallel_extension(
+        p_end, n_end, p_tgt_route, n_tgt_route,
+        tgt_stub_dir_tuple, p_sign
+    )
+
+    # Debug: verify connector parallelism
+    def debug_connector_parallelism(label, p_stub, n_stub, p_route, n_route, stub_dir, p_ext, n_ext):
+        import math
+        # Calculate actual connector start points after extension
+        p_conn_start = (p_stub[0] + stub_dir[0] * p_ext, p_stub[1] + stub_dir[1] * p_ext)
+        n_conn_start = (n_stub[0] + stub_dir[0] * n_ext, n_stub[1] + stub_dir[1] * n_ext)
+        # Connector vectors
+        p_vec = (p_route[0] - p_conn_start[0], p_route[1] - p_conn_start[1])
+        n_vec = (n_route[0] - n_conn_start[0], n_route[1] - n_conn_start[1])
+        # Normalize
+        p_len = math.sqrt(p_vec[0]**2 + p_vec[1]**2) or 1
+        n_len = math.sqrt(n_vec[0]**2 + n_vec[1]**2) or 1
+        p_dir = (p_vec[0]/p_len, p_vec[1]/p_len)
+        n_dir = (n_vec[0]/n_len, n_vec[1]/n_len)
+        # Cross product (should be ~0 if parallel)
+        cross = p_dir[0] * n_dir[1] - p_dir[1] * n_dir[0]
+        dot = p_dir[0] * n_dir[0] + p_dir[1] * n_dir[1]
+        angle_deg = math.degrees(math.acos(max(-1, min(1, dot)))) if abs(dot) <= 1 else 0
+        print(f"  {label} connectors:")
+        print(f"    P stub: ({p_stub[0]:.3f}, {p_stub[1]:.3f}) ext={p_ext:.4f} -> conn_start: ({p_conn_start[0]:.3f}, {p_conn_start[1]:.3f})")
+        print(f"    N stub: ({n_stub[0]:.3f}, {n_stub[1]:.3f}) ext={n_ext:.4f} -> conn_start: ({n_conn_start[0]:.3f}, {n_conn_start[1]:.3f})")
+        print(f"    P route: ({p_route[0]:.3f}, {p_route[1]:.3f}), N route: ({n_route[0]:.3f}, {n_route[1]:.3f})")
+        print(f"    P dir: ({p_dir[0]:.4f}, {p_dir[1]:.4f}), N dir: ({n_dir[0]:.4f}, {n_dir[1]:.4f})")
+        print(f"    Cross product: {cross:.6f}, Angle: {angle_deg:.2f}° {'PARALLEL' if abs(cross) < 0.01 else 'NOT PARALLEL'}")
+
+    debug_connector_parallelism("Source", p_start, n_start, p_src_route, n_src_route,
+                                 src_stub_dir_tuple, src_p_ext, src_n_ext)
+    debug_connector_parallelism("Target", p_end, n_end, p_tgt_route, n_tgt_route,
+                                 tgt_stub_dir_tuple, tgt_p_ext, tgt_n_ext)
+
     # Convert P path
     p_segs, p_vias, p_conn_lines = float_path_to_geometry(
         p_float_path, p_net_id, p_start, p_end, p_sign,
-        src_stub_dir_tuple, tgt_stub_dir_tuple
+        src_stub_dir_tuple, tgt_stub_dir_tuple, src_p_ext, tgt_p_ext
     )
     new_segments.extend(p_segs)
     new_vias.extend(p_vias)
@@ -1210,7 +1263,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Convert N path
     n_segs, n_vias, n_conn_lines = float_path_to_geometry(
         n_float_path, n_net_id, n_start, n_end, n_sign,
-        src_stub_dir_tuple, tgt_stub_dir_tuple
+        src_stub_dir_tuple, tgt_stub_dir_tuple, src_n_ext, tgt_n_ext
     )
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
