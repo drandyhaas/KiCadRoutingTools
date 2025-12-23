@@ -336,6 +336,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 can_swap_to_top_layer: bool = False,
                 swappable_net_patterns: Optional[List[str]] = None,
                 crossing_penalty: float = 100.0,
+                mps_unroll: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -503,7 +504,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if len(swappable_pairs) >= 2:
             target_swaps, target_swap_info = apply_target_swaps(
                 pcb_data, swappable_pairs, config,
-                lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+                lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config),
+                use_boundary_ordering=mps_unroll
             )
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
@@ -1016,7 +1018,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Use Maximum Planar Subset algorithm to minimize crossing conflicts
         print(f"\nUsing MPS ordering strategy...")
         all_net_ids = [nid for _, nid in net_ids]
-        ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids, diff_pairs=diff_pairs)
+        ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids, diff_pairs=diff_pairs,
+                                               use_boundary_ordering=mps_unroll)
         # Rebuild net_ids in the new order
         id_to_name = {nid: name for name, nid in net_ids}
         net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
@@ -2770,6 +2773,8 @@ Differential pair routing:
                         help="Glob patterns for diff pair nets that can have targets swapped (e.g., 'rx1_*')")
     parser.add_argument("--crossing-penalty", type=float, default=100.0,
                         help="Penalty for crossing assignments in target swap optimization (default: 100.0)")
+    parser.add_argument("--mps-unroll", action="store_true",
+                        help="Use chip boundary unrolling for MPS ordering and target swap crossing detection")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -2850,4 +2855,5 @@ Differential pair routing:
                 can_swap_to_top_layer=args.can_swap_to_top_layer,
                 swappable_net_patterns=args.swappable_nets,
                 crossing_penalty=args.crossing_penalty,
+                mps_unroll=args.mps_unroll,
                 vis_callback=vis_callback)

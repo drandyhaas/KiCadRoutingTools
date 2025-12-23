@@ -44,18 +44,18 @@ class UnionFind:
             self.rank[px] += 1
 
 
-def point_key(x: float, y: float, layer: str, tolerance: float = 0.01) -> Tuple[int, int, str]:
+def point_key(x: float, y: float, layer: str, tolerance: float = 0.02) -> Tuple[int, int, str]:
     """Create a hashable key for a point, quantized to tolerance."""
     return (round(x / tolerance), round(y / tolerance), layer)
 
 
-def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.01) -> bool:
+def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:
     """Check if two points are within tolerance."""
     return abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance
 
 
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
-                           pads: List[Pad], tolerance: float = 0.2) -> Dict:
+                           pads: List[Pad], tolerance: float = 0.02) -> Dict:
     """Check connectivity for a single net.
 
     Returns dict with:
@@ -119,13 +119,14 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
 
     # Connect all points that are within tolerance on the same layer
     # Use size/4 as the tolerance for each point pair (use the larger of the two)
+    # but ensure we never go below the minimum tolerance parameter
     for i, (x1, y1, l1, id1, size1) in enumerate(all_points):
         for j in range(i + 1, len(all_points)):
             x2, y2, l2, id2, size2 = all_points[j]
             if l1 != l2:
                 continue
-            # Use max(size1, size2) / 4 as tolerance
-            point_tolerance = max(size1, size2) / 4
+            # Use max(size1, size2) / 4, but at least the minimum tolerance
+            point_tolerance = max(max(size1, size2) / 4, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
                 uf.union(id1, id2)
 
@@ -163,13 +164,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
 
 
 def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = None,
-                           tolerance: float = 0.1, quiet: bool = False) -> List[Dict]:
+                           tolerance: float = 0.02, quiet: bool = False) -> List[Dict]:
     """Run connectivity checks on the PCB file.
 
     Args:
         pcb_file: Path to the KiCad PCB file
         net_patterns: Optional list of net name patterns (fnmatch style) to check.
-        tolerance: Connection tolerance in mm (default: 0.01mm)
+        tolerance: Minimum connection tolerance in mm (default: 0.02mm)
         quiet: If True, only print a summary line unless there are issues
 
     Returns:
@@ -276,8 +277,8 @@ if __name__ == "__main__":
     parser.add_argument('pcb', help='Input PCB file')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
                         help='Net name patterns to check (fnmatch wildcards supported, e.g., "*lvds*")')
-    parser.add_argument('--tolerance', '-t', type=float, default=0.01,
-                        help='Connection tolerance in mm (default: 0.01)')
+    parser.add_argument('--tolerance', '-t', type=float, default=0.02,
+                        help='Minimum connection tolerance in mm (default: 0.02)')
     parser.add_argument('--quiet', '-q', action='store_true',
                         help='Only print a summary line unless there are issues')
 

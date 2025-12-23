@@ -10,11 +10,15 @@ from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPair
+from chip_boundary import (
+    build_chip_list, identify_chip_for_point, compute_far_side,
+    compute_boundary_position, crossings_from_boundary_order
+)
 
 
 # Position rounding precision for coordinate comparisons
 # All position-based lookups must use this to ensure consistency
-POSITION_DECIMALS = 2
+POSITION_DECIMALS = 3
 
 
 def pos_key(x: float, y: float) -> Tuple[float, float]:
@@ -638,7 +642,8 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
 
 def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               center: Tuple[float, float] = None,
-                              diff_pairs: Dict = None) -> List[int]:
+                              diff_pairs: Dict = None,
+                              use_boundary_ordering: bool = False) -> List[int]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 
@@ -663,6 +668,9 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         center: Optional center point for angular projection (auto-computed if None)
         diff_pairs: Optional dict of pair_name -> DiffPair. If provided, P and N nets
                     of each pair are treated as a single routing unit.
+        use_boundary_ordering: If True, use chip boundary unrolling for crossing detection.
+                              This respects the physical constraint that routes can't go
+                              through BGA chips. Default is False (use angular projection).
 
     Returns:
         Ordered list of net IDs, with least-conflicting nets first
@@ -740,7 +748,28 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         else:
             center = (0, 0)
 
-    # Step 3: Compute angular position for each endpoint
+    # Step 3: Compute positions for crossing detection
+    # If use_boundary_ordering is True, use chip boundary unrolling
+    # Otherwise, use angular projection from center (default)
+
+    unit_boundary_info = {}  # unit_id -> (src_pos, tgt_pos, src_chip, tgt_chip) or None
+    unit_angles = {}  # unit_id -> (angle1, angle2)
+
+    if use_boundary_ordering:
+        # Use chip boundary ordering - respects physical constraint that routes can't go through chips
+        chips = build_chip_list(pcb_data)
+
+        for unit_id, endpoints in unit_endpoints.items():
+            src_chip = identify_chip_for_point(endpoints[0], chips)
+            tgt_chip = identify_chip_for_point(endpoints[1], chips)
+
+            if src_chip and tgt_chip and src_chip != tgt_chip:
+                src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
+                src_pos = compute_boundary_position(src_chip, endpoints[0], src_far)
+                tgt_pos = compute_boundary_position(tgt_chip, endpoints[1], tgt_far)
+                unit_boundary_info[unit_id] = (src_pos, tgt_pos, src_chip, tgt_chip)
+
+    # Compute angular positions (used as fallback or as primary method)
     def angle_from_center(point: Tuple[float, float]) -> float:
         """Compute angle from center to point in radians [0, 2*pi)."""
         dx = point[0] - center[0]
@@ -750,15 +779,14 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             ang += 2 * math.pi
         return ang
 
-    # For each unit, get angles of both endpoints and normalize order
-    unit_angles = {}  # unit_id -> (angle1, angle2) where angle1 < angle2
     for unit_id, endpoints in unit_endpoints.items():
-        a1 = angle_from_center(endpoints[0])
-        a2 = angle_from_center(endpoints[1])
-        # Normalize: always store with smaller angle first
-        if a1 > a2:
-            a1, a2 = a2, a1
-        unit_angles[unit_id] = (a1, a2)
+        # Use angular method for all units (primary or fallback)
+        if not use_boundary_ordering or unit_boundary_info.get(unit_id) is None:
+            a1 = angle_from_center(endpoints[0])
+            a2 = angle_from_center(endpoints[1])
+            if a1 > a2:
+                a1, a2 = a2, a1
+            unit_angles[unit_id] = (a1, a2)
 
     # Build layer information for each unit from stub segments
     unit_layers = {}  # unit_id -> (source_layers: set, target_layers: set)
@@ -783,35 +811,52 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         unit_layers[unit_id] = (src_layers, tgt_layers)
 
     # Step 4: Detect crossing conflicts
-    # Two units cross if their intervals on the circle interleave
-    # Unit A with (a1, a2) and Unit B with (b1, b2) cross if:
-    #   a1 < b1 < a2 < b2  OR  b1 < a1 < b2 < a2
     def units_cross(unit_a: int, unit_b: int) -> bool:
-        """Check if two units have crossing paths on the circular boundary."""
-        a1, a2 = unit_angles[unit_a]
-        b1, b2 = unit_angles[unit_b]
+        """Check if two units have crossing paths."""
+        info_a = unit_boundary_info.get(unit_a)
+        info_b = unit_boundary_info.get(unit_b)
 
-        # Check interleaving: one unit's interval partially overlaps the other's
-        # a1 < b1 < a2 < b2 means A starts, B starts, A ends, B ends = crossing
-        angles_cross = (a1 < b1 < a2 < b2) or (b1 < a1 < b2 < a2)
-        if not angles_cross:
-            return False
+        # If both have boundary info and boundary ordering is enabled, use it
+        if use_boundary_ordering and info_a is not None and info_b is not None:
+            # Only compare if same chip pair
+            if (info_a[2], info_a[3]) != (info_b[2], info_b[3]):
+                return False  # Different chip pairs, can't directly cross
 
-        # Check if layers overlap - if no overlap, no real conflict
-        a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
-        b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+            # Check boundary order inversion
+            if not crossings_from_boundary_order(info_a[0], info_a[1], info_b[0], info_b[1]):
+                return False
 
-        a_all = a_src | a_tgt
-        b_all = b_src | b_tgt
+            # Inversion detected, check if layers overlap
+            a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+            b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+            a_all = a_src | a_tgt
+            b_all = b_src | b_tgt
+            if a_all and b_all and not (a_all & b_all):
+                return False  # No layer overlap, no real conflict
+            return True
 
-        # If both have known layers and they don't overlap, no conflict
-        if a_all and b_all and not (a_all & b_all):
-            return False
+        # Use angular method (default or fallback)
+        if unit_a in unit_angles and unit_b in unit_angles:
+            a1, a2 = unit_angles[unit_a]
+            b1, b2 = unit_angles[unit_b]
+            angles_cross = (a1 < b1 < a2 < b2) or (b1 < a1 < b2 < a2)
+            if not angles_cross:
+                return False
 
-        return True
+            # Check layer overlap
+            a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+            b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+            a_all = a_src | a_tgt
+            b_all = b_src | b_tgt
+            if a_all and b_all and not (a_all & b_all):
+                return False
+
+            return True
+
+        return False
 
     # Build conflict graph
-    unit_list = list(unit_angles.keys())
+    unit_list = list(unit_endpoints.keys())
     conflicts = {unit_id: set() for unit_id in unit_list}
 
     for i, unit_a in enumerate(unit_list):

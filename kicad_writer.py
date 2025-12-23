@@ -317,9 +317,14 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
 
 def swap_via_nets_at_positions(content: str, positions: set,
-                               old_net_id: int, new_net_id: int) -> Tuple[str, int]:
+                               old_net_id: int, new_net_id: int,
+                               tolerance: float = 0.02) -> Tuple[str, int]:
     """
     Swap net IDs of vias that are at the given positions.
+
+    Uses tolerance-based matching to handle slight coordinate differences
+    between vias and segment endpoints (e.g., original vias may be slightly
+    off-grid from routed segments).
 
     Returns (modified_content, count_of_swapped_vias).
     """
@@ -327,15 +332,20 @@ def swap_via_nets_at_positions(content: str, positions: set,
 
     count = 0
 
+    def is_near_any_position(x, y, positions, tol):
+        """Check if (x, y) is within tolerance of any position in the set."""
+        for px, py in positions:
+            if abs(x - px) < tol and abs(y - py) < tol:
+                return True
+        return False
+
     def replace_net(match):
         nonlocal count
         via_x, via_y = float(match.group(1)), float(match.group(2))
         via_net_id = int(match.group(3))
 
-        via_key = pos_key(via_x, via_y)
-
-        # Check if this via is at one of our positions and has the correct net ID
-        if via_net_id == old_net_id and via_key in positions:
+        # Check if this via is near one of our positions and has the correct net ID
+        if via_net_id == old_net_id and is_near_any_position(via_x, via_y, positions, tolerance):
             count += 1
             return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)

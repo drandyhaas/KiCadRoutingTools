@@ -11,7 +11,7 @@ Cost factors:
 """
 
 import math
-from typing import Dict, List, Optional, Tuple, Set, Callable
+from typing import Dict, List, Optional, Tuple, Set, Callable, TYPE_CHECKING
 
 try:
     from scipy.optimize import linear_sum_assignment
@@ -22,6 +22,10 @@ except ImportError:
 from kicad_parser import PCBData, Pad
 from routing_config import DiffPair, GridRouteConfig
 from routing_utils import find_connected_segment_positions, pos_key
+from chip_boundary import (
+    ChipBoundary, build_chip_list, identify_chip_for_point,
+    compute_far_side, compute_boundary_position, crossings_from_boundary_order
+)
 
 
 def segments_cross(p1: Tuple[float, float], p2: Tuple[float, float],
@@ -65,7 +69,9 @@ def get_target_centroid(endpoint: Tuple) -> Tuple[float, float]:
 
 def build_cost_matrix(
     pair_data: List[Tuple[str, DiffPair, List, List]],
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+    use_boundary_ordering: bool = False
 ) -> Tuple[List[List[float]], List[str]]:
     """
     Build N x N cost matrix for optimal target assignment.
@@ -74,6 +80,9 @@ def build_cost_matrix(
         pair_data: List of (pair_name, DiffPair, sources, targets) tuples
                    sources/targets format: (p_gx, p_gy, n_gx, n_gy, layer_idx, p_x, p_y, n_x, n_y)
         config: Routing configuration with via_cost
+        pcb_data: PCB data for chip boundary detection
+        use_boundary_ordering: If True, use chip boundary ordering for crossing detection.
+                              Otherwise use Euclidean segment crossing test (default).
 
     Returns:
         (cost_matrix, pair_names) where:
@@ -84,6 +93,7 @@ def build_cost_matrix(
         1. Distance: Euclidean distance between source and target centroids
         2. Layer penalty: via_cost if source layer != target layer
         3. Crossing penalty: Heavy cost for assignments that cross other assignments
+           (using chip boundary ordering for accurate detection)
     """
     n = len(pair_data)
     pair_names = [pd[0] for pd in pair_data]
@@ -105,6 +115,31 @@ def build_cost_matrix(
         source_layers.append(src[4])  # layer_idx
         target_centroids.append(get_target_centroid(tgt))
         target_layers.append(tgt[4])  # layer_idx
+
+    # Build chip list and boundary positions if using boundary ordering
+    chips = []
+    source_chips = []
+    target_chips = []
+    boundary_positions: Dict[Tuple[int, int], Optional[Tuple[float, float]]] = {}
+
+    if use_boundary_ordering:
+        chips = build_chip_list(pcb_data)
+
+        # Identify which chip each source/target belongs to
+        source_chips = [identify_chip_for_point(c, chips) for c in source_centroids]
+        target_chips = [identify_chip_for_point(c, chips) for c in target_centroids]
+
+        # Precompute boundary positions for each (source_i, target_j) assignment
+        for i in range(n):
+            src_chip = source_chips[i]
+            for j in range(n):
+                tgt_chip = target_chips[j]
+
+                if src_chip and tgt_chip and src_chip != tgt_chip:
+                    src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
+                    src_pos = compute_boundary_position(src_chip, source_centroids[i], src_far)
+                    tgt_pos = compute_boundary_position(tgt_chip, target_centroids[j], tgt_far)
+                    boundary_positions[(i, j)] = (src_pos, tgt_pos)
 
     # Initialize cost matrix with distance and layer penalties
     cost_matrix = [[0.0] * n for _ in range(n)]
@@ -128,22 +163,59 @@ def build_cost_matrix(
     # Add crossing penalties
     # For each (i,j) assignment, check if it crosses any other potential (k,l) assignment
     for i in range(n):
-        src_i = source_centroids[i]
         for j in range(n):
-            tgt_j = target_centroids[j]
-
             crossing_count = 0
-            for k in range(n):
-                if k == i:
-                    continue
-                src_k = source_centroids[k]
-                for l in range(n):
-                    if l == j:
-                        continue
-                    tgt_l = target_centroids[l]
 
-                    if segments_cross(src_i, tgt_j, src_k, tgt_l):
-                        crossing_count += 1
+            if use_boundary_ordering:
+                # Use chip boundary ordering for crossing detection
+                pos_ij = boundary_positions.get((i, j))
+                if pos_ij is not None:
+                    for k in range(n):
+                        if k == i:
+                            continue
+                        for l in range(n):
+                            if l == j:
+                                continue
+
+                            pos_kl = boundary_positions.get((k, l))
+                            if pos_kl is None:
+                                continue
+
+                            # Check if same chip pair
+                            if (source_chips[i] == source_chips[k] and
+                                target_chips[j] == target_chips[l]):
+                                if crossings_from_boundary_order(
+                                    pos_ij[0], pos_ij[1], pos_kl[0], pos_kl[1]
+                                ):
+                                    crossing_count += 1
+                else:
+                    # Fall back to segment crossing for this assignment
+                    src_i = source_centroids[i]
+                    tgt_j = target_centroids[j]
+                    for k in range(n):
+                        if k == i:
+                            continue
+                        src_k = source_centroids[k]
+                        for l in range(n):
+                            if l == j:
+                                continue
+                            tgt_l = target_centroids[l]
+                            if segments_cross(src_i, tgt_j, src_k, tgt_l):
+                                crossing_count += 1
+            else:
+                # Use Euclidean segment crossing (default)
+                src_i = source_centroids[i]
+                tgt_j = target_centroids[j]
+                for k in range(n):
+                    if k == i:
+                        continue
+                    src_k = source_centroids[k]
+                    for l in range(n):
+                        if l == j:
+                            continue
+                        tgt_l = target_centroids[l]
+                        if segments_cross(src_i, tgt_j, src_k, tgt_l):
+                            crossing_count += 1
 
             # Add normalized crossing penalty
             if crossing_count > 0:
@@ -154,7 +226,9 @@ def build_cost_matrix(
 
 def compute_optimal_assignment(
     pair_data: List[Tuple[str, DiffPair, List, List]],
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+    use_boundary_ordering: bool = False
 ) -> Optional[Dict[str, str]]:
     """
     Compute optimal target swaps using Hungarian algorithm.
@@ -162,6 +236,8 @@ def compute_optimal_assignment(
     Args:
         pair_data: List of (pair_name, DiffPair, sources, targets) for swappable pairs
         config: Routing configuration
+        pcb_data: PCB data for chip boundary detection
+        use_boundary_ordering: If True, use chip boundary ordering for crossing detection
 
     Returns:
         Dictionary mapping pair_name -> target_pair_name for swaps,
@@ -175,7 +251,7 @@ def compute_optimal_assignment(
     if len(pair_data) < 2:
         return None
 
-    cost_matrix, pair_names = build_cost_matrix(pair_data, config)
+    cost_matrix, pair_names = build_cost_matrix(pair_data, config, pcb_data, use_boundary_ordering)
     n = len(pair_names)
 
     # Compute original (diagonal) cost - each source connects to its own target
@@ -391,7 +467,8 @@ def apply_target_swaps(
     pcb_data: PCBData,
     swappable_pairs: List[Tuple[str, DiffPair]],
     config: GridRouteConfig,
-    get_endpoints_func: Callable[[DiffPair], Tuple[List, List, Optional[str]]]
+    get_endpoints_func: Callable[[DiffPair], Tuple[List, List, Optional[str]]],
+    use_boundary_ordering: bool = False
 ) -> Tuple[Dict[str, str], List[Dict]]:
     """
     Main entry point for target swap optimization.
@@ -405,6 +482,7 @@ def apply_target_swaps(
         config: Routing configuration
         get_endpoints_func: Function to get endpoints for a DiffPair
                            Returns (sources, targets, error_string)
+        use_boundary_ordering: If True, use chip boundary ordering for crossing detection
 
     Returns:
         (target_swaps, target_swap_info) where:
@@ -433,7 +511,7 @@ def apply_target_swaps(
     print(f"\nComputing optimal target assignment for {len(pair_data)} pairs...")
 
     # Compute optimal swaps using Hungarian algorithm
-    optimal_swaps = compute_optimal_assignment(pair_data, config)
+    optimal_swaps = compute_optimal_assignment(pair_data, config, pcb_data, use_boundary_ordering)
 
     if not optimal_swaps:
         return target_swaps, target_swap_info

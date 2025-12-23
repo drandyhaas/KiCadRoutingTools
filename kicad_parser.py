@@ -573,8 +573,8 @@ def detect_package_type(footprint: Footprint) -> str:
         return 'OTHER'
 
     # Get unique X and Y positions
-    x_positions = sorted(set(round(p.global_x, 2) for p in pads))
-    y_positions = sorted(set(round(p.global_y, 2) for p in pads))
+    x_positions = sorted(set(round(p.global_x, 3) for p in pads))
+    y_positions = sorted(set(round(p.global_y, 3) for p in pads))
 
     # BGA: grid arrangement (multiple rows AND columns of pads)
     # QFN/QFP: perimeter arrangement (pads mostly on edges)
