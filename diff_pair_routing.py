@@ -515,13 +515,17 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     def find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, sb, label):
         """Find all open positions at the given setback distance, sorted by preference.
 
-        Scans 5 angles (0, ±max/2, ±max) and returns all valid candidates sorted by
-        separation from neighboring stub endpoints (best first).
+        Scans 9 angles (0, ±max/4, ±max/2, ±3*max/4, ±max) and returns all valid
+        candidates sorted by separation from neighboring stub endpoints (best first).
         Returns list of (gx, gy, actual_dir_x, actual_dir_y, angle_deg, min_dist) or empty list if all blocked.
         """
-        # Generate 5 angles: 0, ±max/2, ±max
+        # Generate 9 angles: 0, ±max/4, ±max/2, ±3*max/4, ±max
         max_angle = config.max_setback_angle
-        angles_deg = [0, max_angle / 2, -max_angle / 2, max_angle, -max_angle]
+        angles_deg = [0,
+                      max_angle / 4, -max_angle / 4,
+                      max_angle / 2, -max_angle / 2,
+                      3 * max_angle / 4, -3 * max_angle / 4,
+                      max_angle, -max_angle]
 
         # Collect all valid candidates: (angle_deg, gx, gy, dx, dy, x, y)
         valid_candidates = []
@@ -577,7 +581,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         Called only after find_open_position returns None.
         """
         max_angle = config.max_setback_angle
-        angles_deg = [0, max_angle / 2, -max_angle / 2, max_angle, -max_angle]
+        angles_deg = [0,
+                      max_angle / 4, -max_angle / 4,
+                      max_angle / 2, -max_angle / 2,
+                      3 * max_angle / 4, -3 * max_angle / 4,
+                      max_angle, -max_angle]
         blocked = []
         step = config.grid_step / 2
 

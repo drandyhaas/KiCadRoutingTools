@@ -54,7 +54,7 @@ class GridRouteConfig:
     track_proximity_distance: float = 1.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
     track_proximity_cost: float = 0.2  # mm equivalent cost at track center
-    target_swap_crossing_penalty: float = 100.0  # Penalty for crossing assignments in target swap
+    target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap
 
 
 class GridCoord:

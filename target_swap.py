@@ -99,7 +99,7 @@ def build_cost_matrix(
     n = len(pair_data)
     pair_names = [pd[0] for pd in pair_data]
 
-    # Get crossing penalty from config (default 100.0)
+    # Get crossing penalty from config (default 1000.0)
     crossing_penalty = getattr(config, 'target_swap_crossing_penalty', 1000.0)
 
     # Extract source/target centroids and layers

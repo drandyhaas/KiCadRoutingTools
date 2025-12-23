@@ -309,9 +309,13 @@ def validate_setback_clear(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     # Check radius around setback position
     check_radius = config.track_width / 2 + config.clearance
 
-    # Generate 5 angles, preferring small angles first: 0, ±max/2, ±max
+    # Generate 9 angles, preferring small angles first: 0, ±max/4, ±max/2, ±3*max/4, ±max
     max_angle = config.max_setback_angle
-    angles_deg = [0, max_angle / 2, -max_angle / 2, max_angle, -max_angle]
+    angles_deg = [0,
+                  max_angle / 4, -max_angle / 4,
+                  max_angle / 2, -max_angle / 2,
+                  3 * max_angle / 4, -3 * max_angle / 4,
+                  max_angle, -max_angle]
 
     for angle_deg in angles_deg:
         angle_rad = math.radians(angle_deg)

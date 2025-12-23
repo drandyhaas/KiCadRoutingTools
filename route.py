@@ -335,7 +335,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 enable_layer_switch: bool = True,
                 can_swap_to_top_layer: bool = False,
                 swappable_net_patterns: Optional[List[str]] = None,
-                crossing_penalty: float = 100.0,
+                crossing_penalty: float = 1000.0,
                 mps_unroll: bool = False,
                 skip_routing: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
