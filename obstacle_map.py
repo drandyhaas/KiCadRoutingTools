@@ -398,7 +398,9 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
     stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
     stub_cost_grid = int(config.stub_proximity_cost * 1000 / config.grid_step)
 
-    for stub_x, stub_y in unrouted_stubs:
+    for stub in unrouted_stubs:
+        # Handle both (x, y) and (x, y, layer) tuple formats
+        stub_x, stub_y = stub[0], stub[1]
         gcx, gcy = coord.to_grid(stub_x, stub_y)
         for dx in range(-stub_radius_grid, stub_radius_grid + 1):
             for dy in range(-stub_radius_grid, stub_radius_grid + 1):

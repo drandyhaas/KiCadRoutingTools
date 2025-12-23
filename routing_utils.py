@@ -516,8 +516,11 @@ def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
     return unrouted_ids
 
 
-def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[float, float]]:
-    """Get free end positions of unrouted net stubs for proximity avoidance."""
+def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[float, float, str]]:
+    """Get free end positions of unrouted net stubs for proximity avoidance.
+
+    Returns list of (x, y, layer) tuples - includes layer for same-layer filtering.
+    """
     stubs = []
     for net_id in net_ids:
         net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
@@ -530,10 +533,9 @@ def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[floa
         for group in groups:
             free_ends = find_stub_free_ends(group, net_pads)
             if free_ends:
-                # Use average of free ends if multiple (e.g., diff pair stub with P/N)
-                avg_x = sum(fe[0] for fe in free_ends) / len(free_ends)
-                avg_y = sum(fe[1] for fe in free_ends) / len(free_ends)
-                stubs.append((avg_x, avg_y))
+                # Include all free ends with their layers (for same-layer filtering)
+                for fe_x, fe_y, fe_layer in free_ends:
+                    stubs.append((fe_x, fe_y, fe_layer))
     return stubs
 
 

@@ -542,30 +542,50 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             gx, gy = coord.to_grid(x, y)
 
             # Check track blocking at setback position
-            if not obstacles.is_blocked(gx, gy, layer_idx):
+            setback_blocked = obstacles.is_blocked(gx, gy, layer_idx)
+            if not setback_blocked:
                 # Also check the connector path from stub center to setback position
-                if check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
+                connector_clear = check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config)
+                if connector_clear:
                     # Check that the routing direction is open (not immediately blocked)
                     # Probe a short distance in the routing direction to ensure route can proceed
                     probe_dist = config.grid_step * 3  # Check 3 grid cells ahead
                     probe_x = x + dx * probe_dist
                     probe_y = y + dy * probe_dist
                     probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
-                    if not obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
+                    probe_blocked = obstacles.is_blocked(probe_gx, probe_gy, layer_idx)
+                    if not probe_blocked:
                         valid_candidates.append((angle_deg, gx, gy, dx, dy, x, y))
+                        if config.verbose:
+                            print(f"      {label} {angle_deg:+.1f}°: OK")
+                    elif config.verbose:
+                        print(f"      {label} {angle_deg:+.1f}°: probe ahead blocked at ({probe_gx},{probe_gy})")
+                elif config.verbose:
+                    print(f"      {label} {angle_deg:+.1f}°: connector path blocked")
+            elif config.verbose:
+                print(f"      {label} {angle_deg:+.1f}°: setback position blocked at ({gx},{gy})")
 
         if not valid_candidates:
             print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
             return []
 
-        # Score each candidate by minimum distance to neighbor stubs
+        # Score each candidate by minimum distance to neighbor stubs ON THE SAME LAYER
+        current_layer = layer_names[layer_idx]
         scored_candidates = []
         for angle_deg, gx, gy, dx, dy, x, y in valid_candidates:
             min_dist = float('inf')
+            closest_stub = None
             if neighbor_stubs:
-                for stub_x, stub_y in neighbor_stubs:
+                for stub in neighbor_stubs:
+                    stub_x, stub_y, stub_layer = stub
+                    if stub_layer != current_layer:
+                        continue  # Only consider stubs on same layer
                     dist = math.sqrt((x - stub_x)**2 + (y - stub_y)**2)
-                    min_dist = min(min_dist, dist)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_stub = (stub_x, stub_y)
+            if config.verbose and closest_stub:
+                print(f"        {label} {angle_deg:+.1f}°: nearest same-layer stub at {closest_stub[0]:.2f},{closest_stub[1]:.2f} dist={min_dist:.2f}mm")
             # Use negative angle magnitude as tiebreaker (prefer smaller angles)
             scored_candidates.append((min_dist, -abs(angle_deg), gx, gy, dx, dy, angle_deg))
 

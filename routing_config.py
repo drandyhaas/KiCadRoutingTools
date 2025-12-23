@@ -49,6 +49,7 @@ class GridRouteConfig:
     min_turning_radius: float = 0.2  # mm - minimum turning radius for pose-based routing
     fix_polarity: bool = True  # Swap target pad nets if polarity swap needed
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
+    verbose: bool = False  # Print detailed diagnostic output
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 1.0  # mm - radius around routed tracks to penalize (same layer)

@@ -329,6 +329,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 diff_pair_centerline_setback: float = None,
                 min_turning_radius: float = 0.2,
                 debug_lines: bool = False,
+                verbose: bool = False,
                 fix_polarity: bool = True,
                 max_rip_up_count: int = 3,
                 max_setback_angle: float = 22.5,
@@ -421,6 +422,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
         debug_lines=debug_lines,
+        verbose=verbose,
         fix_polarity=fix_polarity,
         max_rip_up_count=max_rip_up_count,
         max_setback_angle=max_setback_angle,
@@ -2319,6 +2321,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     rippable_blockers.append(b)
                         current_canonical = ripped_pair.p_net_id
 
+                        if blockers and not rippable_blockers:
+                            # Show which blockers exist but can't be ripped (not yet routed)
+                            unrippable_names = []
+                            for b in blockers[:3]:  # Show up to 3
+                                if b.net_id in diff_pair_by_net_id:
+                                    unrippable_names.append(diff_pair_by_net_id[b.net_id][0])
+                                else:
+                                    unrippable_names.append(b.net_name)
+                            print(f"  No rippable blockers (not yet routed): {', '.join(unrippable_names)}")
+
                         # Progressive rip-up: try N=1, then N=2, etc
                         ripped_items = []
 
@@ -2331,6 +2343,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 for i in range(N)
                             )
                             if (current_canonical, blocker_canonicals) in rip_and_retry_history:
+                                # Show which blockers we're skipping due to history
+                                blocker_names = []
+                                for i in range(N):
+                                    b = rippable_blockers[i]
+                                    if b.net_id in diff_pair_by_net_id:
+                                        blocker_names.append(diff_pair_by_net_id[b.net_id][0])
+                                    else:
+                                        blocker_names.append(b.net_name)
+                                print(f"  Skipping rip-up (already tried): {', '.join(blocker_names)}")
                                 continue
 
                             # Rip up blockers
@@ -2848,6 +2869,8 @@ Differential pair routing:
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Print detailed diagnostic output (setback checks, etc.)")
     parser.add_argument("--skip-routing", action="store_true",
                         help="Skip actual routing, only do swaps and write debug info")
 
@@ -2913,6 +2936,7 @@ Differential pair routing:
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,
                 min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
+                verbose=args.verbose,
                 fix_polarity=not args.no_fix_polarity,
                 max_rip_up_count=args.max_ripup,
                 max_setback_angle=args.max_setback_angle,
