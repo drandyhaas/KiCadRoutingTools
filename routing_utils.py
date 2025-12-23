@@ -12,6 +12,21 @@ from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPair
 
 
+# Position rounding precision for coordinate comparisons
+# All position-based lookups must use this to ensure consistency
+POSITION_DECIMALS = 2
+
+
+def pos_key(x: float, y: float) -> Tuple[float, float]:
+    """
+    Normalize coordinates for position-based lookups.
+
+    Use this consistently when building position sets or checking position membership
+    to avoid floating-point comparison issues.
+    """
+    return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS))
+
+
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     """
     Extract differential pair base name and polarity from net name.
@@ -1274,9 +1289,6 @@ def find_connected_segment_positions(pcb_data: PCBData, start_x: float, start_y:
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
 
     # Build adjacency: position -> list of connected positions
-    def pos_key(x, y):
-        return (round(x, 2), round(y, 2))
-
     adjacency = {}
     for seg in net_segments:
         start = pos_key(seg.start_x, seg.start_y)

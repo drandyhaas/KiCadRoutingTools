@@ -32,7 +32,7 @@ from routing_utils import (
     find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints,
     compute_mps_net_ordering, add_route_to_pcb_data, remove_route_from_pcb_data,
     find_pad_nearest_to_position, find_connected_segment_positions,
-    find_stub_free_ends, find_connected_groups
+    find_stub_free_ends, find_connected_groups, pos_key
 )
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
@@ -109,8 +109,8 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list,
     n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
 
     for seg in pcb_data.segments:
-        seg_start = (round(seg.start_x, 2), round(seg.start_y, 2))
-        seg_end = (round(seg.end_x, 2), round(seg.end_y, 2))
+        seg_start = pos_key(seg.start_x, seg.start_y)
+        seg_end = pos_key(seg.end_x, seg.end_y)
         if seg.net_id == p_net_id and (seg_start in p_stub_positions or seg_end in p_stub_positions):
             seg.net_id = n_net_id
         elif seg.net_id == n_net_id and (seg_start in n_stub_positions or seg_end in n_stub_positions):
@@ -118,7 +118,7 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list,
 
     # Also swap via net IDs at stub positions
     for via in pcb_data.vias:
-        via_pos = (round(via.x, 2), round(via.y, 2))
+        via_pos = pos_key(via.x, via.y)
         if via.net_id == p_net_id and via_pos in p_stub_positions:
             via.net_id = n_net_id
         elif via.net_id == n_net_id and via_pos in n_stub_positions:
@@ -536,9 +536,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 p2_n_seg_count = 0
 
                 for seg in pcb_data.segments:
-                    # Use round(x, 2) to match find_connected_segment_positions
-                    seg_positions = {(round(seg.start_x, 2), round(seg.start_y, 2)),
-                                    (round(seg.end_x, 2), round(seg.end_y, 2))}
+                    seg_positions = {pos_key(seg.start_x, seg.start_y),
+                                    pos_key(seg.end_x, seg.end_y)}
                     # p1 target: p1_pair.p_net_id -> p2_pair.p_net_id
                     if seg.net_id == p1_pair.p_net_id and seg_positions & p1_p_positions:
                         seg.net_id = p2_pair.p_net_id
@@ -563,8 +562,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 p2_n_via_count = 0
 
                 for via in pcb_data.vias:
-                    # Use round(x, 2) to match find_connected_segment_positions
-                    via_pos = (round(via.x, 2), round(via.y, 2))
+                    via_pos = pos_key(via.x, via.y)
                     if via.net_id == p1_pair.p_net_id and via_pos in p1_p_positions:
                         via.net_id = p2_pair.p_net_id
                         p1_p_via_count += 1

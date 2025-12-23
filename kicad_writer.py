@@ -7,6 +7,7 @@ import uuid
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import Pad
+from routing_utils import pos_key
 
 
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
@@ -296,9 +297,6 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
     count = 0
 
-    def pos_key(x, y):
-        return (round(x, 2), round(y, 2))
-
     def replace_net(match):
         nonlocal count
         start_x, start_y = float(match.group(1)), float(match.group(2))
@@ -328,9 +326,6 @@ def swap_via_nets_at_positions(content: str, positions: set,
     via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+(\d+)\)'
 
     count = 0
-
-    def pos_key(x, y):
-        return (round(x, 2), round(y, 2))
 
     def replace_net(match):
         nonlocal count
