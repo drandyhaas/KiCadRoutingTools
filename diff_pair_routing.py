@@ -1154,10 +1154,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
 
     # Check if polarity differs between source and target
     polarity_swap_needed = (src_p_sign != tgt_p_sign)
-    print(f"  DEBUG polarity: src_p_sign={src_p_sign}, tgt_p_sign={tgt_p_sign}, swap_needed={polarity_swap_needed}")
-    print(f"  DEBUG sources: P=({p_src_x:.2f},{p_src_y:.2f}), N=({n_src_x:.2f},{n_src_y:.2f})")
-    print(f"  DEBUG targets: P=({p_tgt_x:.2f},{p_tgt_y:.2f}), N=({n_tgt_x:.2f},{n_tgt_y:.2f})")
-    print(f"  DEBUG path dir: start=({path_dir_x:.2f},{path_dir_y:.2f}), end=({tgt_path_dir_x:.2f},{tgt_path_dir_y:.2f})")
 
     # Check if path has layer changes (vias)
     has_layer_change = False

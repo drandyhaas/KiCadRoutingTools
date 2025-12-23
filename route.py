@@ -534,8 +534,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 p2_n_seg_count = 0
 
                 for seg in pcb_data.segments:
-                    seg_positions = {(round(seg.start_x, 4), round(seg.start_y, 4)),
-                                    (round(seg.end_x, 4), round(seg.end_y, 4))}
+                    # Use round(x, 2) to match find_connected_segment_positions
+                    seg_positions = {(round(seg.start_x, 2), round(seg.start_y, 2)),
+                                    (round(seg.end_x, 2), round(seg.end_y, 2))}
                     # p1 target: p1_pair.p_net_id -> p2_pair.p_net_id
                     if seg.net_id == p1_pair.p_net_id and seg_positions & p1_p_positions:
                         seg.net_id = p2_pair.p_net_id
@@ -560,7 +561,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 p2_n_via_count = 0
 
                 for via in pcb_data.vias:
-                    via_pos = (round(via.x, 4), round(via.y, 4))
+                    # Use round(x, 2) to match find_connected_segment_positions
+                    via_pos = (round(via.x, 2), round(via.y, 2))
                     if via.net_id == p1_pair.p_net_id and via_pos in p1_p_positions:
                         via.net_id = p2_pair.p_net_id
                         p1_p_via_count += 1
@@ -837,9 +839,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"Applied {solo_src_count} solo source layer switch(es)")
 
         # Now try target-side segment overlap swaps for remaining pairs
+        # Skip pairs that have had their targets swapped via --swappable-nets,
+        # as their target positions are now at different physical locations
         target_swap_count = 0
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
             if pair_name in applied_swaps:
+                continue
+            if pair_name in target_swaps:
+                print(f"    Skipping target layer swap for {pair_name} (target-swapped via --swappable-nets)")
                 continue
 
             # Get our target stub info
@@ -2633,9 +2640,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 # Swap pads if they exist
                 if swap['p1_p_pad'] and swap['p2_p_pad']:
+                    print(f"    Swapping P pads in output: {swap['p1_p_pad'].component_ref}:{swap['p1_p_pad'].pad_number} <-> {swap['p2_p_pad'].component_ref}:{swap['p2_p_pad'].pad_number}")
                     content = swap_pad_nets_in_content(content, swap['p1_p_pad'], swap['p2_p_pad'])
+                else:
+                    print(f"    WARNING: Missing P pads for swap: p1={swap['p1_p_pad']}, p2={swap['p2_p_pad']}")
                 if swap['p1_n_pad'] and swap['p2_n_pad']:
+                    print(f"    Swapping N pads in output: {swap['p1_n_pad'].component_ref}:{swap['p1_n_pad'].pad_number} <-> {swap['p2_n_pad'].component_ref}:{swap['p2_n_pad'].pad_number}")
                     content = swap_pad_nets_in_content(content, swap['p1_n_pad'], swap['p2_n_pad'])
+                else:
+                    print(f"    WARNING: Missing N pads for swap: p1={swap['p1_n_pad']}, p2={swap['p2_n_pad']}")
 
                 total_seg = p1_p_seg + p1_n_seg + p2_p_seg + p2_n_seg
                 total_via = p1_p_via + p1_n_via + p2_p_via + p2_n_via
