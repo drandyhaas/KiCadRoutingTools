@@ -871,7 +871,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               center: Tuple[float, float] = None,
                               diff_pairs: Dict = None,
                               use_boundary_ordering: bool = True,
-                              bga_exclusion_zones: List[Tuple[float, float, float, float]] = None) -> List[int]:
+                              bga_exclusion_zones: List[Tuple[float, float, float, float]] = None,
+                              reverse_rounds: bool = False) -> List[int]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 
@@ -1143,7 +1144,7 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
 
     # Step 5: Greedy ordering - repeatedly pick unit with fewest active conflicts
     # Secondary: pick shorter routes first (easier routes done first, leaving space for longer ones)
-    ordered_units = []
+    all_rounds = []  # List of (round_winners, round_num) tuples
     remaining = set(unit_list)
     round_num = 0
 
@@ -1171,13 +1172,22 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                 round_losers.add(loser)
                 round_remaining.discard(loser)
 
-        # Add winners to ordered list, then losers go to next round
-        ordered_units.extend(round_winners)
+        # Collect this round
+        all_rounds.append((round_winners, round_num))
         remaining = round_losers
 
+    # Optionally reverse round order (route smallest/most-conflicting groups first)
+    if reverse_rounds:
+        all_rounds = list(reversed(all_rounds))
+        print("MPS: Reversing round order (routing most-conflicting groups first)")
+
+    # Build ordered list and print round info
+    ordered_units = []
+    for round_winners, orig_round_num in all_rounds:
+        ordered_units.extend(round_winners)
         if round_winners:
             winner_names = [unit_names.get(uid, f"Net {uid}") for uid in round_winners]
-            print(f"MPS Round {round_num}: {len(round_winners)} units selected "
+            print(f"MPS Round {orig_round_num}: {len(round_winners)} units selected "
                   f"({', '.join(winner_names)})")
 
     # Expand ordered units back to net IDs

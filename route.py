@@ -1065,7 +1065,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         all_net_ids = [nid for _, nid in net_ids]
         ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids, diff_pairs=diff_pairs,
                                                use_boundary_ordering=mps_unroll,
-                                               bga_exclusion_zones=bga_exclusion_zones)
+                                               bga_exclusion_zones=bga_exclusion_zones,
+                                               reverse_rounds=args.mps_reverse_rounds)
         # Rebuild net_ids in the new order
         id_to_name = {nid: name for name, nid in net_ids}
         net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
@@ -2839,6 +2840,8 @@ Differential pair routing:
                         help="Glob patterns for diff pair nets that can have targets swapped (e.g., 'rx1_*')")
     parser.add_argument("--crossing-penalty", type=float, default=1000.0,
                         help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
+    parser.add_argument("--mps-reverse-rounds", action="store_true",
+                        help="Reverse MPS round order: route most-conflicting groups first instead of least-conflicting")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
