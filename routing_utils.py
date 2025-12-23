@@ -10,6 +10,25 @@ from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPair
+from chip_boundary import (
+    build_chip_list, identify_chip_for_point, compute_far_side,
+    compute_boundary_position, crossings_from_boundary_order
+)
+
+
+# Position rounding precision for coordinate comparisons
+# All position-based lookups must use this to ensure consistency
+POSITION_DECIMALS = 3
+
+
+def pos_key(x: float, y: float) -> Tuple[float, float]:
+    """
+    Normalize coordinates for position-based lookups.
+
+    Use this consistently when building position sets or checking position membership
+    to avoid floating-point comparison issues.
+    """
+    return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS))
 
 
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
@@ -221,6 +240,72 @@ def get_stub_direction(segments: List[Segment], stub_x: float, stub_y: float, st
 
     # Fallback - no matching segment found
     return (0, 0)
+
+
+def get_stub_segments(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
+                      stub_layer: str, tolerance: float = 0.05) -> List[Segment]:
+    """
+    Get all segments that form a stub (from free end back to pad).
+
+    Walks backwards from the stub free end through connected segments until
+    reaching a pad or the segment chain ends.
+
+    Args:
+        pcb_data: PCB data containing segments and pads
+        net_id: Net ID of the stub
+        stub_x, stub_y: Position of the stub free end
+        stub_layer: Layer of the stub
+        tolerance: Distance tolerance for matching endpoints
+
+    Returns:
+        List of segments forming the stub, ordered from free end to pad
+    """
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == stub_layer]
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    pad_positions = [(p.global_x, p.global_y) for p in net_pads]
+
+    result = []
+    visited = set()
+    current_x, current_y = stub_x, stub_y
+
+    while True:
+        # Find segment connected at current position
+        found = None
+        for seg in net_segments:
+            if id(seg) in visited:
+                continue
+
+            # Check if start matches current position
+            if abs(seg.start_x - current_x) < tolerance and abs(seg.start_y - current_y) < tolerance:
+                found = seg
+                next_x, next_y = seg.end_x, seg.end_y
+                break
+
+            # Check if end matches current position
+            if abs(seg.end_x - current_x) < tolerance and abs(seg.end_y - current_y) < tolerance:
+                found = seg
+                next_x, next_y = seg.start_x, seg.start_y
+                break
+
+        if found is None:
+            break
+
+        result.append(found)
+        visited.add(id(found))
+
+        # Check if next position is at a pad (we've reached the pad end)
+        at_pad = False
+        for px, py in pad_positions:
+            if abs(next_x - px) < tolerance and abs(next_y - py) < tolerance:
+                at_pad = True
+                break
+
+        if at_pad:
+            break
+
+        current_x, current_y = next_x, next_y
+
+    return result
 
 
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -556,7 +641,9 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
 
 
 def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
-                              center: Tuple[float, float] = None) -> List[int]:
+                              center: Tuple[float, float] = None,
+                              diff_pairs: Dict = None,
+                              use_boundary_ordering: bool = True) -> List[int]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 
@@ -579,26 +666,79 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         pcb_data: PCB data with segments
         net_ids: List of net IDs to order
         center: Optional center point for angular projection (auto-computed if None)
+        diff_pairs: Optional dict of pair_name -> DiffPair. If provided, P and N nets
+                    of each pair are treated as a single routing unit.
+        use_boundary_ordering: If True, use chip boundary unrolling for crossing detection.
+                              This respects the physical constraint that routes can't go
+                              through BGA chips. Default is False (use angular projection).
 
     Returns:
         Ordered list of net IDs, with least-conflicting nets first
     """
-    # Step 1: Get routing endpoints for each net (stubs, pads, or both)
-    net_endpoints = {}  # net_id -> [(x1, y1), (x2, y2)]
-    for net_id in net_ids:
-        endpoints = get_net_routing_endpoints(pcb_data, net_id)
-        if len(endpoints) >= 2:
-            # Take the first two endpoints (source and target)
-            net_endpoints[net_id] = endpoints[:2]
+    # Build mapping from net_id to unit_id (for grouping diff pair P/N nets)
+    # unit_id is the canonical ID for the routing unit
+    net_to_unit = {}  # net_id -> unit_id
+    unit_to_nets = {}  # unit_id -> [net_ids]
+    unit_names = {}  # unit_id -> display name
 
-    if not net_endpoints:
-        print("MPS: No nets with valid routing endpoints found")
+    if diff_pairs:
+        for pair_name, pair in diff_pairs.items():
+            if pair.p_net_id in net_ids or pair.n_net_id in net_ids:
+                # Use P net ID as the canonical unit ID
+                unit_id = pair.p_net_id
+                net_to_unit[pair.p_net_id] = unit_id
+                net_to_unit[pair.n_net_id] = unit_id
+                unit_to_nets[unit_id] = [pair.p_net_id, pair.n_net_id]
+                unit_names[unit_id] = pair_name
+
+    # Add single nets (not part of any diff pair)
+    for net_id in net_ids:
+        if net_id not in net_to_unit:
+            net_to_unit[net_id] = net_id
+            unit_to_nets[net_id] = [net_id]
+            unit_names[net_id] = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+
+    # Get unique unit IDs from the net_ids list
+    unit_ids = []
+    seen_units = set()
+    for net_id in net_ids:
+        unit_id = net_to_unit.get(net_id, net_id)
+        if unit_id not in seen_units:
+            seen_units.add(unit_id)
+            unit_ids.append(unit_id)
+
+    # Step 1: Get routing endpoints for each unit
+    # For diff pairs, average the P and N endpoints to get unit endpoints
+    unit_endpoints = {}  # unit_id -> [(x1, y1), (x2, y2)]
+    for unit_id in unit_ids:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+
+        if len(unit_net_ids) == 2:
+            # Diff pair: combine P and N endpoints
+            p_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[0])
+            n_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[1])
+            if len(p_endpoints) >= 2 and len(n_endpoints) >= 2:
+                # Average source endpoints (P and N) and target endpoints
+                src = ((p_endpoints[0][0] + n_endpoints[0][0]) / 2,
+                       (p_endpoints[0][1] + n_endpoints[0][1]) / 2)
+                tgt = ((p_endpoints[1][0] + n_endpoints[1][0]) / 2,
+                       (p_endpoints[1][1] + n_endpoints[1][1]) / 2)
+                unit_endpoints[unit_id] = [src, tgt]
+        else:
+            # Single net
+            endpoints = get_net_routing_endpoints(pcb_data, unit_id)
+            if len(endpoints) >= 2:
+                unit_endpoints[unit_id] = endpoints[:2]
+
+    if not unit_endpoints:
+        print("MPS: No units with valid routing endpoints found")
+        # Return all net_ids in original order
         return list(net_ids)
 
     # Step 2: Compute center if not provided (centroid of all endpoints)
     if center is None:
         all_points = []
-        for endpoints in net_endpoints.values():
+        for endpoints in unit_endpoints.values():
             all_points.extend(endpoints)
         if all_points:
             center = (
@@ -608,7 +748,32 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         else:
             center = (0, 0)
 
-    # Step 3: Compute angular position for each endpoint
+    # Step 3: Compute positions for crossing detection
+    # If use_boundary_ordering is True, use chip boundary unrolling
+    # Otherwise, use angular projection from center (default)
+
+    unit_boundary_info = {}  # unit_id -> (src_pos, tgt_pos, src_chip, tgt_chip) or None
+    unit_angles = {}  # unit_id -> (angle1, angle2)
+
+    if use_boundary_ordering:
+        # Use chip boundary ordering - respects physical constraint that routes can't go through chips
+        chips = build_chip_list(pcb_data)
+
+        for unit_id, endpoints in unit_endpoints.items():
+            src_chip = identify_chip_for_point(endpoints[0], chips)
+            tgt_chip = identify_chip_for_point(endpoints[1], chips)
+
+            if src_chip and tgt_chip and src_chip != tgt_chip:
+                src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
+                # Use OPPOSITE traversal directions: source clockwise, target counter-clockwise
+                # This makes the two chips "face each other" when unrolled.
+                # With opposite directions, the crossing check works correctly:
+                # same geometric order → opposite boundary order → crossing detected
+                src_pos = compute_boundary_position(src_chip, endpoints[0], src_far, clockwise=True)
+                tgt_pos = compute_boundary_position(tgt_chip, endpoints[1], tgt_far, clockwise=False)
+                unit_boundary_info[unit_id] = (src_pos, tgt_pos, src_chip, tgt_chip)
+
+    # Compute angular positions (used as fallback or as primary method)
     def angle_from_center(point: Tuple[float, float]) -> float:
         """Compute angle from center to point in radians [0, 2*pi)."""
         dx = point[0] - center[0]
@@ -618,97 +783,154 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             ang += 2 * math.pi
         return ang
 
-    # For each net, get angles of both endpoints and normalize order
-    net_angles = {}  # net_id -> (angle1, angle2) where angle1 < angle2
-    for net_id, endpoints in net_endpoints.items():
-        a1 = angle_from_center(endpoints[0])
-        a2 = angle_from_center(endpoints[1])
-        # Normalize: always store with smaller angle first
-        if a1 > a2:
-            a1, a2 = a2, a1
-        net_angles[net_id] = (a1, a2)
+    for unit_id, endpoints in unit_endpoints.items():
+        # Use angular method for all units (primary or fallback)
+        if not use_boundary_ordering or unit_boundary_info.get(unit_id) is None:
+            a1 = angle_from_center(endpoints[0])
+            a2 = angle_from_center(endpoints[1])
+            if a1 > a2:
+                a1, a2 = a2, a1
+            unit_angles[unit_id] = (a1, a2)
+
+    # Build layer information for each unit from stub segments
+    unit_layers = {}  # unit_id -> (source_layers: set, target_layers: set)
+    for unit_id in unit_ids:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+        src_layers = set()
+        tgt_layers = set()
+
+        for net_id in unit_net_ids:
+            # Get segments for this net
+            net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+            if net_segments:
+                stub_groups = find_connected_groups(net_segments)
+                if len(stub_groups) >= 2:
+                    # Source stub layers (first group)
+                    for seg in stub_groups[0]:
+                        src_layers.add(seg.layer)
+                    # Target stub layers (second group)
+                    for seg in stub_groups[1]:
+                        tgt_layers.add(seg.layer)
+
+        unit_layers[unit_id] = (src_layers, tgt_layers)
 
     # Step 4: Detect crossing conflicts
-    # Two nets cross if their intervals on the circle interleave
-    # Net A with (a1, a2) and Net B with (b1, b2) cross if:
-    #   a1 < b1 < a2 < b2  OR  b1 < a1 < b2 < a2
-    def nets_cross(net_a: int, net_b: int) -> bool:
-        """Check if two nets have crossing paths on the circular boundary."""
-        a1, a2 = net_angles[net_a]
-        b1, b2 = net_angles[net_b]
+    def units_cross(unit_a: int, unit_b: int) -> bool:
+        """Check if two units have crossing paths."""
+        info_a = unit_boundary_info.get(unit_a)
+        info_b = unit_boundary_info.get(unit_b)
 
-        # Check interleaving: one net's interval partially overlaps the other's
-        # a1 < b1 < a2 < b2 means A starts, B starts, A ends, B ends = crossing
-        if a1 < b1 < a2 < b2:
+        # If both have boundary info and boundary ordering is enabled, use it
+        if use_boundary_ordering and info_a is not None and info_b is not None:
+            # Only compare if same chip pair
+            if (info_a[2], info_a[3]) != (info_b[2], info_b[3]):
+                return False  # Different chip pairs, can't directly cross
+
+            # Check boundary order inversion
+            if not crossings_from_boundary_order(info_a[0], info_a[1], info_b[0], info_b[1]):
+                return False
+
+            # Inversion detected, check if layers overlap
+            a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+            b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+            a_all = a_src | a_tgt
+            b_all = b_src | b_tgt
+            if a_all and b_all and not (a_all & b_all):
+                return False  # No layer overlap, no real conflict
             return True
-        if b1 < a1 < b2 < a2:
+
+        # Use angular method (default or fallback)
+        if unit_a in unit_angles and unit_b in unit_angles:
+            a1, a2 = unit_angles[unit_a]
+            b1, b2 = unit_angles[unit_b]
+            angles_cross = (a1 < b1 < a2 < b2) or (b1 < a1 < b2 < a2)
+            if not angles_cross:
+                return False
+
+            # Check layer overlap
+            a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+            b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+            a_all = a_src | a_tgt
+            b_all = b_src | b_tgt
+            if a_all and b_all and not (a_all & b_all):
+                return False
+
             return True
+
         return False
 
     # Build conflict graph
-    net_list = list(net_angles.keys())
-    conflicts = {net_id: set() for net_id in net_list}
+    unit_list = list(unit_endpoints.keys())
+    conflicts = {unit_id: set() for unit_id in unit_list}
 
-    for i, net_a in enumerate(net_list):
-        for net_b in net_list[i+1:]:
-            if nets_cross(net_a, net_b):
-                conflicts[net_a].add(net_b)
-                conflicts[net_b].add(net_a)
+    for i, unit_a in enumerate(unit_list):
+        for unit_b in unit_list[i+1:]:
+            if units_cross(unit_a, unit_b):
+                conflicts[unit_a].add(unit_b)
+                conflicts[unit_b].add(unit_a)
 
     # Count total conflicts for reporting
     total_conflicts = sum(len(c) for c in conflicts.values()) // 2
-    print(f"MPS: {len(net_list)} nets with {total_conflicts} crossing conflicts detected")
+    num_diff_pairs = sum(1 for uid in unit_list if len(unit_to_nets.get(uid, [])) == 2)
+    num_single = len(unit_list) - num_diff_pairs
+    if num_diff_pairs > 0:
+        print(f"MPS: {num_diff_pairs} diff pairs + {num_single} single nets = {len(unit_list)} units with {total_conflicts} crossing conflicts")
+    else:
+        print(f"MPS: {len(unit_list)} nets with {total_conflicts} crossing conflicts detected")
 
-    # Step 5: Greedy ordering - repeatedly pick net with fewest active conflicts
-    ordered = []
-    remaining = set(net_list)
+    # Step 5: Greedy ordering - repeatedly pick unit with fewest active conflicts
+    ordered_units = []
+    remaining = set(unit_list)
     round_num = 0
 
     while remaining:
         round_num += 1
         round_winners = []
         round_losers = set()
-        active_conflicts = {net_id: len(conflicts[net_id] & remaining)
-                           for net_id in remaining}
 
-        # Process this round: pick nets with minimal conflicts
+        # Process this round: pick units with minimal conflicts
         round_remaining = set(remaining)
         while round_remaining:
-            # Find net with minimum active conflicts among round_remaining
+            # Find unit with minimum active conflicts among round_remaining
             min_conflicts = float('inf')
-            best_net = None
-            for net_id in round_remaining:
-                # Active conflicts = conflicts with nets still in round_remaining
-                active = len(conflicts[net_id] & round_remaining)
+            best_unit = None
+            for unit_id in round_remaining:
+                # Active conflicts = conflicts with units still in round_remaining
+                active = len(conflicts[unit_id] & round_remaining)
                 if active < min_conflicts:
                     min_conflicts = active
-                    best_net = net_id
+                    best_unit = unit_id
 
-            if best_net is None:
+            if best_unit is None:
                 break
 
-            # This net wins this round
-            round_winners.append(best_net)
-            round_remaining.discard(best_net)
+            # This unit wins this round
+            round_winners.append(best_unit)
+            round_remaining.discard(best_unit)
 
             # All its conflicting neighbors in round_remaining become losers
-            for loser in conflicts[best_net] & round_remaining:
+            for loser in conflicts[best_unit] & round_remaining:
                 round_losers.add(loser)
                 round_remaining.discard(loser)
 
         # Add winners to ordered list, then losers go to next round
-        ordered.extend(round_winners)
+        ordered_units.extend(round_winners)
         remaining = round_losers
 
         if round_winners:
-            net_names = [pcb_data.nets[nid].name for nid in round_winners[:3]]
-            suffix = f"... (+{len(round_winners)-3} more)" if len(round_winners) > 3 else ""
-            print(f"MPS Round {round_num}: {len(round_winners)} nets selected "
-                  f"({', '.join(net_names)}{suffix})")
+            winner_names = [unit_names.get(uid, f"Net {uid}") for uid in round_winners]
+            print(f"MPS Round {round_num}: {len(round_winners)} units selected "
+                  f"({', '.join(winner_names)})")
 
-    # Add any nets that weren't in net_angles (no valid endpoints) at the end
+    # Expand ordered units back to net IDs
+    ordered = []
+    for unit_id in ordered_units:
+        ordered.extend(unit_to_nets.get(unit_id, [unit_id]))
+
+    # Add any nets that weren't in unit_angles (no valid endpoints) at the end
     # These are nets we couldn't determine routing endpoints for
-    nets_without_endpoints = [nid for nid in net_ids if nid not in net_angles]
+    ordered_set = set(ordered)
+    nets_without_endpoints = [nid for nid in net_ids if nid not in ordered_set]
     if nets_without_endpoints:
         print(f"MPS: {len(nets_without_endpoints)} nets without valid endpoints appended at end")
         ordered.extend(nets_without_endpoints)
@@ -1116,9 +1338,6 @@ def find_connected_segment_positions(pcb_data: PCBData, start_x: float, start_y:
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
 
     # Build adjacency: position -> list of connected positions
-    def pos_key(x, y):
-        return (round(x, 2), round(y, 2))
-
     adjacency = {}
     for seg in net_segments:
         start = pos_key(seg.start_x, seg.start_y)

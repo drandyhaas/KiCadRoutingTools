@@ -21,8 +21,9 @@ from kicad_parser import (
     auto_detect_bga_exclusion_zones, find_components_by_type
 )
 from kicad_writer import (
-    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
-    swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content
+    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, generate_gr_text_sexpr,
+    swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content,
+    modify_segment_layers
 )
 
 # Import from refactored modules
@@ -30,13 +31,15 @@ from routing_config import GridRouteConfig, GridCoord, DiffPair
 from routing_utils import (
     find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints,
     compute_mps_net_ordering, add_route_to_pcb_data, remove_route_from_pcb_data,
-    find_pad_nearest_to_position, find_connected_segment_positions
+    find_pad_nearest_to_position, find_connected_segment_positions,
+    find_stub_free_ends, find_connected_groups, pos_key
 )
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
-    VisualizationData, add_connector_region_via_blocking
+    VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
+    compute_track_proximity_for_net, merge_track_proximity_costs
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -106,8 +109,8 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list,
     n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
 
     for seg in pcb_data.segments:
-        seg_start = (round(seg.start_x, 2), round(seg.start_y, 2))
-        seg_end = (round(seg.end_x, 2), round(seg.end_y, 2))
+        seg_start = pos_key(seg.start_x, seg.start_y)
+        seg_end = pos_key(seg.end_x, seg.end_y)
         if seg.net_id == p_net_id and (seg_start in p_stub_positions or seg_end in p_stub_positions):
             seg.net_id = n_net_id
         elif seg.net_id == n_net_id and (seg_start in n_stub_positions or seg_end in n_stub_positions):
@@ -115,7 +118,7 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list,
 
     # Also swap via net IDs at stub positions
     for via in pcb_data.vias:
-        via_pos = (round(via.x, 2), round(via.y, 2))
+        via_pos = pos_key(via.x, via.y)
         if via.net_id == p_net_id and via_pos in p_stub_positions:
             via.net_id = n_net_id
         elif via.net_id == n_net_id and via_pos in n_stub_positions:
@@ -145,6 +148,160 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list,
         return False
 
 
+def get_canonical_net_id(net_id: int, diff_pair_by_net_id: dict) -> int:
+    """Get canonical net ID for loop prevention tracking.
+
+    For diff pairs, returns P net_id. For single nets, returns net_id as-is.
+    """
+    if net_id in diff_pair_by_net_id:
+        _, pair = diff_pair_by_net_id[net_id]
+        return pair.p_net_id
+    return net_id
+
+
+def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
+                                              config, extra_clearance: float):
+    """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
+
+    This is a helper function to avoid duplicating code in multiple places.
+    """
+    p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
+    n_segments = [s for s in pcb_data.segments if s.net_id == n_net_id]
+    if not p_segments and not n_segments:
+        return
+
+    p_pads = pcb_data.pads_by_net.get(p_net_id, [])
+    n_pads = pcb_data.pads_by_net.get(n_net_id, [])
+    p_stub_ends = find_stub_free_ends(p_segments, p_pads)
+    n_stub_ends = find_stub_free_ends(n_segments, n_pads)
+    stub_endpoints = [(x, y) for x, y, _ in p_stub_ends + n_stub_ends]
+
+    add_diff_pair_own_stubs_as_obstacles(
+        obstacles, pcb_data, p_net_id, n_net_id, config,
+        exclude_endpoints=stub_endpoints, extra_clearance=extra_clearance
+    )
+
+
+def rip_up_net(net_id: int, pcb_data, routed_net_ids: list, routed_net_paths: dict,
+               routed_results: dict, diff_pair_by_net_id: dict, remaining_net_ids: list,
+               results: list, config, track_proximity_cache: dict = None) -> tuple:
+    """Rip up a routed net (or diff pair), removing it from pcb_data and tracking structures.
+
+    Returns:
+        tuple: (saved_result, ripped_net_ids, was_in_results) for later restoration
+               saved_result: the result dict that was removed
+               ripped_net_ids: list of net IDs that were ripped (1 for single, 2 for diff pair)
+               was_in_results: True if the result was in the results list
+    """
+    if net_id not in routed_results:
+        return None, [], False
+
+    saved_result = routed_results[net_id]
+    ripped_net_ids = []
+    was_in_results = saved_result in results
+
+    # Remove from pcb_data
+    remove_route_from_pcb_data(pcb_data, saved_result)
+
+    # Remove from results list if present
+    if was_in_results:
+        results.remove(saved_result)
+
+    # Update tracking structures
+    if net_id in diff_pair_by_net_id:
+        # It's a diff pair - remove both P and N
+        _, ripped_pair = diff_pair_by_net_id[net_id]
+        ripped_net_ids = [ripped_pair.p_net_id, ripped_pair.n_net_id]
+
+        if ripped_pair.p_net_id in routed_net_ids:
+            routed_net_ids.remove(ripped_pair.p_net_id)
+        if ripped_pair.n_net_id in routed_net_ids:
+            routed_net_ids.remove(ripped_pair.n_net_id)
+        routed_net_paths.pop(ripped_pair.p_net_id, None)
+        routed_net_paths.pop(ripped_pair.n_net_id, None)
+        routed_results.pop(ripped_pair.p_net_id, None)
+        routed_results.pop(ripped_pair.n_net_id, None)
+        # Remove from track proximity cache
+        if track_proximity_cache is not None:
+            track_proximity_cache.pop(ripped_pair.p_net_id, None)
+            track_proximity_cache.pop(ripped_pair.n_net_id, None)
+        # Add back to remaining so stubs are treated as obstacles
+        if ripped_pair.p_net_id not in remaining_net_ids:
+            remaining_net_ids.append(ripped_pair.p_net_id)
+        if ripped_pair.n_net_id not in remaining_net_ids:
+            remaining_net_ids.append(ripped_pair.n_net_id)
+    else:
+        # Single-ended net
+        ripped_net_ids = [net_id]
+
+        if net_id in routed_net_ids:
+            routed_net_ids.remove(net_id)
+        routed_net_paths.pop(net_id, None)
+        routed_results.pop(net_id, None)
+        # Remove from track proximity cache
+        if track_proximity_cache is not None:
+            track_proximity_cache.pop(net_id, None)
+        # Add back to remaining so stubs are treated as obstacles
+        if net_id not in remaining_net_ids:
+            remaining_net_ids.append(net_id)
+
+    return saved_result, ripped_net_ids, was_in_results
+
+
+def restore_net(net_id: int, saved_result: dict, ripped_net_ids: list, was_in_results: bool,
+                pcb_data, routed_net_ids: list, routed_net_paths: dict,
+                routed_results: dict, diff_pair_by_net_id: dict, remaining_net_ids: list,
+                results: list, config, track_proximity_cache: dict = None, layer_map: dict = None):
+    """Restore a previously ripped net to pcb_data and tracking structures."""
+
+    if saved_result is None:
+        return
+
+    # Add back to pcb_data
+    add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
+
+    # Add back to results list if it was there
+    if was_in_results:
+        results.append(saved_result)
+
+    # Restore tracking structures
+    if net_id in diff_pair_by_net_id:
+        # It's a diff pair
+        _, ripped_pair = diff_pair_by_net_id[net_id]
+
+        if ripped_pair.p_net_id not in routed_net_ids:
+            routed_net_ids.append(ripped_pair.p_net_id)
+        if ripped_pair.n_net_id not in routed_net_ids:
+            routed_net_ids.append(ripped_pair.n_net_id)
+        # Remove from remaining_net_ids since they're back to routed
+        if ripped_pair.p_net_id in remaining_net_ids:
+            remaining_net_ids.remove(ripped_pair.p_net_id)
+        if ripped_pair.n_net_id in remaining_net_ids:
+            remaining_net_ids.remove(ripped_pair.n_net_id)
+        if saved_result.get('p_path'):
+            routed_net_paths[ripped_pair.p_net_id] = saved_result['p_path']
+        if saved_result.get('n_path'):
+            routed_net_paths[ripped_pair.n_net_id] = saved_result['n_path']
+        routed_results[ripped_pair.p_net_id] = saved_result
+        routed_results[ripped_pair.n_net_id] = saved_result
+        # Restore track proximity cache
+        if track_proximity_cache is not None and layer_map is not None:
+            track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
+            track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
+    else:
+        # Single-ended net
+        if net_id not in routed_net_ids:
+            routed_net_ids.append(net_id)
+        if net_id in remaining_net_ids:
+            remaining_net_ids.remove(net_id)
+        if saved_result.get('path'):
+            routed_net_paths[net_id] = saved_result['path']
+        routed_results[net_id] = saved_result
+        # Restore track proximity cache
+        if track_proximity_cache is not None and layer_map is not None:
+            track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -158,16 +315,29 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 grid_step: float = 0.1,
                 via_cost: int = 25,
                 max_iterations: int = 200000,
-                heuristic_weight: float = 1.5,
-                stub_proximity_radius: float = 5.0,
+                max_probe_iterations: int = 5000,
+                heuristic_weight: float = 2.0,
+                stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
                 via_proximity_cost: float = 10.0,
+                bga_proximity_radius: float = 10.0,
+                bga_proximity_cost: float = 0.2,
+                track_proximity_distance: float = 10.0,
+                track_proximity_cost: float = 0.2,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.101,
                 diff_pair_centerline_setback: float = None,
                 min_turning_radius: float = 0.2,
                 debug_lines: bool = False,
                 fix_polarity: bool = True,
+                max_rip_up_count: int = 3,
+                max_setback_angle: float = 22.5,
+                enable_layer_switch: bool = True,
+                can_swap_to_top_layer: bool = False,
+                swappable_net_patterns: Optional[List[str]] = None,
+                crossing_penalty: float = 1000.0,
+                mps_unroll: bool = True,
+                skip_routing: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -192,9 +362,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         grid_step: Grid resolution in mm (default: 0.1)
         via_cost: Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)
         max_iterations: Max A* iterations before giving up (default: 200000)
-        heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.5)
-        stub_proximity_radius: Radius around stubs to penalize in mm (default: 5.0)
+        heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 2.0)
+        stub_proximity_radius: Radius around stubs to penalize in mm (default: 2.0)
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 0.2)
+        bga_proximity_radius: Radius around BGA edges to penalize in mm (default: 10.0)
+        bga_proximity_cost: Cost penalty near BGA edges in mm equivalent (default: 0.2)
         diff_pair_patterns: Glob patterns for nets to route as differential pairs
         diff_pair_gap: Gap between P and N traces in differential pairs (default: 0.1mm)
         debug_lines: Output debug geometry on User.2/3/8/9 layers
@@ -235,16 +407,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_cost=via_cost,
         layers=layers,
         max_iterations=max_iterations,
+        max_probe_iterations=max_probe_iterations,
         heuristic_weight=heuristic_weight,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius,
         stub_proximity_cost=stub_proximity_cost,
         via_proximity_cost=via_proximity_cost,
+        bga_proximity_radius=bga_proximity_radius,
+        bga_proximity_cost=bga_proximity_cost,
+        track_proximity_distance=track_proximity_distance,
+        track_proximity_cost=track_proximity_cost,
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
         debug_lines=debug_lines,
         fix_polarity=fix_polarity,
+        max_rip_up_count=max_rip_up_count,
+        max_setback_angle=max_setback_angle,
+        target_swap_crossing_penalty=crossing_penalty,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -256,17 +436,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(pcb_data, diff_pair_patterns)
         if diff_pairs:
-            print(f"\nFound {len(diff_pairs)} differential pairs:")
-            for pair_name, pair in list(diff_pairs.items())[:5]:
-                print(f"  {pair_name}: {pair.p_net_name} / {pair.n_net_name}")
-            if len(diff_pairs) > 5:
-                print(f"  ... and {len(diff_pairs) - 5} more")
             # Track which net IDs are part of pairs
             for pair in diff_pairs.values():
                 diff_pair_net_ids.add(pair.p_net_id)
                 diff_pair_net_ids.add(pair.n_net_id)
-        else:
-            print(f"\nNo differential pairs found matching patterns: {diff_pair_patterns}")
 
     # Find net IDs - check both pcb.nets and pads_by_net
     net_ids = []
@@ -295,12 +468,576 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("No valid nets to route!")
         return 0, 0, 0.0
 
+    # Track all segment layer modifications for file output
+    all_segment_modifications = []
+    # Track all vias added during stub layer swapping
+    all_swap_vias = []
+    # Track total number of layer swaps applied
+    total_layer_swaps = 0
+
+    # Identify which diff pairs we'll be routing BEFORE ordering
+    # (Layer swaps must happen before MPS ordering since ordering depends on layers)
+    diff_pair_ids_to_route_set = []  # (pair_name, pair) tuples - unordered
+    processed_pair_net_ids_early = set()
+    for net_name, net_id in net_ids:
+        if net_id in diff_pair_net_ids and net_id not in processed_pair_net_ids_early:
+            for pair_name, pair in diff_pairs.items():
+                if pair.p_net_id == net_id or pair.n_net_id == net_id:
+                    diff_pair_ids_to_route_set.append((pair_name, pair))
+                    processed_pair_net_ids_early.add(pair.p_net_id)
+                    processed_pair_net_ids_early.add(pair.n_net_id)
+                    break
+
+    # Apply target swaps for swappable-nets feature
+    # This swaps net IDs at targets BEFORE routing, so routing sees the swapped configuration
+    target_swaps: Dict[str, str] = {}  # pair_name -> swapped_target_pair_name
+    target_swap_info: List[Dict] = []  # Info needed to apply swaps to output file
+    boundary_debug_labels: List[Dict] = []  # Debug labels for boundary positions
+    if swappable_net_patterns and diff_pair_ids_to_route_set:
+        from target_swap import apply_target_swaps, generate_debug_boundary_labels
+        from diff_pair_routing import get_diff_pair_endpoints
+
+        swappable_diff_pairs = find_differential_pairs(pcb_data, swappable_net_patterns)
+        # Only include pairs that are also being routed (not just in diff_pairs, but in the route set)
+        pairs_being_routed = {name for name, pair in diff_pair_ids_to_route_set}
+        swappable_pairs = [(name, pair) for name, pair in swappable_diff_pairs.items()
+                          if name in pairs_being_routed]
+
+        if len(swappable_pairs) >= 2:
+            # Generate debug labels if requested (before swaps, so we see original positions)
+            if debug_lines and mps_unroll:
+                boundary_debug_labels = generate_debug_boundary_labels(
+                    pcb_data, swappable_pairs,
+                    lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+                )
+
+            target_swaps, target_swap_info = apply_target_swaps(
+                pcb_data, swappable_pairs, config,
+                lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config),
+                use_boundary_ordering=mps_unroll
+            )
+
+    # Generate boundary debug labels for all diff pairs if not already generated from swappable pairs
+    if debug_lines and mps_unroll and not boundary_debug_labels and diff_pair_ids_to_route_set:
+        from target_swap import generate_debug_boundary_labels
+        from diff_pair_routing import get_diff_pair_endpoints
+        boundary_debug_labels = generate_debug_boundary_labels(
+            pcb_data, list(diff_pair_ids_to_route_set),
+            lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+        )
+
+    # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
+    # BEFORE MPS ordering, so ordering sees correct segment layers
+    if enable_layer_switch and diff_pair_ids_to_route_set:
+        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer, validate_swap
+        from diff_pair_routing import get_diff_pair_endpoints
+
+        print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route_set)} diff pair(s)...")
+
+        # Collect layer info for pairs we're routing
+        pair_layer_info = {}  # pair_name -> (src_layer, tgt_layer, sources, targets, pair)
+        for pair_name, pair in diff_pair_ids_to_route_set:
+            sources, targets, error = get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+            if error or not sources or not targets:
+                continue
+            src_layer = config.layers[sources[0][4]]
+            tgt_layer = config.layers[targets[0][4]]
+            pair_layer_info[pair_name] = (src_layer, tgt_layer, sources, targets, pair)
+
+        # Build layer info for ALL diff pairs (for finding swap partners)
+        all_pair_layer_info = {}  # pair_name -> (src_layer, tgt_layer, sources, targets, pair)
+        for pair_name, pair in diff_pairs.items():
+            sources, targets, error = get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+            if error or not sources or not targets:
+                continue
+            src_layer = config.layers[sources[0][4]]
+            tgt_layer = config.layers[targets[0][4]]
+            all_pair_layer_info[pair_name] = (src_layer, tgt_layer, sources, targets, pair)
+
+        # Pre-collect all stub segments by layer for validation
+        all_stubs_by_layer = collect_stubs_by_layer(pcb_data, all_pair_layer_info, config)
+
+        # Find pairs that need layer switches (src != tgt layer)
+        pairs_needing_via = [(name, info) for name, info in pair_layer_info.items()
+                            if info[0] != info[1]]
+
+        # Try to find swap partners for pairs needing via
+        applied_swaps = set()
+        swap_count = 0
+
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+
+            # Get our source stub info
+            src_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       sources[0][5], sources[0][6], src_layer)
+            src_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       sources[0][7], sources[0][8], src_layer)
+
+            if not src_p_stub or not src_n_stub:
+                continue
+
+            swap_partner = None
+            swap_partner_stubs = None
+
+            # Find which nets on target layer actually overlap with our stub segments
+            overlapping_nets = set()
+            our_stubs = src_p_stub.segments + src_n_stub.segments
+            for stub_seg in our_stubs:
+                stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - 0.2
+                stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + 0.2
+                stub_x_min = min(stub_seg.start_x, stub_seg.end_x)
+                stub_x_max = max(stub_seg.start_x, stub_seg.end_x)
+
+                for seg in pcb_data.segments:
+                    if seg.layer != tgt_layer:
+                        continue
+                    seg_y_min = min(seg.start_y, seg.end_y)
+                    seg_y_max = max(seg.start_y, seg.end_y)
+                    seg_x_min = min(seg.start_x, seg.end_x)
+                    seg_x_max = max(seg.start_x, seg.end_x)
+
+                    # Check Y and X overlap
+                    if seg_y_max >= stub_y_min and seg_y_min <= stub_y_max:
+                        if seg_x_max >= stub_x_min and seg_x_min <= stub_x_max:
+                            overlapping_nets.add(seg.net_id)
+
+            # Find which diff pair the overlapping nets belong to
+            for other_name, other_info in all_pair_layer_info.items():
+                if other_name == pair_name:
+                    continue
+                other_src_layer, other_tgt_layer, other_sources, other_targets, other_pair = other_info
+
+                # Check if their source is on our target layer and overlaps
+                if other_src_layer != tgt_layer:
+                    continue
+                if other_pair.p_net_id not in overlapping_nets and other_pair.n_net_id not in overlapping_nets:
+                    continue
+
+                # Get their source stub info
+                other_src_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                 other_sources[0][5], other_sources[0][6], other_src_layer)
+                other_src_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                 other_sources[0][7], other_sources[0][8], other_src_layer)
+
+                if other_src_p_stub and other_src_n_stub:
+                    swap_partner = other_name
+                    swap_partner_stubs = (other_src_p_stub, other_src_n_stub, other_src_layer)
+                    break
+
+            if swap_partner and swap_partner_stubs:
+                # Found a swap partner! Swap source layers
+                other_src_p_stub, other_src_n_stub, other_src_layer = swap_partner_stubs
+                _, _, _, _, other_pair = all_pair_layer_info[swap_partner]
+
+                # Validate swap before applying
+                our_valid, our_reason = validate_swap(
+                    src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=swap_partner,
+                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                )
+                partner_valid, partner_reason = validate_swap(
+                    other_src_p_stub, other_src_n_stub, src_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=pair_name,
+                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                )
+
+                if not our_valid or not partner_valid:
+                    reason = our_reason if not our_valid else partner_reason
+                    print(f"    Source swap validation failed for {pair_name}: {reason}")
+                    continue  # Try target swap later
+
+                # Check if swap would move stubs to F.Cu (top layer)
+                # Skip if can_swap_to_top_layer is False and either destination is F.Cu
+                if not can_swap_to_top_layer and (tgt_layer == 'F.Cu' or src_layer == 'F.Cu'):
+                    # Skip this swap - would move stubs to top layer
+                    continue
+
+                # Our source: src_layer -> tgt_layer
+                # Their source: other_src_layer (=tgt_layer) -> src_layer
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
+                vias3, mods3 = apply_stub_layer_switch(pcb_data, other_src_p_stub, src_layer, config, debug=False)
+                vias4, mods4 = apply_stub_layer_switch(pcb_data, other_src_n_stub, src_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                all_vias = vias1 + vias2 + vias3 + vias4
+                all_swap_vias.extend(all_vias)
+
+                applied_swaps.add(pair_name)
+                applied_swaps.add(swap_partner)
+                swap_count += 1
+                total_layer_swaps += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Source swap: {pair_name} ({src_layer}->{tgt_layer}) <-> {swap_partner} ({other_src_layer}->{src_layer}){via_msg}")
+
+        if swap_count > 0:
+            print(f"Applied {swap_count} source layer swap(s)")
+
+        # Try solo source layer switches (no partner needed) for remaining pairs
+        solo_src_count = 0
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+
+            # Check if we can move source stubs to target layer without a partner
+            src_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       sources[0][5], sources[0][6], src_layer)
+            src_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       sources[0][7], sources[0][8], src_layer)
+
+            if not src_p_stub or not src_n_stub:
+                continue
+
+            # Check if swap would move stubs to F.Cu (top layer)
+            if not can_swap_to_top_layer and tgt_layer == 'F.Cu':
+                continue
+
+            # Validate solo switch: source stubs move to target layer
+            valid, reason = validate_swap(
+                src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
+                pcb_data, config, swap_partner_name=None,
+                swap_partner_net_ids=set()
+            )
+
+            if valid:
+                # Apply solo source switch
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2)
+                all_vias = vias1 + vias2
+                all_swap_vias.extend(all_vias)
+
+                applied_swaps.add(pair_name)
+                solo_src_count += 1
+                total_layer_swaps += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Solo source switch: {pair_name} ({src_layer}->{tgt_layer}){via_msg}")
+            else:
+                print(f"    Solo source switch validation failed for {pair_name}: {reason}")
+
+        if solo_src_count > 0:
+            print(f"Applied {solo_src_count} solo source layer switch(es)")
+
+        # Now try target-side segment overlap swaps for remaining pairs
+        # Skip pairs that have had their targets swapped via --swappable-nets,
+        # as their target positions are now at different physical locations
+        target_swap_count = 0
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+            if pair_name in target_swaps:
+                print(f"    Skipping target layer swap for {pair_name} (target-swapped via --swappable-nets)")
+                continue
+
+            # Get our target stub info
+            tgt_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       targets[0][5], targets[0][6], tgt_layer)
+            tgt_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       targets[0][7], targets[0][8], tgt_layer)
+
+            if not tgt_p_stub or not tgt_n_stub:
+                continue
+
+            swap_partner = None
+            swap_partner_stubs = None
+
+            # Find which nets on source layer actually overlap with our target stub segments
+            overlapping_nets = set()
+            our_stubs = tgt_p_stub.segments + tgt_n_stub.segments
+            for stub_seg in our_stubs:
+                stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - 0.2
+                stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + 0.2
+                stub_x_min = min(stub_seg.start_x, stub_seg.end_x)
+                stub_x_max = max(stub_seg.start_x, stub_seg.end_x)
+
+                for seg in pcb_data.segments:
+                    if seg.layer != src_layer:
+                        continue
+                    seg_y_min = min(seg.start_y, seg.end_y)
+                    seg_y_max = max(seg.start_y, seg.end_y)
+                    seg_x_min = min(seg.start_x, seg.end_x)
+                    seg_x_max = max(seg.start_x, seg.end_x)
+
+                    # Check Y and X overlap
+                    if seg_y_max >= stub_y_min and seg_y_min <= stub_y_max:
+                        if seg_x_max >= stub_x_min and seg_x_min <= stub_x_max:
+                            overlapping_nets.add(seg.net_id)
+
+            # Find which diff pair the overlapping nets belong to
+            for other_name, other_info in all_pair_layer_info.items():
+                if other_name == pair_name:
+                    continue
+                other_src_layer, other_tgt_layer, other_sources, other_targets, other_pair = other_info
+
+                # Check if their target is on our source layer and overlaps
+                if other_tgt_layer != src_layer:
+                    continue
+                if other_pair.p_net_id not in overlapping_nets and other_pair.n_net_id not in overlapping_nets:
+                    continue
+
+                # Get their target stub info
+                other_tgt_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                 other_targets[0][5], other_targets[0][6], other_tgt_layer)
+                other_tgt_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                 other_targets[0][7], other_targets[0][8], other_tgt_layer)
+
+                if other_tgt_p_stub and other_tgt_n_stub:
+                    swap_partner = other_name
+                    swap_partner_stubs = (other_tgt_p_stub, other_tgt_n_stub, other_tgt_layer)
+                    break
+
+            if swap_partner and swap_partner_stubs:
+                # Found a swap partner! Swap target layers
+                other_tgt_p_stub, other_tgt_n_stub, other_tgt_layer = swap_partner_stubs
+                _, _, _, _, other_pair = all_pair_layer_info[swap_partner]
+
+                # Validate swap before applying
+                our_valid, our_reason = validate_swap(
+                    tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=swap_partner,
+                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                )
+                partner_valid, partner_reason = validate_swap(
+                    other_tgt_p_stub, other_tgt_n_stub, tgt_layer, all_stubs_by_layer,
+                    pcb_data, config, swap_partner_name=pair_name,
+                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                )
+
+                if not our_valid or not partner_valid:
+                    reason = our_reason if not our_valid else partner_reason
+                    print(f"    Target swap validation failed for {pair_name}: {reason}")
+                    continue
+
+                # Check if swap would move stubs to F.Cu (top layer)
+                # Skip if can_swap_to_top_layer is False and either destination is F.Cu
+                if not can_swap_to_top_layer and (src_layer == 'F.Cu' or tgt_layer == 'F.Cu'):
+                    # Skip this swap - would move stubs to top layer
+                    continue
+
+                # Our target: tgt_layer -> src_layer
+                # Their target: other_tgt_layer (=src_layer) -> tgt_layer
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
+                vias3, mods3 = apply_stub_layer_switch(pcb_data, other_tgt_p_stub, tgt_layer, config, debug=False)
+                vias4, mods4 = apply_stub_layer_switch(pcb_data, other_tgt_n_stub, tgt_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+                all_vias = vias1 + vias2 + vias3 + vias4
+                all_swap_vias.extend(all_vias)
+
+                applied_swaps.add(pair_name)
+                applied_swaps.add(swap_partner)
+                target_swap_count += 1
+                total_layer_swaps += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Target swap: {pair_name} ({tgt_layer}->{src_layer}) <-> {swap_partner} ({other_tgt_layer}->{tgt_layer}){via_msg}")
+
+        if target_swap_count > 0:
+            print(f"Applied {target_swap_count} target layer swap(s)")
+
+        # Try solo target layer switches (no partner needed) for remaining pairs
+        solo_switch_count = 0
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+
+            # Check if we can move target stubs to source layer without a partner
+            tgt_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       targets[0][5], targets[0][6], tgt_layer)
+            tgt_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       targets[0][7], targets[0][8], tgt_layer)
+
+            if not tgt_p_stub or not tgt_n_stub:
+                continue
+
+            # Check if swap would move stubs to F.Cu (top layer)
+            if not can_swap_to_top_layer and src_layer == 'F.Cu':
+                continue
+
+            # Validate solo switch: target stubs move to source layer
+            valid, reason = validate_swap(
+                tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
+                pcb_data, config, swap_partner_name=None,
+                swap_partner_net_ids=set()
+            )
+
+            if valid:
+                # Apply solo target switch
+                vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
+                vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
+                all_segment_modifications.extend(mods1 + mods2)
+                all_vias = vias1 + vias2
+                all_swap_vias.extend(all_vias)
+
+                applied_swaps.add(pair_name)
+                solo_switch_count += 1
+                total_layer_swaps += 1
+                via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                print(f"  Solo target switch: {pair_name} ({tgt_layer}->{src_layer}){via_msg}")
+            else:
+                print(f"    Solo target switch validation failed for {pair_name}: {reason}")
+
+        if solo_switch_count > 0:
+            print(f"Applied {solo_switch_count} solo target layer switch(es)")
+
+        # Now try two-pair swaps for remaining pairs that weren't handled
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name in applied_swaps:
+                continue
+
+            # Look for another pair that also needs a via to swap with
+            # Option 1: Swap sources - we want our source to become tgt_layer
+            # Option 2: Swap targets - we want our target to become src_layer
+            for other_name, other_info in pairs_needing_via:
+                if other_name in applied_swaps or other_name == pair_name:
+                    continue
+                other_src, other_tgt, other_sources, other_targets, other_pair = other_info
+
+                swap_type = None
+                our_stubs = None
+                their_stubs = None
+                our_new_layer = None
+                their_new_layer = None
+
+                # Option 1: Swap sources
+                # Their source is on our target layer, our source is on their target layer
+                if other_src == tgt_layer and src_layer == other_tgt:
+                    swap_type = "source"
+                    our_new_layer = tgt_layer
+                    their_new_layer = src_layer
+                    # Our source stubs
+                    p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                          sources[0][5], sources[0][6], src_layer)
+                    n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                          sources[0][7], sources[0][8], src_layer)
+                    # Their source stubs
+                    other_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                other_sources[0][5], other_sources[0][6], other_src)
+                    other_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                other_sources[0][7], other_sources[0][8], other_src)
+                    our_stubs = (p_stub, n_stub)
+                    their_stubs = (other_p_stub, other_n_stub)
+
+                # Option 2: Swap targets
+                # Their target is on our source layer, our target is on their source layer
+                elif other_tgt == src_layer and tgt_layer == other_src:
+                    swap_type = "target"
+                    our_new_layer = src_layer
+                    their_new_layer = tgt_layer
+                    # Our target stubs
+                    p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                          targets[0][5], targets[0][6], tgt_layer)
+                    n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                          targets[0][7], targets[0][8], tgt_layer)
+                    # Their target stubs
+                    other_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                other_targets[0][5], other_targets[0][6], other_tgt)
+                    other_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                other_targets[0][7], other_targets[0][8], other_tgt)
+                    our_stubs = (p_stub, n_stub)
+                    their_stubs = (other_p_stub, other_n_stub)
+
+                # Try swap if we have valid stubs, otherwise try the other side
+                if swap_type and our_stubs[0] and our_stubs[1] and their_stubs[0] and their_stubs[1]:
+                    # Check if swap would move stubs to F.Cu (top layer)
+                    if not can_swap_to_top_layer and (our_new_layer == 'F.Cu' or their_new_layer == 'F.Cu'):
+                        # Skip this swap - would move stubs to top layer
+                        pass
+                    else:
+                        # Validate swap before applying
+                        our_valid, our_reason = validate_swap(
+                            our_stubs[0], our_stubs[1], our_new_layer, all_stubs_by_layer,
+                            pcb_data, config, swap_partner_name=other_name,
+                            swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                        )
+                        their_valid, their_reason = validate_swap(
+                            their_stubs[0], their_stubs[1], their_new_layer, all_stubs_by_layer,
+                            pcb_data, config, swap_partner_name=pair_name,
+                            swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                        )
+
+                        if not our_valid or not their_valid:
+                            reason = our_reason if not our_valid else their_reason
+                            print(f"    Two-pair {swap_type} swap validation failed for {pair_name}: {reason}")
+                            # Don't break - continue to try fallback target swap
+                        else:
+                            # Apply swaps
+                            _, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
+                            _, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
+                            _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
+                            _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
+                            all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+
+                            applied_swaps.add(pair_name)
+                            applied_swaps.add(other_name)
+                            swap_count += 1
+                            total_layer_swaps += 1
+                            print(f"  Swap {swap_type}s: {pair_name} <-> {other_name}")
+                            break
+                if swap_type == "source":
+                    # Source swap failed, try target swap with same pair
+                    if other_tgt == src_layer and tgt_layer == other_src:
+                        # Our target stubs
+                        p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                              targets[0][5], targets[0][6], tgt_layer)
+                        n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                              targets[0][7], targets[0][8], tgt_layer)
+                        # Their target stubs
+                        other_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
+                                                    other_targets[0][5], other_targets[0][6], other_tgt)
+                        other_n_stub = get_stub_info(pcb_data, other_pair.n_net_id,
+                                                    other_targets[0][7], other_targets[0][8], other_tgt)
+
+                        if p_stub and n_stub and other_p_stub and other_n_stub:
+                            # Check if swap would move stubs to F.Cu (top layer)
+                            if not can_swap_to_top_layer and (src_layer == 'F.Cu' or tgt_layer == 'F.Cu'):
+                                # Skip this swap - would move stubs to top layer
+                                pass
+                            else:
+                                # Validate fallback target swap before applying
+                                our_valid, our_reason = validate_swap(
+                                    p_stub, n_stub, src_layer, all_stubs_by_layer,
+                                    pcb_data, config, swap_partner_name=other_name,
+                                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                                )
+                                their_valid, their_reason = validate_swap(
+                                    other_p_stub, other_n_stub, tgt_layer, all_stubs_by_layer,
+                                    pcb_data, config, swap_partner_name=pair_name,
+                                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                                )
+
+                                if not our_valid or not their_valid:
+                                    reason = our_reason if not our_valid else their_reason
+                                    print(f"    Fallback target swap validation failed for {pair_name}: {reason}")
+                                else:
+                                    _, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
+                                    _, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
+                                    _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
+                                    _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
+                                    all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+
+                                    applied_swaps.add(pair_name)
+                                    applied_swaps.add(other_name)
+                                    swap_count += 1
+                                    total_layer_swaps += 1
+                                    print(f"  Swap targets: {pair_name} <-> {other_name}")
+                                    break
+
+        if swap_count > 0:
+            print(f"Applied {swap_count} layer swap(s)")
+
+        # Report pairs that need vias but couldn't be swapped
+        for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+            if pair_name not in applied_swaps:
+                print(f"  No swap found: {pair_name} ({src_layer}->{tgt_layer}) - will need via")
+
     # Apply net ordering strategy
     if ordering_strategy == "mps":
         # Use Maximum Planar Subset algorithm to minimize crossing conflicts
         print(f"\nUsing MPS ordering strategy...")
         all_net_ids = [nid for _, nid in net_ids]
-        ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids)
+        ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids, diff_pairs=diff_pairs,
+                                               use_boundary_ordering=mps_unroll)
         # Rebuild net_ids in the new order
         id_to_name = {nid: name for name, nid in net_ids}
         net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
@@ -371,8 +1108,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             single_ended_nets.append((net_name, net_id))
 
     total_routes = len(single_ended_nets) + len(diff_pair_ids_to_route)
-    print(f"\nRouting {total_routes} items ({len(single_ended_nets)} single-ended nets, {len(diff_pair_ids_to_route)} differential pairs)...")
-    print("=" * 60)
 
     results = []
     pad_swaps = []  # List of (pad1, pad2) tuples for nets that need swapping
@@ -380,6 +1115,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     failed = 0
     total_time = 0
     total_iterations = 0
+    all_swap_vias = []  # Initialize for file writing
+
+    # Skip routing if requested - just write output with swaps and debug info
+    if skip_routing:
+        print(f"\n--skip-routing: Skipping actual routing of {total_routes} items")
+        print("Writing output file with swaps and debug labels only...")
+        # Clear the lists so routing loops don't execute
+        diff_pair_ids_to_route = []
+        single_ended_nets = []
+    else:
+        print(f"\nRouting {total_routes} items ({len(single_ended_nets)} single-ended nets, {len(diff_pair_ids_to_route)} differential pairs)...")
+        print("=" * 60)
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
@@ -440,8 +1187,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_net_paths = {}  # net_id -> path (grid coords) for blocking analysis
     routed_results = {}  # net_id -> result dict (for rip-up)
     diff_pair_by_net_id = {}  # net_id -> (pair_name, pair) for looking up diff pairs
+    # Cache for track proximity costs: net_id -> {layer_idx -> {(gx,gy) -> cost}}
+    # Computed once when route succeeds, removed when ripped up
+    track_proximity_cache = {}
+    layer_map = {name: idx for idx, name in enumerate(config.layers)}
     reroute_queue = []  # List of (pair_name, pair) or (net_name, net_id) for ripped-up nets
     polarity_swapped_pairs = set()  # Track pairs that have already had polarity swap applied
+    rip_and_retry_history = set()  # Set of (routing_net_id, frozenset(ripped_net_ids)) to prevent infinite loops
+    ripup_success_pairs = set()  # Pairs that succeeded after ripping up blockers
+    rerouted_pairs = set()  # Pairs that were ripped up and then successfully rerouted
     remaining_net_ids = list(all_net_ids_to_route)
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
@@ -485,15 +1239,154 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+        # Add track proximity costs for previously routed tracks (same layer only)
+        merge_track_proximity_costs(obstacles, track_proximity_cache)
 
         # Add same-net via clearance for both P and N
         add_same_net_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
         add_same_net_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
 
+        # Add the diff pair's own stub segments as obstacles to prevent the centerline
+        # from routing through them. Exclude the stub endpoints where we need to connect.
+        add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
+
         # Route the differential pair
         # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
         # Also pass unrouted stubs for finding clear extension endpoints
-        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles, unrouted_stubs)
+        # Note: Layer switching is now done upfront before routing starts
+        result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles,
+                                                 unrouted_stubs)
+
+        # Handle probe_blocked: try progressive rip-up before full route
+        probe_ripup_attempts = 0
+        probe_ripped_items = []  # Track all nets ripped during probe phase for potential restore
+        while result and result.get('probe_blocked') and probe_ripup_attempts < config.max_rip_up_count:
+            blocked_at = result.get('blocked_at', 'unknown')
+            blocked_cells = result.get('blocked_cells', [])
+            probe_direction = result.get('direction', 'unknown')
+
+            if not blocked_cells:
+                print(f"  Probe {probe_direction} blocked at {blocked_at} but no blocked cells to analyze")
+                break
+
+            # Analyze which routed nets are blocking
+            blockers = analyze_frontier_blocking(
+                blocked_cells, pcb_data, config, routed_net_paths,
+                exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                extra_clearance=config.diff_pair_gap / 2
+            )
+
+            # Filter to rippable blockers (only those we've routed)
+            rippable_blockers = []
+            seen_canonical_ids = set()
+            for b in blockers:
+                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                if canonical not in seen_canonical_ids and b.net_id in routed_results:
+                    seen_canonical_ids.add(canonical)
+                    rippable_blockers.append(b)
+
+            if not rippable_blockers:
+                print(f"  Probe {probe_direction} blocked at {blocked_at} but no rippable blockers found")
+                # Convert to failed result so normal failure handling takes over
+                result = {
+                    'failed': True,
+                    'iterations': result.get('iterations', 0),
+                    'blocked_cells_forward': blocked_cells if probe_direction == 'forward' else [],
+                    'blocked_cells_backward': blocked_cells if probe_direction == 'backward' else [],
+                }
+                break
+
+            probe_ripup_attempts += 1
+            print(f"  Probe blocked at {blocked_at}, rip-up attempt {probe_ripup_attempts}/{config.max_rip_up_count}")
+
+            # Rip up the top blocker
+            blocker = rippable_blockers[0]
+            print(f"    Ripping up {blocker.net_name} ({blocker.blocked_count} blocked cells)")
+
+            saved_result, ripped_ids, was_in_results = rip_up_net(
+                blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
+                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                results, config, track_proximity_cache
+            )
+            # Track this ripped item for potential restore on total failure
+            probe_ripped_items.append((blocker, saved_result, ripped_ids, was_in_results))
+
+            # Rebuild obstacles without ripped net
+            retry_obstacles = diff_pair_base_obstacles.clone()
+            for routed_id in routed_net_ids:
+                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
+                add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
+                add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
+            add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
+            add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
+            add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, config.diff_pair_gap / 2)
+
+            # Retry the route
+            result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles,
+                                                     unrouted_stubs)
+
+            # If retry succeeded, queue ALL ripped nets for re-routing
+            if result and not result.get('failed') and not result.get('probe_blocked'):
+                # Success! Queue all ripped nets for re-routing later
+                for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in probe_ripped_items:
+                    if ripped_was_in_results:
+                        successful -= 1
+                    if ripped_blocker.net_id in diff_pair_by_net_id:
+                        ripped_pair_name, ripped_pair = diff_pair_by_net_id[ripped_blocker.net_id]
+                        reroute_queue.append(('diff_pair', ripped_pair_name, ripped_pair))
+                    else:
+                        reroute_queue.append(('single', ripped_blocker.net_name, ripped_blocker.net_id))
+                ripup_success_pairs.add(pair_name)
+                print(f"    Probe rip-up succeeded, {len(probe_ripped_items)} net(s) queued for re-routing")
+            elif result and result.get('probe_blocked'):
+                # Still probe_blocked, will loop and try next rip-up
+                print(f"    Still blocked after rip-up, trying next...")
+            else:
+                # Route failed completely - restore ALL ripped nets and exit loop
+                print(f"    Probe rip-up didn't help, restoring {len(probe_ripped_items)} net(s)")
+                for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
+                    if ripped_saved:
+                        add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                        for rid in ripped_ids_item:
+                            if rid not in routed_net_ids:
+                                routed_net_ids.append(rid)
+                            if rid in remaining_net_ids:
+                                remaining_net_ids.remove(rid)
+                            routed_results[rid] = ripped_saved
+                        if ripped_was_in_results:
+                            results.append(ripped_saved)
+                        # Restore track proximity cache
+                        if track_proximity_cache is not None and layer_map is not None:
+                            for rid in ripped_ids_item:
+                                track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
+                probe_ripped_items.clear()
+                break
+
+        # If probe rip-up exhausted attempts without success, restore all and mark as failed
+        if result and result.get('probe_blocked'):
+            print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), route FAILED")
+            for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
+                if ripped_saved:
+                    add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                    for rid in ripped_ids_item:
+                        if rid not in routed_net_ids:
+                            routed_net_ids.append(rid)
+                        if rid in remaining_net_ids:
+                            remaining_net_ids.remove(rid)
+                        routed_results[rid] = ripped_saved
+                    if ripped_was_in_results:
+                        results.append(ripped_saved)
+                    # Restore track proximity cache
+                    if track_proximity_cache is not None and layer_map is not None:
+                        for rid in ripped_ids_item:
+                            track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
+            result = {
+                'failed': True,
+                'iterations': result.get('iterations', 0),
+                'blocked_cells_forward': result.get('blocked_cells', []) if result.get('direction') == 'forward' else [],
+                'blocked_cells_backward': result.get('blocked_cells', []) if result.get('direction') == 'backward' else [],
+            }
+
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -504,7 +1397,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             total_iterations += result['iterations']
 
             # Check if polarity was fixed - need to swap target pad and stub nets
-            # Do this BEFORE add_route_to_pcb_data so collapse_appendices sees correct net IDs
+            # Do this BEFORE add_route_to_pcb_data so segment processing sees correct net IDs
             apply_polarity_swap(pcb_data, result, pad_swaps, pair_name, polarity_swapped_pairs)
 
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
@@ -515,6 +1408,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 remaining_net_ids.remove(pair.n_net_id)
             routed_net_ids.append(pair.p_net_id)
             routed_net_ids.append(pair.n_net_id)
+            # Compute and cache track proximity costs for the newly routed nets
+            track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
+            track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
             # Track paths for blocking analysis
             if result.get('p_path'):
                 routed_net_paths[pair.p_net_id] = result['p_path']
@@ -530,23 +1426,38 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             total_iterations += iterations
 
-            # Try rip-up and reroute
+            # Try rip-up and reroute with progressive N+1
             ripped_up = False
             if routed_net_paths and result:
                 # Find the direction that failed faster (likely more constrained)
                 fwd_iters = result.get('iterations_forward', 0)
                 bwd_iters = result.get('iterations_backward', 0)
-                if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
+                fwd_cells = result.get('blocked_cells_forward', [])
+                bwd_cells = result.get('blocked_cells_backward', [])
+
+                # Check for setback failure (no routing iterations but have blocked cells)
+                is_setback_failure = (fwd_iters == 0 and bwd_iters == 0 and (fwd_cells or bwd_cells))
+
+                if is_setback_failure:
+                    # Combine blocked cells from both directions for setback failures
+                    blocked_cells = list(set(fwd_cells + bwd_cells))
+                    if blocked_cells:
+                        print(f"  Setback blocked ({len(blocked_cells)} blocked cells)")
+                elif fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
                     fastest_dir = 'forward'
-                    blocked_cells = result.get('blocked_cells_forward', [])
+                    blocked_cells = fwd_cells
                     dir_iters = fwd_iters
+                    if blocked_cells:
+                        print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
                 else:
                     fastest_dir = 'backward'
-                    blocked_cells = result.get('blocked_cells_backward', [])
+                    blocked_cells = bwd_cells
                     dir_iters = bwd_iters
+                    if blocked_cells:
+                        print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
 
+                # Analyze blocking for all failure types (setback, forward, backward)
                 if blocked_cells:
-                    print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
                         exclude_net_ids={pair.p_net_id, pair.n_net_id},
@@ -554,207 +1465,219 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     )
                     print_blocking_analysis(blockers)
 
-                    # Try ripping up the top blocker (N=1)
-                    if blockers:
-                        top_blocker = blockers[0]
-                        blocker_net_id = top_blocker.net_id
+                    # Filter to only rippable blockers (those in routed_results)
+                    # and deduplicate by diff pair (P and N count as one)
+                    rippable_blockers = []
+                    seen_canonical_ids = set()
+                    for b in blockers:
+                        if b.net_id in routed_results:
+                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                            if canonical not in seen_canonical_ids:
+                                seen_canonical_ids.add(canonical)
+                                rippable_blockers.append(b)
 
-                        # Check if this is a routed net we can rip up
-                        if blocker_net_id in routed_results:
-                            blocker_result = routed_results[blocker_net_id]
+                    # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
+                    # Keep nets ripped between N levels to avoid redundant restore/re-rip
+                    current_canonical = pair.p_net_id  # P is canonical for diff pairs
+                    ripped_items = []  # Accumulate ripped items across N levels
+                    retry_succeeded = False
 
-                            # Determine what we're ripping up for the message
-                            if blocker_net_id in diff_pair_by_net_id:
-                                ripped_pair_name, ripped_pair = diff_pair_by_net_id[blocker_net_id]
-                                print(f"  Ripping up diff pair {ripped_pair_name} (P and N) to retry...")
-                            else:
-                                print(f"  Ripping up {top_blocker.net_name} to retry...")
+                    for N in range(1, config.max_rip_up_count + 1):
+                        if N > len(rippable_blockers):
+                            break  # Not enough blockers to rip
 
-                            # Remove the blocking route from pcb_data and results list
-                            remove_route_from_pcb_data(pcb_data, blocker_result)
-                            if blocker_result in results:
-                                results.remove(blocker_result)
-                                successful -= 1  # Adjust count since we removed a successful route
-
-                            # Update tracking structures
-                            if blocker_net_id in diff_pair_by_net_id:
-                                # It's a diff pair - remove both P and N
-                                ripped_pair_name, ripped_pair = diff_pair_by_net_id[blocker_net_id]
-                                if ripped_pair.p_net_id in routed_net_ids:
-                                    routed_net_ids.remove(ripped_pair.p_net_id)
-                                if ripped_pair.n_net_id in routed_net_ids:
-                                    routed_net_ids.remove(ripped_pair.n_net_id)
-                                routed_net_paths.pop(ripped_pair.p_net_id, None)
-                                routed_net_paths.pop(ripped_pair.n_net_id, None)
-                                routed_results.pop(ripped_pair.p_net_id, None)
-                                routed_results.pop(ripped_pair.n_net_id, None)
-                                # Add back to remaining so stubs are treated as obstacles
-                                if ripped_pair.p_net_id not in remaining_net_ids:
-                                    remaining_net_ids.append(ripped_pair.p_net_id)
-                                if ripped_pair.n_net_id not in remaining_net_ids:
-                                    remaining_net_ids.append(ripped_pair.n_net_id)
-                            else:
-                                # Single-ended net
-                                if blocker_net_id in routed_net_ids:
-                                    routed_net_ids.remove(blocker_net_id)
-                                routed_net_paths.pop(blocker_net_id, None)
-                                routed_results.pop(blocker_net_id, None)
-                                # Add back to remaining so stubs are treated as obstacles
-                                if blocker_net_id not in remaining_net_ids:
-                                    remaining_net_ids.append(blocker_net_id)
-
-                            # Rebuild obstacles and retry the current route
-                            retry_obstacles = diff_pair_base_obstacles.clone()
-                            for routed_id in routed_net_ids:
-                                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-                                add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-                            other_unrouted = [nid for nid in remaining_net_ids
-                                             if nid != pair.p_net_id and nid != pair.n_net_id]
-                            for other_net_id in other_unrouted:
-                                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-                                add_net_pads_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-                            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
-                                                       if nid != pair.p_net_id and nid != pair.n_net_id
-                                                       and nid not in routed_net_ids]
-                            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-                            if unrouted_stubs:
-                                add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
-                            add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
-                            add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
-
-                            retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
-
-                            if retry_result and not retry_result.get('failed'):
-                                print(f"  RETRY SUCCESS: {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
-                                results.append(retry_result)
-                                successful += 1
-                                total_iterations += retry_result['iterations']
-
-                                # Apply polarity swap if needed (same as original route path)
-                                apply_polarity_swap(pcb_data, retry_result, pad_swaps, pair_name, polarity_swapped_pairs)
-
-                                add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
-                                if pair.p_net_id in remaining_net_ids:
-                                    remaining_net_ids.remove(pair.p_net_id)
-                                if pair.n_net_id in remaining_net_ids:
-                                    remaining_net_ids.remove(pair.n_net_id)
-                                routed_net_ids.append(pair.p_net_id)
-                                routed_net_ids.append(pair.n_net_id)
-                                if retry_result.get('p_path'):
-                                    routed_net_paths[pair.p_net_id] = retry_result['p_path']
-                                if retry_result.get('n_path'):
-                                    routed_net_paths[pair.n_net_id] = retry_result['n_path']
-                                routed_results[pair.p_net_id] = retry_result
-                                routed_results[pair.n_net_id] = retry_result
-                                diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
-                                diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
-
-                                # Queue the ripped-up net for rerouting
-                                if blocker_net_id in diff_pair_by_net_id:
-                                    reroute_queue.append(('diff_pair', ripped_pair_name, ripped_pair))
+                        # Build frozenset of all N blocker canonicals for loop check
+                        blocker_canonicals = frozenset(
+                            get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
+                            for i in range(N)
+                        )
+                        if (current_canonical, blocker_canonicals) in rip_and_retry_history:
+                            # Build informative message showing the loop (use pair names for diff pairs)
+                            blocker_names = []
+                            for i in range(N):
+                                b = rippable_blockers[i]
+                                if b.net_id in diff_pair_by_net_id:
+                                    blocker_names.append(diff_pair_by_net_id[b.net_id][0])
                                 else:
-                                    # Find the net name for single-ended
-                                    net = pcb_data.nets.get(blocker_net_id)
-                                    net_name = net.name if net else f"Net {blocker_net_id}"
-                                    reroute_queue.append(('single', net_name, blocker_net_id))
-                                ripped_up = True
+                                    blocker_names.append(b.net_name)
+                            if len(blocker_names) == 1:
+                                blockers_str = blocker_names[0]
                             else:
-                                # Retry failed - restore the ripped route
-                                print(f"  RETRY FAILED: Restoring {top_blocker.net_name}")
-                                add_route_to_pcb_data(pcb_data, blocker_result, debug_lines=config.debug_lines)
-                                # Add back to results list so it gets written to output
-                                results.append(blocker_result)
-                                successful += 1
-                                if blocker_net_id in diff_pair_by_net_id:
-                                    routed_net_ids.append(ripped_pair.p_net_id)
-                                    routed_net_ids.append(ripped_pair.n_net_id)
-                                    # Remove from remaining_net_ids since they're back to routed
-                                    if ripped_pair.p_net_id in remaining_net_ids:
-                                        remaining_net_ids.remove(ripped_pair.p_net_id)
-                                    if ripped_pair.n_net_id in remaining_net_ids:
-                                        remaining_net_ids.remove(ripped_pair.n_net_id)
-                                    if blocker_result.get('p_path'):
-                                        routed_net_paths[ripped_pair.p_net_id] = blocker_result['p_path']
-                                    if blocker_result.get('n_path'):
-                                        routed_net_paths[ripped_pair.n_net_id] = blocker_result['n_path']
-                                    routed_results[ripped_pair.p_net_id] = blocker_result
-                                    routed_results[ripped_pair.n_net_id] = blocker_result
+                                blockers_str = "{" + ", ".join(blocker_names) + "}"
+                            print(f"  Skipping N={N}: already tried ripping {blockers_str} for {pair_name}")
+                            continue
+
+                        # Rip up only the new blocker(s) for this N level
+                        # (previous blockers are already ripped from N-1)
+                        rip_successful = True
+                        new_ripped_this_level = []
+
+                        if N == 1:
+                            blocker = rippable_blockers[0]
+                            if blocker.net_id in diff_pair_by_net_id:
+                                ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                print(f"  Ripping up diff pair {ripped_pair_name_tmp} (P and N) to retry...")
+                            else:
+                                print(f"  Ripping up {blocker.net_name} to retry...")
+                        else:
+                            print(f"  Extending to N={N}: ripping additional blocker(s)...")
+
+                        for i in range(len(ripped_items), N):
+                            blocker = rippable_blockers[i]
+                            # Skip if already ripped (e.g., as part of a diff pair)
+                            if blocker.net_id not in routed_results:
+                                continue
+                            saved_result, ripped_ids, was_in_results = rip_up_net(
+                                blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache
+                            )
+                            if saved_result is None:
+                                rip_successful = False
+                                break
+                            ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
+                            new_ripped_this_level.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
+                            if was_in_results:
+                                successful -= 1
+                            if blocker.net_id in diff_pair_by_net_id:
+                                ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                print(f"    Ripped diff pair {ripped_pair_name_tmp}")
+                            else:
+                                print(f"    Ripped {blocker.net_name}")
+
+                        if not rip_successful:
+                            # Restore only the nets we just ripped this level
+                            for net_id, saved_result, ripped_ids, was_in_results in reversed(new_ripped_this_level):
+                                restore_net(net_id, saved_result, ripped_ids, was_in_results,
+                                           pcb_data, routed_net_ids, routed_net_paths,
+                                           routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                           results, config, track_proximity_cache, layer_map)
+                                if was_in_results:
+                                    successful += 1
+                                ripped_items.pop()
+                            continue
+
+                        # Rebuild obstacles and retry the current route
+                        retry_obstacles = diff_pair_base_obstacles.clone()
+                        for routed_id in routed_net_ids:
+                            add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                            add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                            add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                        other_unrouted = [nid for nid in remaining_net_ids
+                                         if nid != pair.p_net_id and nid != pair.n_net_id]
+                        for other_net_id in other_unrouted:
+                            add_net_stubs_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                            add_net_vias_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                            add_net_pads_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                        stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                                   if nid != pair.p_net_id and nid != pair.n_net_id
+                                                   and nid not in routed_net_ids]
+                        unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+                        if unrouted_stubs:
+                            add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
+                        merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
+                        add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
+                        add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
+                        add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
+
+                        retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
+
+                        if retry_result and not retry_result.get('failed') and not retry_result.get('probe_blocked'):
+                            print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
+                            results.append(retry_result)
+                            successful += 1
+                            total_iterations += retry_result['iterations']
+
+                            # Apply polarity swap if needed (same as original route path)
+                            apply_polarity_swap(pcb_data, retry_result, pad_swaps, pair_name, polarity_swapped_pairs)
+
+                            add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                            if pair.p_net_id in remaining_net_ids:
+                                remaining_net_ids.remove(pair.p_net_id)
+                            if pair.n_net_id in remaining_net_ids:
+                                remaining_net_ids.remove(pair.n_net_id)
+                            routed_net_ids.append(pair.p_net_id)
+                            routed_net_ids.append(pair.n_net_id)
+                            # Compute and cache track proximity costs
+                            track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
+                            track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
+                            if retry_result.get('p_path'):
+                                routed_net_paths[pair.p_net_id] = retry_result['p_path']
+                            if retry_result.get('n_path'):
+                                routed_net_paths[pair.n_net_id] = retry_result['n_path']
+                            routed_results[pair.p_net_id] = retry_result
+                            routed_results[pair.n_net_id] = retry_result
+                            diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
+                            diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+
+                            # Queue all ripped-up nets for rerouting and add to history
+                            rip_and_retry_history.add((current_canonical, blocker_canonicals))
+
+                            for net_id, saved_result, ripped_ids, was_in_results in ripped_items:
+                                # Decrement successful count - will be re-counted when rerouted
+                                if was_in_results:
+                                    successful -= 1
+                                if net_id in diff_pair_by_net_id:
+                                    ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id]
+                                    reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
                                 else:
-                                    routed_net_ids.append(blocker_net_id)
-                                    if blocker_net_id in remaining_net_ids:
-                                        remaining_net_ids.remove(blocker_net_id)
-                                    if blocker_result.get('path'):
-                                        routed_net_paths[blocker_net_id] = blocker_result['path']
-                                    routed_results[blocker_net_id] = blocker_result
+                                    net = pcb_data.nets.get(net_id)
+                                    net_name = net.name if net else f"Net {net_id}"
+                                    reroute_queue.append(('single', net_name, net_id))
+
+                            ripped_up = True
+                            retry_succeeded = True
+                            ripup_success_pairs.add(pair_name)
+                            break  # Success! Exit the N loop
+                        else:
+                            # Retry failed - keep nets ripped for N+1 attempt
+                            print(f"  RETRY FAILED (N={N})")
+
+                            # Re-analyze blockers from retry result to find new rippable nets
+                            if retry_result:
+                                if retry_result.get('probe_blocked'):
+                                    # Probe was blocked - use blocked_cells from probe result
+                                    retry_blocked_cells = retry_result.get('blocked_cells', [])
+                                else:
+                                    # Full route failed - use blocked_cells from both directions
+                                    retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
+                                    retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                    retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+
+                                if retry_blocked_cells:
+                                    new_blockers = analyze_frontier_blocking(
+                                        retry_blocked_cells, pcb_data, config, routed_net_paths,
+                                        exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                                        extra_clearance=diff_pair_extra_clearance
+                                    )
+                                    # Add any new rippable blockers not already in the list
+                                    for b in new_blockers:
+                                        if b.net_id in routed_results:
+                                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                                            if canonical not in seen_canonical_ids:
+                                                seen_canonical_ids.add(canonical)
+                                                rippable_blockers.append(b)
+                                                if b.net_id in diff_pair_by_net_id:
+                                                    print(f"    New blocker found: {diff_pair_by_net_id[b.net_id][0]}")
+                                                else:
+                                                    print(f"    New blocker found: {b.net_name}")
+
+                    # If all N levels failed, restore all ripped nets
+                    if not retry_succeeded and ripped_items:
+                        print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                        for net_id, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
+                            restore_net(net_id, saved_result, ripped_ids, was_in_results,
+                                       pcb_data, routed_net_ids, routed_net_paths,
+                                       routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                       results, config, track_proximity_cache, layer_map)
+                            if was_in_results:
+                                successful += 1
 
             if not ripped_up:
                 failed += 1
 
-    # Route ripped-up nets
-    for reroute_item in reroute_queue:
-        if reroute_item[0] == 'diff_pair':
-            _, ripped_pair_name, ripped_pair = reroute_item
-            route_index += 1
-            print(f"\n[REROUTE {route_index}] Re-routing ripped diff pair {ripped_pair_name}")
-            print("-" * 40)
-
-            start_time = time.time()
-            obstacles = diff_pair_base_obstacles.clone()
-            for routed_id in routed_net_ids:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-                add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-                add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-            other_unrouted = [nid for nid in remaining_net_ids
-                             if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id]
-            for other_net_id in other_unrouted:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-                add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-                add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
-                                       if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id
-                                       and nid not in routed_net_ids]
-            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-            if unrouted_stubs:
-                add_stub_proximity_costs(obstacles, unrouted_stubs, config)
-            add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
-            add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
-
-            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs)
-            elapsed = time.time() - start_time
-            total_time += elapsed
-
-            if result and not result.get('failed'):
-                print(f"  REROUTE SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias ({elapsed:.2f}s)")
-                results.append(result)
-                successful += 1
-                total_iterations += result['iterations']
-
-                # Apply polarity swap if needed (same as original route path)
-                # Pass pair_name and set to avoid double-swap if already done before rip-up
-                apply_polarity_swap(pcb_data, result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
-
-                add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-                if ripped_pair.p_net_id in remaining_net_ids:
-                    remaining_net_ids.remove(ripped_pair.p_net_id)
-                if ripped_pair.n_net_id in remaining_net_ids:
-                    remaining_net_ids.remove(ripped_pair.n_net_id)
-                routed_net_ids.append(ripped_pair.p_net_id)
-                routed_net_ids.append(ripped_pair.n_net_id)
-                if result.get('p_path'):
-                    routed_net_paths[ripped_pair.p_net_id] = result['p_path']
-                if result.get('n_path'):
-                    routed_net_paths[ripped_pair.n_net_id] = result['n_path']
-                routed_results[ripped_pair.p_net_id] = result
-                routed_results[ripped_pair.n_net_id] = result
-            else:
-                print(f"  REROUTE FAILED: ({elapsed:.2f}s)")
-                failed += 1
-                if result:
-                    total_iterations += result['iterations']
-
     # Route single-ended nets
+    reroute_index = 0  # Initialize for unified reroute loop at end
     user_quit = False
     for net_name, net_id in single_ended_nets:
         if user_quit:
@@ -807,6 +1730,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
         if unrouted_stubs:
             add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+        # Add track proximity costs for previously routed tracks (same layer only)
+        merge_track_proximity_costs(obstacles, track_proximity_cache)
 
         # Add same-net via clearance blocking (for DRC - vias can't be too close even on same net)
         add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
@@ -854,40 +1779,776 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
             remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
+            routed_results[net_id] = result  # Track for summary
             # Track path for blocking analysis
             if result.get('path'):
                 routed_net_paths[net_id] = result['path']
+            # Add to track proximity cache
+            track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
-            failed += 1
             total_iterations += iterations
-            # Analyze which nets are blocking if we have frontier data
+
+            # Try rip-up and reroute for single-ended nets (similar to diff pairs)
+            ripped_up = False
             if routed_net_paths and result:
-                for direction in ['forward', 'backward']:
-                    blocked_cells = result.get(f'blocked_cells_{direction}', [])
-                    dir_iters = result.get(f'iterations_{direction}', 0)
+                # Find the direction that failed faster (likely more constrained)
+                fwd_iters = result.get('iterations_forward', 0)
+                bwd_iters = result.get('iterations_backward', 0)
+                fwd_cells = result.get('blocked_cells_forward', [])
+                bwd_cells = result.get('blocked_cells_backward', [])
+
+                if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
+                    fastest_dir = 'forward'
+                    blocked_cells = fwd_cells
+                    dir_iters = fwd_iters
                     if blocked_cells:
-                        print(f"  {direction.capitalize()} direction ({dir_iters} iterations, {len(blocked_cells)} blocked cells):")
+                        print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
+                elif bwd_iters > 0:
+                    fastest_dir = 'backward'
+                    blocked_cells = bwd_cells
+                    dir_iters = bwd_iters
+                    if blocked_cells:
+                        print(f"  {fastest_dir.capitalize()} direction failed fastest ({dir_iters} iterations, {len(blocked_cells)} blocked cells)")
+                else:
+                    # Both directions had 0 iterations - combine all blocked cells
+                    blocked_cells = list(set(fwd_cells + bwd_cells))
+
+                if blocked_cells:
+                    blockers = analyze_frontier_blocking(
+                        blocked_cells, pcb_data, config, routed_net_paths,
+                        exclude_net_ids={net_id},
+                    )
+                    print_blocking_analysis(blockers)
+
+                    # Filter to only rippable blockers (those in routed_results)
+                    # and deduplicate by diff pair (P and N count as one)
+                    rippable_blockers = []
+                    seen_canonical_ids = set()
+                    for b in blockers:
+                        if b.net_id in routed_results:
+                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                            if canonical not in seen_canonical_ids:
+                                seen_canonical_ids.add(canonical)
+                                rippable_blockers.append(b)
+
+                    # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
+                    ripped_items = []
+                    retry_succeeded = False
+
+                    for N in range(1, config.max_rip_up_count + 1):
+                        if N > len(rippable_blockers):
+                            break  # Not enough blockers to rip
+
+                        # Build frozenset of all N blocker canonicals for loop check
+                        blocker_canonicals = frozenset(
+                            get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
+                            for i in range(N)
+                        )
+                        if (net_id, blocker_canonicals) in rip_and_retry_history:
+                            blocker_names = []
+                            for i in range(N):
+                                b = rippable_blockers[i]
+                                if b.net_id in diff_pair_by_net_id:
+                                    blocker_names.append(diff_pair_by_net_id[b.net_id][0])
+                                else:
+                                    blocker_names.append(b.net_name)
+                            if len(blocker_names) == 1:
+                                blockers_str = blocker_names[0]
+                            else:
+                                blockers_str = "{" + ", ".join(blocker_names) + "}"
+                            print(f"  Skipping N={N}: already tried ripping {blockers_str} for {net_name}")
+                            continue
+
+                        # Rip up only the new blocker(s) for this N level
+                        rip_successful = True
+                        new_ripped_this_level = []
+
+                        if N == 1:
+                            blocker = rippable_blockers[0]
+                            if blocker.net_id in diff_pair_by_net_id:
+                                ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                print(f"  Ripping up diff pair {ripped_pair_name_tmp} (P and N) to retry...")
+                            else:
+                                print(f"  Ripping up {blocker.net_name} to retry...")
+                        else:
+                            print(f"  Extending to N={N}: ripping additional blocker(s)...")
+
+                        for i in range(len(ripped_items), N):
+                            blocker = rippable_blockers[i]
+                            if blocker.net_id not in routed_results:
+                                continue
+                            saved_result, ripped_ids, was_in_results = rip_up_net(
+                                blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache
+                            )
+                            if saved_result is None:
+                                rip_successful = False
+                                break
+                            ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
+                            new_ripped_this_level.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
+                            if was_in_results:
+                                successful -= 1
+                            if blocker.net_id in diff_pair_by_net_id:
+                                ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                print(f"    Ripped diff pair {ripped_pair_name_tmp}")
+                            else:
+                                print(f"    Ripped {blocker.net_name}")
+
+                        if not rip_successful:
+                            for rid, saved_result, ripped_ids, was_in_results in reversed(new_ripped_this_level):
+                                restore_net(rid, saved_result, ripped_ids, was_in_results,
+                                           pcb_data, routed_net_ids, routed_net_paths,
+                                           routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                           results, config, track_proximity_cache, layer_map)
+                                if was_in_results:
+                                    successful += 1
+                                ripped_items.pop()
+                            continue
+
+                        # Rebuild obstacles and retry the current route
+                        retry_obstacles = base_obstacles.clone()
+                        for routed_id in routed_net_ids:
+                            add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                            add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                            add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                        other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
+                        for other_net_id in other_unrouted:
+                            add_net_stubs_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
+                            add_net_vias_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
+                            add_net_pads_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
+                        stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                                   if nid != net_id and nid not in routed_net_ids]
+                        unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+                        if unrouted_stubs:
+                            add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
+                        merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
+                        add_same_net_via_clearance(retry_obstacles, pcb_data, net_id, config)
+
+                        retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles)
+
+                        if retry_result and not retry_result.get('failed'):
+                            print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
+                            results.append(retry_result)
+                            successful += 1
+                            total_iterations += retry_result['iterations']
+                            add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                            if net_id in remaining_net_ids:
+                                remaining_net_ids.remove(net_id)
+                            routed_net_ids.append(net_id)
+                            routed_results[net_id] = retry_result
+                            if retry_result.get('path'):
+                                routed_net_paths[net_id] = retry_result['path']
+                            track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+
+                            # Queue all ripped-up nets for rerouting and add to history
+                            rip_and_retry_history.add((net_id, blocker_canonicals))
+
+                            for rid, saved_result, ripped_ids, was_in_results in ripped_items:
+                                if was_in_results:
+                                    successful -= 1
+                                if rid in diff_pair_by_net_id:
+                                    ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[rid]
+                                    reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
+                                else:
+                                    ripped_net = pcb_data.nets.get(rid)
+                                    ripped_net_name = ripped_net.name if ripped_net else f"Net {rid}"
+                                    reroute_queue.append(('single', ripped_net_name, rid))
+
+                            ripped_up = True
+                            retry_succeeded = True
+                            break  # Success! Exit the N loop
+                        else:
+                            print(f"  RETRY FAILED (N={N})")
+
+                            # Re-analyze blockers from retry result to find new rippable nets
+                            if retry_result:
+                                retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
+                                retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+
+                                if retry_blocked_cells:
+                                    new_blockers = analyze_frontier_blocking(
+                                        retry_blocked_cells, pcb_data, config, routed_net_paths,
+                                        exclude_net_ids={net_id},
+                                    )
+                                    for b in new_blockers:
+                                        if b.net_id in routed_results:
+                                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                                            if canonical not in seen_canonical_ids:
+                                                seen_canonical_ids.add(canonical)
+                                                rippable_blockers.append(b)
+                                                if b.net_id in diff_pair_by_net_id:
+                                                    print(f"    New blocker found: {diff_pair_by_net_id[b.net_id][0]}")
+                                                else:
+                                                    print(f"    New blocker found: {b.net_name}")
+
+                    # If all N levels failed, restore all ripped nets
+                    if not retry_succeeded and ripped_items:
+                        print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                        for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
+                            restore_net(rid, saved_result, ripped_ids, was_in_results,
+                                       pcb_data, routed_net_ids, routed_net_paths,
+                                       routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                       results, config, track_proximity_cache, layer_map)
+                            if was_in_results:
+                                successful += 1
+
+            if not ripped_up:
+                failed += 1
+
+    # Unified reroute loop - handles all nets ripped during diff pair or single-ended routing
+    while reroute_index < len(reroute_queue):
+        reroute_item = reroute_queue[reroute_index]
+        reroute_index += 1
+
+        if reroute_item[0] == 'single':
+            _, ripped_net_name, ripped_net_id = reroute_item
+            route_index += 1
+            current_total = total_routes + len(reroute_queue)
+            print(f"\n[REROUTE {route_index}/{current_total}] Re-routing ripped net {ripped_net_name}")
+            print("-" * 40)
+
+            start_time = time.time()
+            obstacles = base_obstacles.clone()
+            for routed_id in routed_net_ids:
+                add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
+                add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config)
+                add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config)
+            other_unrouted = [nid for nid in remaining_net_ids if nid != ripped_net_id]
+            for other_net_id in other_unrouted:
+                add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
+                add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config)
+                add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
+            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                       if nid != ripped_net_id and nid not in routed_net_ids]
+            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+            if unrouted_stubs:
+                add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+            merge_track_proximity_costs(obstacles, track_proximity_cache)
+            add_same_net_via_clearance(obstacles, pcb_data, ripped_net_id, config)
+
+            result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
+            elapsed = time.time() - start_time
+            total_time += elapsed
+
+            if result and not result.get('failed'):
+                print(f"  REROUTE SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias ({elapsed:.2f}s)")
+                results.append(result)
+                successful += 1
+                total_iterations += result['iterations']
+                add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+                if ripped_net_id in remaining_net_ids:
+                    remaining_net_ids.remove(ripped_net_id)
+                routed_net_ids.append(ripped_net_id)
+                routed_results[ripped_net_id] = result
+                if result.get('path'):
+                    routed_net_paths[ripped_net_id] = result['path']
+                track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(pcb_data, ripped_net_id, config, layer_map)
+            else:
+                # Reroute failed - try rip-up and retry
+                iterations = result['iterations'] if result else 0
+                total_iterations += iterations
+                print(f"  REROUTE FAILED: ({elapsed:.2f}s) - attempting rip-up and retry...")
+
+                reroute_succeeded = False
+                if routed_net_paths and result:
+                    fwd_cells = result.get('blocked_cells_forward', [])
+                    bwd_cells = result.get('blocked_cells_backward', [])
+                    blocked_cells = list(set(fwd_cells + bwd_cells))
+
+                    if blocked_cells:
                         blockers = analyze_frontier_blocking(
                             blocked_cells, pcb_data, config, routed_net_paths,
-                            exclude_net_ids={net_id},
+                            exclude_net_ids={ripped_net_id},
                         )
                         print_blocking_analysis(blockers)
+
+                        # Filter to only rippable blockers
+                        rippable_blockers = []
+                        seen_canonical_ids = set()
+                        for b in blockers:
+                            if b.net_id in routed_results:
+                                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                                if canonical not in seen_canonical_ids:
+                                    seen_canonical_ids.add(canonical)
+                                    rippable_blockers.append(b)
+
+                        # Progressive rip-up
+                        ripped_items = []
+
+                        for N in range(1, config.max_rip_up_count + 1):
+                            if N > len(rippable_blockers):
+                                break
+
+                            blocker_canonicals = frozenset(
+                                get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
+                                for i in range(N)
+                            )
+                            if (ripped_net_id, blocker_canonicals) in rip_and_retry_history:
+                                continue
+
+                            rip_successful = True
+                            new_ripped_this_level = []
+
+                            if N == 1:
+                                blocker = rippable_blockers[0]
+                                if blocker.net_id in diff_pair_by_net_id:
+                                    ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                    print(f"  Ripping up diff pair {ripped_pair_name_tmp} to retry reroute...")
+                                else:
+                                    print(f"  Ripping up {blocker.net_name} to retry reroute...")
+                            else:
+                                print(f"  Extending to N={N}: ripping additional blocker(s)...")
+
+                            for i in range(len(ripped_items), N):
+                                blocker = rippable_blockers[i]
+                                if blocker.net_id not in routed_results:
+                                    continue
+                                saved_result_tmp, ripped_ids, was_in_results = rip_up_net(
+                                    blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                    results, config, track_proximity_cache
+                                )
+                                if saved_result_tmp is None:
+                                    rip_successful = False
+                                    break
+                                ripped_items.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
+                                new_ripped_this_level.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
+                                if was_in_results:
+                                    successful -= 1
+
+                            if not rip_successful:
+                                for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in reversed(new_ripped_this_level):
+                                    restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
+                                               pcb_data, routed_net_ids, routed_net_paths,
+                                               routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                               results, config, track_proximity_cache, layer_map)
+                                    if was_in_results:
+                                        successful += 1
+                                    ripped_items.pop()
+                                continue
+
+                            # Rebuild obstacles and retry
+                            retry_obstacles = base_obstacles.clone()
+                            for routed_id in routed_net_ids:
+                                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                                add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                            other_unrouted = [nid for nid in remaining_net_ids if nid != ripped_net_id]
+                            for other_net_id in other_unrouted:
+                                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
+                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
+                                add_net_pads_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
+                            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                                       if nid != ripped_net_id and nid not in routed_net_ids]
+                            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+                            if unrouted_stubs:
+                                add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
+                            merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
+                            add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_net_id, config)
+
+                            retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles)
+
+                            if retry_result and not retry_result.get('failed'):
+                                print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
+                                results.append(retry_result)
+                                successful += 1
+                                total_iterations += retry_result['iterations']
+                                add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                                if ripped_net_id in remaining_net_ids:
+                                    remaining_net_ids.remove(ripped_net_id)
+                                routed_net_ids.append(ripped_net_id)
+                                routed_results[ripped_net_id] = retry_result
+                                if retry_result.get('path'):
+                                    routed_net_paths[ripped_net_id] = retry_result['path']
+                                track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(pcb_data, ripped_net_id, config, layer_map)
+
+                                # Queue ripped nets and add to history
+                                rip_and_retry_history.add((ripped_net_id, blocker_canonicals))
+                                for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
+                                    if was_in_results:
+                                        successful -= 1
+                                    if net_id_tmp in diff_pair_by_net_id:
+                                        ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id_tmp]
+                                        reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
+                                    else:
+                                        net = pcb_data.nets.get(net_id_tmp)
+                                        net_name_tmp = net.name if net else f"Net {net_id_tmp}"
+                                        reroute_queue.append(('single', net_name_tmp, net_id_tmp))
+
+                                reroute_succeeded = True
+                                break
+                            else:
+                                print(f"  REROUTE RETRY FAILED (N={N})")
+
+                        # If all N levels failed, restore all ripped nets
+                        if not reroute_succeeded and ripped_items:
+                            print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                            for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in reversed(ripped_items):
+                                restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
+                                           pcb_data, routed_net_ids, routed_net_paths,
+                                           routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                           results, config, track_proximity_cache, layer_map)
+                                if was_in_results:
+                                    successful += 1
+
+                if not reroute_succeeded:
+                    failed += 1
+
+        elif reroute_item[0] == 'diff_pair':
+            # Handle diff pairs that were ripped during single-ended routing
+            _, ripped_pair_name, ripped_pair = reroute_item
+            route_index += 1
+            current_total = total_routes + len(reroute_queue)
+            print(f"\n[REROUTE {route_index}/{current_total}] Re-routing ripped diff pair {ripped_pair_name}")
+            print("-" * 40)
+
+            start_time = time.time()
+            obstacles = diff_pair_base_obstacles.clone()
+            for routed_id in routed_net_ids:
+                add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+            other_unrouted = [nid for nid in remaining_net_ids
+                             if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id]
+            for other_net_id in other_unrouted:
+                add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                       if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id
+                                       and nid not in routed_net_ids]
+            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+            if unrouted_stubs:
+                add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+            merge_track_proximity_costs(obstacles, track_proximity_cache)
+            add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
+            add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
+            add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
+
+            result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs)
+            elapsed = time.time() - start_time
+            total_time += elapsed
+
+            if result and not result.get('failed') and not result.get('probe_blocked'):
+                print(f"  REROUTE SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias ({elapsed:.2f}s)")
+                results.append(result)
+                successful += 1
+                total_iterations += result['iterations']
+                rerouted_pairs.add(ripped_pair_name)
+                apply_polarity_swap(pcb_data, result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
+                add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+                if ripped_pair.p_net_id in remaining_net_ids:
+                    remaining_net_ids.remove(ripped_pair.p_net_id)
+                if ripped_pair.n_net_id in remaining_net_ids:
+                    remaining_net_ids.remove(ripped_pair.n_net_id)
+                routed_net_ids.append(ripped_pair.p_net_id)
+                routed_net_ids.append(ripped_pair.n_net_id)
+                if result.get('p_path'):
+                    routed_net_paths[ripped_pair.p_net_id] = result['p_path']
+                if result.get('n_path'):
+                    routed_net_paths[ripped_pair.n_net_id] = result['n_path']
+                routed_results[ripped_pair.p_net_id] = result
+                routed_results[ripped_pair.n_net_id] = result
+                diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
+                diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
+                track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
+                track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
+            else:
+                # Reroute failed - try rip-up and retry
+                iterations = result['iterations'] if result else 0
+                total_iterations += iterations
+                print(f"  REROUTE FAILED: ({elapsed:.2f}s) - attempting rip-up and retry...")
+
+                reroute_succeeded = False
+                if routed_net_paths and result:
+                    # Find blocked cells from the failed route
+                    if result.get('probe_blocked'):
+                        blocked_cells = result.get('blocked_cells', [])
+                    else:
+                        fwd_iters = result.get('iterations_forward', 0)
+                        bwd_iters = result.get('iterations_backward', 0)
+                        if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
+                            blocked_cells = result.get('blocked_cells_forward', [])
+                        else:
+                            blocked_cells = result.get('blocked_cells_backward', [])
+
+                    if blocked_cells:
+                        blockers = analyze_frontier_blocking(
+                            blocked_cells, pcb_data, config, routed_net_paths,
+                            exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
+                            extra_clearance=diff_pair_extra_clearance
+                        )
+                        print_blocking_analysis(blockers)
+
+                        # Filter to only rippable blockers and deduplicate by diff pair
+                        rippable_blockers = []
+                        seen_canonical_ids = set()
+                        for b in blockers:
+                            if b.net_id in routed_results:
+                                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                                if canonical not in seen_canonical_ids:
+                                    seen_canonical_ids.add(canonical)
+                                    rippable_blockers.append(b)
+                        current_canonical = ripped_pair.p_net_id
+
+                        # Progressive rip-up: try N=1, then N=2, etc
+                        ripped_items = []
+
+                        for N in range(1, config.max_rip_up_count + 1):
+                            if N > len(rippable_blockers):
+                                break
+
+                            blocker_canonicals = frozenset(
+                                get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
+                                for i in range(N)
+                            )
+                            if (current_canonical, blocker_canonicals) in rip_and_retry_history:
+                                continue
+
+                            # Rip up blockers
+                            rip_successful = True
+                            new_ripped_this_level = []
+
+                            if N == 1:
+                                blocker = rippable_blockers[0]
+                                if blocker.net_id in diff_pair_by_net_id:
+                                    ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
+                                    print(f"  Ripping up diff pair {ripped_pair_name_tmp} to retry reroute...")
+                                else:
+                                    print(f"  Ripping up {blocker.net_name} to retry reroute...")
+                            else:
+                                print(f"  Extending to N={N}: ripping additional blocker(s)...")
+
+                            for i in range(len(ripped_items), N):
+                                blocker = rippable_blockers[i]
+                                if blocker.net_id not in routed_results:
+                                    continue
+                                saved_result_tmp, ripped_ids, was_in_results = rip_up_net(
+                                    blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                    results, config, track_proximity_cache
+                                )
+                                if saved_result_tmp is None:
+                                    rip_successful = False
+                                    break
+                                ripped_items.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
+                                new_ripped_this_level.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
+                                if was_in_results:
+                                    successful -= 1
+
+                            if not rip_successful:
+                                for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in reversed(new_ripped_this_level):
+                                    restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
+                                               pcb_data, routed_net_ids, routed_net_paths,
+                                               routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                               results, config, track_proximity_cache, layer_map)
+                                    if was_in_results:
+                                        successful += 1
+                                    ripped_items.pop()
+                                continue
+
+                            # Rebuild obstacles and retry
+                            retry_obstacles = diff_pair_base_obstacles.clone()
+                            for routed_id in routed_net_ids:
+                                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                                add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                            other_unrouted = [nid for nid in remaining_net_ids
+                                             if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id]
+                            for other_net_id in other_unrouted:
+                                add_net_stubs_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                                add_net_pads_as_obstacles(retry_obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
+                            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                                       if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id
+                                                       and nid not in routed_net_ids]
+                            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+                            if unrouted_stubs:
+                                add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
+                            merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
+                            add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.p_net_id, config)
+                            add_same_net_via_clearance(retry_obstacles, pcb_data, ripped_pair.n_net_id, config)
+                            add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
+
+                            retry_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
+
+                            if retry_result and not retry_result.get('failed') and not retry_result.get('probe_blocked'):
+                                print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
+                                results.append(retry_result)
+                                successful += 1
+                                total_iterations += retry_result['iterations']
+                                rerouted_pairs.add(ripped_pair_name)
+                                apply_polarity_swap(pcb_data, retry_result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
+                                add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                                if ripped_pair.p_net_id in remaining_net_ids:
+                                    remaining_net_ids.remove(ripped_pair.p_net_id)
+                                if ripped_pair.n_net_id in remaining_net_ids:
+                                    remaining_net_ids.remove(ripped_pair.n_net_id)
+                                routed_net_ids.append(ripped_pair.p_net_id)
+                                routed_net_ids.append(ripped_pair.n_net_id)
+                                if retry_result.get('p_path'):
+                                    routed_net_paths[ripped_pair.p_net_id] = retry_result['p_path']
+                                if retry_result.get('n_path'):
+                                    routed_net_paths[ripped_pair.n_net_id] = retry_result['n_path']
+                                routed_results[ripped_pair.p_net_id] = retry_result
+                                routed_results[ripped_pair.n_net_id] = retry_result
+                                diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
+                                diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
+                                track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
+                                track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
+
+                                # Queue ripped nets and add to history
+                                rip_and_retry_history.add((current_canonical, blocker_canonicals))
+                                for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
+                                    if was_in_results:
+                                        successful -= 1
+                                    if net_id_tmp in diff_pair_by_net_id:
+                                        ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id_tmp]
+                                        reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
+                                    else:
+                                        net = pcb_data.nets.get(net_id_tmp)
+                                        net_name_tmp = net.name if net else f"Net {net_id_tmp}"
+                                        reroute_queue.append(('single', net_name_tmp, net_id_tmp))
+
+                                reroute_succeeded = True
+                                break
+                            else:
+                                print(f"  REROUTE RETRY FAILED (N={N})")
+
+                        # If all N levels failed, restore all ripped nets
+                        if not reroute_succeeded and ripped_items:
+                            print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                            for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in reversed(ripped_items):
+                                restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
+                                           pcb_data, routed_net_ids, routed_net_paths,
+                                           routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                           results, config, track_proximity_cache, layer_map)
+                                if was_in_results:
+                                    successful += 1
+
+                if not reroute_succeeded:
+                    failed += 1
 
     # Notify visualization callback that all routing is complete
     if visualize:
         vis_callback.on_routing_complete(successful, failed, total_iterations)
 
-    print("\n" + "=" * 60)
-    print(f"Routing complete: {successful} successful, {failed} failed")
-    print(f"Total time: {total_time:.2f}s")
-    print(f"Total iterations: {total_iterations}")
+    # Build summary data
+    import json
+    routed_diff_pairs = []
+    failed_diff_pairs = []
+    for pair_name, pair in diff_pair_ids_to_route:
+        if pair.p_net_id in routed_results and pair.n_net_id in routed_results:
+            routed_diff_pairs.append(pair_name)
+        else:
+            failed_diff_pairs.append(pair_name)
+    routed_single = []
+    failed_single = []
+    for net_name, net_id in single_ended_nets:
+        if net_id in routed_results:
+            routed_single.append(net_name)
+        else:
+            failed_single.append(net_name)
+    # Count total vias from results
+    total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
-    if results:
+    # Print human-readable summary
+    print("\n" + "=" * 60)
+    print("Routing complete")
+    print("=" * 60)
+    if diff_pair_ids_to_route:
+        print(f"  Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed")
+    if single_ended_nets:
+        print(f"  Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed")
+    if ripup_success_pairs:
+        print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
+    if rerouted_pairs:
+        print(f"  Rerouted:      {len(rerouted_pairs)} (ripped nets re-routed)")
+    if polarity_swapped_pairs:
+        print(f"  Polarity swaps: {len(polarity_swapped_pairs)}")
+    if target_swaps:
+        # Print unique swaps (each pair shown once)
+        swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
+        print(f"  Target swaps:  {len(swap_pairs)}")
+    print(f"  Total vias:    {total_vias}")
+    print(f"  Total time:    {total_time:.2f}s")
+    print(f"  Iterations:    {total_iterations:,}")
+    summary = {
+        'routed_diff_pairs': routed_diff_pairs,
+        'failed_diff_pairs': failed_diff_pairs,
+        'routed_single': routed_single,
+        'failed_single': failed_single,
+        'ripup_success_pairs': sorted(ripup_success_pairs),
+        'rerouted_pairs': sorted(rerouted_pairs),
+        'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
+        'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
+        'layer_swaps': total_layer_swaps,
+        'successful': successful,
+        'failed': failed,
+        'total_time': round(total_time, 2),
+        'total_iterations': total_iterations,
+        'total_vias': total_vias
+    }
+    print(f"JSON_SUMMARY: {json.dumps(summary)}")
+
+    # Write output if we have results OR if we have layer swap/target swap modifications to show
+    # Also write if skip_routing (to output debug labels even without routing)
+    if results or all_segment_modifications or all_swap_vias or target_swap_info or skip_routing:
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
+
+        # Apply segment layer modifications from stub layer switching BEFORE polarity swaps
+        # (so we can find segments by their original net_id)
+        if all_segment_modifications:
+            content, mod_count = modify_segment_layers(content, all_segment_modifications)
+            print(f"Applied {mod_count} segment layer modifications (layer switching)")
+
+        # Apply target swaps for swappable-nets feature
+        if target_swap_info:
+            print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
+            for swap in target_swap_info:
+                # Swap segments at p1's target: p1 net -> p2 net
+                content, p1_p_seg = swap_segment_nets_at_positions(
+                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'])
+                content, p1_n_seg = swap_segment_nets_at_positions(
+                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'])
+                # Swap segments at p2's target: p2 net -> p1 net
+                content, p2_p_seg = swap_segment_nets_at_positions(
+                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'])
+                content, p2_n_seg = swap_segment_nets_at_positions(
+                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'])
+
+                # Swap vias at p1's target
+                content, p1_p_via = swap_via_nets_at_positions(
+                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'])
+                content, p1_n_via = swap_via_nets_at_positions(
+                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'])
+                # Swap vias at p2's target
+                content, p2_p_via = swap_via_nets_at_positions(
+                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'])
+                content, p2_n_via = swap_via_nets_at_positions(
+                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'])
+
+                # Swap pads if they exist
+                if swap['p1_p_pad'] and swap['p2_p_pad']:
+                    print(f"    Swapping P pads in output: {swap['p1_p_pad'].component_ref}:{swap['p1_p_pad'].pad_number} <-> {swap['p2_p_pad'].component_ref}:{swap['p2_p_pad'].pad_number}")
+                    content = swap_pad_nets_in_content(content, swap['p1_p_pad'], swap['p2_p_pad'])
+                else:
+                    print(f"    WARNING: Missing P pads for swap: p1={swap['p1_p_pad']}, p2={swap['p2_p_pad']}")
+                if swap['p1_n_pad'] and swap['p2_n_pad']:
+                    print(f"    Swapping N pads in output: {swap['p1_n_pad'].component_ref}:{swap['p1_n_pad'].pad_number} <-> {swap['p2_n_pad'].component_ref}:{swap['p2_n_pad'].pad_number}")
+                    content = swap_pad_nets_in_content(content, swap['p1_n_pad'], swap['p2_n_pad'])
+                else:
+                    print(f"    WARNING: Missing N pads for swap: p1={swap['p1_n_pad']}, p2={swap['p2_n_pad']}")
+
+                total_seg = p1_p_seg + p1_n_seg + p2_p_seg + p2_n_seg
+                total_via = p1_p_via + p1_n_via + p2_p_via + p2_n_via
+                print(f"  {swap['p1_name']} <-> {swap['p2_name']}: {total_seg} segments, {total_via} vias")
 
         # Apply pad and stub net swaps for polarity fixes
         if pad_swaps:
@@ -929,6 +2590,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     seg.width, seg.layer, seg.net_id
                 ) + "\n"
             for via in result['new_vias']:
+                routing_text += generate_via_sexpr(
+                    via.x, via.y, via.size, via.drill,
+                    via.layers, via.net_id
+                ) + "\n"
+
+        # Add vias from stub layer swapping
+        if all_swap_vias:
+            print(f"Adding {len(all_swap_vias)} via(s) from stub layer swapping")
+            for via in all_swap_vias:
                 routing_text += generate_via_sexpr(
                     via.x, via.y, via.size, via.drill,
                     via.layers, via.net_id
@@ -976,6 +2646,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     routing_text += generate_gr_line_sexpr(
                         start, end,
                         0.05, "User.4"
+                    ) + "\n"
+
+            # Boundary position labels on User.6 (from mps-unroll)
+            if boundary_debug_labels:
+                print(f"Adding {len(boundary_debug_labels)} boundary position labels to User.6")
+                for label in boundary_debug_labels:
+                    routing_text += generate_gr_text_sexpr(
+                        label['text'], label['x'], label['y'], label['layer'],
+                        size=0.1, angle=label.get('angle', 0)
                     ) + "\n"
 
         last_paren = content.rfind(')')
@@ -1088,16 +2767,30 @@ Differential pair routing:
                         help="Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)")
     parser.add_argument("--max-iterations", type=int, default=200000,
                         help="Max A* iterations before giving up (default: 200000)")
-    parser.add_argument("--heuristic-weight", type=float, default=1.5,
-                        help="A* heuristic weight, higher=faster but less optimal (default: 1.5)")
+    parser.add_argument("--max-probe-iterations", type=int, default=5000,
+                        help="Max iterations for quick probe phase per direction (default: 5000)")
+    parser.add_argument("--heuristic-weight", type=float, default=1.9,
+                        help="A* heuristic weight, higher=faster but less optimal (default: 1.9)")
 
     # Stub proximity penalty
-    parser.add_argument("--stub-proximity-radius", type=float, default=5.0,
-                        help="Radius around stubs to penalize routing in mm (default: 5.0)")
+    parser.add_argument("--stub-proximity-radius", type=float, default=2.0,
+                        help="Radius around stubs to penalize routing in mm (default: 2.0)")
     parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near stubs in mm equivalent (default: 0.2)")
-    parser.add_argument("--via-proximity-cost", type=float, default=10.0,
-                        help="Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)")
+    parser.add_argument("--via-proximity-cost", type=float, default=20.0,
+                        help="Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 20.0)")
+
+    # BGA proximity penalty
+    parser.add_argument("--bga-proximity-radius", type=float, default=10.0,
+                        help="Radius around BGA edges to penalize routing in mm (default: 10.0)")
+    parser.add_argument("--bga-proximity-cost", type=float, default=0.2,
+                        help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
+
+    # Track proximity penalty (same layer only)
+    parser.add_argument("--track-proximity-distance", type=float, default=1.0,
+                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 1.0)")
+    parser.add_argument("--track-proximity-cost", type=float, default=0.2,
+                        help="Cost penalty near routed tracks in mm equivalent (default: 0.2)")
 
     # Differential pair routing
     parser.add_argument("--diff-pairs", "-D", nargs="+",
@@ -1110,10 +2803,26 @@ Differential pair routing:
                         help="Minimum turning radius for pose-based routing in mm (default: 0.2)")
     parser.add_argument("--no-fix-polarity", action="store_true",
                         help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
+    parser.add_argument("--no-stub-layer-swap", action="store_true",
+                        help="Disable stub layer switching optimization (enabled by default)")
+    parser.add_argument("--can-swap-to-top-layer", action="store_true",
+                        help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
+    parser.add_argument("--swappable-nets", nargs="+",
+                        help="Glob patterns for diff pair nets that can have targets swapped (e.g., 'rx1_*')")
+    parser.add_argument("--crossing-penalty", type=float, default=1000.0,
+                        help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
+
+    # Rip-up and retry options
+    parser.add_argument("--max-ripup", type=int, default=3,
+                        help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
+    parser.add_argument("--max-setback-angle", type=float, default=45.0,
+                        help="Maximum angle (degrees) for setback position search (default: 45.0)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
+    parser.add_argument("--skip-routing", action="store_true",
+                        help="Skip actual routing, only do swaps and write debug info")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",
@@ -1163,14 +2872,26 @@ Differential pair routing:
                 grid_step=args.grid_step,
                 via_cost=args.via_cost,
                 max_iterations=args.max_iterations,
+                max_probe_iterations=args.max_probe_iterations,
                 heuristic_weight=args.heuristic_weight,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
                 via_proximity_cost=args.via_proximity_cost,
+                bga_proximity_radius=args.bga_proximity_radius,
+                bga_proximity_cost=args.bga_proximity_cost,
+                track_proximity_distance=args.track_proximity_distance,
+                track_proximity_cost=args.track_proximity_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,
                 min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
                 fix_polarity=not args.no_fix_polarity,
+                max_rip_up_count=args.max_ripup,
+                max_setback_angle=args.max_setback_angle,
+                enable_layer_switch=not args.no_stub_layer_swap,
+                can_swap_to_top_layer=args.can_swap_to_top_layer,
+                swappable_net_patterns=args.swappable_nets,
+                crossing_penalty=args.crossing_penalty,
+                skip_routing=args.skip_routing,
                 vis_callback=vis_callback)

@@ -7,6 +7,7 @@ import uuid
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import Pad
+from routing_utils import pos_key
 
 
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
@@ -48,6 +49,22 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
 		(layers "{layers_str}")
 		(net {net_id})
 		(uuid "{uuid.uuid4()}")
+	)'''
+
+
+def generate_gr_text_sexpr(text: str, x: float, y: float, layer: str,
+                           size: float = 0.5, angle: float = 0) -> str:
+    """Generate KiCad S-expression for a graphic text label."""
+    return f'''	(gr_text "{text}"
+		(at {x:.6f} {y:.6f} {angle})
+		(layer "{layer}")
+		(uuid "{uuid.uuid4()}")
+		(effects
+			(font
+				(size {size} {size})
+				(thickness 0.1)
+			)
+		)
 	)'''
 
 
@@ -210,6 +227,81 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     return True
 
 
+def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, int]:
+    """
+    Modify the layer of existing segments in the KiCad PCB content.
+
+    Args:
+        content: KiCad PCB file content
+        segment_mods: List of dicts with keys:
+            - start: (x, y) tuple
+            - end: (x, y) tuple
+            - net_id: int
+            - old_layer: str (optional, for verification)
+            - new_layer: str
+
+    Returns:
+        (modified_content, count_of_modified_segments)
+    """
+    if not segment_mods:
+        return content, 0
+
+    # Build a lookup for segment modifications
+    def coord_key(x, y):
+        return (round(x, 3), round(y, 3))
+
+    mod_lookup = {}
+    for mod in segment_mods:
+        start_key = coord_key(mod['start'][0], mod['start'][1])
+        end_key = coord_key(mod['end'][0], mod['end'][1])
+        key = (start_key, end_key, mod['net_id'])
+        # Also store reverse order since segment endpoints can be swapped
+        key_rev = (end_key, start_key, mod['net_id'])
+        mod_lookup[key] = mod
+        mod_lookup[key_rev] = mod
+
+    count = 0
+
+    # Pattern to match segment blocks
+    segment_pattern = re.compile(
+        r'(\(segment\s*\n?\s*'
+        r'\(start\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
+        r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
+        r'\(width\s+[\d.]+\)\s*\n?\s*'
+        r'\(layer\s+")([^"]+)("\)\s*\n?\s*'
+        r'\(net\s+(\d+)\))',
+        re.MULTILINE
+    )
+
+    def replace_layer(match):
+        nonlocal count
+        full_match = match.group(0)
+        prefix = match.group(1)
+        start_x = float(match.group(2))
+        start_y = float(match.group(3))
+        end_x = float(match.group(4))
+        end_y = float(match.group(5))
+        layer = match.group(6)
+        layer_suffix = match.group(7)
+        net_id = int(match.group(8))
+
+        start_key = coord_key(start_x, start_y)
+        end_key = coord_key(end_x, end_y)
+        key = (start_key, end_key, net_id)
+
+        if key in mod_lookup:
+            mod = mod_lookup[key]
+            new_layer = mod['new_layer']
+            if layer != new_layer:
+                count += 1
+                # Replace the layer in the match
+                return full_match.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
+        return full_match
+
+    result = segment_pattern.sub(replace_layer, content)
+    return result, count
+
+
 def swap_segment_nets_at_positions(content: str, positions: set,
                                    old_net_id: int, new_net_id: int) -> Tuple[str, int]:
     """
@@ -220,9 +312,6 @@ def swap_segment_nets_at_positions(content: str, positions: set,
     segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+(\d+)\)'
 
     count = 0
-
-    def pos_key(x, y):
-        return (round(x, 2), round(y, 2))
 
     def replace_net(match):
         nonlocal count
@@ -244,9 +333,14 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
 
 def swap_via_nets_at_positions(content: str, positions: set,
-                               old_net_id: int, new_net_id: int) -> Tuple[str, int]:
+                               old_net_id: int, new_net_id: int,
+                               tolerance: float = 0.02) -> Tuple[str, int]:
     """
     Swap net IDs of vias that are at the given positions.
+
+    Uses tolerance-based matching to handle slight coordinate differences
+    between vias and segment endpoints (e.g., original vias may be slightly
+    off-grid from routed segments).
 
     Returns (modified_content, count_of_swapped_vias).
     """
@@ -254,18 +348,20 @@ def swap_via_nets_at_positions(content: str, positions: set,
 
     count = 0
 
-    def pos_key(x, y):
-        return (round(x, 2), round(y, 2))
+    def is_near_any_position(x, y, positions, tol):
+        """Check if (x, y) is within tolerance of any position in the set."""
+        for px, py in positions:
+            if abs(x - px) < tol and abs(y - py) < tol:
+                return True
+        return False
 
     def replace_net(match):
         nonlocal count
         via_x, via_y = float(match.group(1)), float(match.group(2))
         via_net_id = int(match.group(3))
 
-        via_key = pos_key(via_x, via_y)
-
-        # Check if this via is at one of our positions and has the correct net ID
-        if via_net_id == old_net_id and via_key in positions:
+        # Check if this via is near one of our positions and has the correct net ID
+        if via_net_id == old_net_id and is_near_any_position(via_x, via_y, positions, tolerance):
             count += 1
             return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)

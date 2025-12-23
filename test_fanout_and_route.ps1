@@ -19,7 +19,7 @@ python bga_fanout.py fanout_output.kicad_pcb --component U3 --output fanout_outp
 python bga_fanout.py fanout_output.kicad_pcb --component U1 --output fanout_output.kicad_pcb --nets "*U1A*" --primary-escape horizontal
 
 # Route the FTDI tracks, letting them sneak into the BGA for now
-python route.py fanout_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" --stub-proximity-radius 1.0 #--no-bga-zone #--max-iterations 500000
+python route.py fanout_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" #--no-bga-zone
 
 # Check for errors
 python check_drc.py routed_output.kicad_pcb

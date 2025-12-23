@@ -27,18 +27,52 @@ from typing import List, Set, Tuple, Optional
 
 
 def run_command(cmd, description, capture_output=False):
-    """Run a command and print its output."""
+    """Run a command and print its output.
+
+    When capture_output=True, streams output line-by-line as it's produced
+    while also capturing it for later use.
+    """
     print(f"\n{'='*60}")
     print(f"{description}")
     print(f"{'='*60}")
-    print(f"Running: {' '.join(cmd)}\n")
+    print(f"Running: {' '.join(cmd)}")
+    sys.stdout.flush()
 
-    result = subprocess.run(cmd, capture_output=capture_output, text=True)
-    if capture_output and result.stdout:
-        print(result.stdout)
-    if capture_output and result.stderr:
-        print(result.stderr, file=sys.stderr)
-    return result
+    if capture_output:
+        # Use Popen to stream output in real-time while capturing
+        # Set PYTHONUNBUFFERED to force the child process to flush output immediately
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr into stdout for unified streaming
+            text=True,
+            bufsize=1,  # Line buffered
+            env=env
+        )
+
+        stdout_lines = []
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                print(line, end='', flush=True)
+                stdout_lines.append(line)
+
+        process.wait()
+
+        # Create a result-like object
+        class Result:
+            def __init__(self, returncode, stdout):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = None
+
+        return Result(process.returncode, ''.join(stdout_lines))
+    else:
+        return subprocess.run(cmd, text=True)
 
 
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
@@ -172,14 +206,24 @@ Examples:
                               help='Via cost penalty in grid steps (default: 25)')
     router_group.add_argument('--max-iterations', type=int,
                               help='Max A* iterations (default: 200000)')
+    router_group.add_argument('--max-probe-iterations', type=int,
+                              help='Max iterations for quick probe per direction (default: 5000)')
     router_group.add_argument('--heuristic-weight', type=float,
-                              help='A* heuristic weight (default: 1.5)')
+                              help='A* heuristic weight (default: 1.9)')
     router_group.add_argument('--stub-proximity-radius', type=float,
-                              help='Radius around stubs to penalize in mm (default: 5.0)')
+                              help='Radius around stubs to penalize in mm (default: 2.0)')
     router_group.add_argument('--stub-proximity-cost', type=float,
                               help='Cost penalty near stubs in mm equivalent (default: 0.2)')
     router_group.add_argument('--via-proximity-cost', type=float,
-                              help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)')
+                              help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 20.0)')
+    router_group.add_argument('--bga-proximity-radius', type=float,
+                              help='Radius around BGA edges to penalize in mm (default: 10.0)')
+    router_group.add_argument('--bga-proximity-cost', type=float,
+                              help='Cost penalty near BGA edges in mm equivalent (default: 0.2)')
+    router_group.add_argument('--track-proximity-distance', type=float,
+                              help='Distance around routed tracks to penalize on same layer in mm (default: 1.0)')
+    router_group.add_argument('--track-proximity-cost', type=float,
+                              help='Cost penalty near routed tracks in mm equivalent (default: 0.2)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.101)')
     router_group.add_argument('--diff-pair-centerline-setback', type=float,
@@ -190,6 +234,20 @@ Examples:
                               help='Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8/9 (centerline)')
     router_group.add_argument('--no-fix-polarity', action='store_true',
                               help="Don't swap target pad nets if polarity swap is needed (default: fix polarity)")
+    router_group.add_argument('--no-stub-layer-swap', action='store_true',
+                              help='Disable stub layer switching optimization (enabled by default)')
+    router_group.add_argument('--can-swap-to-top-layer', action='store_true',
+                              help='Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.')
+    router_group.add_argument('--max-ripup', type=int,
+                              help='Maximum blockers to rip up at once during rip-up and retry (default: 3)')
+    router_group.add_argument('--max-setback-angle', type=float,
+                              help='Maximum angle (degrees) for setback position search (default: 45.0)')
+    router_group.add_argument('--swappable-nets', nargs='+',
+                              help='Glob patterns for diff pairs that can have targets swapped (e.g., rx1_*)')
+    router_group.add_argument('--crossing-penalty', type=float,
+                              help='Penalty for crossing assignments in target swap optimization (default: 1000.0)')
+    router_group.add_argument('--skip-routing', action='store_true',
+                              help='Skip actual routing, only do swaps and write debug info')
 
     args = parser.parse_args()
 
@@ -279,6 +337,8 @@ Examples:
         router_cmd.extend(["--via-cost", str(args.via_cost)])
     if args.max_iterations is not None:
         router_cmd.extend(["--max-iterations", str(args.max_iterations)])
+    if args.max_probe_iterations is not None:
+        router_cmd.extend(["--max-probe-iterations", str(args.max_probe_iterations)])
     if args.heuristic_weight is not None:
         router_cmd.extend(["--heuristic-weight", str(args.heuristic_weight)])
     if args.stub_proximity_radius is not None:
@@ -287,6 +347,14 @@ Examples:
         router_cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
     if args.via_proximity_cost is not None:
         router_cmd.extend(["--via-proximity-cost", str(args.via_proximity_cost)])
+    if args.bga_proximity_radius is not None:
+        router_cmd.extend(["--bga-proximity-radius", str(args.bga_proximity_radius)])
+    if args.bga_proximity_cost is not None:
+        router_cmd.extend(["--bga-proximity-cost", str(args.bga_proximity_cost)])
+    if args.track_proximity_distance is not None:
+        router_cmd.extend(["--track-proximity-distance", str(args.track_proximity_distance)])
+    if args.track_proximity_cost is not None:
+        router_cmd.extend(["--track-proximity-cost", str(args.track_proximity_cost)])
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
     if args.diff_pair_centerline_setback is not None:
@@ -297,6 +365,20 @@ Examples:
         router_cmd.append("--debug-lines")
     if args.no_fix_polarity:
         router_cmd.append("--no-fix-polarity")
+    if args.no_stub_layer_swap:
+        router_cmd.append("--no-stub-layer-swap")
+    if args.can_swap_to_top_layer:
+        router_cmd.append("--can-swap-to-top-layer")
+    if args.max_ripup is not None:
+        router_cmd.extend(["--max-ripup", str(args.max_ripup)])
+    if args.max_setback_angle is not None:
+        router_cmd.extend(["--max-setback-angle", str(args.max_setback_angle)])
+    if args.swappable_nets:
+        router_cmd.extend(["--swappable-nets"] + args.swappable_nets)
+    if args.crossing_penalty is not None:
+        router_cmd.extend(["--crossing-penalty", str(args.crossing_penalty)])
+    if args.skip_routing:
+        router_cmd.append("--skip-routing")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(
@@ -306,137 +388,23 @@ Examples:
     )
     router_output = result.stdout if result.stdout else ""
 
-    # Parse router output to determine which pairs succeeded/failed routing
-    # Router format:
-    #   [1/10] Routing diff pair lvds_rx2_0
-    #   ...
-    #   SUCCESS: X segments, Y vias, Z iterations (T.TTs)
-    # or:
-    #   FAILED: Could not find route (T.TTs)
-    #
-    # With rip-up and reroute:
-    #   FAILED: ...
-    #   Ripping up diff pair X (P and N) to retry...
-    #   RETRY SUCCESS: ...
-    #   ...
-    #   [REROUTE N] Re-routing ripped diff pair X
-    #   SUCCESS: ...
+    # Parse JSON summary from router output
+    import json
+    json_summary = None
+    for line in router_output.split('\n'):
+        if line.startswith('JSON_SUMMARY: '):
+            try:
+                json_summary = json.loads(line[14:])
+            except json.JSONDecodeError:
+                pass
+            break
 
-    routing_results = {}  # diff_pair -> True (routed) or False (failed)
-    routing_stats = {}  # diff_pair -> {'iterations': int, 'vias': int, 'time': float, 'polarity_fixed': bool}
-    failed_stats = {}  # diff_pair -> {'time': float} for failed routes
-    ripped_pairs = set()  # Pairs that were ripped up (need rerouting)
-    retry_success_pairs = set()  # Pairs that succeeded after rip-up retry
+    if not json_summary:
+        print("ERROR: Could not parse JSON_SUMMARY from router output")
+        return 1
 
-    for diff_pair in matched_pairs:
-        # Find the section for this diff pair's initial routing attempt
-        # Pattern: "Routing diff pair {name}" followed by content until next routing or reroute section
-        section_pattern = rf'\[\d+/\d+\]\s+Routing diff pair\s+{re.escape(diff_pair)}\b([\s\S]*?)(?=\[\d+/\d+\]\s+Routing|\[REROUTE|\nRouting complete|$)'
-        section_match = re.search(section_pattern, router_output)
-
-        if section_match:
-            section = section_match.group(1)
-
-            # Check for RETRY SUCCESS (succeeded after ripping up another net)
-            if re.search(r'RETRY SUCCESS:', section):
-                routing_results[diff_pair] = True
-                retry_success_pairs.add(diff_pair)
-                # Parse RETRY SUCCESS line
-                success_match = re.search(r'RETRY SUCCESS:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?', section)
-                if success_match:
-                    routing_stats[diff_pair] = {
-                        'iterations': 0,  # Not reported in RETRY SUCCESS
-                        'vias': int(success_match.group(2)),
-                        'time': 0,
-                        'polarity_fixed': 'Polarity fixed:' in section or 'Polarity swap needed - will swap' in section,
-                        'via_ripup': True
-                    }
-            # Check for regular SUCCESS
-            elif re.search(r'^\s*SUCCESS:', section, re.MULTILINE):
-                routing_results[diff_pair] = True
-                # Parse SUCCESS line: "SUCCESS: X segments, Y vias, Z iterations (T.TTs)"
-                success_match = re.search(r'SUCCESS:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?,\s*(\d+)\s*iterations?\s*\(([0-9.]+)s\)', section)
-                if success_match:
-                    routing_stats[diff_pair] = {
-                        'iterations': int(success_match.group(3)),
-                        'vias': int(success_match.group(2)),
-                        'time': float(success_match.group(4)),
-                        'polarity_fixed': 'Polarity fixed:' in section or 'Polarity swap needed - will swap' in section
-                    }
-            elif re.search(r'^\s*FAILED:', section, re.MULTILINE):
-                routing_results[diff_pair] = False
-                # Parse time from FAILED line: "FAILED: Could not find route (T.TTs)"
-                failed_match = re.search(r'FAILED:.*\(([0-9.]+)s\)', section)
-                if failed_match:
-                    failed_stats[diff_pair] = {'time': float(failed_match.group(1))}
-            else:
-                # No explicit SUCCESS/FAILED found, check for other indicators
-                if 'No route found' in section or 'No valid source' in section or 'No valid target' in section:
-                    routing_results[diff_pair] = False
-                else:
-                    routing_results[diff_pair] = True  # Assume success
-
-            # Check if this pair was ripped up (appears in "Ripping up diff pair X" message)
-            # But only count it as ripped if it wasn't restored due to RETRY FAILED
-            ripped_match = re.search(rf'Ripping up diff pair\s+{re.escape(diff_pair)}\s+\(P and N\)', router_output)
-            if ripped_match:
-                # Check if the rip was reversed (RETRY FAILED: Restoring)
-                # The restore message uses the net name (with _P or _N suffix)
-                restored_match = re.search(rf'RETRY FAILED: Restoring\s+{re.escape(diff_pair)}', router_output)
-                if not restored_match:
-                    ripped_pairs.add(diff_pair)
-        else:
-            # Pair not found in output - assume success (DRC will catch issues)
-            routing_results[diff_pair] = True
-
-    # Parse REROUTE section for ripped pairs
-    for diff_pair in ripped_pairs:
-        reroute_pattern = rf'\[REROUTE\s+\d+\]\s+Re-routing ripped diff pair\s+{re.escape(diff_pair)}\b([\s\S]*?)(?=\[REROUTE|\nRouting complete|$)'
-        reroute_match = re.search(reroute_pattern, router_output)
-
-        if reroute_match:
-            reroute_section = reroute_match.group(1)
-            # REROUTE section uses "REROUTE SUCCESS:" format
-            if re.search(r'REROUTE SUCCESS:', reroute_section):
-                routing_results[diff_pair] = True
-                # Parse: "REROUTE SUCCESS: X segments, Y vias (T.TTs)"
-                success_match = re.search(r'REROUTE SUCCESS:\s*(\d+)\s*segments?,\s*(\d+)\s*vias?\s*\(([0-9.]+)s\)', reroute_section)
-                if success_match:
-                    routing_stats[diff_pair] = {
-                        'iterations': 0,  # Not reported in REROUTE SUCCESS
-                        'vias': int(success_match.group(2)),
-                        'time': float(success_match.group(3)),
-                        'polarity_fixed': False,
-                        'rerouted': True
-                    }
-                else:
-                    # Match found but couldn't parse stats - still mark as rerouted
-                    routing_stats[diff_pair] = {
-                        'iterations': 0,
-                        'vias': 0,
-                        'time': 0,
-                        'polarity_fixed': False,
-                        'rerouted': True
-                    }
-            elif re.search(r'REROUTE FAILED:', reroute_section):
-                routing_results[diff_pair] = False
-                # Parse time from REROUTE FAILED line: "REROUTE FAILED: (T.TTs)"
-                failed_match = re.search(r'REROUTE FAILED:.*\(([0-9.]+)s\)', reroute_section)
-                if failed_match:
-                    failed_stats[diff_pair] = {'time': float(failed_match.group(1))}
-        else:
-            # Ripped but no reroute section found - assume failed
-            routing_results[diff_pair] = False
-
-    # Also check for any REROUTE FAILED for pairs that might have been missed
-    # (e.g., pair was ripped twice - first restored, second failed to reroute)
-    for diff_pair in matched_pairs:
-        reroute_failed_pattern = rf'\[REROUTE\s+\d+\]\s+Re-routing ripped diff pair\s+{re.escape(diff_pair)}\b[\s\S]*?REROUTE FAILED:'
-        if re.search(reroute_failed_pattern, router_output):
-            routing_results[diff_pair] = False
-
-    routed_pairs = [p for p in matched_pairs if routing_results.get(p, True)]
-    failed_routing_pairs = [p for p in matched_pairs if not routing_results.get(p, True)]
+    routed_pairs = json_summary.get('routed_diff_pairs', [])
+    failed_routing_pairs = json_summary.get('failed_diff_pairs', [])
 
     # Step 3: Run DRC check only on successfully routed pairs (unless skipped)
     drc_results = {}  # diff_pair -> (passed, error_count)
@@ -445,25 +413,29 @@ Examples:
     if skip_drc:
         print("\nSkipping DRC checks (--skip-drc)")
     else:
+        print(f"\nStep 3: DRC checks for {len(routed_pairs)} routed pair(s)")
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
-            drc_cmd = [sys.executable, "check_drc.py", output_pcb, "--nets", net_pattern]
+            drc_cmd = [sys.executable, "check_drc.py", output_pcb, "--nets", net_pattern, "--quiet"]
             if args.debug_lines:
                 drc_cmd.append("--debug-lines")
-            result = run_command(
-                drc_cmd,
-                f"Step 3: DRC check for {diff_pair}",
-                capture_output=True
-            )
+            result = subprocess.run(drc_cmd, capture_output=True, text=True)
+
+            # Print the quiet-mode output from the script
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
 
             # Parse DRC output to count errors
             output = result.stdout if result.stdout else ""
             error_count = 0
 
             # Look for violation counts in output
-            # Format: "FOUND 8 DRC VIOLATIONS" or "X violations" or "X violation"
+            # Format: "FOUND 8 DRC VIOLATIONS" or "X violations" or "X violation" or "FAILED (N violations)"
             patterns = [
-                r'FOUND\s+(\d+)\s+DRC\s+VIOLATION',  # "FOUND 8 DRC VIOLATIONS"
+                r'FAILED\s+\((\d+)\s+violation',      # "FAILED (8 violations)"
+                r'FOUND\s+(\d+)\s+DRC\s+VIOLATION',   # "FOUND 8 DRC VIOLATIONS"
                 r'(\d+)\s+DRC\s+violation',           # "8 DRC violations"
                 r'(\d+)\s+violation',                 # "8 violations"
             ]
@@ -473,17 +445,6 @@ Examples:
                 if match:
                     error_count = int(match.group(1))
                     break
-
-            # If no pattern matched but "violation" mentioned (and not "no violations" or "0")
-            if error_count == 0 and "violation" in output.lower():
-                # Check for explicit "no violations" messages (check_drc.py outputs "NO DRC VIOLATIONS FOUND!")
-                no_violations = ("no drc violations" in output.lower() or
-                                 "no violation" in output.lower() or
-                                 "0 violation" in output.lower())
-                if not no_violations:
-                    # Count individual violation lines as fallback
-                    violation_lines = re.findall(r'violation|error', output, re.IGNORECASE)
-                    error_count = len(violation_lines) if violation_lines else 1
 
             passed = result.returncode == 0 and error_count == 0
             drc_results[diff_pair] = (passed, error_count)
@@ -495,21 +456,28 @@ Examples:
     if skip_connectivity:
         print("\nSkipping connectivity checks" + (" (--debug-lines)" if args.debug_lines else " (--skip-connectivity)"))
     else:
+        print(f"\nStep 4: Connectivity checks for {len(routed_pairs)} routed pair(s)")
         for diff_pair in routed_pairs:
             net_pattern = f"*{diff_pair}_*"
-            result = run_command(
-                [sys.executable, "check_connected.py", output_pcb, "--nets", net_pattern],
-                f"Step 4: Connectivity check for {diff_pair}",
-                capture_output=True
+            result = subprocess.run(
+                [sys.executable, "check_connected.py", output_pcb, "--nets", net_pattern, "--quiet"],
+                capture_output=True, text=True
             )
+
+            # Print the quiet-mode output from the script
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
 
             # Parse connectivity output to count issues
             output = result.stdout if result.stdout else ""
             issue_count = 0
 
             # Look for issue counts in output
-            # Format: "FOUND X CONNECTIVITY ISSUES" or "ALL NETS FULLY CONNECTED!"
+            # Format: "FOUND X CONNECTIVITY ISSUES" or "ALL NETS FULLY CONNECTED!" or "FAILED (N issues)"
             patterns = [
+                r'FAILED\s+\((\d+)\s+issue',              # "FAILED (2 issues)"
                 r'FOUND\s+(\d+)\s+CONNECTIVITY\s+ISSUE',  # "FOUND 2 CONNECTIVITY ISSUES"
                 r'(\d+)\s+connectivity\s+issue',          # "2 connectivity issues"
             ]
@@ -528,35 +496,34 @@ Examples:
     print("SUMMARY")
     print(f"{'='*60}")
 
-    # Aggregate statistics
-    total_iterations = sum(s.get('iterations', 0) for s in routing_stats.values())
-    total_vias = sum(s.get('vias', 0) for s in routing_stats.values())
-    success_time = sum(s.get('time', 0) for s in routing_stats.values())
-    failed_time = sum(s.get('time', 0) for s in failed_stats.values())
-    total_time = success_time + failed_time
-    polarity_fixed_pairs = [p for p, s in routing_stats.items() if s.get('polarity_fixed', False)]
-    rerouted_pairs_list = [p for p, s in routing_stats.items() if s.get('rerouted', False)]
-    via_ripup_pairs = [p for p, s in routing_stats.items() if s.get('via_ripup', False)]
+    # All values from JSON summary
+    total_iterations = json_summary.get('total_iterations', 0)
+    total_time = json_summary.get('total_time', 0)
+    total_vias = json_summary.get('total_vias', 0)
+    ripup_success_pairs = json_summary.get('ripup_success_pairs', [])
+    rerouted_pairs_list = json_summary.get('rerouted_pairs', [])
+    polarity_swapped_pairs = json_summary.get('polarity_swapped_pairs', [])
+    target_swaps = json_summary.get('target_swaps', [])
+    layer_swaps = json_summary.get('layer_swaps', 0)
 
     # Routing summary
     print(f"\nRouting:")
     print(f"  Succeeded: {len(routed_pairs)}/{len(matched_pairs)}")
     print(f"  Total iterations: {total_iterations:,}")
     print(f"  Total via pairs:  {total_vias // 2}")
-    print(f"  Successful time:  {success_time:.2f}s")
-    if failed_stats:
-        print(f"  Failed time:      {failed_time:.2f}s")
     print(f"  Total time:       {total_time:.2f}s")
-    print(f"  Polarity swaps:   {len(polarity_fixed_pairs)}")
-    if ripped_pairs or via_ripup_pairs:
-        print(f"  Rip-up/reroute:   {len(via_ripup_pairs)} via rip-up, {len(rerouted_pairs_list)} rerouted")
+    print(f"  Polarity swaps:   {len(polarity_swapped_pairs)}")
+    print(f"  Target swaps:     {len(target_swaps)}")
+    print(f"  Layer swaps:      {layer_swaps}")
+    if ripup_success_pairs or rerouted_pairs_list:
+        print(f"  Rip-up/reroute:   {len(ripup_success_pairs)} rip-up success, {len(rerouted_pairs_list)} rerouted")
 
     if routed_pairs:
         print(f"  Routed:")
         for pair in routed_pairs:
             suffix = ""
-            if pair in via_ripup_pairs:
-                suffix = " (via rip-up)"
+            if pair in ripup_success_pairs:
+                suffix = " (rip-up success)"
             elif pair in rerouted_pairs_list:
                 suffix = " (rerouted)"
             print(f"    {pair}{suffix}")
@@ -608,10 +575,17 @@ Examples:
     elif skip_connectivity:
         print(f"\nConnectivity: skipped")
 
-    if polarity_fixed_pairs:
+    if polarity_swapped_pairs:
         print(f"\nNets with P<->N polarity swap:")
-        for pair in sorted(polarity_fixed_pairs):
+        for pair in polarity_swapped_pairs:
             print(f"  - {pair}")
+
+    if target_swaps:
+        print(f"\nNets with target swap:")
+        for swap in target_swaps:
+            pair1 = swap.get('pair1', '')
+            pair2 = swap.get('pair2', '')
+            print(f"  - {pair1} <-> {pair2}")
 
     print(f"\nOutput file: {output_pcb}")
     print(f"{'='*60}")

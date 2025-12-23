@@ -52,6 +52,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 for gy in range(gmin_y, gmax_y + 1):
                     obstacles.add_blocked_cell(gx, gy, layer_idx)
 
+    # Add BGA proximity costs (penalize routing near BGA edges)
+    add_bga_proximity_costs(obstacles, config)
+
     # Precompute grid expansions (with extra clearance)
     expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
@@ -105,6 +108,98 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         if layer_idx is None:
             continue
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid)
+
+
+def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                                          p_net_id: int, n_net_id: int,
+                                          config: GridRouteConfig,
+                                          exclude_endpoints: List[Tuple[float, float]] = None,
+                                          extra_clearance: float = 0.0):
+    """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
+
+    This is different from add_net_stubs_as_obstacles which adds OTHER nets' stubs.
+    Here we add the SAME pair's stubs so the centerline route avoids crossing them,
+    but we exclude the stub endpoints where we need to connect.
+
+    Args:
+        obstacles: The obstacle map to modify
+        pcb_data: PCB data containing segments
+        p_net_id: Net ID of P net
+        n_net_id: Net ID of N net
+        config: Routing configuration
+        exclude_endpoints: List of (x, y) positions to exclude from blocking (stub connection points)
+        extra_clearance: Additional clearance to add
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+
+    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
+    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
+    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
+
+    # Convert exclude endpoints to grid coordinates with some radius
+    exclude_grid_cells = set()
+    exclude_radius = max(2, coord.to_grid_dist(config.track_width * 2))  # 2x track width radius
+    if exclude_endpoints:
+        for ex, ey in exclude_endpoints:
+            gex, gey = coord.to_grid(ex, ey)
+            for dx in range(-exclude_radius, exclude_radius + 1):
+                for dy in range(-exclude_radius, exclude_radius + 1):
+                    if dx*dx + dy*dy <= exclude_radius * exclude_radius:
+                        exclude_grid_cells.add((gex + dx, gey + dy))
+
+    for seg in pcb_data.segments:
+        if seg.net_id != p_net_id and seg.net_id != n_net_id:
+            continue
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        # Add segment as obstacle, but skip cells in excluded regions
+        _add_segment_obstacle_with_exclusion(
+            obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
+            exclude_grid_cells
+        )
+
+
+def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,
+                                          layer_idx: int, expansion_grid: int, via_block_grid: int,
+                                          exclude_cells: Set[Tuple[int, int]]):
+    """Add a segment as obstacle, excluding certain grid cells."""
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+    # Bresenham line with expansion
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+    err = dx - dy
+
+    gx, gy = gx1, gy1
+    while True:
+        # Skip if this cell is in the exclusion zone
+        if (gx, gy) not in exclude_cells:
+            for ex in range(-expansion_grid, expansion_grid + 1):
+                for ey in range(-expansion_grid, expansion_grid + 1):
+                    if (gx + ex, gy + ey) not in exclude_cells:
+                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+            for ex in range(-via_block_grid, via_block_grid + 1):
+                for ey in range(-via_block_grid, via_block_grid + 1):
+                    if ex*ex + ey*ey <= via_block_grid * via_block_grid:
+                        if (gx + ex, gy + ey) not in exclude_cells:
+                            obstacles.add_blocked_via(gx + ex, gy + ey)
+
+        if gx == gx2 and gy == gy2:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            gx += sx
+        if e2 < dx:
+            err += dx
+            gy += sy
 
 
 def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -315,6 +410,161 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
                     obstacles.set_stub_proximity(gcx + dx, gcy + dy, cost)
 
 
+def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig):
+    """Add BGA proximity costs around zone edges (outside the zones).
+
+    Penalizes routing near BGA edges with linear falloff from max cost at edge
+    to zero at bga_proximity_radius distance.
+    """
+    if config.bga_proximity_radius <= 0:
+        return  # Feature disabled
+
+    coord = GridCoord(config.grid_step)
+    radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
+    cost_grid = int(config.bga_proximity_cost * 1000 / config.grid_step)
+
+    for min_x, min_y, max_x, max_y in config.bga_exclusion_zones:
+        gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+        gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+
+        # Iterate over cells within radius of BGA zone edges (outside the zone)
+        for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):
+            for gy in range(gmin_y - radius_grid, gmax_y + radius_grid + 1):
+                # Skip if inside BGA zone (already blocked)
+                if gmin_x <= gx <= gmax_x and gmin_y <= gy <= gmax_y:
+                    continue
+
+                # Calculate distance to nearest edge of rectangle
+                # Clamp point to rect, then calculate distance from original to clamped
+                cx = max(gmin_x, min(gx, gmax_x))
+                cy = max(gmin_y, min(gy, gmax_y))
+                dist = ((gx - cx) ** 2 + (gy - cy) ** 2) ** 0.5
+
+                if dist <= radius_grid:
+                    proximity = 1.0 - (dist / radius_grid)
+                    cost = int(proximity * cost_grid)
+                    obstacles.set_stub_proximity(gx, gy, cost)
+
+
+def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                                     layer_map: Dict[str, int]) -> Dict[int, Dict[Tuple[int, int], int]]:
+    """Compute track proximity costs for a single net's segments.
+
+    Returns a dict of layer_idx -> {(gx, gy) -> cost} that can be stored and merged later.
+    This allows incremental updates: compute once when route succeeds, remove when ripped up.
+
+    Args:
+        pcb_data: PCB data containing routed segments
+        net_id: Net ID to compute proximity for
+        config: Routing configuration with track_proximity_distance and track_proximity_cost
+        layer_map: Mapping of layer names to layer indices
+
+    Returns:
+        Dict mapping layer_idx -> {(gx, gy) -> cost}
+    """
+    result: Dict[int, Dict[Tuple[int, int], int]] = {}
+
+    if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
+        return result  # Feature disabled
+
+    coord = GridCoord(config.grid_step)
+    radius_grid = coord.to_grid_dist(config.track_proximity_distance)
+    cost_grid = int(config.track_proximity_cost * 1000 / config.grid_step)
+
+    # Sample every ~1mm along segments (not every grid step) for performance
+    sample_interval = max(1, int(1.0 / config.grid_step))
+
+    for seg in pcb_data.segments:
+        if seg.net_id != net_id:
+            continue
+
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        if layer_idx not in result:
+            result[layer_idx] = {}
+        layer_costs = result[layer_idx]
+
+        # Walk along segment using Bresenham, sampling every sample_interval points
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+
+        gx, gy = gx1, gy1
+        step_count = 0
+
+        while True:
+            # Only process every sample_interval'th point
+            if step_count % sample_interval == 0:
+                # Add proximity costs around this track point
+                for ex in range(-radius_grid, radius_grid + 1):
+                    for ey in range(-radius_grid, radius_grid + 1):
+                        dist_sq = ex * ex + ey * ey
+                        if dist_sq <= radius_grid * radius_grid:
+                            dist = dist_sq ** 0.5
+                            proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
+                            cost = int(proximity * cost_grid)
+                            cell = (gx + ex, gy + ey)
+                            # Store max cost at each cell
+                            if cell not in layer_costs or cost > layer_costs[cell]:
+                                layer_costs[cell] = cost
+
+            if gx == gx2 and gy == gy2:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+            step_count += 1
+
+    return result
+
+
+def merge_track_proximity_costs(obstacles: GridObstacleMap,
+                                 per_net_costs: Dict[int, Dict[int, Dict[Tuple[int, int], int]]]):
+    """Merge pre-computed per-net track proximity costs into the obstacle map.
+
+    Args:
+        obstacles: The obstacle map to add costs to
+        per_net_costs: Dict of net_id -> layer_idx -> {(gx, gy) -> cost}
+    """
+    for net_id, layer_costs in per_net_costs.items():
+        for layer_idx, cells in layer_costs.items():
+            for (gx, gy), cost in cells.items():
+                obstacles.set_layer_proximity(gx, gy, layer_idx, cost)
+
+
+def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
+                               routed_net_ids: List[int], config: GridRouteConfig,
+                               layer_map: Dict[str, int]):
+    """Add track proximity costs around previously routed tracks (same layer only).
+
+    DEPRECATED: Use compute_track_proximity_for_net() + merge_track_proximity_costs()
+    for better performance with incremental updates.
+
+    Penalizes routing near existing tracks with linear falloff from max cost at track
+    to zero at track_proximity_distance.
+    """
+    if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
+        return  # Feature disabled
+
+    # Compute and merge costs for all routed nets
+    per_net_costs = {}
+    for net_id in routed_net_ids:
+        per_net_costs[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+    merge_track_proximity_costs(obstacles, per_net_costs)
+
+
 def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                        exclude_net_id: int, unrouted_stubs: Optional[List[Tuple[float, float]]] = None) -> GridObstacleMap:
     """Build Rust obstacle map from PCB data (legacy function for compatibility)."""
@@ -376,6 +626,9 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
                 for gy in range(gmin_y, gmax_y + 1):
                     obstacles.add_blocked_cell(gx, gy, layer_idx)
                     blocked_cells[layer_idx].add((gx, gy))
+
+    # Add BGA proximity costs (penalize routing near BGA edges)
+    add_bga_proximity_costs(obstacles, config)
 
     # Precompute grid expansions (with extra clearance)
     expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
@@ -603,6 +856,28 @@ def check_line_clearance(obstacles: GridObstacleMap,
 
         dist += step
 
+    return True
+
+
+def check_stub_layer_clearance(obstacles: GridObstacleMap,
+                                stub_segments: List[Segment],
+                                target_layer_idx: int,
+                                config: GridRouteConfig) -> bool:
+    """Check if all stub segments can be placed on target_layer without conflicts.
+
+    Args:
+        obstacles: The obstacle map to check against
+        stub_segments: List of segments that form the stub
+        target_layer_idx: Layer index to check clearance on
+        config: Routing configuration
+
+    Returns:
+        True if all segments are clear on target_layer, False otherwise
+    """
+    for seg in stub_segments:
+        if not check_line_clearance(obstacles, seg.start_x, seg.start_y,
+                                     seg.end_x, seg.end_y, target_layer_idx, config):
+            return False
     return True
 
 

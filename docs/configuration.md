@@ -41,7 +41,9 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 |--------|---------|-------------|
 | `--via-cost` | 25 | Via penalty in grid steps (doubled for diff pairs) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
-| `--heuristic-weight` | 1.5 | A* greediness (>1 = faster, <1 = more optimal) |
+| `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
+| `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
+| `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 
 ### Routing Strategy Options
 
@@ -52,12 +54,17 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--layers` / `-l` | F.Cu In1.Cu In2.Cu B.Cu | Routing layers |
 | `--no-bga-zones` | false | Disable BGA exclusion zone detection |
 
-### Stub Proximity Options
+### Proximity Penalty Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--stub-proximity-radius` | 5.0 | Radius around stubs to penalize (mm) |
+| `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty at stub center (mm equivalent) |
+| `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize (mm) |
+| `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
+| `--via-proximity-cost` | 20.0 | Via cost multiplier near stubs/BGAs (0=block) |
+| `--track-proximity-distance` | 1.0 | Radius around routed tracks to penalize on same layer (mm) |
+| `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
 
 ### Differential Pair Options
 
@@ -67,7 +74,12 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
+| `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
+| `--no-stub-layer-swap` | false | Disable stub layer switching (enabled by default) |
+| `--can-swap-to-top-layer` | false | Allow swapping stubs to F.Cu (off by default due to clearance issues) |
+| `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
+| `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 
 ### Debug Options
 
@@ -94,7 +106,10 @@ class GridRouteConfig:
     # A* algorithm
     via_cost: int = 25            # grid steps penalty for via (doubled for diff pairs)
     max_iterations: int = 200000
-    heuristic_weight: float = 1.5
+    max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
+    heuristic_weight: float = 1.9
+    max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
+    max_setback_angle: float = 45.0  # degrees
 
     # Layers
     layers: List[str] = ['F.Cu', 'B.Cu']
@@ -103,8 +118,13 @@ class GridRouteConfig:
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = []
 
     # Stub proximity
-    stub_proximity_radius: float = 5.0   # mm
+    stub_proximity_radius: float = 2.0   # mm
     stub_proximity_cost: float = 0.2     # mm equivalent
+    via_proximity_cost: float = 20.0     # multiplier for vias near stubs
+
+    # Track proximity (same layer)
+    track_proximity_distance: float = 1.0  # mm
+    track_proximity_cost: float = 0.2      # mm equivalent
 
     # Direction
     direction_order: str = "forward"     # forward, backward, or random
@@ -113,6 +133,8 @@ class GridRouteConfig:
     diff_pair_gap: float = 0.101         # mm between P and N
     diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
     fix_polarity: bool = True            # swap target pads if polarity swap needed
+    stub_layer_swap: bool = True         # enable stub layer switching optimization
+    target_swap_crossing_penalty: float = 1000.0  # penalty for crossing assignments
 
     # Debug
     debug_lines: bool = False
@@ -139,8 +161,8 @@ Controls A* behavior:
 | Value | Effect |
 |-------|--------|
 | 1.0 | Optimal paths (slower) |
-| 1.5 (default) | Good balance |
-| 2.0+ | Faster but may miss tight routes |
+| 1.9 (default) | Good balance of speed and quality |
+| 2.5+ | Faster but may miss tight routes |
 
 ### Grid Step
 
@@ -202,7 +224,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
 python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
     --ordering mps \
     --via-cost 50 \
-    --heuristic-weight 1.5
+    --heuristic-weight 2.0
 ```
 
 ### Differential Pairs (LVDS)

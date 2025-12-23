@@ -8,13 +8,18 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
-- **Rip-up and reroute** - When a diff pair fails, automatically rips up blocking routes and retries
+- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
+- **Stub layer switching** - Experimental optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Finds compatible pairs to swap or moves stubs solo when safe.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
-- **Net ordering strategies** - MPS (crossing conflicts), inside-out (BGA), or original order
+- **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
+- **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
 - **Via proximity cost** - Configurable cost penalty for vias near stubs (instead of blocking)
+- **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced
+- **Target swap optimization** - For swappable diff pairs (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings
+- **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 
 ## Quick Start
 
@@ -71,6 +76,7 @@ KiCadRoutingTools/
 ├── diff_pair_routing.py      # Differential pair routing
 ├── kicad_parser.py           # KiCad .kicad_pcb file parser
 ├── kicad_writer.py           # KiCad S-expression generator
+├── stub_layer_switching.py   # Stub layer swap optimization
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
 ├── bga_fanout.py             # BGA differential pair fanout generator
@@ -78,7 +84,7 @@ KiCadRoutingTools/
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
 ├── test_diffpair.py          # Test single/multiple diff pairs with DRC
-├── test_all_diffpairs.py     # Batch test all diff pairs (parallel)
+├── test_all_diffpairs.py     # Batch test all diff pairs (parallel, extensive options)
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
 └── docs/                     # Documentation
@@ -88,12 +94,13 @@ KiCadRoutingTools/
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
-| `routing_config.py` | 65 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
-| `routing_utils.py` | 1136 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
-| `obstacle_map.py` | 330 | Obstacle map building from PCB data |
-| `single_ended_routing.py` | 343 | Single-ended net routing with A* |
-| `diff_pair_routing.py` | 1091 | Differential pair centerline + offset routing |
-| `route.py` | 643 | CLI and batch routing orchestration |
+| `routing_config.py` | 72 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
+| `routing_utils.py` | 1272 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
+| `obstacle_map.py` | 767 | Obstacle map building from PCB data |
+| `single_ended_routing.py` | 589 | Single-ended net routing with A* |
+| `diff_pair_routing.py` | 1649 | Differential pair centerline + offset routing |
+| `stub_layer_switching.py` | 428 | Stub layer swap optimization for diff pairs |
+| `route.py` | 2297 | CLI and batch routing orchestration |
 
 ## Performance
 
@@ -117,18 +124,25 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
 --via-cost 25           # Via penalty (grid steps, doubled for diff pairs)
---max-iterations 200000 # A* iteration limit
---heuristic-weight 1.5  # A* greediness (>1 = faster)
+--max-iterations 200000      # A* iteration limit
+--max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
+--heuristic-weight 1.9       # A* greediness (>1 = faster)
+--max-ripup 3                # Max blockers to rip up at once (1-N progressive)
+--max-setback-angle 45       # Max angle for setback search (degrees)
 
 # Strategy
 --ordering mps          # mps | inside_out | original
 --layers F.Cu In1.Cu In2.Cu B.Cu
 --no-bga-zones          # Allow routing through BGA areas
 
-# Stub proximity
---stub-proximity-radius 5.0  # Radius around stubs to penalize (mm)
+# Proximity penalties
+--stub-proximity-radius 2.0  # Radius around stubs to penalize (mm)
 --stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
---via-proximity-cost 10      # Via cost multiplier near stubs (0=block)
+--bga-proximity-radius 10.0  # Radius around BGA edges to penalize (mm)
+--bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
+--via-proximity-cost 20      # Via cost multiplier near stubs/BGAs (0=block)
+--track-proximity-distance 1.0  # Radius around routed tracks to penalize (mm, same layer)
+--track-proximity-cost 0.2   # Cost penalty near routed tracks (mm equivalent)
 
 # Differential pairs
 --diff-pairs "*lvds*"   # Pattern for diff pair nets
@@ -136,6 +150,14 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
 --min-turning-radius 0.2      # Min turn radius (mm)
 --direction backward    # Route from target to source
+
+# Layer optimization (stub layer swap enabled by default)
+--no-stub-layer-swap    # Disable stub layer switching
+--can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
+
+# Target swap optimization
+--swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
+--crossing-penalty 1000  # Penalty for crossing assignments (default: 1000)
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.

@@ -6,7 +6,7 @@ This document describes how the router handles differential pairs, including P/N
 
 Differential pairs are routed using a **centerline + offset** approach with **pose-based A* routing**:
 
-1. **Setback position finding** - Find clear positions in front of stubs at fixed setback distance, scanning 0°, ±15° angles
+1. **Setback position finding** - Find clear positions in front of stubs at fixed setback distance, scanning 9 angles (0°, ±max/4, ±max/2, ±3max/4, ±max)
 2. **Pose-based centerline routing** - Route using orientation-aware A* with Dubins path heuristic
 3. **Path simplification** - Remove collinear points and in-place turns for cleaner geometry
 4. **P/N offset generation** - Create P and N paths as perpendicular offsets from centerline
@@ -100,17 +100,18 @@ This produces routes that:
 
 ### Setback Position Finding
 
-The router uses a fixed setback distance (default: 2× P-N spacing) and scans angles 0°, ±15° to find an unblocked position:
+The router uses a fixed setback distance (default: 2× P-N spacing) and scans 9 angles to find an unblocked position:
 
 ```python
-angles_deg = [0, 15, -15]  # Prefer straight first
+# With max_setback_angle = 45° (default):
+angles_deg = [0, 11.25, -11.25, 22.5, -22.5, 33.75, -33.75, 45, -45]
 ```
 
 For each angle:
 1. Check if the position is blocked in the obstacle map
 2. Check if the connector path from stub center is clear
 
-This allows finding unblocked positions even when the straight path is blocked by nearby stubs, while keeping the approach angle within ±15° of the original stub direction (combined with ±22.5° theta quantization, max deviation is ~37.5°).
+This allows finding unblocked positions even when the straight path is blocked by nearby stubs. With 9 angles (vs 5 previously), there's finer granularity for finding optimal positions.
 
 ### Extra Clearance
 
@@ -276,9 +277,36 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
+| `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
+| `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
-| `--stub-proximity-radius` | 5.0 | Radius around stubs to penalize routing (mm) |
+| `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
+| `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |
+| `--bga-proximity-cost` | 0.2 | Cost penalty near BGA edges (mm equivalent) |
+| `--via-proximity-cost` | 10.0 | Via cost multiplier near stubs/BGAs (0=block) |
+
+## Target Swap Optimization
+
+For swappable diff pairs (e.g., memory data lanes where any source can connect to any target), the router can optimize target assignments to minimize crossings.
+
+### Usage
+
+```bash
+python route.py input.kicad_pcb output.kicad_pcb "*rx*" \
+    --diff-pairs "*rx*" \
+    --swappable-nets "*rx*"
+```
+
+### How It Works
+
+1. **Chip boundary detection** - Identifies source and target chips from pad positions
+2. **Boundary position computation** - "Unrolls" each chip's boundary into a linear ordering
+3. **Crossing detection** - Two routes cross if their source order is inverted relative to their target order
+4. **Hungarian algorithm** - Finds optimal assignment minimizing total cost (distance + crossing penalty)
+5. **Pad net swapping** - Swaps target pad net assignments in the PCB data before routing
+
+The crossing penalty (default 1000) heavily discourages crossing assignments, prioritizing non-crossing routes even if they're slightly longer.
 
 ## Limitations
 

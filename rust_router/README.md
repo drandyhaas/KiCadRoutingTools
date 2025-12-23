@@ -187,6 +187,7 @@ Methods:
 
 Constraints enforced by PoseRouter:
 - **First move straight**: First move from start must be in the start direction (no immediate turn)
+- **Minimum turn radius**: Enforced for ALL route steps - turns must respect `min_radius_grid` to ensure smooth paths
 - **Straight after via**: After placing a via, must continue straight for `min_radius_grid + 1` steps before turning (ensures P/N offset tracks clear vias before turning)
 - **Diff pair via clearance**: When `diff_pair_via_spacing` is set, checks that P/N via positions (perpendicular offsets from centerline) are clear
 - **Via proximity cost**: When `via_proximity_cost > 0`, vias near stubs incur a cost penalty instead of being blocked
@@ -225,7 +226,7 @@ src/
 
 ## Version History
 
-- **0.8.0**: Added `via_proximity_cost` parameter to PoseRouter - allows vias near stubs with cost penalty instead of blocking (default: 10, set to 0 for old blocking behavior). Improved turn radius enforcement after vias: `straight_after_via` is now based on `min_radius_grid + 1` instead of hardcoded 2 steps, preventing DRC violations where P/N tracks turn too sharply after vias. Added `route_pose_with_frontier()` method that returns blocked cells on failure for blocking analysis.
+- **0.8.0**: Added `via_proximity_cost` parameter to PoseRouter - allows vias near stubs with cost penalty instead of blocking (default: 10, set to 0 for old blocking behavior). Improved turn radius enforcement: minimum turn radius is now enforced for ALL route steps (not just near vias), ensuring smooth paths throughout. `straight_after_via` is based on `min_radius_grid + 1` instead of hardcoded 2 steps, preventing DRC violations where P/N tracks turn too sharply after vias. Added `route_pose_with_frontier()` method that returns blocked cells on failure for blocking analysis.
 - **0.7.0**: Added `PoseRouter` with Dubins path heuristic for orientation-aware differential pair centerline routing. State space expanded to (x, y, θ, layer) where θ is one of 8 directions (45° increments). Dubins path length used as heuristic for better routing with prescribed start/end orientations.
 - **0.5.1**: Added `via_exclusion_radius` parameter to prevent routes from conflicting with their own vias. Tracks via positions along each path and blocks moves that would cause P/N offset tracks to intersect P/N vias.
 - **0.5.0**: Added `collinear_vias` parameter for differential pair routing - enforces symmetric via geometry: `±45° → D → VIA → D → ±45°` (requires 2 steps before via, approach within ±45° of previous, exit same as approach, then ±45° allowed)
