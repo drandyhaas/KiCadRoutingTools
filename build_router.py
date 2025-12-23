@@ -48,9 +48,12 @@ def main():
     print(f"Successfully built grid_router v{grid_router.__version__}")
 
     # Remove any stale copies in the parent directory
-    stale_pyd = os.path.join(script_dir, 'grid_router.pyd')
-    stale_so = os.path.join(script_dir, 'grid_router.so')
-    for stale in [stale_pyd, stale_so]:
+    stale_files = [
+        os.path.join(script_dir, 'grid_router.pyd'),
+        os.path.join(script_dir, 'grid_router.so'),
+        os.path.join(script_dir, 'grid_router.abi3.so'),
+    ]
+    for stale in stale_files:
         if os.path.exists(stale):
             print(f"Removing stale module: {stale}")
             os.remove(stale)

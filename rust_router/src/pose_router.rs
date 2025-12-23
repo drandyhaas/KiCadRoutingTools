@@ -136,7 +136,8 @@ impl PoseRouter {
 
                 if !closed.contains(&neighbor_key) {
                     let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
-                    let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny);
+                    let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
+                        + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                     let new_g = g + move_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -178,7 +179,8 @@ impl PoseRouter {
                         if !closed.contains(&neighbor_key) {
                             // Cost = movement + turn arc cost
                             let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
-                            let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny);
+                            let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
+                                + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                             let new_g = g + move_cost + self.turn_cost + proximity_cost;
 
                             let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -366,7 +368,8 @@ impl PoseRouter {
 
                 if !closed.contains(&neighbor_key) {
                     let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
-                    let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny);
+                    let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
+                        + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                     let new_g = g + move_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
