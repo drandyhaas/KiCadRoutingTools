@@ -206,20 +206,21 @@ def compute_boundary_position(
     Compute normalized position [0, 1] along chip boundary.
 
     The boundary is "unrolled" starting from the far side, with edge traversal
-    directions chosen to ensure SPATIAL consistency between chips. This means:
-    - Horizontal edges (top, bottom): always traverse left-to-right
-    - Vertical edges (left, right): always traverse top-to-bottom
+    directions following the clockwise/counter-clockwise direction. This ensures
+    that routes connecting corresponding positions (e.g., bottom-left to bottom-left)
+    are correctly detected as non-crossing.
 
-    This ensures that for any pair of chips, positions along corresponding edges
-    increase in the same spatial direction, which is required for correct
-    crossing detection.
+    For horizontal chip arrangement (left chip → right chip):
+    - Source chip uses counter-clockwise (left → top → right → bottom)
+    - Target chip uses clockwise (right → top → left → bottom)
+    - This makes bottom edges both increase going in opposite spatial directions,
+      which correctly preserves the relative ordering for parallel routes.
 
     Args:
         chip: The chip boundary information
         point: (x, y) position to compute boundary position for
         far_side: Which side to start from ('left', 'right', 'top', 'bottom')
-        clockwise: Direction to traverse boundary (for edge ordering, not
-                   within-edge direction which is always spatially consistent).
+        clockwise: Direction to traverse boundary (affects within-edge direction)
 
     Returns:
         Normalized position in [0, 1] along the boundary
@@ -236,67 +237,98 @@ def compute_boundary_position(
     projected, edge = _project_to_boundary(point, chip.bounds)
     px, py = projected
 
-    # Define edge order based on far_side and direction
+    # Define edge order and traversal directions based on far_side and clockwise
+    # Each entry is (edge_name, forward_direction) where forward_direction indicates
+    # whether we traverse in the positive spatial direction (True) or negative (False)
+    #
+    # Clockwise traversal (starting from far side):
+    #   left:   left(↓) → bottom(→) → right(↑) → top(←)
+    #   right:  right(↑) → top(←) → left(↓) → bottom(→)
+    #   top:    top(←) → left(↓) → bottom(→) → right(↑)
+    #   bottom: bottom(→) → right(↑) → top(←) → left(↓)
+    #
+    # Counter-clockwise is the reverse within each edge
+
     if far_side == 'left':
         if clockwise:
-            edge_order = ['left', 'bottom', 'right', 'top']
+            # left(down/+Y) → bottom(right/+X) → right(up/-Y) → top(left/-X)
+            edge_info = [('left', True), ('bottom', True), ('right', False), ('top', False)]
         else:
-            edge_order = ['left', 'top', 'right', 'bottom']
+            # left(up/-Y) → top(right/+X) → right(down/+Y) → bottom(left/-X)
+            edge_info = [('left', False), ('top', True), ('right', True), ('bottom', False)]
     elif far_side == 'right':
         if clockwise:
-            edge_order = ['right', 'top', 'left', 'bottom']
+            # right(up/-Y) → top(left/-X) → left(down/+Y) → bottom(right/+X)
+            edge_info = [('right', False), ('top', False), ('left', True), ('bottom', True)]
         else:
-            edge_order = ['right', 'bottom', 'left', 'top']
+            # right(down/+Y) → bottom(left/-X) → left(up/-Y) → top(right/+X)
+            edge_info = [('right', True), ('bottom', False), ('left', False), ('top', True)]
     elif far_side == 'top':
         if clockwise:
-            edge_order = ['top', 'left', 'bottom', 'right']
+            # top(left/-X) → left(down/+Y) → bottom(right/+X) → right(up/-Y)
+            edge_info = [('top', False), ('left', True), ('bottom', True), ('right', False)]
         else:
-            edge_order = ['top', 'right', 'bottom', 'left']
+            # top(right/+X) → right(down/+Y) → bottom(left/-X) → left(up/-Y)
+            edge_info = [('top', True), ('right', True), ('bottom', False), ('left', False)]
     elif far_side == 'bottom':
         if clockwise:
-            edge_order = ['bottom', 'right', 'top', 'left']
+            # bottom(right/+X) → right(up/-Y) → top(left/-X) → left(down/+Y)
+            edge_info = [('bottom', True), ('right', False), ('top', False), ('left', True)]
         else:
-            edge_order = ['bottom', 'left', 'top', 'right']
+            # bottom(left/-X) → left(up/-Y) → top(right/+X) → right(down/+Y)
+            edge_info = [('bottom', False), ('left', False), ('top', True), ('right', True)]
     else:
-        edge_order = ['left', 'bottom', 'right', 'top']
+        edge_info = [('left', True), ('bottom', True), ('right', False), ('top', False)]
 
     # Compute distance along perimeter from start to projected point
-    # CRITICAL: Use consistent SPATIAL directions for each edge type:
-    # - Horizontal edges (top, bottom): left-to-right (increasing X)
-    # - Vertical edges (left, right): top-to-bottom (increasing Y)
-    # This ensures positions on the same edge type are comparable across chips.
     distance = 0.0
 
-    for current_edge in edge_order:
+    for current_edge, forward in edge_info:
         if current_edge == 'left':
             edge_length = height
             if edge == 'left':
-                # Left edge: top-to-bottom (increasing Y)
-                distance += abs(py - min_y)
+                if forward:
+                    # Going down (increasing Y): distance from top
+                    distance += (py - min_y)
+                else:
+                    # Going up (decreasing Y): distance from bottom
+                    distance += (max_y - py)
                 break
             else:
                 distance += edge_length
         elif current_edge == 'bottom':
             edge_length = width
             if edge == 'bottom':
-                # Bottom edge: left-to-right (increasing X)
-                distance += abs(px - min_x)
+                if forward:
+                    # Going right (increasing X): distance from left
+                    distance += (px - min_x)
+                else:
+                    # Going left (decreasing X): distance from right
+                    distance += (max_x - px)
                 break
             else:
                 distance += edge_length
         elif current_edge == 'right':
             edge_length = height
             if edge == 'right':
-                # Right edge: top-to-bottom (increasing Y)
-                distance += abs(py - min_y)
+                if forward:
+                    # Going down (increasing Y): distance from top
+                    distance += (py - min_y)
+                else:
+                    # Going up (decreasing Y): distance from bottom
+                    distance += (max_y - py)
                 break
             else:
                 distance += edge_length
         elif current_edge == 'top':
             edge_length = width
             if edge == 'top':
-                # Top edge: left-to-right (increasing X)
-                distance += abs(px - min_x)
+                if forward:
+                    # Going right (increasing X): distance from left
+                    distance += (px - min_x)
+                else:
+                    # Going left (decreasing X): distance from right
+                    distance += (max_x - px)
                 break
             else:
                 distance += edge_length

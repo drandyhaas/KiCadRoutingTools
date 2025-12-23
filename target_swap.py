@@ -138,8 +138,13 @@ def build_cost_matrix(
 
                 if src_chip and tgt_chip and src_chip != tgt_chip:
                     src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
-                    src_pos = compute_boundary_position(src_chip, source_centroids[i], src_far, clockwise=False)
-                    tgt_pos = compute_boundary_position(tgt_chip, target_centroids[j], tgt_far, clockwise=True)
+                    # Use OPPOSITE traversal directions so that when both chips are
+                    # "unrolled" into vertical lines, they face each other.
+                    # With opposite directions, the standard crossing check is already
+                    # inverted: (src_a < src_b) != (tgt_a < tgt_b) means NON-crossing.
+                    # So we DON'T flip the target position.
+                    src_pos = compute_boundary_position(src_chip, source_centroids[i], src_far, clockwise=True)
+                    tgt_pos = compute_boundary_position(tgt_chip, target_centroids[j], tgt_far, clockwise=False)
                     boundary_positions[(i, j)] = (src_pos, tgt_pos)
 
     # Initialize cost matrix with distance and layer penalties
@@ -592,9 +597,11 @@ def generate_debug_boundary_labels(
     src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
 
     # Generate labels for source positions (numbered by order)
+    # Source uses clockwise, target uses counter-clockwise (opposite directions)
+    # so that when "unrolled" the two lines face each other
     src_positions = []
     for i, centroid in enumerate(source_centroids):
-        pos = compute_boundary_position(src_chip, centroid, src_far, clockwise=False)
+        pos = compute_boundary_position(src_chip, centroid, src_far, clockwise=True)
         src_positions.append((pos, centroid, pair_names[i]))
 
     # Sort and number
@@ -612,10 +619,10 @@ def generate_debug_boundary_labels(
             'angle': angle
         })
 
-    # Generate labels for target positions
+    # Generate labels for target positions (counter-clockwise, opposite of source)
     tgt_positions = []
     for i, centroid in enumerate(target_centroids):
-        pos = compute_boundary_position(tgt_chip, centroid, tgt_far, clockwise=True)
+        pos = compute_boundary_position(tgt_chip, centroid, tgt_far, clockwise=False)
         tgt_positions.append((pos, centroid, pair_names[i]))
 
     tgt_sorted = sorted(tgt_positions, key=lambda x: x[0])

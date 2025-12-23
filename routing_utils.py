@@ -765,9 +765,12 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
 
             if src_chip and tgt_chip and src_chip != tgt_chip:
                 src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
-                src_pos = compute_boundary_position(src_chip, endpoints[0], src_far, clockwise=False)
-                tgt_pos = compute_boundary_position(tgt_chip, endpoints[1], tgt_far, clockwise=True)
-                unit_boundary_info[unit_id] = (src_pos, tgt_pos, src_chip, tgt_chip)
+                # Use OPPOSITE traversal directions: source clockwise, target counter-clockwise
+                # This makes the two chips "face each other" when unrolled
+                # Flip target position (1 - pos) to correct crossing detection
+                src_pos = compute_boundary_position(src_chip, endpoints[0], src_far, clockwise=True)
+                tgt_pos = compute_boundary_position(tgt_chip, endpoints[1], tgt_far, clockwise=False)
+                unit_boundary_info[unit_id] = (src_pos, 1.0 - tgt_pos, src_chip, tgt_chip)
 
     # Compute angular positions (used as fallback or as primary method)
     def angle_from_center(point: Tuple[float, float]) -> float:
