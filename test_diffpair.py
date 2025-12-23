@@ -248,6 +248,8 @@ Examples:
                               help='Penalty for crossing assignments in target swap optimization (default: 100.0)')
     router_group.add_argument('--mps-unroll', action='store_true',
                               help='Use chip boundary unrolling for MPS ordering and target swap crossing detection')
+    router_group.add_argument('--skip-routing', action='store_true',
+                              help='Skip actual routing, only do swaps and write debug info')
 
     args = parser.parse_args()
 
@@ -379,6 +381,8 @@ Examples:
         router_cmd.extend(["--crossing-penalty", str(args.crossing_penalty)])
     if args.mps_unroll:
         router_cmd.append("--mps-unroll")
+    if args.skip_routing:
+        router_cmd.append("--skip-routing")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(

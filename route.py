@@ -21,7 +21,7 @@ from kicad_parser import (
     auto_detect_bga_exclusion_zones, find_components_by_type
 )
 from kicad_writer import (
-    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
+    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, generate_gr_text_sexpr,
     swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content,
     modify_segment_layers
 )
@@ -337,6 +337,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 swappable_net_patterns: Optional[List[str]] = None,
                 crossing_penalty: float = 100.0,
                 mps_unroll: bool = False,
+                skip_routing: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -491,8 +492,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # This swaps net IDs at targets BEFORE routing, so routing sees the swapped configuration
     target_swaps: Dict[str, str] = {}  # pair_name -> swapped_target_pair_name
     target_swap_info: List[Dict] = []  # Info needed to apply swaps to output file
+    boundary_debug_labels: List[Dict] = []  # Debug labels for boundary positions
     if swappable_net_patterns and diff_pair_ids_to_route_set:
-        from target_swap import apply_target_swaps
+        from target_swap import apply_target_swaps, generate_debug_boundary_labels
         from diff_pair_routing import get_diff_pair_endpoints
 
         swappable_diff_pairs = find_differential_pairs(pcb_data, swappable_net_patterns)
@@ -502,11 +504,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           if name in pairs_being_routed]
 
         if len(swappable_pairs) >= 2:
+            # Generate debug labels if requested (before swaps, so we see original positions)
+            if debug_lines and mps_unroll:
+                boundary_debug_labels = generate_debug_boundary_labels(
+                    pcb_data, swappable_pairs,
+                    lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+                )
+
             target_swaps, target_swap_info = apply_target_swaps(
                 pcb_data, swappable_pairs, config,
                 lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config),
                 use_boundary_ordering=mps_unroll
             )
+
+    # Generate boundary debug labels for all diff pairs if not already generated from swappable pairs
+    if debug_lines and mps_unroll and not boundary_debug_labels and diff_pair_ids_to_route_set:
+        from target_swap import generate_debug_boundary_labels
+        from diff_pair_routing import get_diff_pair_endpoints
+        boundary_debug_labels = generate_debug_boundary_labels(
+            pcb_data, list(diff_pair_ids_to_route_set),
+            lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+        )
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
@@ -1090,8 +1108,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             single_ended_nets.append((net_name, net_id))
 
     total_routes = len(single_ended_nets) + len(diff_pair_ids_to_route)
-    print(f"\nRouting {total_routes} items ({len(single_ended_nets)} single-ended nets, {len(diff_pair_ids_to_route)} differential pairs)...")
-    print("=" * 60)
 
     results = []
     pad_swaps = []  # List of (pad1, pad2) tuples for nets that need swapping
@@ -1099,6 +1115,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     failed = 0
     total_time = 0
     total_iterations = 0
+    all_swap_vias = []  # Initialize for file writing
+
+    # Skip routing if requested - just write output with swaps and debug info
+    if skip_routing:
+        print(f"\n--skip-routing: Skipping actual routing of {total_routes} items")
+        print("Writing output file with swaps and debug labels only...")
+        # Clear the lists so routing loops don't execute
+        diff_pair_ids_to_route = []
+        single_ended_nets = []
+    else:
+        print(f"\nRouting {total_routes} items ({len(single_ended_nets)} single-ended nets, {len(diff_pair_ids_to_route)} differential pairs)...")
+        print("=" * 60)
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
@@ -2468,7 +2496,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output if we have results OR if we have layer swap/target swap modifications to show
-    if results or all_segment_modifications or all_swap_vias or target_swap_info:
+    # Also write if skip_routing (to output debug labels even without routing)
+    if results or all_segment_modifications or all_swap_vias or target_swap_info or skip_routing:
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -2617,6 +2646,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     routing_text += generate_gr_line_sexpr(
                         start, end,
                         0.05, "User.4"
+                    ) + "\n"
+
+            # Boundary position labels on User.6 (from mps-unroll)
+            if boundary_debug_labels:
+                print(f"Adding {len(boundary_debug_labels)} boundary position labels to User.6")
+                for label in boundary_debug_labels:
+                    routing_text += generate_gr_text_sexpr(
+                        label['text'], label['x'], label['y'], label['layer'],
+                        size=0.1, angle=label.get('angle', 0)
                     ) + "\n"
 
         last_paren = content.rfind(')')
@@ -2785,6 +2823,8 @@ Differential pair routing:
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
+    parser.add_argument("--skip-routing", action="store_true",
+                        help="Skip actual routing, only do swaps and write debug info")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",
@@ -2856,4 +2896,5 @@ Differential pair routing:
                 swappable_net_patterns=args.swappable_nets,
                 crossing_penalty=args.crossing_penalty,
                 mps_unroll=args.mps_unroll,
+                skip_routing=args.skip_routing,
                 vis_callback=vis_callback)

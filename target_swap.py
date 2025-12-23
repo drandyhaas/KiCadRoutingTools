@@ -24,7 +24,8 @@ from routing_config import DiffPair, GridRouteConfig
 from routing_utils import find_connected_segment_positions, pos_key
 from chip_boundary import (
     ChipBoundary, build_chip_list, identify_chip_for_point,
-    compute_far_side, compute_boundary_position, crossings_from_boundary_order
+    compute_far_side, compute_boundary_position, crossings_from_boundary_order,
+    generate_boundary_debug_labels
 )
 
 
@@ -540,3 +541,95 @@ def apply_target_swaps(
         )
 
     return target_swaps, target_swap_info
+
+
+def generate_debug_boundary_labels(
+    pcb_data: PCBData,
+    swappable_pairs: List[Tuple[str, DiffPair]],
+    get_endpoints_func: Callable[[DiffPair], Tuple[List, List, Optional[str]]]
+) -> List[dict]:
+    """
+    Generate debug labels showing boundary position ordering for visualization.
+
+    Args:
+        pcb_data: PCB data for chip detection
+        swappable_pairs: List of (pair_name, DiffPair) to label
+        get_endpoints_func: Function to get endpoints for a DiffPair
+
+    Returns:
+        List of label dicts with 'text', 'x', 'y', 'layer' keys
+    """
+    labels = []
+
+    # Gather endpoints
+    source_centroids = []
+    target_centroids = []
+    pair_names = []
+
+    for pair_name, pair in swappable_pairs:
+        sources, targets, error = get_endpoints_func(pair)
+        if error or not sources or not targets:
+            continue
+        src = sources[0]
+        tgt = targets[0]
+        source_centroids.append(get_source_centroid(src))
+        target_centroids.append(get_target_centroid(tgt))
+        pair_names.append(pair_name)
+
+    if len(source_centroids) < 2:
+        return labels
+
+    # Build chip list and identify chips
+    chips = build_chip_list(pcb_data)
+
+    # Find the two main chips (source and target)
+    src_chip = identify_chip_for_point(source_centroids[0], chips)
+    tgt_chip = identify_chip_for_point(target_centroids[0], chips)
+
+    if not src_chip or not tgt_chip or src_chip == tgt_chip:
+        return labels
+
+    src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
+
+    # Generate labels for source positions (numbered by order)
+    src_positions = []
+    for i, centroid in enumerate(source_centroids):
+        pos = compute_boundary_position(src_chip, centroid, src_far, clockwise=False)
+        src_positions.append((pos, centroid, pair_names[i]))
+
+    # Sort and number
+    src_sorted = sorted(src_positions, key=lambda x: x[0])
+    for order_num, (pos, centroid, name) in enumerate(src_sorted, start=1):
+        from chip_boundary import _project_to_boundary
+        projected, edge = _project_to_boundary(centroid, src_chip.bounds)
+        # Rotate labels on top/bottom edges by 90 degrees
+        angle = 90 if edge in ('top', 'bottom') else 0
+        labels.append({
+            'text': f"S{order_num}",
+            'x': projected[0],
+            'y': projected[1],
+            'layer': "User.6",
+            'angle': angle
+        })
+
+    # Generate labels for target positions
+    tgt_positions = []
+    for i, centroid in enumerate(target_centroids):
+        pos = compute_boundary_position(tgt_chip, centroid, tgt_far, clockwise=True)
+        tgt_positions.append((pos, centroid, pair_names[i]))
+
+    tgt_sorted = sorted(tgt_positions, key=lambda x: x[0])
+    for order_num, (pos, centroid, name) in enumerate(tgt_sorted, start=1):
+        from chip_boundary import _project_to_boundary
+        projected, edge = _project_to_boundary(centroid, tgt_chip.bounds)
+        # Rotate labels on top/bottom edges by 90 degrees
+        angle = 90 if edge in ('top', 'bottom') else 0
+        labels.append({
+            'text': f"T{order_num}",
+            'x': projected[0],
+            'y': projected[1],
+            'layer': "User.6",
+            'angle': angle
+        })
+
+    return labels

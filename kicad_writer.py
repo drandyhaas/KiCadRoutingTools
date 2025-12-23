@@ -52,6 +52,22 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
 	)'''
 
 
+def generate_gr_text_sexpr(text: str, x: float, y: float, layer: str,
+                           size: float = 0.5, angle: float = 0) -> str:
+    """Generate KiCad S-expression for a graphic text label."""
+    return f'''	(gr_text "{text}"
+		(at {x:.6f} {y:.6f} {angle})
+		(layer "{layer}")
+		(uuid "{uuid.uuid4()}")
+		(effects
+			(font
+				(size {size} {size})
+				(thickness 0.1)
+			)
+		)
+	)'''
+
+
 def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict]) -> bool:
     """
     Add track segments to a PCB file.
