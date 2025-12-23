@@ -245,9 +245,7 @@ Examples:
     router_group.add_argument('--swappable-nets', nargs='+',
                               help='Glob patterns for diff pairs that can have targets swapped (e.g., rx1_*)')
     router_group.add_argument('--crossing-penalty', type=float,
-                              help='Penalty for crossing assignments in target swap optimization (default: 100.0)')
-    router_group.add_argument('--mps-unroll', action='store_true',
-                              help='Use chip boundary unrolling for MPS ordering and target swap crossing detection')
+                              help='Penalty for crossing assignments in target swap optimization (default: 1000.0)')
     router_group.add_argument('--skip-routing', action='store_true',
                               help='Skip actual routing, only do swaps and write debug info')
 
@@ -379,8 +377,6 @@ Examples:
         router_cmd.extend(["--swappable-nets"] + args.swappable_nets)
     if args.crossing_penalty is not None:
         router_cmd.extend(["--crossing-penalty", str(args.crossing_penalty)])
-    if args.mps_unroll:
-        router_cmd.append("--mps-unroll")
     if args.skip_routing:
         router_cmd.append("--skip-routing")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])

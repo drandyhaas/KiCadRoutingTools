@@ -643,7 +643,7 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
 def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               center: Tuple[float, float] = None,
                               diff_pairs: Dict = None,
-                              use_boundary_ordering: bool = False) -> List[int]:
+                              use_boundary_ordering: bool = True) -> List[int]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 

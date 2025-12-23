@@ -72,7 +72,7 @@ def build_cost_matrix(
     pair_data: List[Tuple[str, DiffPair, List, List]],
     config: GridRouteConfig,
     pcb_data: PCBData,
-    use_boundary_ordering: bool = False
+    use_boundary_ordering: bool = True
 ) -> Tuple[List[List[float]], List[str]]:
     """
     Build N x N cost matrix for optimal target assignment.
@@ -233,7 +233,7 @@ def compute_optimal_assignment(
     pair_data: List[Tuple[str, DiffPair, List, List]],
     config: GridRouteConfig,
     pcb_data: PCBData,
-    use_boundary_ordering: bool = False
+    use_boundary_ordering: bool = True
 ) -> Optional[Dict[str, str]]:
     """
     Compute optimal target swaps using Hungarian algorithm.
@@ -473,7 +473,7 @@ def apply_target_swaps(
     swappable_pairs: List[Tuple[str, DiffPair]],
     config: GridRouteConfig,
     get_endpoints_func: Callable[[DiffPair], Tuple[List, List, Optional[str]]],
-    use_boundary_ordering: bool = False
+    use_boundary_ordering: bool = True
 ) -> Tuple[Dict[str, str], List[Dict]]:
     """
     Main entry point for target swap optimization.

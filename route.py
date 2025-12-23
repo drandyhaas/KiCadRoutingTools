@@ -336,7 +336,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 can_swap_to_top_layer: bool = False,
                 swappable_net_patterns: Optional[List[str]] = None,
                 crossing_penalty: float = 1000.0,
-                mps_unroll: bool = False,
+                mps_unroll: bool = True,
                 skip_routing: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
@@ -2809,10 +2809,8 @@ Differential pair routing:
                         help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
     parser.add_argument("--swappable-nets", nargs="+",
                         help="Glob patterns for diff pair nets that can have targets swapped (e.g., 'rx1_*')")
-    parser.add_argument("--crossing-penalty", type=float, default=100.0,
-                        help="Penalty for crossing assignments in target swap optimization (default: 100.0)")
-    parser.add_argument("--mps-unroll", action="store_true",
-                        help="Use chip boundary unrolling for MPS ordering and target swap crossing detection")
+    parser.add_argument("--crossing-penalty", type=float, default=1000.0,
+                        help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -2895,6 +2893,5 @@ Differential pair routing:
                 can_swap_to_top_layer=args.can_swap_to_top_layer,
                 swappable_net_patterns=args.swappable_nets,
                 crossing_penalty=args.crossing_penalty,
-                mps_unroll=args.mps_unroll,
                 skip_routing=args.skip_routing,
                 vis_callback=vis_callback)
