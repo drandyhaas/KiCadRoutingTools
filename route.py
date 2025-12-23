@@ -468,6 +468,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     all_segment_modifications = []
     # Track all vias added during stub layer swapping
     all_swap_vias = []
+    # Track total number of layer swaps applied
+    total_layer_swaps = 0
 
     # Identify which diff pairs we'll be routing BEFORE ordering
     # (Layer swaps must happen before MPS ordering since ordering depends on layers)
@@ -788,6 +790,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 applied_swaps.add(pair_name)
                 applied_swaps.add(swap_partner)
                 swap_count += 1
+                total_layer_swaps += 1
                 via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
                 print(f"  Source swap: {pair_name} ({src_layer}->{tgt_layer}) <-> {swap_partner} ({other_src_layer}->{src_layer}){via_msg}")
 
@@ -830,6 +833,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 applied_swaps.add(pair_name)
                 solo_src_count += 1
+                total_layer_swaps += 1
                 via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
                 print(f"  Solo source switch: {pair_name} ({src_layer}->{tgt_layer}){via_msg}")
             else:
@@ -947,6 +951,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 applied_swaps.add(pair_name)
                 applied_swaps.add(swap_partner)
                 target_swap_count += 1
+                total_layer_swaps += 1
                 via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
                 print(f"  Target swap: {pair_name} ({tgt_layer}->{src_layer}) <-> {swap_partner} ({other_tgt_layer}->{tgt_layer}){via_msg}")
 
@@ -989,6 +994,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 applied_swaps.add(pair_name)
                 solo_switch_count += 1
+                total_layer_swaps += 1
                 via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
                 print(f"  Solo target switch: {pair_name} ({tgt_layer}->{src_layer}){via_msg}")
             else:
@@ -1088,6 +1094,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             applied_swaps.add(pair_name)
                             applied_swaps.add(other_name)
                             swap_count += 1
+                            total_layer_swaps += 1
                             print(f"  Swap {swap_type}s: {pair_name} <-> {other_name}")
                             break
                 if swap_type == "source":
@@ -1135,6 +1142,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     applied_swaps.add(pair_name)
                                     applied_swaps.add(other_name)
                                     swap_count += 1
+                                    total_layer_swaps += 1
                                     print(f"  Swap targets: {pair_name} <-> {other_name}")
                                     break
 
@@ -2578,8 +2586,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Print unique swaps (each pair shown once)
         swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
         print(f"  Target swaps:  {len(swap_pairs)}")
-        for p1, p2 in swap_pairs:
-            print(f"    {p1} <-> {p2}")
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
@@ -2592,6 +2598,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
+        'layer_swaps': total_layer_swaps,
         'successful': successful,
         'failed': failed,
         'total_time': round(total_time, 2),

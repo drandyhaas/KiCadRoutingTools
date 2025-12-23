@@ -495,6 +495,8 @@ Examples:
     ripup_success_pairs = json_summary.get('ripup_success_pairs', [])
     rerouted_pairs_list = json_summary.get('rerouted_pairs', [])
     polarity_swapped_pairs = json_summary.get('polarity_swapped_pairs', [])
+    target_swaps = json_summary.get('target_swaps', [])
+    layer_swaps = json_summary.get('layer_swaps', 0)
 
     # Routing summary
     print(f"\nRouting:")
@@ -503,6 +505,8 @@ Examples:
     print(f"  Total via pairs:  {total_vias // 2}")
     print(f"  Total time:       {total_time:.2f}s")
     print(f"  Polarity swaps:   {len(polarity_swapped_pairs)}")
+    print(f"  Target swaps:     {len(target_swaps)}")
+    print(f"  Layer swaps:      {layer_swaps}")
     if ripup_success_pairs or rerouted_pairs_list:
         print(f"  Rip-up/reroute:   {len(ripup_success_pairs)} rip-up success, {len(rerouted_pairs_list)} rerouted")
 
@@ -567,6 +571,13 @@ Examples:
         print(f"\nNets with P<->N polarity swap:")
         for pair in polarity_swapped_pairs:
             print(f"  - {pair}")
+
+    if target_swaps:
+        print(f"\nNets with target swap:")
+        for swap in target_swaps:
+            pair1 = swap.get('pair1', '')
+            pair2 = swap.get('pair2', '')
+            print(f"  - {pair1} <-> {pair2}")
 
     print(f"\nOutput file: {output_pcb}")
     print(f"{'='*60}")
