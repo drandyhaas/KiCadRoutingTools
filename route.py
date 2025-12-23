@@ -2531,13 +2531,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # Apply segment layer modifications from stub layer switching BEFORE polarity swaps
-        # (so we can find segments by their original net_id)
-        if all_segment_modifications:
-            content, mod_count = modify_segment_layers(content, all_segment_modifications)
-            print(f"Applied {mod_count} segment layer modifications (layer switching)")
-
-        # Apply target swaps for swappable-nets feature
+        # Apply target swaps FIRST - layer modifications were recorded with post-swap net IDs,
+        # so we need to swap the file content to match before applying layer modifications
         if target_swap_info:
             print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
             for swap in target_swap_info:
@@ -2578,6 +2573,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 total_seg = p1_p_seg + p1_n_seg + p2_p_seg + p2_n_seg
                 total_via = p1_p_via + p1_n_via + p2_p_via + p2_n_via
                 print(f"  {swap['p1_name']} <-> {swap['p2_name']}: {total_seg} segments, {total_via} vias")
+
+        # Apply segment layer modifications from stub layer switching AFTER target swaps
+        # (layer mods were recorded with post-swap net IDs, so file must be swapped first)
+        if all_segment_modifications:
+            content, mod_count = modify_segment_layers(content, all_segment_modifications)
+            print(f"Applied {mod_count} segment layer modifications (layer switching)")
 
         # Apply pad and stub net swaps for polarity fixes
         if pad_swaps:
