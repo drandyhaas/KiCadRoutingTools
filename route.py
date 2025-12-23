@@ -615,6 +615,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 if other_pair.p_net_id not in overlapping_nets and other_pair.n_net_id not in overlapping_nets:
                     continue
 
+                # IMPORTANT: Don't break a pair that was already OK!
+                # After swap, partner's source will be on our src_layer.
+                # Partner is OK if: their new source (src_layer) == their target (other_tgt_layer)
+                # OR if they already needed a via (can't make it worse)
+                partner_already_needs_via = (other_src_layer != other_tgt_layer)
+                partner_would_be_ok_after = (src_layer == other_tgt_layer)
+                if not partner_already_needs_via and not partner_would_be_ok_after:
+                    # Partner was OK but swap would break them - skip
+                    continue
+
                 # Get their source stub info
                 other_src_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
                                                  other_sources[0][5], other_sources[0][6], other_src_layer)
@@ -776,6 +786,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 if other_pair.p_net_id not in overlapping_nets and other_pair.n_net_id not in overlapping_nets:
                     continue
 
+                # IMPORTANT: Don't break a pair that was already OK!
+                # After swap, partner's target will be on our tgt_layer.
+                # Partner is OK if: their source (other_src_layer) == their new target (tgt_layer)
+                # OR if they already needed a via (can't make it worse)
+                partner_already_needs_via = (other_src_layer != other_tgt_layer)
+                partner_would_be_ok_after = (other_src_layer == tgt_layer)
+                if not partner_already_needs_via and not partner_would_be_ok_after:
+                    # Partner was OK but swap would break them - skip
+                    continue
+
                 # Get their target stub info
                 other_tgt_p_stub = get_stub_info(pcb_data, other_pair.p_net_id,
                                                  other_targets[0][5], other_targets[0][6], other_tgt_layer)
@@ -848,10 +868,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                        targets[0][7], targets[0][8], tgt_layer)
 
             if not tgt_p_stub or not tgt_n_stub:
+                missing = []
+                if not tgt_p_stub:
+                    missing.append("P")
+                if not tgt_n_stub:
+                    missing.append("N")
+                print(f"    Solo target switch skipped for {pair_name}: can't find {'+'.join(missing)} stub at target ({targets[0][5]:.2f}, {targets[0][6]:.2f}) on {tgt_layer}")
                 continue
 
             # Check if swap would move stubs to F.Cu (top layer)
             if not can_swap_to_top_layer and src_layer == 'F.Cu':
+                print(f"    Solo target switch skipped for {pair_name}: would move to F.Cu (top layer)")
                 continue
 
             # Validate solo switch: target stubs move to source layer
