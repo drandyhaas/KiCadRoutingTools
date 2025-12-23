@@ -878,7 +878,16 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
     else:
         print(f"MPS: {len(unit_list)} nets with {total_conflicts} crossing conflicts detected")
 
+    # Compute route distances for each unit (straight-line distance between endpoints)
+    # Used as secondary ordering: shorter routes first within same conflict count
+    unit_distances = {}
+    for unit_id, endpoints in unit_endpoints.items():
+        dx = endpoints[1][0] - endpoints[0][0]
+        dy = endpoints[1][1] - endpoints[0][1]
+        unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
+
     # Step 5: Greedy ordering - repeatedly pick unit with fewest active conflicts
+    # Secondary: pick shorter routes first (easier routes done first, leaving space for longer ones)
     ordered_units = []
     remaining = set(unit_list)
     round_num = 0
@@ -892,17 +901,11 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         round_remaining = set(remaining)
         while round_remaining:
             # Find unit with minimum active conflicts among round_remaining
-            min_conflicts = float('inf')
-            best_unit = None
-            for unit_id in round_remaining:
-                # Active conflicts = conflicts with units still in round_remaining
-                active = len(conflicts[unit_id] & round_remaining)
-                if active < min_conflicts:
-                    min_conflicts = active
-                    best_unit = unit_id
-
-            if best_unit is None:
-                break
+            # Tiebreaker: shorter route distance first
+            best_unit = min(
+                round_remaining,
+                key=lambda uid: (len(conflicts[uid] & round_remaining), unit_distances.get(uid, 0))
+            )
 
             # This unit wins this round
             round_winners.append(best_unit)
