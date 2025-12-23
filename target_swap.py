@@ -100,7 +100,7 @@ def build_cost_matrix(
     pair_names = [pd[0] for pd in pair_data]
 
     # Get crossing penalty from config (default 100.0)
-    crossing_penalty = getattr(config, 'target_swap_crossing_penalty', 100.0)
+    crossing_penalty = getattr(config, 'target_swap_crossing_penalty', 1000.0)
 
     # Extract source/target centroids and layers
     source_centroids = []
@@ -140,9 +140,8 @@ def build_cost_matrix(
                     src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
                     # Use OPPOSITE traversal directions so that when both chips are
                     # "unrolled" into vertical lines, they face each other.
-                    # With opposite directions, the standard crossing check is already
-                    # inverted: (src_a < src_b) != (tgt_a < tgt_b) means NON-crossing.
-                    # So we DON'T flip the target position.
+                    # With opposite directions, the crossing check works correctly:
+                    # same geometric order → opposite boundary order → crossing detected
                     src_pos = compute_boundary_position(src_chip, source_centroids[i], src_far, clockwise=True)
                     tgt_pos = compute_boundary_position(tgt_chip, target_centroids[j], tgt_far, clockwise=False)
                     boundary_positions[(i, j)] = (src_pos, tgt_pos)
