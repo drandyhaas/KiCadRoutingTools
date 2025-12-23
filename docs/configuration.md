@@ -78,6 +78,8 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
 | `--no-stub-layer-swap` | false | Disable stub layer switching (enabled by default) |
 | `--can-swap-to-top-layer` | false | Allow swapping stubs to F.Cu (off by default due to clearance issues) |
+| `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
+| `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 
 ### Debug Options
 
@@ -132,6 +134,7 @@ class GridRouteConfig:
     diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
     fix_polarity: bool = True            # swap target pads if polarity swap needed
     stub_layer_swap: bool = True         # enable stub layer switching optimization
+    target_swap_crossing_penalty: float = 1000.0  # penalty for crossing assignments
 
     # Debug
     debug_lines: bool = False

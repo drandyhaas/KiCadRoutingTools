@@ -17,7 +17,9 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
 - **Via proximity cost** - Configurable cost penalty for vias near stubs (instead of blocking)
-- **Adaptive setback angles** - Evaluates multiple setback angles (0°, ±max/2, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced
+- **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced
+- **Target swap optimization** - For swappable diff pairs (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings
+- **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 
 ## Quick Start
 
@@ -152,6 +154,10 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 # Layer optimization (stub layer swap enabled by default)
 --no-stub-layer-swap    # Disable stub layer switching
 --can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
+
+# Target swap optimization
+--swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
+--crossing-penalty 1000  # Penalty for crossing assignments (default: 1000)
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.

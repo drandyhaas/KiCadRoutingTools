@@ -20,22 +20,27 @@ Three ordering strategies are available:
 
 ### How It Works
 
-1. **Project endpoints to circle**: Each net's source and target are projected onto a circular boundary around the routing region
+1. **Identify chips**: Detect source and target chips from pad positions
 
-2. **Detect crossings**: Two nets "cross" if their endpoints alternate on the circle:
+2. **Boundary position computation**: "Unroll" each chip's rectangular boundary into a linear [0,1] position, starting from the "far side" (side facing away from the other chip)
+
+3. **Detect crossings**: Two nets cross if their source order is inverted relative to their target order:
    ```
-   Circle: ... A1 ... B1 ... A2 ... B2 ...
-                    ^ these nets cross
+   Source chip:  Net A at position 0.3, Net B at position 0.5  (A < B)
+   Target chip:  Net A at position 0.6, Net B at position 0.4  (A > B)
+   Orders differ → crossing detected
    ```
 
-3. **Build conflict graph**: Nets that cross share an edge in the conflict graph
+4. **Build conflict graph**: Nets that cross share an edge in the conflict graph
 
-4. **Greedy ordering**: Repeatedly select the net with fewest active conflicts, add to result, remove its conflicting neighbors from consideration
+5. **Greedy ordering**: Repeatedly select the net with fewest active conflicts, add to result, remove its conflicting neighbors from consideration
+
+This chip boundary approach accurately detects crossings that respect the physical constraint that routes cannot go through BGA chips.
 
 ### Algorithm Detail
 
 ```python
-def compute_mps_net_ordering(pcb_data, net_ids, center=None):
+def compute_mps_net_ordering(pcb_data, net_ids):
     # Step 1: Get routing endpoints for each net
     net_endpoints = {}
     for net_id in net_ids:
@@ -43,23 +48,36 @@ def compute_mps_net_ordering(pcb_data, net_ids, center=None):
         if len(endpoints) >= 2:
             net_endpoints[net_id] = endpoints[:2]
 
-    # Step 2: Compute center (centroid of all endpoints)
-    if center is None:
-        center = compute_centroid(all_endpoints)
+    # Step 2: Identify chips from pad positions
+    chips = build_chip_list(pcb_data)  # List of ChipBoundary objects
 
-    # Step 3: Compute angular position for each endpoint
-    net_angles = {}
+    # Step 3: Compute boundary positions for each net
+    net_boundary_info = {}
     for net_id, endpoints in net_endpoints.items():
-        a1 = angle_from_center(endpoints[0])
-        a2 = angle_from_center(endpoints[1])
-        net_angles[net_id] = (min(a1, a2), max(a1, a2))
+        src_chip = identify_chip_for_point(endpoints[0], chips)
+        tgt_chip = identify_chip_for_point(endpoints[1], chips)
+
+        if src_chip and tgt_chip and src_chip != tgt_chip:
+            # Determine far sides based on chip-to-chip direction
+            src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
+
+            # Compute boundary positions with opposite traversal directions
+            # Source: clockwise, Target: counter-clockwise (chips "face each other")
+            src_pos = compute_boundary_position(src_chip, endpoints[0], src_far, clockwise=True)
+            tgt_pos = compute_boundary_position(tgt_chip, endpoints[1], tgt_far, clockwise=False)
+            net_boundary_info[net_id] = (src_pos, tgt_pos, src_chip, tgt_chip)
 
     # Step 4: Detect crossing conflicts
     def nets_cross(net_a, net_b):
-        a1, a2 = net_angles[net_a]
-        b1, b2 = net_angles[net_b]
-        # Check if intervals interleave
-        return (a1 < b1 < a2 < b2) or (b1 < a1 < b2 < a2)
+        info_a = net_boundary_info.get(net_a)
+        info_b = net_boundary_info.get(net_b)
+        if not info_a or not info_b:
+            return False
+        # Only compare nets with same chip pair
+        if (info_a[2], info_a[3]) != (info_b[2], info_b[3]):
+            return False
+        # Crossing = source order inverted relative to target order
+        return (info_a[0] < info_b[0]) != (info_a[1] < info_b[1])
 
     # Build conflict graph
     conflicts = {net_id: set() for net_id in net_list}
