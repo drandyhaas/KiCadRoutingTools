@@ -730,14 +730,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"Applied {solo_src_count} solo source layer switch(es)")
 
         # Now try target-side segment overlap swaps for remaining pairs
-        # Skip pairs that have had their targets swapped via --swappable-nets,
-        # as their target positions are now at different physical locations
         target_swap_count = 0
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
             if pair_name in applied_swaps:
-                continue
-            if pair_name in target_swaps:
-                print(f"    Skipping target layer swap for {pair_name} (target-swapped via --swappable-nets)")
                 continue
 
             # Get our target stub info
