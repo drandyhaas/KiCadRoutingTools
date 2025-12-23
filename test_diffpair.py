@@ -244,6 +244,8 @@ Examples:
                               help='Maximum angle (degrees) for setback position search (default: 45.0)')
     router_group.add_argument('--swappable-nets', nargs='+',
                               help='Glob patterns for diff pairs that can have targets swapped (e.g., rx1_*)')
+    router_group.add_argument('--crossing-penalty', type=float,
+                              help='Penalty for crossing assignments in target swap optimization (default: 100.0)')
 
     args = parser.parse_args()
 
@@ -371,6 +373,8 @@ Examples:
         router_cmd.extend(["--max-setback-angle", str(args.max_setback_angle)])
     if args.swappable_nets:
         router_cmd.extend(["--swappable-nets"] + args.swappable_nets)
+    if args.crossing_penalty is not None:
+        router_cmd.extend(["--crossing-penalty", str(args.crossing_penalty)])
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(
