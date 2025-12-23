@@ -137,8 +137,8 @@ def build_cost_matrix(
 
                 if src_chip and tgt_chip and src_chip != tgt_chip:
                     src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
-                    src_pos = compute_boundary_position(src_chip, source_centroids[i], src_far)
-                    tgt_pos = compute_boundary_position(tgt_chip, target_centroids[j], tgt_far)
+                    src_pos = compute_boundary_position(src_chip, source_centroids[i], src_far, clockwise=False)
+                    tgt_pos = compute_boundary_position(tgt_chip, target_centroids[j], tgt_far, clockwise=True)
                     boundary_positions[(i, j)] = (src_pos, tgt_pos)
 
     # Initialize cost matrix with distance and layer penalties

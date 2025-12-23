@@ -199,19 +199,26 @@ def _project_to_boundary(
 def compute_boundary_position(
     chip: ChipBoundary,
     point: Tuple[float, float],
-    far_side: str
+    far_side: str,
+    clockwise: bool = True
 ) -> float:
     """
     Compute normalized position [0, 1] along chip boundary.
 
     The boundary is "unrolled" starting from the far side corner,
-    proceeding clockwise. Each point gets a position based on its
-    distance along this unrolled perimeter.
+    proceeding clockwise or counter-clockwise. Each point gets a position
+    based on its distance along this unrolled perimeter.
+
+    IMPORTANT: For crossing detection to work correctly, source and target
+    chips must use opposite directions (one clockwise, one counter-clockwise)
+    so that positions on facing edges increase in the same direction.
 
     Args:
         chip: The chip boundary information
         point: (x, y) position to compute boundary position for
         far_side: Which side to start from ('left', 'right', 'top', 'bottom')
+        clockwise: Direction to traverse boundary. Use True for source chips,
+                   False for target chips.
 
     Returns:
         Normalized position in [0, 1] along the boundary
@@ -228,62 +235,91 @@ def compute_boundary_position(
     projected, edge = _project_to_boundary(point, chip.bounds)
     px, py = projected
 
-    # Define edge order and start corner based on far_side
-    # We go clockwise from the start corner
+    # Define edge order and start corner based on far_side and direction
+    # Clockwise: left->bottom->right->top (starting from appropriate corner)
+    # Counter-clockwise: left->top->right->bottom (starting from appropriate corner)
     if far_side == 'left':
-        # Start at top-left corner, go clockwise: left -> bottom -> right -> top
-        start_corner = (min_x, min_y)  # top-left (KiCad Y increases downward)
-        edge_order = ['left', 'bottom', 'right', 'top']
+        if clockwise:
+            # Start at top-left corner, go clockwise: left -> bottom -> right -> top
+            edge_order = ['left', 'bottom', 'right', 'top']
+        else:
+            # Start at bottom-left corner, go counter-clockwise: left -> top -> right -> bottom
+            edge_order = ['left', 'top', 'right', 'bottom']
     elif far_side == 'right':
-        # Start at bottom-right corner, go clockwise: right -> top -> left -> bottom
-        start_corner = (max_x, max_y)
-        edge_order = ['right', 'top', 'left', 'bottom']
+        if clockwise:
+            # Start at bottom-right corner, go clockwise: right -> top -> left -> bottom
+            edge_order = ['right', 'top', 'left', 'bottom']
+        else:
+            # Start at top-right corner, go counter-clockwise: right -> bottom -> left -> top
+            edge_order = ['right', 'bottom', 'left', 'top']
     elif far_side == 'top':
-        # Start at top-right corner, go clockwise: top -> left -> bottom -> right
-        start_corner = (max_x, min_y)
-        edge_order = ['top', 'left', 'bottom', 'right']
+        if clockwise:
+            # Start at top-right corner, go clockwise: top -> left -> bottom -> right
+            edge_order = ['top', 'left', 'bottom', 'right']
+        else:
+            # Start at top-left corner, go counter-clockwise: top -> right -> bottom -> left
+            edge_order = ['top', 'right', 'bottom', 'left']
     elif far_side == 'bottom':
-        # Start at bottom-left corner, go clockwise: bottom -> right -> top -> left
-        start_corner = (min_x, max_y)
-        edge_order = ['bottom', 'right', 'top', 'left']
+        if clockwise:
+            # Start at bottom-left corner, go clockwise: bottom -> right -> top -> left
+            edge_order = ['bottom', 'right', 'top', 'left']
+        else:
+            # Start at bottom-right corner, go counter-clockwise: bottom -> left -> top -> right
+            edge_order = ['bottom', 'left', 'top', 'right']
     else:
-        # Default to left
-        start_corner = (min_x, min_y)
+        # Default to left, clockwise
         edge_order = ['left', 'bottom', 'right', 'top']
 
     # Compute distance along perimeter from start corner to projected point
+    # The starting point on each edge depends on the direction (clockwise vs counter-clockwise)
     distance = 0.0
 
     for current_edge in edge_order:
         if current_edge == 'left':
             edge_length = height
             if edge == 'left':
-                # Distance along left edge from top
-                distance += abs(py - min_y)
+                if clockwise:
+                    # Clockwise: left edge traversed top-to-bottom
+                    distance += abs(py - min_y)
+                else:
+                    # Counter-clockwise: left edge traversed bottom-to-top
+                    distance += abs(py - max_y)
                 break
             else:
                 distance += edge_length
         elif current_edge == 'bottom':
             edge_length = width
             if edge == 'bottom':
-                # Distance along bottom edge from left
-                distance += abs(px - min_x)
+                if clockwise:
+                    # Clockwise: bottom edge traversed left-to-right
+                    distance += abs(px - min_x)
+                else:
+                    # Counter-clockwise: bottom edge traversed right-to-left
+                    distance += abs(px - max_x)
                 break
             else:
                 distance += edge_length
         elif current_edge == 'right':
             edge_length = height
             if edge == 'right':
-                # Distance along right edge from bottom
-                distance += abs(py - max_y)
+                if clockwise:
+                    # Clockwise: right edge traversed bottom-to-top
+                    distance += abs(py - max_y)
+                else:
+                    # Counter-clockwise: right edge traversed top-to-bottom
+                    distance += abs(py - min_y)
                 break
             else:
                 distance += edge_length
         elif current_edge == 'top':
             edge_length = width
             if edge == 'top':
-                # Distance along top edge from right
-                distance += abs(px - max_x)
+                if clockwise:
+                    # Clockwise: top edge traversed right-to-left
+                    distance += abs(px - max_x)
+                else:
+                    # Counter-clockwise: top edge traversed left-to-right
+                    distance += abs(px - min_x)
                 break
             else:
                 distance += edge_length
