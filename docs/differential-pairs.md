@@ -285,6 +285,14 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty near BGA edges (mm equivalent) |
 | `--via-proximity-cost` | 10.0 | Via cost multiplier near stubs/BGAs (0=block) |
+| `--track-proximity-distance` | 1.0 | Radius around routed tracks to penalize (mm, same layer) |
+| `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
+
+## Track Proximity Avoidance
+
+The `--track-proximity-distance` and `--track-proximity-cost` options penalize routes that run close to previously routed tracks on the same layer. This encourages spread-out routing and reduces the risk of DRC violations.
+
+**Note:** Track proximity now works correctly for differential pair routing (pose-based A*). Previously, only single-ended routing used track proximity costs.
 
 ## Target Swap Optimization
 

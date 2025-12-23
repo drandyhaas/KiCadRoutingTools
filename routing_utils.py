@@ -640,10 +640,238 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
     return []
 
 
+def find_containing_or_nearest_bga_zone(
+    point: Tuple[float, float],
+    bga_zones: List[Tuple[float, float, float, float]]
+) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Find the BGA zone containing a point, or the nearest zone if outside all zones.
+
+    Args:
+        point: (x, y) position
+        bga_zones: List of (min_x, min_y, max_x, max_y) BGA exclusion zones
+
+    Returns:
+        The containing/nearest BGA zone, or None if no zones provided
+    """
+    if not bga_zones:
+        return None
+
+    x, y = point
+
+    # First check if inside any zone
+    for zone in bga_zones:
+        min_x, min_y, max_x, max_y = zone
+        if min_x <= x <= max_x and min_y <= y <= max_y:
+            return zone
+
+    # Not inside any zone - find nearest
+    best_zone = None
+    best_dist = float('inf')
+
+    for zone in bga_zones:
+        min_x, min_y, max_x, max_y = zone
+        # Distance to bounding box
+        dx = max(min_x - x, 0, x - max_x)
+        dy = max(min_y - y, 0, y - max_y)
+        dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist < best_dist:
+            best_dist = dist
+            best_zone = zone
+
+    return best_zone
+
+
+def get_source_chip_center(
+    pcb_data: PCBData,
+    source_pads: List[Pad]
+) -> Optional[Tuple[float, float]]:
+    """
+    Get the center of the source chip/component from source pads.
+
+    Args:
+        pcb_data: PCB data with footprint information
+        source_pads: List of pads belonging to the source stub
+
+    Returns:
+        (x, y) center of the source component, or None if not found
+    """
+    if not source_pads:
+        return None
+
+    # Get component reference from the first pad
+    component_ref = source_pads[0].component_ref
+    if not component_ref:
+        # Fall back to centroid of pads if no component_ref
+        cx = sum(p.global_x for p in source_pads) / len(source_pads)
+        cy = sum(p.global_y for p in source_pads) / len(source_pads)
+        return (cx, cy)
+
+    # Look up footprint bounds
+    footprint = pcb_data.footprints.get(component_ref)
+    if footprint and footprint.pads:
+        # Calculate center from pad extents
+        pad_xs = [p.global_x for p in footprint.pads]
+        pad_ys = [p.global_y for p in footprint.pads]
+        center_x = (min(pad_xs) + max(pad_xs)) / 2
+        center_y = (min(pad_ys) + max(pad_ys)) / 2
+        return (center_x, center_y)
+
+    # Fall back to pad centroid
+    cx = sum(p.global_x for p in source_pads) / len(source_pads)
+    cy = sum(p.global_y for p in source_pads) / len(source_pads)
+    return (cx, cy)
+
+
+def compute_routing_aware_distance(
+    target_free_end: Tuple[float, float],
+    source_chip_center: Tuple[float, float],
+    bga_zone: Tuple[float, float, float, float]
+) -> float:
+    """
+    Compute the shortest path distance from target stub free end to source chip center,
+    routing around the BGA zone (not through it).
+
+    The algorithm:
+    1. Determine which edge of the BGA the target stub is on/near
+    2. Compute two candidate paths: around each corner of the BGA edge
+    3. Return the shorter path distance
+
+    Args:
+        target_free_end: (x, y) position of target stub free end
+        source_chip_center: (x, y) position of source chip center
+        bga_zone: (min_x, min_y, max_x, max_y) BGA exclusion zone
+
+    Returns:
+        Routing-aware distance in mm
+    """
+    tx, ty = target_free_end
+    sx, sy = source_chip_center
+    min_x, min_y, max_x, max_y = bga_zone
+
+    def point_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+        return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+
+    # Get BGA corners
+    corners = {
+        'top_left': (min_x, min_y),
+        'top_right': (max_x, min_y),
+        'bottom_left': (min_x, max_y),
+        'bottom_right': (max_x, max_y)
+    }
+
+    # Determine which edge the target stub is on/nearest to
+    dist_to_left = abs(tx - min_x)
+    dist_to_right = abs(tx - max_x)
+    dist_to_top = abs(ty - min_y)
+    dist_to_bottom = abs(ty - max_y)
+
+    min_dist = min(dist_to_left, dist_to_right, dist_to_top, dist_to_bottom)
+
+    # Determine candidate corners based on stub edge position
+    if min_dist == dist_to_top:
+        # Stub on top edge - can go around top-left or top-right corner
+        corner1, corner2 = corners['top_left'], corners['top_right']
+    elif min_dist == dist_to_bottom:
+        # Stub on bottom edge
+        corner1, corner2 = corners['bottom_left'], corners['bottom_right']
+    elif min_dist == dist_to_left:
+        # Stub on left edge
+        corner1, corner2 = corners['top_left'], corners['bottom_left']
+    else:  # dist_to_right
+        # Stub on right edge
+        corner1, corner2 = corners['top_right'], corners['bottom_right']
+
+    # Path 1: target -> corner1 -> source
+    dist1 = point_distance(target_free_end, corner1) + point_distance(corner1, source_chip_center)
+
+    # Path 2: target -> corner2 -> source
+    dist2 = point_distance(target_free_end, corner2) + point_distance(corner2, source_chip_center)
+
+    return min(dist1, dist2)
+
+
+def get_unit_routing_info(
+    pcb_data: PCBData,
+    unit_net_ids: List[int]
+) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """
+    Get target stub free end and source chip center for a routing unit.
+
+    For diff pairs, averages the P and N positions.
+
+    Args:
+        pcb_data: PCB data
+        unit_net_ids: List of net IDs (1 for single net, 2 for diff pair)
+
+    Returns:
+        (target_free_end, source_chip_center) or None if not determinable
+    """
+    target_free_ends = []
+    source_chip_centers = []
+
+    for net_id in unit_net_ids:
+        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+        if len(net_segments) < 2:
+            continue
+
+        groups = find_connected_groups(net_segments)
+        if len(groups) < 2:
+            continue
+
+        # Sort by size: larger = source, smaller = target
+        groups.sort(key=len, reverse=True)
+        source_segs = groups[0]
+        target_segs = groups[1]
+
+        # Get target stub free end
+        target_free = find_stub_free_ends(target_segs, net_pads)
+        if target_free:
+            target_free_ends.append((target_free[0][0], target_free[0][1]))
+
+        # Get source pads (pads connected to source stub)
+        source_points = set()
+        for seg in source_segs:
+            source_points.add(pos_key(seg.start_x, seg.start_y))
+            source_points.add(pos_key(seg.end_x, seg.end_y))
+
+        source_pads = []
+        for pad in net_pads:
+            pad_pos = pos_key(pad.global_x, pad.global_y)
+            for sp in source_points:
+                if abs(pad_pos[0] - sp[0]) < 0.05 and abs(pad_pos[1] - sp[1]) < 0.05:
+                    source_pads.append(pad)
+                    break
+
+        # Get source chip center
+        chip_center = get_source_chip_center(pcb_data, source_pads)
+        if chip_center:
+            source_chip_centers.append(chip_center)
+
+    if not target_free_ends or not source_chip_centers:
+        return None
+
+    # Average for diff pairs
+    avg_target = (
+        sum(p[0] for p in target_free_ends) / len(target_free_ends),
+        sum(p[1] for p in target_free_ends) / len(target_free_ends)
+    )
+    avg_source = (
+        sum(p[0] for p in source_chip_centers) / len(source_chip_centers),
+        sum(p[1] for p in source_chip_centers) / len(source_chip_centers)
+    )
+
+    return (avg_target, avg_source)
+
+
 def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               center: Tuple[float, float] = None,
                               diff_pairs: Dict = None,
-                              use_boundary_ordering: bool = True) -> List[int]:
+                              use_boundary_ordering: bool = True,
+                              bga_exclusion_zones: List[Tuple[float, float, float, float]] = None) -> List[int]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 
@@ -878,13 +1106,40 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
     else:
         print(f"MPS: {len(unit_list)} nets with {total_conflicts} crossing conflicts detected")
 
-    # Compute route distances for each unit (straight-line distance between endpoints)
+    # Compute route distances for each unit (routing-aware distance around BGA)
     # Used as secondary ordering: shorter routes first within same conflict count
     unit_distances = {}
-    for unit_id, endpoints in unit_endpoints.items():
-        dx = endpoints[1][0] - endpoints[0][0]
-        dy = endpoints[1][1] - endpoints[0][1]
-        unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
+    for unit_id in unit_list:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+
+        # Try to get routing-aware distance
+        routing_info = get_unit_routing_info(pcb_data, unit_net_ids)
+
+        if routing_info and bga_exclusion_zones:
+            target_free_end, source_chip_center = routing_info
+
+            # Find which BGA zone the target stub is in/near
+            bga_zone = find_containing_or_nearest_bga_zone(target_free_end, bga_exclusion_zones)
+
+            if bga_zone:
+                # Compute routing-aware distance around BGA
+                unit_distances[unit_id] = compute_routing_aware_distance(
+                    target_free_end, source_chip_center, bga_zone
+                )
+            else:
+                # No BGA zone found - use straight line from target to source
+                dx = source_chip_center[0] - target_free_end[0]
+                dy = source_chip_center[1] - target_free_end[1]
+                unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
+        else:
+            # Fall back to straight-line distance between endpoints
+            if unit_id in unit_endpoints:
+                endpoints = unit_endpoints[unit_id]
+                dx = endpoints[1][0] - endpoints[0][0]
+                dy = endpoints[1][1] - endpoints[0][1]
+                unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
+            else:
+                unit_distances[unit_id] = float('inf')
 
     # Step 5: Greedy ordering - repeatedly pick unit with fewest active conflicts
     # Secondary: pick shorter routes first (easier routes done first, leaving space for longer ones)

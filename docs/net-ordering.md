@@ -33,7 +33,9 @@ Three ordering strategies are available:
 
 4. **Build conflict graph**: Nets that cross share an edge in the conflict graph
 
-5. **Greedy ordering**: Repeatedly select the net with fewest active conflicts, add to result, remove its conflicting neighbors from consideration
+5. **Greedy ordering**: Repeatedly select the net with fewest active conflicts. Within same conflict count, select shorter routes first (based on routing-aware distance)
+
+6. **Routing-aware distance**: Instead of straight-line distance, the router computes a BGA-aware distance that routes around the target BGA. This measures from the target stub free end, around the BGA corner, to the source chip center - reflecting actual routing difficulty.
 
 This chip boundary approach accurately detects crossings that respect the physical constraint that routes cannot go through BGA chips.
 
@@ -126,6 +128,32 @@ Order: [C, D, A, B]
 ```bash
 python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
+
+### Routing-Aware Distance Calculation
+
+When ordering routes within each MPS round, shorter routes are prioritized. The distance is calculated using a BGA-aware algorithm:
+
+1. **Target stub free end**: The actual endpoint of the target stub (not the centroid)
+2. **Source chip center**: The center of the component containing the source pads
+3. **BGA avoidance**: The path cannot go through the target BGA - it must go around
+
+```
+Target BGA:
+┌─────────────────┐
+│                 │
+│    [Target]     │   Path goes around corner
+│       ↓         │   to avoid crossing BGA
+│       *─────────┼──→ corner → source chip center
+└─────────────────┘
+```
+
+The algorithm:
+1. Find which BGA zone contains (or is nearest to) the target stub
+2. Determine which edge of the BGA the stub is on (top, bottom, left, right)
+3. Compute two candidate paths around the two corners of that edge
+4. Return the shorter path distance
+
+This produces more accurate ordering than straight-line distance because it reflects the actual routing constraint that routes cannot pass through BGA areas.
 
 ## Inside-Out Ordering
 

@@ -1064,7 +1064,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"\nUsing MPS ordering strategy...")
         all_net_ids = [nid for _, nid in net_ids]
         ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids, diff_pairs=diff_pairs,
-                                               use_boundary_ordering=mps_unroll)
+                                               use_boundary_ordering=mps_unroll,
+                                               bga_exclusion_zones=bga_exclusion_zones)
         # Rebuild net_ids in the new order
         id_to_name = {nid: name for name, nid in net_ids}
         net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]

@@ -10,9 +10,9 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
 - **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
-- **Stub layer switching** - Experimental optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Finds compatible pairs to swap or moves stubs solo when safe.
+- **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Finds compatible pairs to swap or moves stubs solo when safe. Won't break pairs that are already on matching layers.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
-- **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units), inside-out (BGA), or original order
+- **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
@@ -95,7 +95,7 @@ KiCadRoutingTools/
 | Module | Lines | Purpose |
 |--------|-------|---------|
 | `routing_config.py` | 72 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
-| `routing_utils.py` | 1272 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
+| `routing_utils.py` | 1624 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
 | `obstacle_map.py` | 767 | Obstacle map building from PCB data |
 | `single_ended_routing.py` | 589 | Single-ended net routing with A* |
 | `diff_pair_routing.py` | 1649 | Differential pair centerline + offset routing |
