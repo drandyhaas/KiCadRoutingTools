@@ -361,6 +361,12 @@ def apply_single_swap(
         pcb_data.pads_by_net.setdefault(p1_pair.n_net_id, []).append(p2_n_pad)
 
     # Store swap info for output file writing
+    # IMPORTANT: Exclude overlapping positions from p2 to prevent double-swapping in output file
+    # When positions overlap, a segment would be swapped twice (758->780, then 780->758) and end up
+    # back at its original net. By excluding overlaps from p2, each segment is swapped exactly once.
+    p2_p_positions_no_overlap = p2_p_positions - p1_p_positions
+    p2_n_positions_no_overlap = p2_n_positions - p1_n_positions
+
     target_swap_info.append({
         'p1_name': p1_name,
         'p2_name': p2_name,
@@ -370,8 +376,8 @@ def apply_single_swap(
         'p2_n_net_id': p2_pair.n_net_id,
         'p1_p_positions': p1_p_positions,
         'p1_n_positions': p1_n_positions,
-        'p2_p_positions': p2_p_positions,
-        'p2_n_positions': p2_n_positions,
+        'p2_p_positions': p2_p_positions_no_overlap,  # Excludes overlapping positions
+        'p2_n_positions': p2_n_positions_no_overlap,  # Excludes overlapping positions
         'p1_p_pad': p1_p_pad,
         'p1_n_pad': p1_n_pad,
         'p2_p_pad': p2_p_pad,
