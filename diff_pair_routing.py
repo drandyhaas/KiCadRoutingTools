@@ -642,12 +642,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Create pose-based router for centerline
     # Double via cost since diff pairs place two vias per layer change
     # via_proximity_cost is a multiplier on stub proximity cost for vias (0 = block vias near stubs)
+    # diff_pair_spacing is the P/N offset from centerline in grid units (for self-intersection prevention)
+    # Use 2*spacing to prevent P/N tracks from crossing when centerline loops
+    diff_pair_spacing_grid = max(1, int(2 * spacing_mm / config.grid_step + 0.5))
     pose_router = PoseRouter(
         via_cost=config.via_cost * 1000 * 2,
         h_weight=config.heuristic_weight,
         turn_cost=turn_cost,
         min_radius_grid=min_radius_grid,
-        via_proximity_cost=int(config.via_proximity_cost)
+        via_proximity_cost=int(config.via_proximity_cost),
+        diff_pair_spacing=diff_pair_spacing_grid
     )
 
     # Route using pose-based A* with Dubins heuristic

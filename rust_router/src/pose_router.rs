@@ -20,17 +20,18 @@ pub struct PoseRouter {
     min_radius_grid: f64,  // Minimum turning radius in grid units
     via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
     straight_after_via: i32,  // Required straight steps after via (derived from min_radius_grid)
+    diff_pair_spacing: i32,  // P/N spacing in grid units (0 = not a diff pair)
 }
 
 #[pymethods]
 impl PoseRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32) -> Self {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
         let straight_after_via = (min_radius_grid.ceil() as i32 + 1).max(3);
-        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via }
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing }
     }
 
     /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
@@ -130,7 +131,9 @@ impl PoseRouter {
             let nx = current.gx + dx;
             let ny = current.gy + dy;
 
-            if !obstacles.is_blocked(nx, ny, current.layer as usize) {
+            // Check for self-intersection (prevents path from looping back on itself)
+            if !obstacles.is_blocked(nx, ny, current.layer as usize)
+               && !self.would_self_intersect(&parents, current_key, nx, ny) {
                 let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
                 let neighbor_key = neighbor.as_key();
 
@@ -165,6 +168,7 @@ impl PoseRouter {
             // CONSTRAINTS:
             // - First move from start must be straight in src_theta direction
             // - After a via, must go straight for 2 steps (no turns)
+            // - For diff pairs, use larger effective radius to prevent P/N crossing
             if current_key != start_key && current_straight_remaining <= 0 {
                 for delta in [-1i8, 1i8] {
                     let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
@@ -172,7 +176,9 @@ impl PoseRouter {
                     let nx = current.gx + dx;
                     let ny = current.gy + dy;
 
-                    if !obstacles.is_blocked(nx, ny, current.layer as usize) {
+                    // Check for self-intersection (prevents path from looping back on itself)
+                    if !obstacles.is_blocked(nx, ny, current.layer as usize)
+                       && !self.would_self_intersect(&parents, current_key, nx, ny) {
                         let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
                         let neighbor_key = neighbor.as_key();
 
@@ -189,9 +195,15 @@ impl PoseRouter {
                                 parents.insert(neighbor_key, current_key);
                                 // Update constraint tracking for turn move
                                 steps_from_source.insert(neighbor_key, current_steps + 1);
-                                // After a turn, require min_radius_grid straight steps before next turn
-                                // This enforces the minimum turning radius constraint
-                                straight_steps_remaining.insert(neighbor_key, self.min_radius_grid.ceil() as i32);
+                                // After a turn, require straight steps before next turn.
+                                // For diff pairs, use larger radius to prevent P/N crossing:
+                                // effective_radius = min_radius + 2*spacing (spacing on each side)
+                                let effective_radius = if self.diff_pair_spacing > 0 {
+                                    self.min_radius_grid + (2 * self.diff_pair_spacing) as f64
+                                } else {
+                                    self.min_radius_grid
+                                };
+                                straight_steps_remaining.insert(neighbor_key, effective_radius.ceil() as i32);
                                 // Reset to 1: this is the first step in the new direction
                                 straight_steps_taken.insert(neighbor_key, 1);
                                 let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
@@ -362,6 +374,8 @@ impl PoseRouter {
 
             if obstacles.is_blocked(nx, ny, current.layer as usize) {
                 tracker.track(nx, ny, current.layer);
+            } else if self.would_self_intersect(&parents, current_key, nx, ny) {
+                // Self-intersection detected - skip this neighbor (don't track as blocked)
             } else {
                 let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
                 let neighbor_key = neighbor.as_key();
@@ -399,6 +413,11 @@ impl PoseRouter {
                         continue;
                     }
 
+                    // Check for self-intersection (prevents path from looping back on itself)
+                    if self.would_self_intersect(&parents, current_key, nx, ny) {
+                        continue;
+                    }
+
                     let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
                     let neighbor_key = neighbor.as_key();
 
@@ -412,8 +431,15 @@ impl PoseRouter {
                             g_costs.insert(neighbor_key, new_g);
                             parents.insert(neighbor_key, current_key);
                             steps_from_source.insert(neighbor_key, current_steps + 1);
-                            // After a turn, require min_radius_grid straight steps before next turn
-                            straight_steps_remaining.insert(neighbor_key, self.min_radius_grid.ceil() as i32);
+                            // After a turn, require straight steps before next turn.
+                            // For diff pairs, use larger radius to prevent P/N crossing:
+                            // effective_radius = min_radius + 2*spacing (spacing on each side)
+                            let effective_radius = if self.diff_pair_spacing > 0 {
+                                self.min_radius_grid + (2 * self.diff_pair_spacing) as f64
+                            } else {
+                                self.min_radius_grid
+                            };
+                            straight_steps_remaining.insert(neighbor_key, effective_radius.ceil() as i32);
                             straight_steps_taken.insert(neighbor_key, 1);
                             let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
                             open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
@@ -551,5 +577,52 @@ impl PoseRouter {
 
         path.reverse();
         path
+    }
+
+    /// Check if a cell would cause self-intersection with the path to current state.
+    /// For diff pairs, prevents centerline from revisiting the same grid cell.
+    /// Only checks last ~100 cells for performance.
+    fn would_self_intersect(
+        &self,
+        parents: &FxHashMap<u64, u64>,
+        current_key: u64,
+        nx: i32, ny: i32,
+    ) -> bool {
+        // Only check for diff pairs
+        if self.diff_pair_spacing == 0 {
+            return false;
+        }
+
+        let mut check_key = current_key;
+        let mut count = 0;
+
+        // Walk backwards through the last ~100 cells
+        loop {
+            match parents.get(&check_key) {
+                Some(&parent_key) => {
+                    count += 1;
+                    if count > 100 {
+                        break;
+                    }
+
+                    // Unpack key to get x, y
+                    let y = ((check_key >> 11) & 0x7FFFF) as i32;
+                    let x = ((check_key >> 30) & 0x7FFFF) as i32;
+                    // Sign extension
+                    let x = if x & 0x40000 != 0 { x | !0x7FFFF_i32 } else { x };
+                    let y = if y & 0x40000 != 0 { y | !0x7FFFF_i32 } else { y };
+
+                    // Check exact match - centerline can't revisit the same cell
+                    if nx == x && ny == y {
+                        return true;
+                    }
+
+                    check_key = parent_key;
+                }
+                None => break,
+            }
+        }
+
+        false
     }
 }
