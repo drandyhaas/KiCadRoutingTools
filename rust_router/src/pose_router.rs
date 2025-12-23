@@ -375,7 +375,7 @@ impl PoseRouter {
             if obstacles.is_blocked(nx, ny, current.layer as usize) {
                 tracker.track(nx, ny, current.layer);
             } else if self.would_self_intersect(&parents, current_key, nx, ny) {
-                // Self-intersection detected - skip this neighbor (don't track as blocked)
+                // Self-intersection - skip without tracking as blocked
             } else {
                 let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
                 let neighbor_key = neighbor.as_key();
@@ -581,7 +581,7 @@ impl PoseRouter {
 
     /// Check if a cell would cause self-intersection with the path to current state.
     /// For diff pairs, prevents centerline from revisiting the same grid cell.
-    /// Only checks last ~100 cells for performance.
+    /// Only checks last 50 cells for performance (loops are usually tight).
     fn would_self_intersect(
         &self,
         parents: &FxHashMap<u64, u64>,
@@ -596,31 +596,25 @@ impl PoseRouter {
         let mut check_key = current_key;
         let mut count = 0;
 
-        // Walk backwards through the last ~100 cells
-        loop {
-            match parents.get(&check_key) {
-                Some(&parent_key) => {
-                    count += 1;
-                    if count > 100 {
-                        break;
-                    }
-
-                    // Unpack key to get x, y
-                    let y = ((check_key >> 11) & 0x7FFFF) as i32;
-                    let x = ((check_key >> 30) & 0x7FFFF) as i32;
-                    // Sign extension
-                    let x = if x & 0x40000 != 0 { x | !0x7FFFF_i32 } else { x };
-                    let y = if y & 0x40000 != 0 { y | !0x7FFFF_i32 } else { y };
-
-                    // Check exact match - centerline can't revisit the same cell
-                    if nx == x && ny == y {
-                        return true;
-                    }
-
-                    check_key = parent_key;
-                }
-                None => break,
+        // Walk backwards through the last 50 cells
+        while let Some(&parent_key) = parents.get(&check_key) {
+            count += 1;
+            if count > 50 {
+                break;
             }
+
+            // Unpack key to get x, y (skip theta/layer bits)
+            let y = ((check_key >> 11) & 0x7FFFF) as i32;
+            let x = ((check_key >> 30) & 0x7FFFF) as i32;
+            // Sign extension
+            let x = if x & 0x40000 != 0 { x | !0x7FFFF_i32 } else { x };
+            let y = if y & 0x40000 != 0 { y | !0x7FFFF_i32 } else { y };
+
+            if nx == x && ny == y {
+                return true;
+            }
+
+            check_key = parent_key;
         }
 
         false
