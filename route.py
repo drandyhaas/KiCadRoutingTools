@@ -1092,8 +1092,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             swap_pair_count = 0
             solo_switch_count = 0
 
-            # Try swap pairs first (two nets that can help each other)
-            # Find pairs: Net1 src:A->tgt:B, Net2 src:B->tgt:A
+            # PHASE 1: Try swap pairs first
+            # For swap pairs (Net1: src=A,tgt=B and Net2: src=B,tgt=A), we can:
+            # Option 1: Both move to layer B (Net1 src A→B, Net2 tgt A→B)
+            # Option 2: Both move to layer A (Net1 tgt B→A, Net2 src B→A)
             for net1_name, (src1, tgt1, sources1, targets1, net1_id) in single_net_layer_info.items():
                 if net1_name in applied_single_swaps:
                     continue
@@ -1102,33 +1104,54 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         continue
                     # Check if they can help each other: src1==tgt2 and tgt1==src2
                     if src1 == tgt2 and tgt1 == src2:
-                        # Get stub info for both source stubs
+                        # Get stubs for both source AND target endpoints
                         src1_stub = get_stub_info(pcb_data, net1_id, sources1[0][3], sources1[0][4], src1)
+                        tgt1_stub = get_stub_info(pcb_data, net1_id, targets1[0][3], targets1[0][4], tgt1)
                         src2_stub = get_stub_info(pcb_data, net2_id, sources2[0][3], sources2[0][4], src2)
+                        tgt2_stub = get_stub_info(pcb_data, net2_id, targets2[0][3], targets2[0][4], tgt2)
+
+                        # Try different combinations to find one that works
+                        # Each net needs to end up with both endpoints on same layer
+                        swap_options = []
                         if src1_stub and src2_stub:
-                            # Validate both swaps (each excluding the other as swap partner)
+                            # Option A: Net1 src→tgt1, Net2 src→tgt2 (both go to their tgt layers)
+                            swap_options.append(('src', 'src', src1_stub, tgt1, src2_stub, tgt2))
+                        if tgt1_stub and tgt2_stub:
+                            # Option B: Net1 tgt→src1, Net2 tgt→src2 (both go to their src layers)
+                            swap_options.append(('tgt', 'tgt', tgt1_stub, src1, tgt2_stub, src2))
+                        if src1_stub and tgt2_stub:
+                            # Option C: Net1 src→tgt1, Net2 tgt→src2
+                            swap_options.append(('src', 'tgt', src1_stub, tgt1, tgt2_stub, src2))
+                        if tgt1_stub and src2_stub:
+                            # Option D: Net1 tgt→src1, Net2 src→tgt2
+                            swap_options.append(('tgt', 'src', tgt1_stub, src1, src2_stub, tgt2))
+
+                        for opt_name1, opt_name2, stub1, dest1, stub2, dest2 in swap_options:
                             valid1, reason1 = validate_single_swap(
-                                src1_stub, tgt1, combined_stubs_by_layer, pcb_data, config,
+                                stub1, dest1, combined_stubs_by_layer, pcb_data, config,
                                 swap_partner_name=net2_name, swap_partner_net_ids={net2_id}
                             )
                             valid2, reason2 = validate_single_swap(
-                                src2_stub, tgt2, combined_stubs_by_layer, pcb_data, config,
+                                stub2, dest2, combined_stubs_by_layer, pcb_data, config,
                                 swap_partner_name=net1_name, swap_partner_net_ids={net1_id}
                             )
                             if valid1 and valid2:
                                 # Apply both swaps
-                                vias1, mods1 = apply_stub_layer_switch(pcb_data, src1_stub, tgt1, config, debug=False)
-                                vias2, mods2 = apply_stub_layer_switch(pcb_data, src2_stub, tgt2, config, debug=False)
+                                vias1, mods1 = apply_stub_layer_switch(pcb_data, stub1, dest1, config, debug=False)
+                                vias2, mods2 = apply_stub_layer_switch(pcb_data, stub2, dest2, config, debug=False)
                                 all_swap_vias.extend(vias1 + vias2)
                                 all_segment_modifications.extend(mods1 + mods2)
                                 applied_single_swaps.add(net1_name)
                                 applied_single_swaps.add(net2_name)
                                 swap_pair_count += 1
                                 total_layer_swaps += 2
-                                print(f"  Swap pair: {net1_name} <-> {net2_name}")
+                                print(f"  Swap pair ({opt_name1}/{opt_name2}): {net1_name} <-> {net2_name}")
                                 break
+                        else:
+                            continue  # No valid option found, try next partner
+                        break  # Found a valid option, exit inner loop
 
-            # Try solo switches for remaining nets
+            # PHASE 4: Try remaining solo switches (swap pair candidates that failed)
             for net_name, (src_layer, tgt_layer, sources, targets, net_id) in single_net_layer_info.items():
                 if net_name in applied_single_swaps:
                     continue
