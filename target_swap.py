@@ -301,6 +301,86 @@ def find_pad_in_positions(pads: List[Pad], positions: Set[Tuple[float, float]],
     return None
 
 
+def ensure_consistent_target_component(
+    pair_data: List[Tuple[str, 'DiffPair', List, List]],
+    pcb_data: PCBData
+) -> List[Tuple[str, 'DiffPair', List, List]]:
+    """
+    Ensure all target endpoints are consistently on the same component.
+
+    When get_diff_pair_endpoints sometimes picks the wrong side as "target"
+    (due to short stubs making the P-N proximity heuristic unreliable),
+    this function fixes it by:
+    1. Finding which component each endpoint is on
+    2. Picking one component as the consistent "target" component
+    3. Swapping source/target for any pairs where target is on wrong component
+    """
+    def find_component_for_endpoint(x: float, y: float, net_id: int) -> Optional[str]:
+        """Find component of the closest pad to this position on this net."""
+        pads = pcb_data.pads_by_net.get(net_id, [])
+        best_dist = float('inf')
+        best_ref = None
+        for pad in pads:
+            dist = abs(pad.global_x - x) + abs(pad.global_y - y)
+            if dist < best_dist:
+                best_dist = dist
+                best_ref = pad.component_ref
+        return best_ref
+
+    # Find which component each pair's source and target are on
+    pair_components = []  # [(pair_name, source_component, target_component)]
+    for pair_name, pair, sources, targets in pair_data:
+        src = sources[0]
+        tgt = targets[0]
+
+        # Use P net positions to find components
+        # Endpoint format: (p_gx, p_gy, n_gx, n_gy, layer_idx, p_x, p_y, n_x, n_y)
+        src_p_x, src_p_y = src[5], src[6]  # Source P position
+        tgt_p_x, tgt_p_y = tgt[5], tgt[6]  # Target P position
+
+        src_comp = find_component_for_endpoint(src_p_x, src_p_y, pair.p_net_id)
+        tgt_comp = find_component_for_endpoint(tgt_p_x, tgt_p_y, pair.p_net_id)
+
+        pair_components.append((pair_name, src_comp, tgt_comp))
+
+    # Count how often each component appears as target
+    component_target_count: Dict[str, int] = {}
+    for pair_name, src_comp, tgt_comp in pair_components:
+        if tgt_comp:
+            component_target_count[tgt_comp] = component_target_count.get(tgt_comp, 0) + 1
+
+    # Find the component that most often appears as target
+    # This will be our consistent target component
+    target_component = None
+    max_target_count = 0
+    for comp, count in component_target_count.items():
+        if count > max_target_count:
+            max_target_count = count
+            target_component = comp
+
+    if not target_component:
+        return pair_data  # Can't determine, return unchanged
+
+    # Fix any pairs where target is on the wrong component
+    result = []
+    swapped_count = 0
+    for i, (pair_name, pair, sources, targets) in enumerate(pair_data):
+        _, src_comp, tgt_comp = pair_components[i]
+
+        if tgt_comp == target_component:
+            # Target is already on the right component
+            result.append((pair_name, pair, sources, targets))
+        else:
+            # Target is on wrong component, swap source and target
+            result.append((pair_name, pair, targets, sources))
+            swapped_count += 1
+
+    if swapped_count > 0:
+        print(f"  Swapped source/target for {swapped_count} pairs to ensure consistent target component ({target_component})")
+
+    return result
+
+
 def apply_single_swap(
     pcb_data: PCBData,
     p1_name: str,
@@ -512,6 +592,11 @@ def apply_target_swaps(
     if len(pair_data) < 2:
         print("  Not enough valid pairs for target swap optimization")
         return target_swaps, target_swap_info
+
+    # Ensure all targets are consistently on the same component
+    # (fixes issues where shorter stubs cause get_diff_pair_endpoints to
+    # sometimes pick the wrong side as "target")
+    pair_data = ensure_consistent_target_component(pair_data, pcb_data)
 
     print(f"\nComputing optimal target assignment for {len(pair_data)} pairs...")
 
