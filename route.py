@@ -531,7 +531,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
     if enable_layer_switch and diff_pair_ids_to_route_set:
-        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer, validate_swap
+        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer, validate_swap, validate_single_swap, collect_single_ended_stubs_by_layer
         from diff_pair_routing import get_diff_pair_endpoints
 
         print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route_set)} diff pair(s)...")
@@ -1055,6 +1055,127 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if pair_name not in applied_swaps:
                 print(f"  No swap found: {pair_name} ({src_layer}->{tgt_layer}) - will need via")
 
+    # Single-ended layer swap optimization (after diff pair swaps, before MPS ordering)
+    # Identify single-ended nets at this point (before separation at line 1119)
+    single_ended_net_ids = [(name, nid) for name, nid in net_ids if nid not in diff_pair_net_ids]
+
+    if enable_layer_switch and single_ended_net_ids:
+        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, validate_single_swap, collect_single_ended_stubs_by_layer
+        from routing_utils import get_net_endpoints
+
+        # Collect layer info for single-ended nets
+        single_net_layer_info = {}  # net_name -> (src_layer, tgt_layer, sources, targets, net_id)
+        for net_name, net_id in single_ended_net_ids:
+            sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
+            if error or not sources or not targets:
+                continue
+            src_layer = config.layers[sources[0][2]]
+            tgt_layer = config.layers[targets[0][2]]
+            if src_layer != tgt_layer:  # Only track nets needing via
+                single_net_layer_info[net_name] = (src_layer, tgt_layer, sources, targets, net_id)
+
+        if single_net_layer_info:
+            print(f"\nAnalyzing layer swaps for {len(single_net_layer_info)} single-ended net(s) needing via...")
+
+            # Pre-collect single-ended stubs by layer
+            single_stubs_by_layer = collect_single_ended_stubs_by_layer(pcb_data, single_net_layer_info, config)
+
+            # Combine with diff pair stubs if they exist (from earlier block)
+            try:
+                combined_stubs_by_layer = {layer: list(stubs) for layer, stubs in all_stubs_by_layer.items()}
+            except NameError:
+                combined_stubs_by_layer = {}
+            for layer, stubs in single_stubs_by_layer.items():
+                combined_stubs_by_layer.setdefault(layer, []).extend(stubs)
+
+            applied_single_swaps = set()
+            swap_pair_count = 0
+            solo_switch_count = 0
+
+            # Try swap pairs first (two nets that can help each other)
+            # Find pairs: Net1 src:A->tgt:B, Net2 src:B->tgt:A
+            for net1_name, (src1, tgt1, sources1, targets1, net1_id) in single_net_layer_info.items():
+                if net1_name in applied_single_swaps:
+                    continue
+                for net2_name, (src2, tgt2, sources2, targets2, net2_id) in single_net_layer_info.items():
+                    if net2_name in applied_single_swaps or net1_name == net2_name:
+                        continue
+                    # Check if they can help each other: src1==tgt2 and tgt1==src2
+                    if src1 == tgt2 and tgt1 == src2:
+                        # Get stub info for both source stubs
+                        src1_stub = get_stub_info(pcb_data, net1_id, sources1[0][3], sources1[0][4], src1)
+                        src2_stub = get_stub_info(pcb_data, net2_id, sources2[0][3], sources2[0][4], src2)
+                        if src1_stub and src2_stub:
+                            # Validate both swaps (each excluding the other as swap partner)
+                            valid1, reason1 = validate_single_swap(
+                                src1_stub, tgt1, combined_stubs_by_layer, pcb_data, config,
+                                swap_partner_name=net2_name, swap_partner_net_ids={net2_id}
+                            )
+                            valid2, reason2 = validate_single_swap(
+                                src2_stub, tgt2, combined_stubs_by_layer, pcb_data, config,
+                                swap_partner_name=net1_name, swap_partner_net_ids={net1_id}
+                            )
+                            if valid1 and valid2:
+                                # Apply both swaps
+                                vias1, mods1 = apply_stub_layer_switch(pcb_data, src1_stub, tgt1, config, debug=False)
+                                vias2, mods2 = apply_stub_layer_switch(pcb_data, src2_stub, tgt2, config, debug=False)
+                                all_swap_vias.extend(vias1 + vias2)
+                                all_segment_modifications.extend(mods1 + mods2)
+                                applied_single_swaps.add(net1_name)
+                                applied_single_swaps.add(net2_name)
+                                swap_pair_count += 1
+                                total_layer_swaps += 2
+                                print(f"  Swap pair: {net1_name} <-> {net2_name}")
+                                break
+
+            # Try solo switches for remaining nets
+            for net_name, (src_layer, tgt_layer, sources, targets, net_id) in single_net_layer_info.items():
+                if net_name in applied_single_swaps:
+                    continue
+
+                # Try source -> target layer switch first
+                src_stub = get_stub_info(pcb_data, net_id, sources[0][3], sources[0][4], src_layer)
+
+                # Check can_swap_to_top_layer restriction
+                if src_stub and (can_swap_to_top_layer or tgt_layer != 'F.Cu'):
+                    valid, reason = validate_single_swap(
+                        src_stub, tgt_layer, combined_stubs_by_layer, pcb_data, config
+                    )
+                    if valid:
+                        vias, mods = apply_stub_layer_switch(pcb_data, src_stub, tgt_layer, config, debug=False)
+                        all_swap_vias.extend(vias)
+                        all_segment_modifications.extend(mods)
+                        applied_single_swaps.add(net_name)
+                        solo_switch_count += 1
+                        total_layer_swaps += 1
+                        print(f"  Solo source switch: {net_name} ({src_layer}->{tgt_layer})")
+                        continue
+
+                # Try target -> source layer switch as fallback
+                tgt_stub = get_stub_info(pcb_data, net_id, targets[0][3], targets[0][4], tgt_layer)
+                if tgt_stub and (can_swap_to_top_layer or src_layer != 'F.Cu'):
+                    valid, reason = validate_single_swap(
+                        tgt_stub, src_layer, combined_stubs_by_layer, pcb_data, config
+                    )
+                    if valid:
+                        vias, mods = apply_stub_layer_switch(pcb_data, tgt_stub, src_layer, config, debug=False)
+                        all_swap_vias.extend(vias)
+                        all_segment_modifications.extend(mods)
+                        applied_single_swaps.add(net_name)
+                        solo_switch_count += 1
+                        total_layer_swaps += 1
+                        print(f"  Solo target switch: {net_name} ({tgt_layer}->{src_layer})")
+                        continue
+
+                # Report if no swap found
+                if args.verbose:
+                    print(f"  No swap found: {net_name} ({src_layer}->{tgt_layer}) - will need via")
+
+            if swap_pair_count > 0:
+                print(f"Applied {swap_pair_count} single-ended swap pair(s) ({swap_pair_count * 2} nets)")
+            if solo_switch_count > 0:
+                print(f"Applied {solo_switch_count} single-ended solo switch(es)")
+
     # Apply net ordering strategy
     if ordering_strategy == "mps":
         # Use Maximum Planar Subset algorithm to minimize crossing conflicts
@@ -1141,7 +1262,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     failed = 0
     total_time = 0
     total_iterations = 0
-    all_swap_vias = []  # Initialize for file writing
+    # Note: all_swap_vias is initialized at line 476 and populated during layer swaps
 
     # Skip routing if requested - just write output with swaps and debug info
     if skip_routing:
