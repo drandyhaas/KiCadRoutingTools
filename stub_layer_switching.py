@@ -462,7 +462,9 @@ def collect_stubs_by_layer(pcb_data: PCBData, all_pair_layer_info: Dict,
 
 def validate_single_stub_no_overlap(stub: StubInfo, dest_layer: str,
                                      all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
-                                     swap_partner_name: Optional[str] = None) -> Tuple[bool, str]:
+                                     pcb_data: PCBData,
+                                     swap_partner_name: Optional[str] = None,
+                                     swap_partner_net_ids: Set[int] = None) -> Tuple[bool, str]:
     """
     Check that a single swapped stub won't overlap with other stubs on destination layer.
 
@@ -470,14 +472,19 @@ def validate_single_stub_no_overlap(stub: StubInfo, dest_layer: str,
         stub: StubInfo for the single-ended stub to be swapped
         dest_layer: Destination layer after swap
         all_stubs_by_layer: Dict mapping layer -> list of (net_name, segments)
+        pcb_data: PCB data with all segments (for checking existing stubs not in swap collection)
         swap_partner_name: Name of swap partner net (excluded from overlap check)
+        swap_partner_net_ids: Net IDs of swap partner (excluded from existing segment check)
 
     Returns:
         (is_valid, error_message) - True if no overlap, False with explanation otherwise
     """
+    if swap_partner_net_ids is None:
+        swap_partner_net_ids = set()
+
     our_segments = stub.segments
 
-    # Check against all stubs on destination layer
+    # Check against stubs in the swap collection
     for net_name, other_segments in all_stubs_by_layer.get(dest_layer, []):
         # Skip swap partner (their stubs are moving away)
         if swap_partner_name and net_name == swap_partner_name:
@@ -485,6 +492,32 @@ def validate_single_stub_no_overlap(stub: StubInfo, dest_layer: str,
 
         if check_segments_overlap(our_segments, other_segments):
             return False, f"overlaps with {net_name} on {dest_layer}"
+
+    # Also check against ALL existing segments on destination layer
+    # This catches overlaps with stubs that aren't being layer-switched
+    for our_seg in our_segments:
+        our_y_min = min(our_seg.start_y, our_seg.end_y) - 0.2
+        our_y_max = max(our_seg.start_y, our_seg.end_y) + 0.2
+        our_x_min = min(our_seg.start_x, our_seg.end_x)
+        our_x_max = max(our_seg.start_x, our_seg.end_x)
+
+        for other_seg in pcb_data.segments:
+            if other_seg.layer != dest_layer:
+                continue
+            if other_seg.net_id == stub.net_id:
+                continue
+            if other_seg.net_id in swap_partner_net_ids:
+                continue
+
+            other_y_min = min(other_seg.start_y, other_seg.end_y)
+            other_y_max = max(other_seg.start_y, other_seg.end_y)
+            other_x_min = min(other_seg.start_x, other_seg.end_x)
+            other_x_max = max(other_seg.start_x, other_seg.end_x)
+
+            # Check bounding box overlap
+            if other_y_max >= our_y_min and other_y_min <= our_y_max:
+                if other_x_max >= our_x_min and other_x_min <= our_x_max:
+                    return False, f"overlaps with existing segment (net {other_seg.net_id}) on {dest_layer}"
 
     return True, ""
 
@@ -597,7 +630,7 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     """
     # Check 1: No overlap with other stubs on dest layer
     overlap_valid, overlap_reason = validate_single_stub_no_overlap(
-        stub, dest_layer, all_stubs_by_layer, swap_partner_name
+        stub, dest_layer, all_stubs_by_layer, pcb_data, swap_partner_name, swap_partner_net_ids
     )
     if not overlap_valid:
         return False, overlap_reason
