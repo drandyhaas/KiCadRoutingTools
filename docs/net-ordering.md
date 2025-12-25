@@ -129,6 +129,19 @@ Order: [C, D, A, B]
 python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
 
+### Reverse Round Order
+
+By default, MPS routes the least-conflicting groups first (fewest active conflicts). The `--mps-reverse-rounds` flag reverses this, routing the most-conflicting groups first:
+
+```bash
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-reverse-rounds
+```
+
+This can sometimes improve results when:
+- The most-constrained routes need maximum freedom
+- Early routing of difficult nets allows easier nets to route around them
+- You want to fail fast on impossible routes
+
 ### Routing-Aware Distance Calculation
 
 When ordering routes within each MPS round, shorter routes are prioritized. The distance is calculated using a BGA-aware algorithm:

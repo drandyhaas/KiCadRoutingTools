@@ -284,9 +284,9 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
 | `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty near BGA edges (mm equivalent) |
-| `--via-proximity-cost` | 10.0 | Via cost multiplier near stubs/BGAs (0=block) |
-| `--track-proximity-distance` | 1.0 | Radius around routed tracks to penalize (mm, same layer) |
+| `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize (mm, same layer) |
 | `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
+| `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
 
 ## Track Proximity Avoidance
 

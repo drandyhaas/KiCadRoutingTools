@@ -39,7 +39,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--via-cost` | 25 | Via penalty in grid steps (doubled for diff pairs) |
+| `--via-cost` | 50 | Via penalty in grid steps (doubled for diff pairs) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
@@ -62,8 +62,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--stub-proximity-cost` | 0.2 | Cost penalty at stub center (mm equivalent) |
 | `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
-| `--via-proximity-cost` | 20.0 | Via cost multiplier near stubs/BGAs (0=block) |
-| `--track-proximity-distance` | 1.0 | Radius around routed tracks to penalize on same layer (mm) |
+| `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
 | `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
 
 ### Differential Pair Options
@@ -80,12 +79,14 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--can-swap-to-top-layer` | false | Allow swapping stubs to F.Cu (off by default due to clearance issues) |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
+| `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
 
 ### Debug Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
+| `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, etc.) |
 
 ## GridRouteConfig Class
 
@@ -104,7 +105,7 @@ class GridRouteConfig:
     grid_step: float = 0.1        # mm grid resolution
 
     # A* algorithm
-    via_cost: int = 25            # grid steps penalty for via (doubled for diff pairs)
+    via_cost: int = 50            # grid steps penalty for via (doubled for diff pairs)
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
     heuristic_weight: float = 1.9
@@ -120,10 +121,10 @@ class GridRouteConfig:
     # Stub proximity
     stub_proximity_radius: float = 2.0   # mm
     stub_proximity_cost: float = 0.2     # mm equivalent
-    via_proximity_cost: float = 20.0     # multiplier for vias near stubs
+    via_proximity_cost: float = 50.0     # multiplier for vias near stubs (uses via_cost value)
 
     # Track proximity (same layer)
-    track_proximity_distance: float = 1.0  # mm
+    track_proximity_distance: float = 2.0  # mm
     track_proximity_cost: float = 0.2      # mm equivalent
 
     # Direction
@@ -148,11 +149,11 @@ The `via_cost` parameter controls how much the router penalizes layer changes:
 
 | Value | Effect |
 |-------|--------|
-| 0-10 | Many vias, shorter paths |
-| 25 (default) | Balanced |
-| 50-100 | Few vias, longer paths |
+| 0-25 | Many vias, shorter paths |
+| 50 (default) | Balanced, discourages unnecessary vias |
+| 75-100 | Few vias, longer paths |
 
-For BGA escape routing, lower values (10-15) work well since vias are necessary.
+For BGA escape routing, lower values (10-25) work well since vias are necessary.
 
 ### Heuristic Weight
 

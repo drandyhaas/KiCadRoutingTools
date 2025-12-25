@@ -16,8 +16,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
-- **Via proximity cost** - Configurable cost penalty for vias near stubs (instead of blocking)
 - **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced
+- **Loop detection** - Prevents differential pair routes from forming loops (>270° turns)
 - **Target swap optimization** - For swappable diff pairs (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 
@@ -123,7 +123,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
---via-cost 25           # Via penalty (grid steps, doubled for diff pairs)
+--via-cost 50           # Via penalty (grid steps, doubled for diff pairs)
 --max-iterations 200000      # A* iteration limit
 --max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
 --heuristic-weight 1.9       # A* greediness (>1 = faster)
@@ -140,8 +140,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
 --bga-proximity-radius 10.0  # Radius around BGA edges to penalize (mm)
 --bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
---via-proximity-cost 20      # Via cost multiplier near stubs/BGAs (0=block)
---track-proximity-distance 1.0  # Radius around routed tracks to penalize (mm, same layer)
+--track-proximity-distance 2.0  # Radius around routed tracks to penalize (mm, same layer)
 --track-proximity-cost 0.2   # Cost penalty near routed tracks (mm equivalent)
 
 # Differential pairs
@@ -158,6 +157,11 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 # Target swap optimization
 --swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
 --crossing-penalty 1000  # Penalty for crossing assignments (default: 1000)
+--mps-reverse-rounds     # Route most-conflicting MPS groups first (instead of least)
+
+# Debug
+--verbose               # Print detailed diagnostic output
+--debug-lines           # Output debug geometry on User layers
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.

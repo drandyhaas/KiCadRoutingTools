@@ -167,7 +167,7 @@ Methods:
 Orientation-aware A* router using Dubins path length as heuristic. Used for differential pair centerline routing where start and end orientations are constrained by stub directions.
 
 ```python
-router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float, via_proximity_cost: int = 10)
+router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float, via_proximity_cost: int = 50)
 ```
 
 Parameters:
