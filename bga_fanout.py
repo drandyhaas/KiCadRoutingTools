@@ -1497,7 +1497,8 @@ def calculate_jog_end(exit_pos: Tuple[float, float],
 
     # Calculate jog components based on escape direction
     # At 45°, both components equal jog_length / sqrt(2)
-    diag = jog_length / math.sqrt(2)
+    # Reduce by factor of 4 for a shorter angled segment at the end of each stub
+    diag = jog_length / math.sqrt(2) / 4
 
     ex, ey = exit_pos
     extension_point = None
