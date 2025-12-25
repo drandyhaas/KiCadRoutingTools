@@ -29,7 +29,7 @@ class GridRouteConfig:
     via_size: float = 0.3  # mm via outer diameter
     via_drill: float = 0.2  # mm via drill
     grid_step: float = 0.1  # mm grid resolution
-    via_cost: int = 25  # grid steps equivalent penalty for via
+    via_cost: int = 50  # grid steps equivalent penalty for via
     layers: List[str] = field(default_factory=lambda: ['F.Cu', 'B.Cu'])
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # Quick probe per direction to detect stuck routes
@@ -38,7 +38,7 @@ class GridRouteConfig:
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
     stub_proximity_radius: float = 2.0  # mm - radius around stubs to penalize
     stub_proximity_cost: float = 0.2  # mm equivalent cost at stub center
-    via_proximity_cost: float = 20.0  # multiplier on stub_proximity_cost for vias near stubs (0 = block vias)
+    via_proximity_cost: float = 50.0  # multiplier on stub_proximity_cost for vias near stubs (0 = block vias)
     bga_proximity_radius: float = 10.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
     # Direction search order: "forward", "backward", or "random"
@@ -52,7 +52,7 @@ class GridRouteConfig:
     verbose: bool = False  # Print detailed diagnostic output
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
-    track_proximity_distance: float = 1.0  # mm - radius around routed tracks to penalize (same layer)
+    track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
     track_proximity_cost: float = 0.2  # mm equivalent cost at track center
     target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap

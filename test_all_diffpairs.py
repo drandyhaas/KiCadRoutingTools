@@ -73,8 +73,6 @@ def run_test(diff_pair_name, args, verbose=False):
             cmd.extend(["--min-turning-radius", str(args.min_turning_radius)])
         if args.max_probe_iterations is not None:
             cmd.extend(["--max-probe-iterations", str(args.max_probe_iterations)])
-        if args.via_proximity_cost is not None:
-            cmd.extend(["--via-proximity-cost", str(args.via_proximity_cost)])
         if args.bga_proximity_radius is not None:
             cmd.extend(["--bga-proximity-radius", str(args.bga_proximity_radius)])
         if args.bga_proximity_cost is not None:
@@ -215,8 +213,6 @@ def main():
                               help='Minimum turning radius for pose-based routing in mm (default: 0.2)')
     router_group.add_argument('--max-probe-iterations', type=int,
                               help='Max iterations for quick probe per direction (default: 5000)')
-    router_group.add_argument('--via-proximity-cost', type=float,
-                              help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 10.0)')
     router_group.add_argument('--bga-proximity-radius', type=float,
                               help='Radius around BGA edges to penalize in mm (default: 10.0)')
     router_group.add_argument('--bga-proximity-cost', type=float,

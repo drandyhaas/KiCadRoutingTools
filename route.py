@@ -313,16 +313,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 via_size: float = 0.3,
                 via_drill: float = 0.2,
                 grid_step: float = 0.1,
-                via_cost: int = 25,
+                via_cost: int = 50,
                 max_iterations: int = 200000,
                 max_probe_iterations: int = 5000,
                 heuristic_weight: float = 2.0,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
-                via_proximity_cost: float = 10.0,
+                via_proximity_cost: float = 50.0,
                 bga_proximity_radius: float = 10.0,
                 bga_proximity_cost: float = 0.2,
-                track_proximity_distance: float = 10.0,
+                track_proximity_distance: float = 2.0,
                 track_proximity_cost: float = 0.2,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.101,
@@ -361,7 +361,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_size: Via outer diameter in mm (default: 0.3)
         via_drill: Via drill size in mm (default: 0.2)
         grid_step: Grid resolution in mm (default: 0.1)
-        via_cost: Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)
+        via_cost: Penalty for placing a via in grid steps (default: 50, doubled for diff pairs)
         max_iterations: Max A* iterations before giving up (default: 200000)
         heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 2.0)
         stub_proximity_radius: Radius around stubs to penalize in mm (default: 2.0)
@@ -2809,8 +2809,8 @@ Differential pair routing:
     # Router algorithm parameters
     parser.add_argument("--grid-step", type=float, default=0.1,
                         help="Grid resolution in mm (default: 0.1)")
-    parser.add_argument("--via-cost", type=int, default=25,
-                        help="Penalty for placing a via in grid steps (default: 25, doubled for diff pairs)")
+    parser.add_argument("--via-cost", type=int, default=50,
+                        help="Penalty for placing a via in grid steps (default: 50, doubled for diff pairs)")
     parser.add_argument("--max-iterations", type=int, default=200000,
                         help="Max A* iterations before giving up (default: 200000)")
     parser.add_argument("--max-probe-iterations", type=int, default=5000,
@@ -2823,8 +2823,6 @@ Differential pair routing:
                         help="Radius around stubs to penalize routing in mm (default: 2.0)")
     parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near stubs in mm equivalent (default: 0.2)")
-    parser.add_argument("--via-proximity-cost", type=float, default=20.0,
-                        help="Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 20.0)")
 
     # BGA proximity penalty
     parser.add_argument("--bga-proximity-radius", type=float, default=10.0,
@@ -2833,8 +2831,8 @@ Differential pair routing:
                         help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 
     # Track proximity penalty (same layer only)
-    parser.add_argument("--track-proximity-distance", type=float, default=1.0,
-                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 1.0)")
+    parser.add_argument("--track-proximity-distance", type=float, default=2.0,
+                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 2.0)")
     parser.add_argument("--track-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near routed tracks in mm equivalent (default: 0.2)")
 
@@ -2926,7 +2924,7 @@ Differential pair routing:
                 heuristic_weight=args.heuristic_weight,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
-                via_proximity_cost=args.via_proximity_cost,
+                via_proximity_cost=args.via_cost,
                 bga_proximity_radius=args.bga_proximity_radius,
                 bga_proximity_cost=args.bga_proximity_cost,
                 track_proximity_distance=args.track_proximity_distance,

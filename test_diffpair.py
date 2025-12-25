@@ -214,14 +214,12 @@ Examples:
                               help='Radius around stubs to penalize in mm (default: 2.0)')
     router_group.add_argument('--stub-proximity-cost', type=float,
                               help='Cost penalty near stubs in mm equivalent (default: 0.2)')
-    router_group.add_argument('--via-proximity-cost', type=float,
-                              help='Multiplier on stub-proximity-cost for vias near stubs (0=block, default: 20.0)')
     router_group.add_argument('--bga-proximity-radius', type=float,
                               help='Radius around BGA edges to penalize in mm (default: 10.0)')
     router_group.add_argument('--bga-proximity-cost', type=float,
                               help='Cost penalty near BGA edges in mm equivalent (default: 0.2)')
     router_group.add_argument('--track-proximity-distance', type=float,
-                              help='Distance around routed tracks to penalize on same layer in mm (default: 1.0)')
+                              help='Distance around routed tracks to penalize on same layer in mm (default: 2.0)')
     router_group.add_argument('--track-proximity-cost', type=float,
                               help='Cost penalty near routed tracks in mm equivalent (default: 0.2)')
     router_group.add_argument('--diff-pair-gap', type=float,
@@ -349,8 +347,6 @@ Examples:
         router_cmd.extend(["--stub-proximity-radius", str(args.stub_proximity_radius)])
     if args.stub_proximity_cost is not None:
         router_cmd.extend(["--stub-proximity-cost", str(args.stub_proximity_cost)])
-    if args.via_proximity_cost is not None:
-        router_cmd.extend(["--via-proximity-cost", str(args.via_proximity_cost)])
     if args.bga_proximity_radius is not None:
         router_cmd.extend(["--bga-proximity-radius", str(args.bga_proximity_radius)])
     if args.bga_proximity_cost is not None:
