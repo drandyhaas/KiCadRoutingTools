@@ -525,6 +525,54 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     return [], [], f"Cannot determine endpoints: {len(net_segments)} segments, {len(net_pads)} pads"
 
 
+def normalize_endpoints_by_component(
+    pcb_data: PCBData,
+    sources: List,
+    targets: List,
+    net_id: int
+) -> Tuple[List, List]:
+    """
+    Normalize source/target endpoints so that source is always from the
+    alphabetically-first component. This ensures consistent ordering across
+    all nets for crossing detection and distance calculations.
+
+    Args:
+        pcb_data: PCB data with pad information
+        sources: List of source endpoints (gx, gy, layer_idx, orig_x, orig_y)
+        targets: List of target endpoints (gx, gy, layer_idx, orig_x, orig_y)
+        net_id: Net ID for looking up pads
+
+    Returns:
+        (normalized_sources, normalized_targets) - may be swapped if needed
+    """
+    if not sources or not targets:
+        return sources, targets
+
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    if len(net_pads) < 2:
+        return sources, targets
+
+    # Find which component each endpoint is connected to
+    def find_component_for_endpoint(endpoint):
+        """Find the component_ref for the pad nearest to this endpoint."""
+        ex, ey = endpoint[3], endpoint[4]  # orig_x, orig_y
+        for pad in net_pads:
+            if abs(pad.global_x - ex) < 1.0 and abs(pad.global_y - ey) < 1.0:
+                return pad.component_ref
+        return None
+
+    src_component = find_component_for_endpoint(sources[0])
+    tgt_component = find_component_for_endpoint(targets[0])
+
+    if src_component and tgt_component:
+        # Sort alphabetically - first component is source
+        if src_component > tgt_component:
+            # Swap so alphabetically-first component is source
+            return targets, sources
+
+    return sources, targets
+
+
 def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
     """
     Find all net IDs in the PCB that have unrouted stubs (multiple disconnected segment groups).
@@ -1170,11 +1218,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
     # Compute route distances for each unit (routing-aware distance around BGA)
     # Used as secondary ordering: shorter routes first within same conflict count
     unit_distances = {}
-    debug_nets = {"DATA_1", "DATA_19"}  # Debug these specific nets
     for unit_id in unit_list:
         unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
-        unit_name = unit_names.get(unit_id, f"Net {unit_id}")
-        is_debug = any(dn in unit_name for dn in debug_nets)
 
         # Try to get routing-aware distance
         routing_info = get_unit_routing_info(pcb_data, unit_net_ids)
@@ -1182,30 +1227,19 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         if routing_info and bga_exclusion_zones:
             target_free_end, source_chip_center = routing_info
 
-            if is_debug:
-                print(f"DEBUG {unit_name}: target_free_end={target_free_end}, source_chip_center={source_chip_center}")
-
             # Find which BGA zone the target stub is in/near
             bga_zone = find_containing_or_nearest_bga_zone(target_free_end, bga_exclusion_zones)
 
             if bga_zone:
                 # Compute routing-aware distance around BGA
-                dist = compute_routing_aware_distance(
+                unit_distances[unit_id] = compute_routing_aware_distance(
                     target_free_end, source_chip_center, bga_zone
                 )
-                unit_distances[unit_id] = dist
-                if is_debug:
-                    straight_dx = source_chip_center[0] - target_free_end[0]
-                    straight_dy = source_chip_center[1] - target_free_end[1]
-                    straight_dist = math.sqrt(straight_dx * straight_dx + straight_dy * straight_dy)
-                    print(f"DEBUG {unit_name}: bga_zone={bga_zone}, routing_dist={dist:.2f}mm, straight_dist={straight_dist:.2f}mm")
             else:
                 # No BGA zone found - use straight line from target to source
                 dx = source_chip_center[0] - target_free_end[0]
                 dy = source_chip_center[1] - target_free_end[1]
                 unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
-                if is_debug:
-                    print(f"DEBUG {unit_name}: no BGA zone, straight_dist={unit_distances[unit_id]:.2f}mm")
         else:
             # Fall back to straight-line distance between endpoints
             if unit_id in unit_endpoints:
@@ -1213,12 +1247,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                 dx = endpoints[1][0] - endpoints[0][0]
                 dy = endpoints[1][1] - endpoints[0][1]
                 unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
-                if is_debug:
-                    print(f"DEBUG {unit_name}: fallback endpoints={endpoints}, dist={unit_distances[unit_id]:.2f}mm")
             else:
                 unit_distances[unit_id] = float('inf')
-                if is_debug:
-                    print(f"DEBUG {unit_name}: no endpoints, dist=inf")
 
     # Step 5: Greedy ordering - repeatedly pick unit with fewest active conflicts
     # Secondary: pick shorter routes first (easier routes done first, leaving space for longer ones)
@@ -1266,11 +1296,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         sorted_winners = sorted(round_winners, key=lambda uid: unit_distances.get(uid, 0))
         ordered_units.extend(sorted_winners)
         if sorted_winners:
-            # Show names with distances for debugging
-            winner_info = [f"{unit_names.get(uid, f'Net {uid}')}({unit_distances.get(uid, 0):.2f}mm)"
-                          for uid in sorted_winners]
-            print(f"MPS Round {orig_round_num}: {len(sorted_winners)} units selected "
-                  f"({', '.join(winner_info)})")
+            winner_names = [unit_names.get(uid, f"Net {uid}") for uid in sorted_winners]
+            print(f"MPS Round {orig_round_num}: {len(sorted_winners)} units")
 
     # Expand ordered units back to net IDs
     ordered = []

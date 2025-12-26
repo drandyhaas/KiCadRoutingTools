@@ -204,6 +204,7 @@ def build_cost_matrix(
 
     # Add crossing penalties
     # For each (i,j) assignment, check if it crosses any other potential (k,l) assignment
+    total_crossings_detected = 0
     for i in range(n):
         for j in range(n):
             crossing_count = 0
@@ -352,14 +353,11 @@ def ensure_consistent_target_component(
     pcb_data: PCBData
 ) -> List[Tuple[str, 'DiffPair', List, List]]:
     """
-    Ensure all target endpoints are consistently on the same component.
+    Ensure all source/target endpoints are consistently ordered by component.
 
-    When get_diff_pair_endpoints sometimes picks the wrong side as "target"
-    (due to short stubs making the P-N proximity heuristic unreliable),
-    this function fixes it by:
-    1. Finding which component each endpoint is on
-    2. Picking one component as the consistent "target" component
-    3. Swapping source/target for any pairs where target is on wrong component
+    Uses alphabetical component ordering: alphabetically-first component is always
+    the source, alphabetically-second is always the target. This ensures consistent
+    ordering across ALL pairs for crossing detection.
     """
     def find_component_for_endpoint(x: float, y: float, net_id: int) -> Optional[str]:
         """Find component of the closest pad to this position on this net."""
@@ -373,8 +371,9 @@ def ensure_consistent_target_component(
                 best_ref = pad.component_ref
         return best_ref
 
-    # Find which component each pair's source and target are on
-    pair_components = []  # [(pair_name, source_component, target_component)]
+    # Normalize each pair so source is on alphabetically-first component
+    result = []
+    swapped_count = 0
     for pair_name, pair, sources, targets in pair_data:
         src = sources[0]
         tgt = targets[0]
@@ -387,42 +386,25 @@ def ensure_consistent_target_component(
         src_comp = find_component_for_endpoint(src_p_x, src_p_y, pair.p_net_id)
         tgt_comp = find_component_for_endpoint(tgt_p_x, tgt_p_y, pair.p_net_id)
 
-        pair_components.append((pair_name, src_comp, tgt_comp))
-
-    # Count how often each component appears as target
-    component_target_count: Dict[str, int] = {}
-    for pair_name, src_comp, tgt_comp in pair_components:
-        if tgt_comp:
-            component_target_count[tgt_comp] = component_target_count.get(tgt_comp, 0) + 1
-
-    # Find the component that most often appears as target
-    # This will be our consistent target component
-    target_component = None
-    max_target_count = 0
-    for comp, count in component_target_count.items():
-        if count > max_target_count:
-            max_target_count = count
-            target_component = comp
-
-    if not target_component:
-        return pair_data  # Can't determine, return unchanged
-
-    # Fix any pairs where target is on the wrong component
-    result = []
-    swapped_count = 0
-    for i, (pair_name, pair, sources, targets) in enumerate(pair_data):
-        _, src_comp, tgt_comp = pair_components[i]
-
-        if tgt_comp == target_component:
-            # Target is already on the right component
-            result.append((pair_name, pair, sources, targets))
+        if src_comp and tgt_comp:
+            # Alphabetically first component should be source
+            if src_comp > tgt_comp:
+                # Swap so alphabetically-first is source
+                result.append((pair_name, pair, targets, sources))
+                swapped_count += 1
+            else:
+                result.append((pair_name, pair, sources, targets))
         else:
-            # Target is on wrong component, swap source and target
-            result.append((pair_name, pair, targets, sources))
-            swapped_count += 1
+            # Can't determine, keep as-is
+            result.append((pair_name, pair, sources, targets))
 
     if swapped_count > 0:
-        print(f"  Swapped source/target for {swapped_count} pairs to ensure consistent target component ({target_component})")
+        # Determine what the source component is now (should be same for all)
+        if result:
+            src = result[0][2][0]  # First pair's source
+            src_p_x, src_p_y = src[5], src[6]
+            src_comp = find_component_for_endpoint(src_p_x, src_p_y, result[0][1].p_net_id)
+            print(f"  Swapped source/target for {swapped_count} pairs to ensure consistent source component ({src_comp})")
 
     return result
 
@@ -757,9 +739,11 @@ def ensure_consistent_single_ended_target_component(
     pcb_data: PCBData
 ) -> List[Tuple[str, int, List, List]]:
     """
-    Ensure all target endpoints are consistently on the same component.
+    Ensure all source/target endpoints are consistently ordered by component.
 
-    Similar to ensure_consistent_target_component but for single-ended nets.
+    Uses alphabetical component ordering: alphabetically-first component is always
+    the source, alphabetically-second is always the target. This ensures consistent
+    ordering across ALL nets for crossing detection.
 
     Args:
         net_data: List of (net_name, net_id, sources, targets) tuples
@@ -780,8 +764,9 @@ def ensure_consistent_single_ended_target_component(
                 best_ref = pad.component_ref
         return best_ref
 
-    # Find which component each net's source and target are on
-    net_components = []  # [(net_name, source_component, target_component)]
+    # Normalize each net so source is on alphabetically-first component
+    result = []
+    swapped_count = 0
     for net_name, net_id, sources, targets in net_data:
         src = sources[0]
         tgt = targets[0]
@@ -793,41 +778,25 @@ def ensure_consistent_single_ended_target_component(
         src_comp = find_component_for_endpoint(src_x, src_y, net_id)
         tgt_comp = find_component_for_endpoint(tgt_x, tgt_y, net_id)
 
-        net_components.append((net_name, src_comp, tgt_comp))
-
-    # Count how often each component appears as target
-    component_target_count: Dict[str, int] = {}
-    for net_name, src_comp, tgt_comp in net_components:
-        if tgt_comp:
-            component_target_count[tgt_comp] = component_target_count.get(tgt_comp, 0) + 1
-
-    # Find the component that most often appears as target
-    target_component = None
-    max_target_count = 0
-    for comp, count in component_target_count.items():
-        if count > max_target_count:
-            max_target_count = count
-            target_component = comp
-
-    if not target_component:
-        return net_data  # Can't determine, return unchanged
-
-    # Fix any nets where target is on the wrong component
-    result = []
-    swapped_count = 0
-    for i, (net_name, net_id, sources, targets) in enumerate(net_data):
-        _, src_comp, tgt_comp = net_components[i]
-
-        if tgt_comp == target_component:
-            # Target is already on the right component
-            result.append((net_name, net_id, sources, targets))
+        if src_comp and tgt_comp:
+            # Alphabetically first component should be source
+            if src_comp > tgt_comp:
+                # Swap so alphabetically-first is source
+                result.append((net_name, net_id, targets, sources))
+                swapped_count += 1
+            else:
+                result.append((net_name, net_id, sources, targets))
         else:
-            # Target is on wrong component, swap source and target
-            result.append((net_name, net_id, targets, sources))
-            swapped_count += 1
+            # Can't determine, keep as-is
+            result.append((net_name, net_id, sources, targets))
 
     if swapped_count > 0:
-        print(f"  Swapped source/target for {swapped_count} nets to ensure consistent target component ({target_component})")
+        # Determine what the source component is now (should be same for all)
+        if result:
+            src = result[0][2][0]  # First net's source
+            src_x, src_y = src[3], src[4]
+            src_comp = find_component_for_endpoint(src_x, src_y, result[0][1])
+            print(f"  Swapped source/target for {swapped_count} nets to ensure consistent source component ({src_comp})")
 
     return result
 
