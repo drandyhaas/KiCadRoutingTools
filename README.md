@@ -10,7 +10,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
 - **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
-- **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Finds compatible pairs to swap or moves stubs solo when safe. Won't break pairs that are already on matching layers.
+- **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
 - **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
@@ -99,8 +99,8 @@ KiCadRoutingTools/
 | `obstacle_map.py` | 767 | Obstacle map building from PCB data |
 | `single_ended_routing.py` | 589 | Single-ended net routing with A* |
 | `diff_pair_routing.py` | 1649 | Differential pair centerline + offset routing |
-| `stub_layer_switching.py` | 428 | Stub layer swap optimization for diff pairs |
-| `route.py` | 2297 | CLI and batch routing orchestration |
+| `stub_layer_switching.py` | 682 | Stub layer swap optimization for diff pairs and single-ended nets |
+| `route.py` | 3090 | CLI and batch routing orchestration |
 
 ## Performance
 
@@ -150,9 +150,9 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --min-turning-radius 0.2      # Min turn radius (mm)
 --direction backward    # Route from target to source
 
-# Layer optimization (stub layer swap enabled by default)
+# Layer optimization (stub layer swap enabled by default for both diff pairs and single-ended)
 --no-stub-layer-swap    # Disable stub layer switching
---can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
+--can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default for diff pairs)
 
 # Target swap optimization
 --swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped

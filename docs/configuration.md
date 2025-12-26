@@ -75,11 +75,25 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
-| `--no-stub-layer-swap` | false | Disable stub layer switching (enabled by default) |
-| `--can-swap-to-top-layer` | false | Allow swapping stubs to F.Cu (off by default due to clearance issues) |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
+
+### Layer Optimization Options
+
+These options control stub layer switching, which moves stubs to different layers before routing to avoid vias. Works for both differential pairs and single-ended nets.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--no-stub-layer-swap` | false | Disable stub layer switching (enabled by default) |
+| `--can-swap-to-top-layer` | false | Allow swapping stubs to F.Cu (off by default for diff pairs due to clearance) |
+
+**How it works:**
+- When source and target stubs are on different layers, a via is normally required
+- Stub layer switching moves one stub to match the other's layer, eliminating the via
+- For **swap pairs**, two nets exchange layers to help each other (e.g., Net1 src:A→B and Net2 src:B→A)
+- For **solo switches**, a single stub moves when it doesn't conflict with other stubs
+- Multiple swap options are tried: src/src, tgt/tgt, src/tgt, tgt/src
 
 ### Debug Options
 
