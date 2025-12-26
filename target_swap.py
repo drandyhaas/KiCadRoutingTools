@@ -21,7 +21,10 @@ except ImportError:
 
 from kicad_parser import PCBData, Pad
 from routing_config import DiffPair, GridRouteConfig
-from routing_utils import find_connected_segment_positions, pos_key
+from routing_utils import (
+    find_connected_segment_positions, pos_key,
+    compute_routing_aware_distance, find_containing_or_nearest_bga_zone
+)
 from chip_boundary import (
     ChipBoundary, build_chip_list, identify_chip_for_point,
     compute_far_side, compute_boundary_position, crossings_from_boundary_order,
@@ -186,6 +189,9 @@ def build_cost_matrix(
     # Initialize cost matrix with distance and layer penalties
     cost_matrix = [[0.0] * n for _ in range(n)]
 
+    # Get BGA exclusion zones for routing-aware distance
+    bga_zones = getattr(pcb_data, 'bga_exclusion_zones', [])
+
     for i in range(n):
         src_c = source_centroids[i]
         src_layer = source_layers[i]
@@ -194,8 +200,18 @@ def build_cost_matrix(
             tgt_c = target_centroids[j]
             tgt_layer = target_layers[j]
 
-            # Distance cost (Euclidean)
-            dist = math.sqrt((src_c[0] - tgt_c[0])**2 + (src_c[1] - tgt_c[1])**2)
+            # Distance cost (routing-aware if BGA zones present)
+            if bga_zones:
+                # Find BGA zone containing or nearest to the source centroid
+                bga_zone = find_containing_or_nearest_bga_zone(src_c, bga_zones)
+                if bga_zone:
+                    dist = compute_routing_aware_distance(src_c, tgt_c, bga_zone)
+                else:
+                    # Fallback to Euclidean if no zone found
+                    dist = math.sqrt((src_c[0] - tgt_c[0])**2 + (src_c[1] - tgt_c[1])**2)
+            else:
+                # No BGA zones - use Euclidean distance
+                dist = math.sqrt((src_c[0] - tgt_c[0])**2 + (src_c[1] - tgt_c[1])**2)
 
             # Layer penalty (via cost if layers differ)
             layer_cost = config.via_cost if src_layer != tgt_layer else 0
