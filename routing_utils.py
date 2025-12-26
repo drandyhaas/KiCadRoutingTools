@@ -1741,3 +1741,57 @@ def find_connected_segment_positions(pcb_data: PCBData, start_x: float, start_y:
                 queue.append(neighbor)
 
     return visited
+
+
+def find_connected_segments(pcb_data: PCBData, start_x: float, start_y: float,
+                            net_id: int) -> List:
+    """
+    Find all segments connected to a starting position for a given net.
+
+    Uses BFS to traverse the segment chain from the starting position.
+    Returns a list of Segment objects in the connected stub chain.
+
+    This differs from find_connected_segment_positions in that it returns
+    the actual segment objects, not just their positions. This allows
+    unambiguous identification of which segments belong to which stub chain,
+    even when two chains share a common endpoint position.
+    """
+    # Get all segments for this net
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+
+    # Build adjacency: position -> list of segments touching that position
+    pos_to_segments = {}
+    for seg in net_segments:
+        start = pos_key(seg.start_x, seg.start_y)
+        end = pos_key(seg.end_x, seg.end_y)
+        if start not in pos_to_segments:
+            pos_to_segments[start] = []
+        if end not in pos_to_segments:
+            pos_to_segments[end] = []
+        pos_to_segments[start].append(seg)
+        pos_to_segments[end].append(seg)
+
+    # BFS from start position, collecting segments
+    start_key = pos_key(start_x, start_y)
+    visited_positions = set()
+    visited_segments = set()
+    queue = [start_key]
+
+    while queue:
+        pos = queue.pop(0)
+        if pos in visited_positions:
+            continue
+        visited_positions.add(pos)
+
+        for seg in pos_to_segments.get(pos, []):
+            if id(seg) in visited_segments:
+                continue
+            visited_segments.add(id(seg))
+
+            # Add the other endpoint of this segment to the queue
+            other_end = pos_key(seg.end_x, seg.end_y) if pos_key(seg.start_x, seg.start_y) == pos else pos_key(seg.start_x, seg.start_y)
+            if other_end not in visited_positions:
+                queue.append(other_end)
+
+    # Return the actual segment objects
+    return [s for s in net_segments if id(s) in visited_segments]

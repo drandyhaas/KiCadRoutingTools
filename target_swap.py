@@ -22,7 +22,7 @@ except ImportError:
 from kicad_parser import PCBData, Pad
 from routing_config import DiffPair, GridRouteConfig
 from routing_utils import (
-    find_connected_segment_positions, pos_key,
+    find_connected_segment_positions, find_connected_segments, pos_key,
     compute_routing_aware_distance, find_containing_or_nearest_bga_zone
 )
 from chip_boundary import (
@@ -633,6 +633,55 @@ def _swap_net_at_positions(
     return seg_count, via_count
 
 
+def _swap_segments_and_vias(
+    pcb_data: PCBData,
+    segments: List,
+    new_net_id: int
+) -> Tuple[int, int]:
+    """
+    Swap net IDs for specific segments and any vias at their positions.
+
+    Unlike _swap_net_at_positions which matches by position (and can accidentally
+    match segments from other nets that share a position), this function swaps
+    only the specific segment objects provided.
+
+    Args:
+        pcb_data: PCB data to modify in place
+        segments: List of Segment objects to swap
+        new_net_id: New net ID to assign
+
+    Returns:
+        (segment_count, via_count) - number of segments and vias swapped
+    """
+    if not segments:
+        return 0, 0
+
+    seg_count = 0
+    via_count = 0
+
+    # Get the original net_id from the first segment
+    old_net_id = segments[0].net_id
+
+    # Collect all positions from the segments for via matching
+    positions = set()
+    for seg in segments:
+        seg.net_id = new_net_id
+        seg_count += 1
+        positions.add(pos_key(seg.start_x, seg.start_y))
+        positions.add(pos_key(seg.end_x, seg.end_y))
+
+    # Swap vias at these positions that match the original net_id
+    for via in pcb_data.vias:
+        if via.net_id != old_net_id:
+            continue
+        via_pos = pos_key(via.x, via.y)
+        if via_pos in positions:
+            via.net_id = new_net_id
+            via_count += 1
+
+    return seg_count, via_count
+
+
 def _swap_pads(
     pcb_data: PCBData,
     pad1: Optional[Pad],
@@ -708,13 +757,18 @@ def apply_single_ended_swap(
     n1_pos = (n1_tgt[3], n1_tgt[4])
     n2_pos = (n2_tgt[3], n2_tgt[4])
 
-    # Find all segment positions connected to each target stub
+    # Find the actual segments connected to each target stub
+    # Using segments (not positions) avoids double-swap when stubs share a position
+    n1_segments = find_connected_segments(pcb_data, n1_pos[0], n1_pos[1], n1_net_id)
+    n2_segments = find_connected_segments(pcb_data, n2_pos[0], n2_pos[1], n2_net_id)
+
+    # Also get positions for output file writing and pad finding
     n1_positions = find_connected_segment_positions(pcb_data, n1_pos[0], n1_pos[1], n1_net_id)
     n2_positions = find_connected_segment_positions(pcb_data, n2_pos[0], n2_pos[1], n2_net_id)
 
-    # Swap net IDs using helper
-    n1_seg, n1_via = _swap_net_at_positions(pcb_data, n1_positions, n1_net_id, n2_net_id)
-    n2_seg, n2_via = _swap_net_at_positions(pcb_data, n2_positions, n2_net_id, n1_net_id)
+    # Swap net IDs using segment-based swap (avoids double-swap bug)
+    n1_seg, n1_via = _swap_segments_and_vias(pcb_data, n1_segments, n2_net_id)
+    n2_seg, n2_via = _swap_segments_and_vias(pcb_data, n2_segments, n1_net_id)
 
     print(f"  Swapped segments: {n1_name}: {n1_seg}, {n2_name}: {n2_seg}")
     if n1_via + n2_via > 0:
