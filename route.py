@@ -14,7 +14,7 @@ import sys
 import os
 import time
 import fnmatch
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import (
     parse_kicad_pcb, PCBData, Pad,
@@ -516,6 +516,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             target_swaps, target_swap_info = apply_target_swaps(
                 pcb_data, swappable_pairs, config,
                 lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config),
+                use_boundary_ordering=mps_unroll
+            )
+
+    # Apply target swaps for single-ended swappable-nets
+    single_ended_target_swaps: Dict[str, str] = {}
+    single_ended_target_swap_info: List[Dict] = []
+    if swappable_net_patterns:
+        from target_swap import apply_single_ended_target_swaps
+        from routing_utils import find_single_ended_nets, get_net_endpoints
+
+        # Get diff pair net IDs to exclude
+        diff_pair_net_id_set: Set[int] = set()
+        for pair_name, pair in diff_pairs.items():
+            diff_pair_net_id_set.add(pair.p_net_id)
+            diff_pair_net_id_set.add(pair.n_net_id)
+
+        # Find matching single-ended nets
+        swappable_se_nets = find_single_ended_nets(
+            pcb_data,
+            swappable_net_patterns,
+            exclude_net_ids=diff_pair_net_id_set
+        )
+
+        if len(swappable_se_nets) >= 2:
+            print(f"\nAnalyzing target swaps for {len(swappable_se_nets)} single-ended net(s)...")
+            single_ended_target_swaps, single_ended_target_swap_info = apply_single_ended_target_swaps(
+                pcb_data, swappable_se_nets, config,
+                lambda net_id: get_net_endpoints(pcb_data, net_id, config),
                 use_boundary_ordering=mps_unroll
             )
 
@@ -2675,6 +2703,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
+        'single_ended_target_swaps': [{'net1': k, 'net2': v} for k, v in single_ended_target_swaps.items() if k < v],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
         'failed': failed,
@@ -2686,7 +2715,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Write output if we have results OR if we have layer swap/target swap modifications to show
     # Also write if skip_routing (to output debug labels even without routing)
-    if results or all_segment_modifications or all_swap_vias or target_swap_info or skip_routing:
+    if results or all_segment_modifications or all_swap_vias or target_swap_info or single_ended_target_swap_info or skip_routing:
         print(f"\nWriting output to {output_file}...")
         with open(input_file, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -2733,6 +2762,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 total_seg = p1_p_seg + p1_n_seg + p2_p_seg + p2_n_seg
                 total_via = p1_p_via + p1_n_via + p2_p_via + p2_n_via
                 print(f"  {swap['p1_name']} <-> {swap['p2_name']}: {total_seg} segments, {total_via} vias")
+
+        # Apply single-ended target swaps
+        if single_ended_target_swap_info:
+            print(f"Applying {len(single_ended_target_swap_info)} single-ended target swap(s) to output file...")
+            for swap in single_ended_target_swap_info:
+                # Swap segments at n1's target: n1 net -> n2 net
+                content, n1_seg = swap_segment_nets_at_positions(
+                    content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'])
+                # Swap segments at n2's target: n2 net -> n1 net
+                content, n2_seg = swap_segment_nets_at_positions(
+                    content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'])
+
+                # Swap vias at n1's target
+                content, n1_via = swap_via_nets_at_positions(
+                    content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'])
+                # Swap vias at n2's target
+                content, n2_via = swap_via_nets_at_positions(
+                    content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'])
+
+                # Swap pads if they exist
+                if swap['n1_pad'] and swap['n2_pad']:
+                    print(f"    Swapping pads in output: {swap['n1_pad'].component_ref}:{swap['n1_pad'].pad_number} <-> {swap['n2_pad'].component_ref}:{swap['n2_pad'].pad_number}")
+                    content = swap_pad_nets_in_content(content, swap['n1_pad'], swap['n2_pad'])
+
+                total_seg = n1_seg + n2_seg
+                total_via = n1_via + n2_via
+                print(f"  {swap['n1_name']} <-> {swap['n2_name']}: {total_seg} segments, {total_via} vias")
 
         # Apply segment layer modifications from stub layer switching AFTER target swaps
         # (layer mods were recorded with post-swap net IDs, so file must be swapped first)

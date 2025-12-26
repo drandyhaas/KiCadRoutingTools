@@ -6,7 +6,7 @@ Includes connectivity analysis, endpoint finding, MPS ordering, and segment clea
 
 import math
 import fnmatch
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPair
@@ -114,6 +114,43 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
     complete_pairs = {k: v for k, v in pairs.items() if v.is_complete}
 
     return complete_pairs
+
+
+def find_single_ended_nets(
+    pcb_data: PCBData,
+    patterns: List[str],
+    exclude_net_ids: Set[int] = None
+) -> List[Tuple[str, int]]:
+    """
+    Find all single-ended nets matching the given glob patterns.
+
+    Args:
+        pcb_data: PCB data with net information
+        patterns: Glob patterns for nets (e.g., 'Net-(U2A-BE*)')
+        exclude_net_ids: Net IDs to exclude (e.g., diff pair net IDs)
+
+    Returns:
+        List of (net_name, net_id) tuples for matching single-ended nets
+    """
+    if exclude_net_ids is None:
+        exclude_net_ids = set()
+
+    result = []
+    for net_id, net in pcb_data.nets.items():
+        net_name = net.name
+        if not net_name or net_id == 0:
+            continue
+
+        # Skip excluded nets (e.g., diff pair nets)
+        if net_id in exclude_net_ids:
+            continue
+
+        # Check if this net matches any pattern
+        matched = any(fnmatch.fnmatch(net_name, pattern) for pattern in patterns)
+        if matched:
+            result.append((net_name, net_id))
+
+    return result
 
 
 def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> List[List[Segment]]:
