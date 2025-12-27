@@ -418,7 +418,15 @@ def build_cost_matrix(
             if crossing_count > 0:
                 cost_matrix[i][j] += crossing_penalty * crossing_count / max(1, (n - 1))
 
-    return cost_matrix, pair_names
+    # Return debug info as well
+    debug_info = {
+        'boundary_positions': boundary_positions,
+        'source_chips': source_chips,
+        'target_chips': target_chips,
+        'source_layers': source_layers,
+        'target_layers': target_layers
+    }
+    return cost_matrix, pair_names, debug_info
 
 
 def compute_optimal_assignment(
@@ -429,14 +437,12 @@ def compute_optimal_assignment(
     get_source_centroid_func: Callable[[Tuple], Tuple[float, float]] = None,
     get_target_centroid_func: Callable[[Tuple], Tuple[float, float]] = None,
     get_layer_idx_func: Callable[[Tuple], int] = None
-) -> Optional[Dict[str, str]]:
+) -> Tuple[Optional[Dict[str, str]], Optional[List[Tuple[str, str]]]]:
     """
     Compute optimal target swaps using pairwise swap optimization.
 
-    Unlike the unconstrained Hungarian algorithm, this finds the best set of
-    independent 2-swaps (each element can only be in one swap). This matches
-    the physical constraint that swapping A↔B means A gets B's target and
-    B gets A's target.
+    First tries single-round pairwise optimization. If crossings remain and
+    multi-round swaps could achieve 0 crossings, returns a swap sequence instead.
 
     Args:
         pair_data: List of (name, data, sources, targets) for swappable pairs/nets
@@ -448,22 +454,28 @@ def compute_optimal_assignment(
         get_layer_idx_func: Function to extract layer index from endpoint
 
     Returns:
-        Dictionary mapping name -> target_name for swaps,
-        or None if no swaps improve the assignment.
-        Only includes pairs where assignment differs from original (diagonal).
+        (swaps_dict, swap_sequence) where:
+        - swaps_dict: Dict mapping name -> target_name for pairwise swaps, or None
+        - swap_sequence: List of (name_a, name_b) tuples for multi-round swaps, or None
+        Only one will be non-None. If both are None, no beneficial swaps found.
     """
     if not HAS_SCIPY:
         print("  Warning: scipy not available, cannot compute optimal assignment")
-        return None
+        return None, None
 
     if len(pair_data) < 2:
-        return None
+        return None, None
 
-    cost_matrix, pair_names = build_cost_matrix(
+    cost_matrix, pair_names, debug_info = build_cost_matrix(
         pair_data, config, pcb_data, use_boundary_ordering,
         get_source_centroid_func, get_target_centroid_func, get_layer_idx_func
     )
     n = len(pair_names)
+    boundary_positions = debug_info['boundary_positions']
+    source_chips = debug_info['source_chips']
+    target_chips = debug_info['target_chips']
+    source_layers = debug_info['source_layers']
+    target_layers = debug_info['target_layers']
 
     # Compute original (diagonal) cost - each source connects to its own target
     original_cost = sum(cost_matrix[i][i] for i in range(n))
@@ -503,7 +515,7 @@ def compute_optimal_assignment(
     # Only apply if optimal is strictly better
     if optimal_cost >= original_cost or not selected_swaps:
         print("  No beneficial swaps found")
-        return None
+        return None, None
 
     # Build swap dictionary from selected pairwise swaps
     swaps = {}
@@ -515,7 +527,126 @@ def compute_optimal_assignment(
     num_swaps = len(selected_swaps)
     print(f"  Improvement: {improvement:.2f} ({num_swaps} swap pair(s))")
 
-    return swaps
+    # Count crossings for pairwise swaps and check if multi-round can do better
+    def count_crossings_for_assignment(assignment):
+        """Count crossings for a given assignment."""
+        crossings = 0
+        crossing_pairs = []
+        for i in range(len(assignment)):
+            for k in range(i + 1, len(assignment)):
+                j = assignment[i]
+                l = assignment[k]
+                pos_ij = boundary_positions.get((i, j))
+                pos_kl = boundary_positions.get((k, l))
+                if pos_ij and pos_kl:
+                    if (source_chips[i] == source_chips[k] and
+                        target_chips[j] == target_chips[l]):
+                        if crossings_from_boundary_order(
+                            pos_ij[0], pos_ij[1], pos_kl[0], pos_kl[1]
+                        ):
+                            if config.crossing_layer_check:
+                                layers_ij = {source_layers[i], target_layers[j]}
+                                layers_kl = {source_layers[k], target_layers[l]}
+                                if not (layers_ij & layers_kl):
+                                    continue
+                            crossings += 1
+                            crossing_pairs.append((pair_names[i], pair_names[k]))
+        return crossings, crossing_pairs
+
+    # Build assignment for pairwise swaps
+    final_assignment = list(range(n))
+    for i, j in selected_swaps:
+        final_assignment[i] = j
+        final_assignment[j] = i
+
+    final_crossings, final_pairs = count_crossings_for_assignment(final_assignment)
+
+    # If there are still crossings, try multi-round greedy swaps
+    # Each round finds the best swap that reduces crossings
+    if final_crossings > 0 and use_boundary_ordering:
+        max_rounds = n * 2  # Limit iterations to prevent infinite loops
+        current_assignment = final_assignment[:]
+        # Start with the pairwise swaps already selected
+        swap_sequence = [(i, j) for i, j in selected_swaps]
+        current_crossings = final_crossings
+
+        for round_num in range(max_rounds):
+            # Find the swap that reduces crossings the most
+            best_swap = None
+            best_new_crossings = current_crossings
+
+            for i in range(n):
+                for j in range(i + 1, n):
+                    # Try swapping i and j's target assignments
+                    test_assignment = current_assignment[:]
+                    test_assignment[i], test_assignment[j] = test_assignment[j], test_assignment[i]
+                    new_crossings, _ = count_crossings_for_assignment(test_assignment)
+
+                    if new_crossings < best_new_crossings:
+                        best_new_crossings = new_crossings
+                        best_swap = (i, j)
+
+            if best_swap is None or best_new_crossings >= current_crossings:
+                # No improvement possible
+                break
+
+            # Apply the best swap
+            i, j = best_swap
+            current_assignment[i], current_assignment[j] = current_assignment[j], current_assignment[i]
+            swap_sequence.append((i, j))
+            current_crossings = best_new_crossings
+
+            if current_crossings == 0:
+                break
+
+        if swap_sequence and current_crossings < final_crossings:
+            swap_sequence_names = [(pair_names[i], pair_names[j]) for i, j in swap_sequence]
+
+            print(f"  Crossings: pairwise={final_crossings}, multi-round={current_crossings}")
+            print(f"  Using multi-round swaps ({len(swap_sequence)} rounds):")
+            print(f"    Swap sequence: {swap_sequence_names}")
+
+            return None, swap_sequence_names
+
+    # Debug output for verbose mode
+    if config.verbose and use_boundary_ordering:
+        original_crossings, _ = count_crossings_for_assignment(list(range(n)))
+        print(f"  Crossings: {original_crossings} -> {final_crossings}")
+
+        # Show all source and target boundary positions
+        print(f"  Source boundary positions (sorted):")
+        src_positions = []
+        for i in range(n):
+            pos = boundary_positions.get((i, i))
+            if pos:
+                src_positions.append((pos[0], pair_names[i]))
+        for pos, name in sorted(src_positions):
+            print(f"    {name}: {pos:.4f}")
+
+        print(f"  Target boundary positions (sorted):")
+        tgt_positions = []
+        for j in range(n):
+            pos = boundary_positions.get((j, j))
+            if pos:
+                tgt_positions.append((pos[1], pair_names[j]))
+        for pos, name in sorted(tgt_positions):
+            print(f"    {name}: {pos:.4f}")
+
+        if final_crossings > 0:
+            print(f"  Remaining crossing pairs: {final_pairs}")
+            for name_i, name_k in final_pairs:
+                idx_i = pair_names.index(name_i)
+                idx_k = pair_names.index(name_k)
+                j = final_assignment[idx_i]
+                l = final_assignment[idx_k]
+                pos_ij = boundary_positions.get((idx_i, j))
+                pos_kl = boundary_positions.get((idx_k, l))
+                if pos_ij and pos_kl:
+                    print(f"    {name_i}: src={pos_ij[0]:.4f} tgt={pos_ij[1]:.4f}")
+                    print(f"    {name_k}: src={pos_kl[0]:.4f} tgt={pos_kl[1]:.4f}")
+            print(f"  NOTE: No permutation achieves 0 crossings (geometric constraint)")
+
+    return swaps, None
 
 
 def find_pad_in_positions(pads: List[Pad], positions: Set[Tuple[float, float]],
@@ -1093,39 +1224,56 @@ def apply_single_ended_target_swaps(
 
     print(f"\nComputing optimal target assignment for {len(net_data)} single-ended net(s)...")
 
-    # Compute optimal swaps using Hungarian algorithm with single-ended centroid functions
-    optimal_swaps = compute_optimal_assignment(
+    # Compute optimal swaps (may return dict or sequence)
+    optimal_swaps_dict, swap_sequence = compute_optimal_assignment(
         net_data, config, pcb_data, use_boundary_ordering,
         get_source_centroid_func=get_single_source_centroid,
         get_target_centroid_func=get_single_target_centroid,
         get_layer_idx_func=lambda e: e[2]  # Single-ended: layer_idx at position 2
     )
 
-    if not optimal_swaps:
+    if not optimal_swaps_dict and not swap_sequence:
         return target_swaps, target_swap_info
 
     # Build lookup for net_data by name
     net_lookup = {name: (net_id, sources, targets)
                   for name, net_id, sources, targets in net_data}
 
-    # Apply each swap pair (only process each pair once)
-    processed = set()
-    for src_name, tgt_name in optimal_swaps.items():
-        if src_name in processed or tgt_name in processed:
-            continue
+    if swap_sequence:
+        # Multi-round swaps: apply in sequence
+        for src_name, tgt_name in swap_sequence:
+            n1_net_id, n1_sources, n1_targets = net_lookup[src_name]
+            n2_net_id, n2_sources, n2_targets = net_lookup[tgt_name]
 
-        processed.add(src_name)
-        processed.add(tgt_name)
+            apply_single_ended_swap(
+                pcb_data,
+                src_name, n1_net_id, n1_targets,
+                tgt_name, n2_net_id, n2_targets,
+                target_swaps, target_swap_info
+            )
 
-        n1_net_id, n1_sources, n1_targets = net_lookup[src_name]
-        n2_net_id, n2_sources, n2_targets = net_lookup[tgt_name]
+            # Update lookup with swapped targets for subsequent rounds
+            net_lookup[src_name] = (n1_net_id, n1_sources, n2_targets)
+            net_lookup[tgt_name] = (n2_net_id, n2_sources, n1_targets)
+    else:
+        # Single-round pairwise swaps: apply each swap pair once
+        processed = set()
+        for src_name, tgt_name in optimal_swaps_dict.items():
+            if src_name in processed or tgt_name in processed:
+                continue
 
-        apply_single_ended_swap(
-            pcb_data,
-            src_name, n1_net_id, n1_targets,
-            tgt_name, n2_net_id, n2_targets,
-            target_swaps, target_swap_info
-        )
+            processed.add(src_name)
+            processed.add(tgt_name)
+
+            n1_net_id, n1_sources, n1_targets = net_lookup[src_name]
+            n2_net_id, n2_sources, n2_targets = net_lookup[tgt_name]
+
+            apply_single_ended_swap(
+                pcb_data,
+                src_name, n1_net_id, n1_targets,
+                tgt_name, n2_net_id, n2_targets,
+                target_swaps, target_swap_info
+            )
 
     return target_swaps, target_swap_info
 
@@ -1182,34 +1330,55 @@ def apply_target_swaps(
 
     print(f"\nComputing optimal target assignment for {len(pair_data)} pairs...")
 
-    # Compute optimal swaps using Hungarian algorithm
-    optimal_swaps = compute_optimal_assignment(pair_data, config, pcb_data, use_boundary_ordering)
+    # Compute optimal swaps (may return dict or sequence)
+    optimal_swaps_dict, swap_sequence = compute_optimal_assignment(
+        pair_data, config, pcb_data, use_boundary_ordering
+    )
 
-    if not optimal_swaps:
+    if not optimal_swaps_dict and not swap_sequence:
         return target_swaps, target_swap_info
 
     # Build lookup for pair_data by name
     pair_lookup = {name: (pair, sources, targets)
                    for name, pair, sources, targets in pair_data}
 
-    # Apply each swap pair (only process each pair once)
-    processed = set()
-    for src_name, tgt_name in optimal_swaps.items():
-        if src_name in processed or tgt_name in processed:
-            continue
+    if swap_sequence:
+        # Multi-round swaps: apply in sequence
+        # Each swap operates on the current state after previous swaps
+        for src_name, tgt_name in swap_sequence:
+            # Get current targets for each pair (may have been swapped already)
+            p1_pair, p1_sources, p1_targets = pair_lookup[src_name]
+            p2_pair, p2_sources, p2_targets = pair_lookup[tgt_name]
 
-        processed.add(src_name)
-        processed.add(tgt_name)
+            apply_single_swap(
+                pcb_data,
+                src_name, p1_pair, p1_targets,
+                tgt_name, p2_pair, p2_targets,
+                target_swaps, target_swap_info
+            )
 
-        p1_pair, p1_sources, p1_targets = pair_lookup[src_name]
-        p2_pair, p2_sources, p2_targets = pair_lookup[tgt_name]
+            # Update lookup with swapped targets for subsequent rounds
+            pair_lookup[src_name] = (p1_pair, p1_sources, p2_targets)
+            pair_lookup[tgt_name] = (p2_pair, p2_sources, p1_targets)
+    else:
+        # Single-round pairwise swaps: apply each swap pair once
+        processed = set()
+        for src_name, tgt_name in optimal_swaps_dict.items():
+            if src_name in processed or tgt_name in processed:
+                continue
 
-        apply_single_swap(
-            pcb_data,
-            src_name, p1_pair, p1_targets,
-            tgt_name, p2_pair, p2_targets,
-            target_swaps, target_swap_info
-        )
+            processed.add(src_name)
+            processed.add(tgt_name)
+
+            p1_pair, p1_sources, p1_targets = pair_lookup[src_name]
+            p2_pair, p2_sources, p2_targets = pair_lookup[tgt_name]
+
+            apply_single_swap(
+                pcb_data,
+                src_name, p1_pair, p1_targets,
+                tgt_name, p2_pair, p2_targets,
+                target_swaps, target_swap_info
+            )
 
     return target_swaps, target_swap_info
 
