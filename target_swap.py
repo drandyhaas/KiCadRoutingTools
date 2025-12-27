@@ -366,7 +366,8 @@ def find_pad_in_positions(pads: List[Pad], positions: Set[Tuple[float, float]],
 
 def ensure_consistent_target_component(
     pair_data: List[Tuple[str, 'DiffPair', List, List]],
-    pcb_data: PCBData
+    pcb_data: PCBData,
+    quiet: bool = False
 ) -> List[Tuple[str, 'DiffPair', List, List]]:
     """
     Ensure all source/target endpoints are consistently ordered by component.
@@ -374,6 +375,11 @@ def ensure_consistent_target_component(
     Uses alphabetical component ordering: alphabetically-first component is always
     the source, alphabetically-second is always the target. This ensures consistent
     ordering across ALL pairs for crossing detection.
+
+    Args:
+        pair_data: List of (pair_name, pair, sources, targets) tuples
+        pcb_data: PCB data for pad lookup
+        quiet: If True, suppress status messages
     """
     def find_component_for_endpoint(x: float, y: float, net_id: int) -> Optional[str]:
         """Find component of the closest pad to this position on this net."""
@@ -414,7 +420,7 @@ def ensure_consistent_target_component(
             # Can't determine, keep as-is
             result.append((pair_name, pair, sources, targets))
 
-    if swapped_count > 0:
+    if swapped_count > 0 and not quiet:
         # Determine what the source component is now (should be same for all)
         if result:
             src = result[0][2][0]  # First pair's source
@@ -1060,15 +1066,26 @@ def generate_debug_boundary_labels(
     """
     labels = []
 
-    # Gather endpoints
-    source_centroids = []
-    target_centroids = []
-    pair_names = []
-
+    # Gather endpoints (same as apply_target_swaps)
+    pair_data: List[Tuple[str, DiffPair, List, List]] = []
     for pair_name, pair in swappable_pairs:
         sources, targets, error = get_endpoints_func(pair)
         if error or not sources or not targets:
             continue
+        pair_data.append((pair_name, pair, sources, targets))
+
+    if len(pair_data) < 2:
+        return labels
+
+    # Normalize source/target to ensure consistent component ordering
+    # (same normalization as apply_target_swaps uses)
+    pair_data = ensure_consistent_target_component(pair_data, pcb_data, quiet=True)
+
+    # Extract centroids from normalized data
+    source_centroids = []
+    target_centroids = []
+    pair_names = []
+    for pair_name, pair, sources, targets in pair_data:
         src = sources[0]
         tgt = targets[0]
         source_centroids.append(get_source_centroid(src))

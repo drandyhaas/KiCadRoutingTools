@@ -1101,6 +1101,15 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             tgt_chip = identify_chip_for_point(endpoints[1], chips)
 
             if src_chip and tgt_chip and src_chip != tgt_chip:
+                # Normalize source/target by component reference (alphabetically)
+                # This ensures consistent ordering across all units for crossing detection
+                # (same normalization as used in target_swap and debug labels)
+                if src_chip.reference > tgt_chip.reference:
+                    # Swap endpoints so alphabetically-first chip is always source
+                    endpoints = [endpoints[1], endpoints[0]]
+                    src_chip, tgt_chip = tgt_chip, src_chip
+                    unit_endpoints[unit_id] = endpoints
+
                 src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
                 # Use OPPOSITE traversal directions: source clockwise, target counter-clockwise
                 # This makes the two chips "face each other" when unrolled.
