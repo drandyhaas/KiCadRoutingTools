@@ -812,7 +812,8 @@ def apply_single_ended_swap(
 
 def ensure_consistent_single_ended_target_component(
     net_data: List[Tuple[str, int, List, List]],
-    pcb_data: PCBData
+    pcb_data: PCBData,
+    quiet: bool = False
 ) -> List[Tuple[str, int, List, List]]:
     """
     Ensure all source/target endpoints are consistently ordered by component.
@@ -824,6 +825,7 @@ def ensure_consistent_single_ended_target_component(
     Args:
         net_data: List of (net_name, net_id, sources, targets) tuples
         pcb_data: PCB data for pad lookup
+        quiet: If True, suppress status messages
 
     Returns:
         Updated net_data with source/target potentially swapped
@@ -866,7 +868,7 @@ def ensure_consistent_single_ended_target_component(
             # Can't determine, keep as-is
             result.append((net_name, net_id, sources, targets))
 
-    if swapped_count > 0:
+    if swapped_count > 0 and not quiet:
         # Determine what the source component is now (should be same for all)
         if result:
             src = result[0][2][0]  # First net's source
@@ -1141,6 +1143,107 @@ def generate_debug_boundary_labels(
         from chip_boundary import _project_to_boundary
         projected, edge = _project_to_boundary(centroid, tgt_chip.bounds)
         # Rotate labels on top/bottom edges by 90 degrees
+        angle = 90 if edge in ('top', 'bottom') else 0
+        labels.append({
+            'text': f"T{order_num}",
+            'x': projected[0],
+            'y': projected[1],
+            'layer': "User.6",
+            'angle': angle
+        })
+
+    return labels
+
+
+def generate_single_ended_debug_labels(
+    pcb_data: PCBData,
+    swappable_nets: List[Tuple[str, int]],
+    get_endpoints_func: Callable[[int], Tuple[List, List, Optional[str]]]
+) -> List[dict]:
+    """
+    Generate debug labels showing boundary position ordering for single-ended nets.
+
+    Args:
+        pcb_data: PCB data for chip detection
+        swappable_nets: List of (net_name, net_id) to label
+        get_endpoints_func: Function to get endpoints for a net_id
+
+    Returns:
+        List of label dicts with 'text', 'x', 'y', 'layer' keys
+    """
+    labels = []
+
+    # Gather endpoints (same as apply_single_ended_target_swaps)
+    net_data: List[Tuple[str, int, List, List]] = []
+    for net_name, net_id in swappable_nets:
+        sources, targets, error = get_endpoints_func(net_id)
+        if error or not sources or not targets:
+            continue
+        net_data.append((net_name, net_id, sources, targets))
+
+    if len(net_data) < 2:
+        return labels
+
+    # Normalize source/target to ensure consistent component ordering
+    # (same normalization as apply_single_ended_target_swaps uses)
+    net_data = ensure_consistent_single_ended_target_component(net_data, pcb_data, quiet=True)
+
+    # Extract centroids from normalized data
+    source_centroids = []
+    target_centroids = []
+    net_names = []
+    for net_name, net_id, sources, targets in net_data:
+        src = sources[0]
+        tgt = targets[0]
+        source_centroids.append(get_single_source_centroid(src))
+        target_centroids.append(get_single_target_centroid(tgt))
+        net_names.append(net_name)
+
+    if len(source_centroids) < 2:
+        return labels
+
+    # Build chip list and identify chips
+    chips = build_chip_list(pcb_data)
+
+    # Find the two main chips (source and target)
+    src_chip = identify_chip_for_point(source_centroids[0], chips)
+    tgt_chip = identify_chip_for_point(target_centroids[0], chips)
+
+    if not src_chip or not tgt_chip or src_chip == tgt_chip:
+        return labels
+
+    src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
+
+    # Generate labels for source positions (numbered by order)
+    src_positions = []
+    for i, centroid in enumerate(source_centroids):
+        pos = compute_boundary_position(src_chip, centroid, src_far, clockwise=True)
+        src_positions.append((pos, centroid, net_names[i]))
+
+    # Sort and number
+    src_sorted = sorted(src_positions, key=lambda x: x[0])
+    for order_num, (pos, centroid, name) in enumerate(src_sorted, start=1):
+        from chip_boundary import _project_to_boundary
+        projected, edge = _project_to_boundary(centroid, src_chip.bounds)
+        angle = 90 if edge in ('top', 'bottom') else 0
+        labels.append({
+            'text': f"S{order_num}",
+            'x': projected[0],
+            'y': projected[1],
+            'layer': "User.6",
+            'angle': angle
+        })
+
+    # Generate labels for target positions (counter-clockwise, opposite of source)
+    tgt_positions = []
+    for i, centroid in enumerate(target_centroids):
+        pos = compute_boundary_position(tgt_chip, centroid, tgt_far, clockwise=False)
+        tgt_positions.append((pos, centroid, net_names[i]))
+
+    tgt_sorted = sorted(tgt_positions, key=lambda x: x[0])
+    for order_num, (pos, centroid, name) in enumerate(tgt_sorted, start=1):
+        from chip_boundary import _project_to_boundary
+        projected, edge = _project_to_boundary(centroid, tgt_chip.bounds)
         angle = 90 if edge in ('top', 'bottom') else 0
         labels.append({
             'text': f"T{order_num}",
