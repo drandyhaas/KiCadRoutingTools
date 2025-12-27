@@ -564,6 +564,7 @@ def compute_optimal_assignment(
     # If there are still crossings, try multi-round greedy swaps
     # Each round finds the best swap that reduces crossings
     if final_crossings > 0 and use_boundary_ordering:
+        print(f"  Pairwise swaps leave {final_crossings} crossings, trying multi-round optimization...")
         max_rounds = n * 2  # Limit iterations to prevent infinite loops
         current_assignment = final_assignment[:]
         # Start with the pairwise swaps already selected
@@ -588,15 +589,18 @@ def compute_optimal_assignment(
 
             if best_swap is None or best_new_crossings >= current_crossings:
                 # No improvement possible
+                print(f"    Round {round_num + 1}: no improvement found, stopping")
                 break
 
             # Apply the best swap
             i, j = best_swap
             current_assignment[i], current_assignment[j] = current_assignment[j], current_assignment[i]
             swap_sequence.append((i, j))
+            print(f"    Round {round_num + 1}: {current_crossings} -> {best_new_crossings} crossings (swap {pair_names[i]} <-> {pair_names[j]})")
             current_crossings = best_new_crossings
 
             if current_crossings == 0:
+                print(f"    Achieved 0 crossings!")
                 break
 
         if swap_sequence and current_crossings < final_crossings:

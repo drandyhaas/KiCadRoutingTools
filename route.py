@@ -46,6 +46,12 @@ from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_conn
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis
 import re
 
+# ANSI color codes for terminal output
+RED = '\033[91m'
+GREEN = '\033[92m'
+YELLOW = '\033[93m'
+RESET = '\033[0m'
+
 # Add rust_router directory to path for importing the compiled module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 
@@ -1418,7 +1424,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Route differential pairs first (they're more constrained)
     for pair_name, pair in diff_pair_ids_to_route:
         route_index += 1
-        print(f"\n[{route_index}/{total_routes}] Routing diff pair {pair_name}")
+        failed_str = f" ({failed} failed)" if failed > 0 else ""
+        print(f"\n[{route_index}/{total_routes}{failed_str}] Routing diff pair {pair_name}")
         print(f"  P: {pair.p_net_name} (id={pair.p_net_id})")
         print(f"  N: {pair.n_net_name} (id={pair.n_net_id})")
         print("-" * 40)
@@ -1574,7 +1581,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         # If probe rip-up exhausted attempts without success, restore all and mark as failed
         if result and result.get('probe_blocked'):
-            print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), route FAILED")
+            print(f"  {RED}Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), route FAILED{RESET}")
             for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
                 if ripped_saved:
                     add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
@@ -1857,9 +1864,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 if retry_blocked_cells:
                                     new_blockers = analyze_frontier_blocking(
                                         retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                        exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                                        exclude_net_ids={pair.p_net_id, pair.n_net_id} | set(b.net_id for b in rippable_blockers),
                                         extra_clearance=diff_pair_extra_clearance
                                     )
+                                    if new_blockers:
+                                        print(f"    Retry blocked by {len(new_blockers)} net(s) ({len(retry_blocked_cells)} cells)")
                                     # Add any new rippable blockers not already in the list
                                     for b in new_blockers:
                                         if b.net_id in routed_results:
@@ -1868,13 +1877,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                                 seen_canonical_ids.add(canonical)
                                                 rippable_blockers.append(b)
                                                 if b.net_id in diff_pair_by_net_id:
-                                                    print(f"    New blocker found: {diff_pair_by_net_id[b.net_id][0]}")
+                                                    print(f"    Added new blocker from retry: {diff_pair_by_net_id[b.net_id][0]}")
                                                 else:
-                                                    print(f"    New blocker found: {b.net_name}")
+                                                    print(f"    Added new blocker from retry: {b.net_name}")
+                                else:
+                                    print(f"    No blocked cells from retry to analyze")
 
                     # If all N levels failed, restore all ripped nets
                     if not retry_succeeded and ripped_items:
-                        print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                        print(f"  {RED}All rip-up attempts failed: Restoring {len(ripped_items)} net(s){RESET}")
                         for net_id, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
                             restore_net(net_id, saved_result, ripped_ids, was_in_results,
                                        pcb_data, routed_net_ids, routed_net_paths,
@@ -1884,6 +1895,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 successful += 1
 
             if not ripped_up:
+                print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 failed += 1
 
     # Route single-ended nets
@@ -1894,7 +1906,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             break
 
         route_index += 1
-        print(f"\n[{route_index}/{total_routes}] Routing {net_name} (id={net_id})")
+        failed_str = f" ({failed} failed)" if failed > 0 else ""
+        print(f"\n[{route_index}/{total_routes}{failed_str}] Routing {net_name} (id={net_id})")
         print("-" * 40)
 
         start_time = time.time()
@@ -2182,8 +2195,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 if retry_blocked_cells:
                                     new_blockers = analyze_frontier_blocking(
                                         retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                        exclude_net_ids={net_id},
+                                        exclude_net_ids={net_id} | set(b.net_id for b in rippable_blockers),
                                     )
+                                    if new_blockers:
+                                        print(f"    Retry blocked by {len(new_blockers)} net(s) ({len(retry_blocked_cells)} cells)")
                                     for b in new_blockers:
                                         if b.net_id in routed_results:
                                             canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
@@ -2191,13 +2206,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                                 seen_canonical_ids.add(canonical)
                                                 rippable_blockers.append(b)
                                                 if b.net_id in diff_pair_by_net_id:
-                                                    print(f"    New blocker found: {diff_pair_by_net_id[b.net_id][0]}")
+                                                    print(f"    Added new blocker from retry: {diff_pair_by_net_id[b.net_id][0]}")
                                                 else:
-                                                    print(f"    New blocker found: {b.net_name}")
+                                                    print(f"    Added new blocker from retry: {b.net_name}")
+                                else:
+                                    print(f"    No blocked cells from retry to analyze")
 
                     # If all N levels failed, restore all ripped nets
                     if not retry_succeeded and ripped_items:
-                        print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                        print(f"  {RED}All rip-up attempts failed: Restoring {len(ripped_items)} net(s){RESET}")
                         for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
                             restore_net(rid, saved_result, ripped_ids, was_in_results,
                                        pcb_data, routed_net_ids, routed_net_paths,
@@ -2207,6 +2224,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 successful += 1
 
             if not ripped_up:
+                print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 failed += 1
 
     # Unified reroute loop - handles all nets ripped during diff pair or single-ended routing
@@ -2218,7 +2236,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _, ripped_net_name, ripped_net_id = reroute_item
             route_index += 1
             current_total = total_routes + len(reroute_queue)
-            print(f"\n[REROUTE {route_index}/{current_total}] Re-routing ripped net {ripped_net_name}")
+            failed_str = f" ({failed} failed)" if failed > 0 else ""
+            print(f"\n[REROUTE {route_index}/{current_total}{failed_str}] Re-routing ripped net {ripped_net_name}")
             print("-" * 40)
 
             start_time = time.time()
@@ -2393,10 +2412,35 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 break
                             else:
                                 print(f"  REROUTE RETRY FAILED (N={N})")
+                                # Analyze blocked cells from failed retry to find additional blockers
+                                if retry_result:
+                                    retry_fwd = retry_result.get('blocked_cells_forward', [])
+                                    retry_bwd = retry_result.get('blocked_cells_backward', [])
+                                    retry_blocked = list(set(retry_fwd + retry_bwd))
+                                    if retry_blocked:
+                                        retry_blockers = analyze_frontier_blocking(
+                                            retry_blocked, pcb_data, config, routed_net_paths,
+                                            exclude_net_ids={ripped_net_id} | set(b.net_id for b in rippable_blockers),
+                                        )
+                                        if retry_blockers:
+                                            print(f"    Retry blocked by {len(retry_blockers)} net(s) ({len(retry_blocked)} cells)")
+                                        # Add new rippable blockers not already in list
+                                        for rb in retry_blockers:
+                                            if rb.net_id in routed_results:
+                                                canonical = get_canonical_net_id(rb.net_id, diff_pair_by_net_id)
+                                                if canonical not in seen_canonical_ids:
+                                                    seen_canonical_ids.add(canonical)
+                                                    rippable_blockers.append(rb)
+                                                    if rb.net_id in diff_pair_by_net_id:
+                                                        print(f"    Added new blocker from retry: {diff_pair_by_net_id[rb.net_id][0]}")
+                                                    else:
+                                                        print(f"    Added new blocker from retry: {rb.net_name}")
+                                    else:
+                                        print(f"    No blocked cells from retry to analyze")
 
                         # If all N levels failed, restore all ripped nets
                         if not reroute_succeeded and ripped_items:
-                            print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                            print(f"  {RED}All rip-up attempts failed: Restoring {len(ripped_items)} net(s){RESET}")
                             for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in reversed(ripped_items):
                                 restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
@@ -2406,6 +2450,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     successful += 1
 
                 if not reroute_succeeded:
+                    if not ripped_items:
+                        print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                     failed += 1
 
         elif reroute_item[0] == 'diff_pair':
@@ -2413,7 +2459,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _, ripped_pair_name, ripped_pair = reroute_item
             route_index += 1
             current_total = total_routes + len(reroute_queue)
-            print(f"\n[REROUTE {route_index}/{current_total}] Re-routing ripped diff pair {ripped_pair_name}")
+            failed_str = f" ({failed} failed)" if failed > 0 else ""
+            print(f"\n[REROUTE {route_index}/{current_total}{failed_str}] Re-routing ripped diff pair {ripped_pair_name}")
             print("-" * 40)
 
             start_time = time.time()
@@ -2647,10 +2694,39 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 break
                             else:
                                 print(f"  REROUTE RETRY FAILED (N={N})")
+                                # Analyze blocked cells from failed retry to find additional blockers
+                                if retry_result:
+                                    if retry_result.get('probe_blocked'):
+                                        retry_blocked = retry_result.get('blocked_cells', [])
+                                    else:
+                                        retry_fwd = retry_result.get('blocked_cells_forward', [])
+                                        retry_bwd = retry_result.get('blocked_cells_backward', [])
+                                        retry_blocked = list(set(retry_fwd + retry_bwd))
+                                    if retry_blocked:
+                                        retry_blockers = analyze_frontier_blocking(
+                                            retry_blocked, pcb_data, config, routed_net_paths,
+                                            exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id} | set(b.net_id for b in rippable_blockers),
+                                            extra_clearance=diff_pair_extra_clearance
+                                        )
+                                        if retry_blockers:
+                                            print(f"    Retry blocked by {len(retry_blockers)} net(s) ({len(retry_blocked)} cells)")
+                                        # Add new rippable blockers not already in list
+                                        for rb in retry_blockers:
+                                            if rb.net_id in routed_results:
+                                                canonical = get_canonical_net_id(rb.net_id, diff_pair_by_net_id)
+                                                if canonical not in seen_canonical_ids:
+                                                    seen_canonical_ids.add(canonical)
+                                                    rippable_blockers.append(rb)
+                                                    if rb.net_id in diff_pair_by_net_id:
+                                                        print(f"    Added new blocker from retry: {diff_pair_by_net_id[rb.net_id][0]}")
+                                                    else:
+                                                        print(f"    Added new blocker from retry: {rb.net_name}")
+                                    else:
+                                        print(f"    No blocked cells from retry to analyze")
 
                         # If all N levels failed, restore all ripped nets
                         if not reroute_succeeded and ripped_items:
-                            print(f"  All rip-up attempts failed: Restoring {len(ripped_items)} net(s)")
+                            print(f"  {RED}All rip-up attempts failed: Restoring {len(ripped_items)} net(s){RESET}")
                             for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in reversed(ripped_items):
                                 restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
@@ -2660,6 +2736,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     successful += 1
 
                 if not reroute_succeeded:
+                    if not ripped_items:
+                        print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                     failed += 1
 
     # Notify visualization callback that all routing is complete
@@ -2690,9 +2768,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print("Routing complete")
     print("=" * 60)
     if diff_pair_ids_to_route:
-        print(f"  Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed")
+        if failed_diff_pairs:
+            print(f"  {RED}Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed ({len(failed_diff_pairs)} FAILED){RESET}")
+        else:
+            print(f"  Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed")
     if single_ended_nets:
-        print(f"  Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed")
+        if failed_single:
+            print(f"  {RED}Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed ({len(failed_single)} FAILED){RESET}")
+        else:
+            print(f"  Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed")
     if ripup_success_pairs:
         print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
     if rerouted_pairs:

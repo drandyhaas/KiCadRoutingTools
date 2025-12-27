@@ -913,7 +913,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         else:
             # forward: first=source, second=target
             physical_endpoint = 'source' if blocked_endpoint == 'first' else 'target'
-        print(f"  Probe {first_label} blocked at {physical_endpoint}")
+        print(f"  Probe {first_label} blocked at {physical_endpoint} after {first_probe_iters} iterations")
         return {
             'probe_blocked': True,
             'blocked_at': physical_endpoint,
@@ -949,7 +949,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             else:
                 # forward: first=source, second=target
                 physical_endpoint = 'source' if blocked_endpoint == 'first' else 'target'
-            print(f"  Probe {second_label} blocked at {physical_endpoint}")
+            print(f"  Probe {second_label} blocked at {physical_endpoint} after {second_probe_iters} iterations")
             return {
                 'probe_blocked': True,
                 'blocked_at': physical_endpoint,
