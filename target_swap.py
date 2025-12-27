@@ -150,9 +150,14 @@ def get_stub_exit_edge(
 
     # Determine exit edge based on primary direction
     if abs(dx) > abs(dy):
-        return 'right' if dx > 0 else 'left'
+        edge = 'right' if dx > 0 else 'left'
     else:
-        return 'bottom' if dy > 0 else 'top'
+        edge = 'bottom' if dy > 0 else 'top'
+
+    # Debug output (enable with verbose)
+    # print(f"    DEBUG stub net={net_id}: pad={pad_end}, tip={stub_tip}, dx={dx:.1f}, dy={dy:.1f} -> {edge}")
+
+    return edge
 
 
 def project_to_edge(
@@ -255,8 +260,15 @@ def build_cost_matrix(
         source_layers.append(get_layer_idx_func(src))
         target_centroids.append(get_target_centroid_func(tgt))
         target_layers.append(get_layer_idx_func(tgt))
-        # Store net_id for single-ended nets (data is int), None for diff pairs
-        net_ids.append(data if isinstance(data, int) else None)
+        # Store net_id for stub direction tracing
+        # For single-ended: data is int (net_id)
+        # For diff pairs: data is DiffPair, use p_net_id
+        if isinstance(data, int):
+            net_ids.append(data)
+        elif hasattr(data, 'p_net_id'):
+            net_ids.append(data.p_net_id)
+        else:
+            net_ids.append(None)
 
     # Build chip list and boundary positions if using boundary ordering
     chips = []
@@ -271,7 +283,7 @@ def build_cost_matrix(
         source_chips = [identify_chip_for_point(c, chips) for c in source_centroids]
         target_chips = [identify_chip_for_point(c, chips) for c in target_centroids]
 
-        # Precompute stub exit edges for single-ended nets (for accurate boundary position)
+        # Precompute stub exit edges (for accurate boundary position)
         src_exit_edges = []
         tgt_exit_edges = []
         for i in range(n):
@@ -413,7 +425,12 @@ def compute_optimal_assignment(
     get_layer_idx_func: Callable[[Tuple], int] = None
 ) -> Optional[Dict[str, str]]:
     """
-    Compute optimal target swaps using Hungarian algorithm.
+    Compute optimal target swaps using pairwise swap optimization.
+
+    Unlike the unconstrained Hungarian algorithm, this finds the best set of
+    independent 2-swaps (each element can only be in one swap). This matches
+    the physical constraint that swapping A↔B means A gets B's target and
+    B gets A's target.
 
     Args:
         pair_data: List of (name, data, sources, targets) for swappable pairs/nets
@@ -445,33 +462,54 @@ def compute_optimal_assignment(
     # Compute original (diagonal) cost - each source connects to its own target
     original_cost = sum(cost_matrix[i][i] for i in range(n))
 
-    # Compute optimal assignment using Hungarian algorithm
-    import numpy as np
-    cost_array = np.array(cost_matrix)
-    row_ind, col_ind = linear_sum_assignment(cost_array)
-    optimal_cost = sum(cost_matrix[row_ind[i]][col_ind[i]] for i in range(n))
+    # Find best pairwise swaps using maximum weighted matching
+    # For each pair (i, j), compute the cost savings from swapping
+    # Savings = (cost[i][i] + cost[j][j]) - (cost[i][j] + cost[j][i])
+    swap_savings = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            original = cost_matrix[i][i] + cost_matrix[j][j]
+            swapped = cost_matrix[i][j] + cost_matrix[j][i]
+            savings = original - swapped
+            if savings > 0:
+                swap_savings.append((savings, i, j))
+
+    # Sort by savings (highest first) and greedily select non-overlapping swaps
+    swap_savings.sort(reverse=True)
+    selected_swaps = []
+    used = set()
+    for savings, i, j in swap_savings:
+        if i not in used and j not in used:
+            selected_swaps.append((i, j))
+            used.add(i)
+            used.add(j)
+
+    # Compute optimal cost with selected swaps
+    optimal_cost = original_cost
+    for i, j in selected_swaps:
+        # Remove original costs, add swapped costs
+        optimal_cost -= cost_matrix[i][i] + cost_matrix[j][j]
+        optimal_cost += cost_matrix[i][j] + cost_matrix[j][i]
 
     print(f"  Original assignment cost: {original_cost:.2f}")
     print(f"  Optimal assignment cost:  {optimal_cost:.2f}")
 
     # Only apply if optimal is strictly better
-    if optimal_cost >= original_cost:
+    if optimal_cost >= original_cost or not selected_swaps:
         print("  No beneficial swaps found")
         return None
 
-    # Build swap dictionary for non-diagonal assignments
+    # Build swap dictionary from selected pairwise swaps
     swaps = {}
-    for i in range(n):
-        src_pair = pair_names[row_ind[i]]
-        tgt_pair = pair_names[col_ind[i]]
-        if src_pair != tgt_pair:
-            swaps[src_pair] = tgt_pair
+    for i, j in selected_swaps:
+        swaps[pair_names[i]] = pair_names[j]
+        swaps[pair_names[j]] = pair_names[i]
 
     improvement = original_cost - optimal_cost
-    num_swaps = len(swaps) // 2  # Each swap involves 2 pairs
+    num_swaps = len(selected_swaps)
     print(f"  Improvement: {improvement:.2f} ({num_swaps} swap pair(s))")
 
-    return swaps if swaps else None
+    return swaps
 
 
 def find_pad_in_positions(pads: List[Pad], positions: Set[Tuple[float, float]],
