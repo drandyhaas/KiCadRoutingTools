@@ -1730,7 +1730,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             # Find and move it to position N-1 if needed
                             for idx, b in enumerate(rippable_blockers):
                                 if get_canonical_net_id(b.net_id, diff_pair_by_net_id) == next_canonical:
-                                    if idx != N - 1:
+                                    if idx != N - 1 and N - 1 < len(rippable_blockers):
                                         # Swap to position N-1
                                         rippable_blockers[idx], rippable_blockers[N-1] = rippable_blockers[N-1], rippable_blockers[idx]
                                     break
@@ -2110,7 +2110,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             # Find and move it to position N-1 if needed
                             for idx, b in enumerate(rippable_blockers):
                                 if get_canonical_net_id(b.net_id, diff_pair_by_net_id) == next_canonical:
-                                    if idx != N - 1:
+                                    if idx != N - 1 and N - 1 < len(rippable_blockers):
                                         rippable_blockers[idx], rippable_blockers[N-1] = rippable_blockers[N-1], rippable_blockers[idx]
                                     break
 
@@ -2380,7 +2380,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 # Find and move it to position N-1 if needed
                                 for idx, b in enumerate(rippable_blockers):
                                     if get_canonical_net_id(b.net_id, diff_pair_by_net_id) == next_canonical:
-                                        if idx != N - 1:
+                                        if idx != N - 1 and N - 1 < len(rippable_blockers):
                                             rippable_blockers[idx], rippable_blockers[N-1] = rippable_blockers[N-1], rippable_blockers[idx]
                                         break
 
@@ -2660,7 +2660,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 # Find and move it to position N-1 if needed
                                 for idx, b in enumerate(rippable_blockers):
                                     if get_canonical_net_id(b.net_id, diff_pair_by_net_id) == next_canonical:
-                                        if idx != N - 1:
+                                        if idx != N - 1 and N - 1 < len(rippable_blockers):
                                             rippable_blockers[idx], rippable_blockers[N-1] = rippable_blockers[N-1], rippable_blockers[idx]
                                         break
 
