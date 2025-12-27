@@ -640,6 +640,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                             blocked.append((pgx, pgy, layer_idx))
                     dist += step
 
+            # Also collect "probe ahead" blocked cells (3 grid cells ahead of setback)
+            # This catches cases where setback and connector are clear but routing direction is blocked
+            probe_dist = config.grid_step * 3
+            probe_x = x + dx * probe_dist
+            probe_y = y + dy * probe_dist
+            probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
+            if obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
+                if (probe_gx, probe_gy, layer_idx) not in blocked:
+                    blocked.append((probe_gx, probe_gy, layer_idx))
+
         return blocked
 
     # Get all valid setback positions for source and target, sorted by preference
