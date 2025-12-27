@@ -200,7 +200,8 @@ def compute_boundary_position(
     chip: ChipBoundary,
     point: Tuple[float, float],
     far_side: str,
-    clockwise: bool = True
+    clockwise: bool = True,
+    exit_edge: str = None
 ) -> float:
     """
     Compute normalized position [0, 1] along chip boundary.
@@ -221,6 +222,7 @@ def compute_boundary_position(
         point: (x, y) position to compute boundary position for
         far_side: Which side to start from ('left', 'right', 'top', 'bottom')
         clockwise: Direction to traverse boundary (affects within-edge direction)
+        exit_edge: Optional edge override (e.g., from stub direction tracing)
 
     Returns:
         Normalized position in [0, 1] along the boundary
@@ -234,8 +236,23 @@ def compute_boundary_position(
         return 0.0
 
     # Project point onto boundary
-    projected, edge = _project_to_boundary(point, chip.bounds)
-    px, py = projected
+    if exit_edge:
+        # Use the specified edge and project point onto it
+        edge = exit_edge
+        x, y = point
+        cx = max(min_x, min(max_x, x))
+        cy = max(min_y, min(max_y, y))
+        if edge == 'left':
+            px, py = min_x, cy
+        elif edge == 'right':
+            px, py = max_x, cy
+        elif edge == 'top':
+            px, py = cx, min_y
+        else:  # bottom
+            px, py = cx, max_y
+    else:
+        projected, edge = _project_to_boundary(point, chip.bounds)
+        px, py = projected
 
     # Define edge order and traversal directions based on far_side and clockwise
     # Each entry is (edge_name, forward_direction) where forward_direction indicates

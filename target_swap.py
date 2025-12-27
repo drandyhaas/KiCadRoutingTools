@@ -90,6 +90,104 @@ def get_single_target_centroid(endpoint: Tuple) -> Tuple[float, float]:
     return (endpoint[3], endpoint[4])
 
 
+def get_stub_exit_edge(
+    pcb_data: PCBData,
+    net_id: int,
+    chip_bounds: Tuple[float, float, float, float]
+) -> Optional[str]:
+    """
+    Determine which edge a stub is exiting from based on its segment direction.
+
+    Args:
+        pcb_data: PCB data with segments
+        net_id: Net ID to trace
+        chip_bounds: (min_x, min_y, max_x, max_y) of the chip
+
+    Returns:
+        'left', 'right', 'top', or 'bottom', or None if can't determine
+    """
+    import math
+
+    min_x, min_y, max_x, max_y = chip_bounds
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+
+    # Get segments for this net that are near/inside the chip
+    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    # Filter to segments with at least one point near/inside the chip bounds (with margin)
+    margin = 5.0
+    chip_segs = []
+    for seg in segs:
+        in_range_start = (min_x - margin <= seg.start_x <= max_x + margin and
+                         min_y - margin <= seg.start_y <= max_y + margin)
+        in_range_end = (min_x - margin <= seg.end_x <= max_x + margin and
+                       min_y - margin <= seg.end_y <= max_y + margin)
+        if in_range_start or in_range_end:
+            chip_segs.append(seg)
+
+    if not chip_segs:
+        return None
+
+    # Find endpoints (points that appear in only one segment)
+    points = {}
+    for seg in chip_segs:
+        p1 = (round(seg.start_x, 2), round(seg.start_y, 2))
+        p2 = (round(seg.end_x, 2), round(seg.end_y, 2))
+        points[p1] = points.get(p1, 0) + 1
+        points[p2] = points.get(p2, 0) + 1
+
+    endpoints = [p for p, count in points.items() if count == 1]
+    if len(endpoints) < 2:
+        return None
+
+    # Find stub tip (furthest from chip center) and pad end (closest to center)
+    stub_tip = max(endpoints, key=lambda p: math.sqrt((p[0]-center_x)**2 + (p[1]-center_y)**2))
+    pad_end = min(endpoints, key=lambda p: math.sqrt((p[0]-center_x)**2 + (p[1]-center_y)**2))
+
+    # Compute direction from pad to stub tip
+    dx = stub_tip[0] - pad_end[0]
+    dy = stub_tip[1] - pad_end[1]
+
+    # Determine exit edge based on primary direction
+    if abs(dx) > abs(dy):
+        return 'right' if dx > 0 else 'left'
+    else:
+        return 'bottom' if dy > 0 else 'top'
+
+
+def project_to_edge(
+    point: Tuple[float, float],
+    bounds: Tuple[float, float, float, float],
+    edge: str
+) -> Tuple[float, float]:
+    """
+    Project a point onto a specific edge of a rectangular boundary.
+
+    Args:
+        point: (x, y) position to project
+        bounds: (min_x, min_y, max_x, max_y) rectangle bounds
+        edge: 'left', 'right', 'top', or 'bottom'
+
+    Returns:
+        (x, y) projected point on the specified edge
+    """
+    x, y = point
+    min_x, min_y, max_x, max_y = bounds
+
+    # Clamp coordinates to be within bounds
+    cx = max(min_x, min(max_x, x))
+    cy = max(min_y, min(max_y, y))
+
+    if edge == 'left':
+        return (min_x, cy)
+    elif edge == 'right':
+        return (max_x, cy)
+    elif edge == 'top':
+        return (cx, min_y)
+    else:  # bottom
+        return (cx, max_y)
+
+
 def build_cost_matrix(
     pair_data: List[Tuple],  # (name, data, sources, targets) - data can be DiffPair or net_id
     config: GridRouteConfig,
@@ -147,6 +245,7 @@ def build_cost_matrix(
     source_layers = []
     target_centroids = []
     target_layers = []
+    net_ids = []  # Store net_ids for single-ended stub direction tracing
 
     for name, data, sources, targets in pair_data:
         # Use first source/target (typically there's only one of each)
@@ -156,6 +255,8 @@ def build_cost_matrix(
         source_layers.append(get_layer_idx_func(src))
         target_centroids.append(get_target_centroid_func(tgt))
         target_layers.append(get_layer_idx_func(tgt))
+        # Store net_id for single-ended nets (data is int), None for diff pairs
+        net_ids.append(data if isinstance(data, int) else None)
 
     # Build chip list and boundary positions if using boundary ordering
     chips = []
@@ -170,6 +271,19 @@ def build_cost_matrix(
         source_chips = [identify_chip_for_point(c, chips) for c in source_centroids]
         target_chips = [identify_chip_for_point(c, chips) for c in target_centroids]
 
+        # Precompute stub exit edges for single-ended nets (for accurate boundary position)
+        src_exit_edges = []
+        tgt_exit_edges = []
+        for i in range(n):
+            if net_ids[i] is not None and source_chips[i]:
+                src_exit_edges.append(get_stub_exit_edge(pcb_data, net_ids[i], source_chips[i].bounds))
+            else:
+                src_exit_edges.append(None)
+            if net_ids[i] is not None and target_chips[i]:
+                tgt_exit_edges.append(get_stub_exit_edge(pcb_data, net_ids[i], target_chips[i].bounds))
+            else:
+                tgt_exit_edges.append(None)
+
         # Precompute boundary positions for each (source_i, target_j) assignment
         for i in range(n):
             src_chip = source_chips[i]
@@ -182,8 +296,14 @@ def build_cost_matrix(
                     # "unrolled" into vertical lines, they face each other.
                     # With opposite directions, the crossing check works correctly:
                     # same geometric order → opposite boundary order → crossing detected
-                    src_pos = compute_boundary_position(src_chip, source_centroids[i], src_far, clockwise=True)
-                    tgt_pos = compute_boundary_position(tgt_chip, target_centroids[j], tgt_far, clockwise=False)
+                    src_pos = compute_boundary_position(
+                        src_chip, source_centroids[i], src_far, clockwise=True,
+                        exit_edge=src_exit_edges[i]
+                    )
+                    tgt_pos = compute_boundary_position(
+                        tgt_chip, target_centroids[j], tgt_far, clockwise=False,
+                        exit_edge=tgt_exit_edges[j]
+                    )
                     boundary_positions[(i, j)] = (src_pos, tgt_pos)
 
     # Initialize cost matrix with distance and layer penalties
@@ -1192,12 +1312,14 @@ def generate_single_ended_debug_labels(
     source_centroids = []
     target_centroids = []
     net_names = []
+    net_ids = []
     for net_name, net_id, sources, targets in net_data:
         src = sources[0]
         tgt = targets[0]
         source_centroids.append(get_single_source_centroid(src))
         target_centroids.append(get_single_target_centroid(tgt))
         net_names.append(net_name)
+        net_ids.append(net_id)
 
     if len(source_centroids) < 2:
         return labels
@@ -1214,17 +1336,30 @@ def generate_single_ended_debug_labels(
 
     src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
 
+    # Precompute stub exit edges for all nets
+    src_exit_edges = [get_stub_exit_edge(pcb_data, nid, src_chip.bounds) for nid in net_ids]
+    tgt_exit_edges = [get_stub_exit_edge(pcb_data, nid, tgt_chip.bounds) for nid in net_ids]
+
     # Generate labels for source positions (numbered by order)
     src_positions = []
     for i, centroid in enumerate(source_centroids):
-        pos = compute_boundary_position(src_chip, centroid, src_far, clockwise=True)
-        src_positions.append((pos, centroid, net_names[i]))
+        # Use stub exit edge for accurate boundary position ordering
+        pos = compute_boundary_position(
+            src_chip, centroid, src_far, clockwise=True,
+            exit_edge=src_exit_edges[i]
+        )
+        src_positions.append((pos, centroid, net_names[i], net_ids[i], src_exit_edges[i]))
 
     # Sort and number
     src_sorted = sorted(src_positions, key=lambda x: x[0])
-    for order_num, (pos, centroid, name) in enumerate(src_sorted, start=1):
-        from chip_boundary import _project_to_boundary
-        projected, edge = _project_to_boundary(centroid, src_chip.bounds)
+    for order_num, (pos, centroid, name, net_id, exit_edge) in enumerate(src_sorted, start=1):
+        # Use precomputed exit edge for label placement
+        if exit_edge:
+            projected = project_to_edge(centroid, src_chip.bounds, exit_edge)
+            edge = exit_edge
+        else:
+            from chip_boundary import _project_to_boundary
+            projected, edge = _project_to_boundary(centroid, src_chip.bounds)
         angle = 90 if edge in ('top', 'bottom') else 0
         labels.append({
             'text': f"S{order_num}",
@@ -1237,13 +1372,22 @@ def generate_single_ended_debug_labels(
     # Generate labels for target positions (counter-clockwise, opposite of source)
     tgt_positions = []
     for i, centroid in enumerate(target_centroids):
-        pos = compute_boundary_position(tgt_chip, centroid, tgt_far, clockwise=False)
-        tgt_positions.append((pos, centroid, net_names[i]))
+        # Use stub exit edge for accurate boundary position ordering
+        pos = compute_boundary_position(
+            tgt_chip, centroid, tgt_far, clockwise=False,
+            exit_edge=tgt_exit_edges[i]
+        )
+        tgt_positions.append((pos, centroid, net_names[i], net_ids[i], tgt_exit_edges[i]))
 
     tgt_sorted = sorted(tgt_positions, key=lambda x: x[0])
-    for order_num, (pos, centroid, name) in enumerate(tgt_sorted, start=1):
-        from chip_boundary import _project_to_boundary
-        projected, edge = _project_to_boundary(centroid, tgt_chip.bounds)
+    for order_num, (pos, centroid, name, net_id, exit_edge) in enumerate(tgt_sorted, start=1):
+        # Use precomputed exit edge for label placement
+        if exit_edge:
+            projected = project_to_edge(centroid, tgt_chip.bounds, exit_edge)
+            edge = exit_edge
+        else:
+            from chip_boundary import _project_to_boundary
+            projected, edge = _project_to_boundary(centroid, tgt_chip.bounds)
         angle = 90 if edge in ('top', 'bottom') else 0
         labels.append({
             'text': f"T{order_num}",
