@@ -378,6 +378,12 @@ def build_cost_matrix(
                                 if crossings_from_boundary_order(
                                     pos_ij[0], pos_ij[1], pos_kl[0], pos_kl[1]
                                 ):
+                                    # Check layer overlap if enabled
+                                    if config.crossing_layer_check:
+                                        layers_ij = {source_layers[i], target_layers[j]}
+                                        layers_kl = {source_layers[k], target_layers[l]}
+                                        if not (layers_ij & layers_kl):
+                                            continue  # No layer overlap, not a real crossing
                                     crossing_count += 1
                 else:
                     # Fall back to segment crossing for this assignment

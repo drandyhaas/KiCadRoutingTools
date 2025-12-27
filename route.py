@@ -334,6 +334,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 max_rip_up_count: int = 3,
                 max_setback_angle: float = 22.5,
                 enable_layer_switch: bool = True,
+                crossing_layer_check: bool = True,
                 can_swap_to_top_layer: bool = False,
                 swappable_net_patterns: Optional[List[str]] = None,
                 crossing_penalty: float = 1000.0,
@@ -427,6 +428,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         max_rip_up_count=max_rip_up_count,
         max_setback_angle=max_setback_angle,
         target_swap_crossing_penalty=crossing_penalty,
+        crossing_layer_check=crossing_layer_check,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -1244,7 +1246,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids, diff_pairs=diff_pairs,
                                                use_boundary_ordering=mps_unroll,
                                                bga_exclusion_zones=bga_exclusion_zones,
-                                               reverse_rounds=args.mps_reverse_rounds)
+                                               reverse_rounds=args.mps_reverse_rounds,
+                                               crossing_layer_check=crossing_layer_check)
         # Rebuild net_ids in the new order
         id_to_name = {nid: name for name, nid in net_ids}
         net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
@@ -3058,6 +3061,8 @@ Differential pair routing:
                         help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
     parser.add_argument("--no-stub-layer-swap", action="store_true",
                         help="Disable stub layer switching optimization (enabled by default)")
+    parser.add_argument("--no-crossing-layer-check", action="store_true",
+                        help="Count crossings regardless of layer overlap (by default, only same-layer crossings count)")
     parser.add_argument("--can-swap-to-top-layer", action="store_true",
                         help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
     parser.add_argument("--swappable-nets", nargs="+",
@@ -3148,6 +3153,7 @@ Differential pair routing:
                 max_rip_up_count=args.max_ripup,
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,
+                crossing_layer_check=not args.no_crossing_layer_check,
                 can_swap_to_top_layer=args.can_swap_to_top_layer,
                 swappable_net_patterns=args.swappable_nets,
                 crossing_penalty=args.crossing_penalty,

@@ -250,6 +250,8 @@ Examples:
                               help='Reverse MPS round order: route most-conflicting groups first')
     router_group.add_argument('--skip-routing', action='store_true',
                               help='Skip actual routing, only do swaps and write debug info')
+    router_group.add_argument('--no-crossing-layer-check', action='store_true',
+                              help='Count crossings regardless of layer overlap')
 
     args = parser.parse_args()
 
@@ -383,6 +385,8 @@ Examples:
         router_cmd.append("--mps-reverse-rounds")
     if args.skip_routing:
         router_cmd.append("--skip-routing")
+    if args.no_crossing_layer_check:
+        router_cmd.append("--no-crossing-layer-check")
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(

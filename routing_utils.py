@@ -980,7 +980,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               diff_pairs: Dict = None,
                               use_boundary_ordering: bool = True,
                               bga_exclusion_zones: List[Tuple[float, float, float, float]] = None,
-                              reverse_rounds: bool = False) -> List[int]:
+                              reverse_rounds: bool = False,
+                              crossing_layer_check: bool = True) -> List[int]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 
@@ -1176,13 +1177,14 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             if not crossings_from_boundary_order(info_a[0], info_a[1], info_b[0], info_b[1]):
                 return False
 
-            # Inversion detected, check if layers overlap
-            a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
-            b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
-            a_all = a_src | a_tgt
-            b_all = b_src | b_tgt
-            if a_all and b_all and not (a_all & b_all):
-                return False  # No layer overlap, no real conflict
+            # Inversion detected, check if layers overlap (if enabled)
+            if crossing_layer_check:
+                a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+                b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+                a_all = a_src | a_tgt
+                b_all = b_src | b_tgt
+                if a_all and b_all and not (a_all & b_all):
+                    return False  # No layer overlap, no real conflict
             return True
 
         # Use angular method (default or fallback)
@@ -1193,13 +1195,14 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             if not angles_cross:
                 return False
 
-            # Check layer overlap
-            a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
-            b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
-            a_all = a_src | a_tgt
-            b_all = b_src | b_tgt
-            if a_all and b_all and not (a_all & b_all):
-                return False
+            # Check layer overlap (if enabled)
+            if crossing_layer_check:
+                a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+                b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+                a_all = a_src | a_tgt
+                b_all = b_src | b_tgt
+                if a_all and b_all and not (a_all & b_all):
+                    return False
 
             return True
 

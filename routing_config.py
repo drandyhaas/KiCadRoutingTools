@@ -56,6 +56,7 @@ class GridRouteConfig:
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
     track_proximity_cost: float = 0.2  # mm equivalent cost at track center
     target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap
+    crossing_layer_check: bool = True  # Only count crossings when routes share a layer
 
 
 class GridCoord:
