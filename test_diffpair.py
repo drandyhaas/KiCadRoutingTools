@@ -222,6 +222,10 @@ Examples:
                               help='Distance around routed tracks to penalize on same layer in mm (default: 2.0)')
     router_group.add_argument('--track-proximity-cost', type=float,
                               help='Cost penalty near routed tracks in mm equivalent (default: 0.2)')
+    router_group.add_argument('--track-attraction-distance', type=float,
+                              help='Distance for cross-layer track attraction in mm (default: 0.5)')
+    router_group.add_argument('--track-attraction-cost', type=float,
+                              help='Bonus for routing near tracks on other layer in mm equivalent (default: 0.2)')
     router_group.add_argument('--diff-pair-gap', type=float,
                               help='Gap between P/N traces in mm (default: 0.101)')
     router_group.add_argument('--diff-pair-centerline-setback', type=float,
@@ -357,6 +361,10 @@ Examples:
         router_cmd.extend(["--track-proximity-distance", str(args.track_proximity_distance)])
     if args.track_proximity_cost is not None:
         router_cmd.extend(["--track-proximity-cost", str(args.track_proximity_cost)])
+    if args.track_attraction_distance is not None:
+        router_cmd.extend(["--track-attraction-distance", str(args.track_attraction_distance)])
+    if args.track_attraction_cost is not None:
+        router_cmd.extend(["--track-attraction-cost", str(args.track_attraction_cost)])
     if args.diff_pair_gap is not None:
         router_cmd.extend(["--diff-pair-gap", str(args.diff_pair_gap)])
     if args.diff_pair_centerline_setback is not None:

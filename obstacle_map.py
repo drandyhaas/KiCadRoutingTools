@@ -449,10 +449,13 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
 
 
 def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
-                                     layer_map: Dict[str, int]) -> Dict[int, Dict[Tuple[int, int], int]]:
-    """Compute track proximity costs for a single net's segments.
+                                     layer_map: Dict[str, int]) -> Tuple[Dict[int, Dict[Tuple[int, int], int]], Dict[int, Dict[Tuple[int, int], int]]]:
+    """Compute track proximity costs and cross-layer attraction for a single net's segments.
 
-    Returns a dict of layer_idx -> {(gx, gy) -> cost} that can be stored and merged later.
+    Returns two dicts:
+    1. proximity_costs: layer_idx -> {(gx, gy) -> cost} for same-layer repulsion
+    2. attraction_costs: layer_idx -> {(gx, gy) -> cost} for cross-layer attraction
+
     This allows incremental updates: compute once when route succeeds, remove when ripped up.
 
     Args:
@@ -462,19 +465,34 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
         layer_map: Mapping of layer names to layer indices
 
     Returns:
-        Dict mapping layer_idx -> {(gx, gy) -> cost}
+        Tuple of (proximity_costs, attraction_costs) dicts mapping layer_idx -> {(gx, gy) -> cost}
     """
-    result: Dict[int, Dict[Tuple[int, int], int]] = {}
-
-    if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
-        return result  # Feature disabled
+    proximity_result: Dict[int, Dict[Tuple[int, int], int]] = {}
+    attraction_result: Dict[int, Dict[Tuple[int, int], int]] = {}
 
     coord = GridCoord(config.grid_step)
-    radius_grid = coord.to_grid_dist(config.track_proximity_distance)
-    cost_grid = int(config.track_proximity_cost * 1000 / config.grid_step)
+
+    # Proximity (same-layer repulsion) parameters
+    proximity_enabled = config.track_proximity_distance > 0 and config.track_proximity_cost > 0
+    proximity_radius_grid = coord.to_grid_dist(config.track_proximity_distance) if proximity_enabled else 0
+    proximity_cost_grid = int(config.track_proximity_cost * 1000 / config.grid_step) if proximity_enabled else 0
+
+    # Attraction (cross-layer) parameters
+    attraction_enabled = config.track_attraction_distance > 0 and config.track_attraction_cost > 0
+    attraction_radius_grid = coord.to_grid_dist(config.track_attraction_distance) if attraction_enabled else 0
+    attraction_cost_grid = int(config.track_attraction_cost * 1000 / config.grid_step) if attraction_enabled else 0
+
+    if not proximity_enabled and not attraction_enabled:
+        return proximity_result, attraction_result  # Both features disabled
 
     # Sample every ~1mm along segments (not every grid step) for performance
     sample_interval = max(1, int(1.0 / config.grid_step))
+
+    # Get number of layers for cross-layer attraction
+    num_layers = len(layer_map)
+
+    # Use the larger radius for iteration
+    max_radius = max(proximity_radius_grid, attraction_radius_grid)
 
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
@@ -484,9 +502,22 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
         if layer_idx is None:
             continue
 
-        if layer_idx not in result:
-            result[layer_idx] = {}
-        layer_costs = result[layer_idx]
+        # Set up proximity costs dict for this layer
+        if proximity_enabled:
+            if layer_idx not in proximity_result:
+                proximity_result[layer_idx] = {}
+            layer_costs = proximity_result[layer_idx]
+        else:
+            layer_costs = None
+
+        # Cross-layer attraction: track creates attraction on ALL other layers
+        if attraction_enabled:
+            other_layers = [l for l in range(num_layers) if l != layer_idx]
+            for other_layer in other_layers:
+                if other_layer not in attraction_result:
+                    attraction_result[other_layer] = {}
+        else:
+            other_layers = []
 
         # Walk along segment using Bresenham, sampling every sample_interval points
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -504,18 +535,29 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
         while True:
             # Only process every sample_interval'th point
             if step_count % sample_interval == 0:
-                # Add proximity costs around this track point
-                for ex in range(-radius_grid, radius_grid + 1):
-                    for ey in range(-radius_grid, radius_grid + 1):
+                # Add costs around this track point
+                for ex in range(-max_radius, max_radius + 1):
+                    for ey in range(-max_radius, max_radius + 1):
                         dist_sq = ex * ex + ey * ey
-                        if dist_sq <= radius_grid * radius_grid:
+                        cell = (gx + ex, gy + ey)
+
+                        # Same-layer proximity (repulsion)
+                        if layer_costs is not None and dist_sq <= proximity_radius_grid * proximity_radius_grid:
                             dist = dist_sq ** 0.5
-                            proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
-                            cost = int(proximity * cost_grid)
-                            cell = (gx + ex, gy + ey)
-                            # Store max cost at each cell
+                            proximity = 1.0 - (dist / proximity_radius_grid) if proximity_radius_grid > 0 else 1.0
+                            cost = int(proximity * proximity_cost_grid)
                             if cell not in layer_costs or cost > layer_costs[cell]:
                                 layer_costs[cell] = cost
+
+                        # Cross-layer attraction (apply to all other layers)
+                        if other_layers and dist_sq <= attraction_radius_grid * attraction_radius_grid:
+                            dist = dist_sq ** 0.5
+                            proximity = 1.0 - (dist / attraction_radius_grid) if attraction_radius_grid > 0 else 1.0
+                            cost = int(proximity * attraction_cost_grid)
+                            for other_layer in other_layers:
+                                attraction_costs = attraction_result[other_layer]
+                                if cell not in attraction_costs or cost > attraction_costs[cell]:
+                                    attraction_costs[cell] = cost
 
             if gx == gx2 and gy == gy2:
                 break
@@ -529,21 +571,28 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
                 gy += sy
             step_count += 1
 
-    return result
+    return proximity_result, attraction_result
 
 
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
-                                 per_net_costs: Dict[int, Dict[int, Dict[Tuple[int, int], int]]]):
-    """Merge pre-computed per-net track proximity costs into the obstacle map.
+                                 per_net_costs: Dict[int, Tuple[Dict[int, Dict[Tuple[int, int], int]], Dict[int, Dict[Tuple[int, int], int]]]]):
+    """Merge pre-computed per-net track proximity and attraction costs into the obstacle map.
 
     Args:
         obstacles: The obstacle map to add costs to
-        per_net_costs: Dict of net_id -> layer_idx -> {(gx, gy) -> cost}
+        per_net_costs: Dict of net_id -> (proximity_costs, attraction_costs)
+            where each is layer_idx -> {(gx, gy) -> cost}
     """
-    for net_id, layer_costs in per_net_costs.items():
-        for layer_idx, cells in layer_costs.items():
+    for net_id, costs_tuple in per_net_costs.items():
+        proximity_costs, attraction_costs = costs_tuple
+        # Merge same-layer proximity costs (repulsion)
+        for layer_idx, cells in proximity_costs.items():
             for (gx, gy), cost in cells.items():
                 obstacles.set_layer_proximity(gx, gy, layer_idx, cost)
+        # Merge cross-layer attraction costs
+        for layer_idx, cells in attraction_costs.items():
+            for (gx, gy), cost in cells.items():
+                obstacles.set_cross_layer_attraction(gx, gy, layer_idx, cost)
 
 
 def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,

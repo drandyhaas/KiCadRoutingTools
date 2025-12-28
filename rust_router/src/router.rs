@@ -269,7 +269,8 @@ impl GridRouter {
 
                 let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
-                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
+                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize)
+                    - obstacles.get_cross_layer_attraction(ngx, ngy, current.layer as usize);
                 let new_g = g + move_cost + proximity_cost;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -369,7 +370,8 @@ impl GridRouter {
                     }
 
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
-                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize)) * 2;
+                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize)
+                        - obstacles.get_cross_layer_attraction(current.gx, current.gy, layer as usize)) * 2;
                     let new_g = g + self.via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -562,7 +564,8 @@ impl GridRouter {
 
                 let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
-                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
+                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize)
+                    - obstacles.get_cross_layer_attraction(ngx, ngy, current.layer as usize);
                 let new_g = g + move_cost + proximity_cost;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -622,7 +625,8 @@ impl GridRouter {
                     if closed.contains(&neighbor_key) { continue; }
 
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
-                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize)) * 2;
+                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize)
+                        - obstacles.get_cross_layer_attraction(current.gx, current.gy, layer as usize)) * 2;
                     let new_g = g + self.via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
