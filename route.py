@@ -330,8 +330,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bga_proximity_cost: float = 0.2,
                 track_proximity_distance: float = 2.0,
                 track_proximity_cost: float = 0.2,
-                track_attraction_distance: float = 0.5,
-                track_attraction_cost: float = 0.2,
                 diff_pair_patterns: Optional[List[str]] = None,
                 diff_pair_gap: float = 0.101,
                 diff_pair_centerline_setback: float = None,
@@ -427,8 +425,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         bga_proximity_cost=bga_proximity_cost,
         track_proximity_distance=track_proximity_distance,
         track_proximity_cost=track_proximity_cost,
-        track_attraction_distance=track_attraction_distance,
-        track_attraction_cost=track_attraction_cost,
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
@@ -3223,12 +3219,6 @@ Differential pair routing:
     parser.add_argument("--track-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near routed tracks in mm equivalent (default: 0.2)")
 
-    # Cross-layer track attraction
-    parser.add_argument("--track-attraction-distance", type=float, default=0.5,
-                        help="Distance for cross-layer track attraction in mm (default: 0.5)")
-    parser.add_argument("--track-attraction-cost", type=float, default=0.2,
-                        help="Bonus for routing near tracks on other layer in mm equivalent (default: 0.2)")
-
     # Differential pair routing
     parser.add_argument("--diff-pairs", "-D", nargs="+",
                         help="Glob patterns for nets to route as differential pairs (e.g., '*lvds*')")
@@ -3324,8 +3314,6 @@ Differential pair routing:
                 bga_proximity_cost=args.bga_proximity_cost,
                 track_proximity_distance=args.track_proximity_distance,
                 track_proximity_cost=args.track_proximity_cost,
-                track_attraction_distance=args.track_attraction_distance,
-                track_attraction_cost=args.track_attraction_cost,
                 diff_pair_patterns=args.diff_pairs,
                 diff_pair_gap=args.diff_pair_gap,
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,

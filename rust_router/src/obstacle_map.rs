@@ -16,8 +16,6 @@ pub struct GridObstacleMap {
     pub stub_proximity: FxHashMap<u64, i32>,
     /// Layer-specific proximity costs (for track proximity on same layer)
     pub layer_proximity_costs: Vec<FxHashMap<u64, i32>>,
-    /// Cross-layer attraction costs (bonus for routing near tracks on other layers)
-    pub cross_layer_attraction: Vec<FxHashMap<u64, i32>>,
     /// Number of layers
     #[pyo3(get)]
     pub num_layers: usize,
@@ -40,7 +38,6 @@ impl GridObstacleMap {
             blocked_vias: FxHashSet::default(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
-            cross_layer_attraction: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             num_layers,
             bga_zones: Vec::new(),
             allowed_cells: FxHashSet::default(),
@@ -70,7 +67,6 @@ impl GridObstacleMap {
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
-            cross_layer_attraction: self.cross_layer_attraction.clone(),
             num_layers: self.num_layers,
             bga_zones: self.bga_zones.clone(),
             allowed_cells: self.allowed_cells.clone(),
@@ -207,34 +203,6 @@ impl GridObstacleMap {
     /// Clear layer-specific proximity costs
     pub fn clear_layer_proximity(&mut self) {
         for layer_map in &mut self.layer_proximity_costs {
-            layer_map.clear();
-        }
-    }
-
-    /// Set cross-layer attraction cost (bonus for routing near tracks on other layers)
-    pub fn set_cross_layer_attraction(&mut self, gx: i32, gy: i32, layer: usize, cost: i32) {
-        if layer < self.num_layers && cost > 0 {
-            let key = pack_xy(gx, gy);
-            let entry = self.cross_layer_attraction[layer].entry(key).or_insert(0);
-            *entry = (*entry).max(cost);
-        }
-    }
-
-    /// Get cross-layer attraction cost (reduces routing cost near tracks on other layers)
-    #[inline]
-    pub fn get_cross_layer_attraction(&self, gx: i32, gy: i32, layer: usize) -> i32 {
-        if layer >= self.num_layers {
-            return 0;
-        }
-        self.cross_layer_attraction[layer]
-            .get(&pack_xy(gx, gy))
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Clear cross-layer attraction costs
-    pub fn clear_cross_layer_attraction(&mut self) {
-        for layer_map in &mut self.cross_layer_attraction {
             layer_map.clear();
         }
     }
