@@ -3222,8 +3222,135 @@ def generate_bga_fanout(footprint: Footprint,
                                                min_spacing):
                         new_collision_count += 1
             print(f"  After resolution: {new_collision_count} collisions remaining")
+            collisions_remaining = new_collision_count
     else:
         print(f"  Validated: No collisions")
+        collisions_remaining = 0
+
+    # Post-resolution layer rebalancing for even distribution
+    # Only rebalance if there are no collisions remaining
+    inner_layers = layers[1:] if len(layers) > 1 else layers  # Exclude F.Cu from rebalancing targets
+
+    if collisions_remaining == 0 and len(inner_layers) > 1:
+        rebalanced_count = 0
+        max_rebalance_rounds = 10  # Limit iterations
+
+        for round_num in range(max_rebalance_rounds):
+            # Count routes per inner layer (exclude edge routes on F.Cu)
+            layer_counts = {layer: 0 for layer in inner_layers}
+            for route in routes:
+                if route.layer in layer_counts and not route.is_edge:
+                    layer_counts[route.layer] += 1
+
+            if not any(layer_counts.values()):
+                break  # No inner routes to rebalance
+
+            # Find most and least crowded layers
+            max_layer = max(inner_layers, key=lambda l: layer_counts[l])
+            min_layer = min(inner_layers, key=lambda l: layer_counts[l])
+
+            # Stop if difference is small enough (balanced)
+            if layer_counts[max_layer] - layer_counts[min_layer] <= 1:
+                break
+
+            # Try to move a route (or diff pair) from max_layer to min_layer
+            moved_one = False
+            processed_pairs = set()
+
+            for route in routes:
+                if route.is_edge or route.layer != max_layer:
+                    continue
+
+                # For diff pairs, process both together and skip if already processed
+                if route.pair_id:
+                    if route.pair_id in processed_pairs:
+                        continue
+                    processed_pairs.add(route.pair_id)
+                    # Find both routes in the pair
+                    pair_routes = [r for r in routes if r.pair_id == route.pair_id]
+                    # Skip if not all on same layer
+                    if not all(r.layer == max_layer for r in pair_routes):
+                        continue
+                else:
+                    pair_routes = [route]
+
+                # Build segments for all routes being moved
+                all_route_segs = []
+                all_net_ids = set()
+                for r in pair_routes:
+                    all_route_segs.extend([
+                        (r.pad_pos, r.stub_end),
+                        (r.stub_end, r.exit_pos)
+                    ])
+                    all_net_ids.add(r.net_id)
+
+                # Check if these routes can move to min_layer without conflicts
+                conflict = False
+
+                # Check against other routes on target layer
+                for other in routes:
+                    if other in pair_routes or other.layer != min_layer:
+                        continue
+                    other_segs = [(other.pad_pos, other.stub_end),
+                                  (other.stub_end, other.exit_pos)]
+                    for rs, re in all_route_segs:
+                        for os, oe in other_segs:
+                            if check_segment_collision(rs, re, os, oe, min_spacing):
+                                conflict = True
+                                break
+                        if conflict:
+                            break
+                    if conflict:
+                        break
+
+                # Check against existing tracks on target layer
+                if not conflict:
+                    for existing in existing_tracks:
+                        if existing['layer'] != min_layer:
+                            continue
+                        for seg_start, seg_end in all_route_segs:
+                            if check_segment_collision(seg_start, seg_end,
+                                                       existing['start'], existing['end'],
+                                                       min_spacing):
+                                conflict = True
+                                break
+                        if conflict:
+                            break
+
+                # Check against new tracks already on target layer (from other nets)
+                if not conflict:
+                    for track in tracks:
+                        if track['layer'] != min_layer:
+                            continue
+                        if track.get('net_id') in all_net_ids:
+                            continue  # Skip our own tracks
+                        for seg_start, seg_end in all_route_segs:
+                            if check_segment_collision(seg_start, seg_end,
+                                                       track['start'], track['end'],
+                                                       min_spacing):
+                                conflict = True
+                                break
+                        if conflict:
+                            break
+
+                if not conflict:
+                    # Move all routes in the pair/single
+                    old_layer = pair_routes[0].layer
+                    for r in pair_routes:
+                        r.layer = min_layer
+                    # Update tracks for these routes
+                    for track in tracks:
+                        if track.get('net_id') in all_net_ids and track['layer'] == old_layer:
+                            track['layer'] = min_layer
+                    rebalanced_count += len(pair_routes)
+                    moved_one = True
+                    break  # Move one at a time, then recount
+
+            if not moved_one:
+                break  # No more moves possible
+
+        if rebalanced_count > 0:
+            print(f"  Rebalanced {rebalanced_count} routes for even layer distribution")
 
     # Stats by layer
     layer_counts = defaultdict(int)
