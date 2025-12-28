@@ -3326,8 +3326,18 @@ def generate_bga_fanout(footprint: Footprint,
             for other in routes:
                 if other in pair_routes_to_check or other.layer != target_layer:
                     continue
-                other_segs = [(other.pad_pos, other.stub_end),
-                              (other.stub_end, other.exit_pos)]
+                # Build segments for other route, including channel points for half-edge routes
+                other_segs = []
+                if other.channel_point:
+                    other_segs.append((other.pad_pos, other.channel_point))
+                    if other.channel_point2:
+                        other_segs.append((other.channel_point, other.channel_point2))
+                        other_segs.append((other.channel_point2, other.stub_end))
+                    else:
+                        other_segs.append((other.channel_point, other.stub_end))
+                else:
+                    other_segs.append((other.pad_pos, other.stub_end))
+                other_segs.append((other.stub_end, other.exit_pos))
                 for rs, re in all_route_segs:
                     for os, oe in other_segs:
                         if check_segment_collision(rs, re, os, oe, min_spacing):

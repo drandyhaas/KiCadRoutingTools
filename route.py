@@ -721,6 +721,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 all_vias = vias1 + vias2 + vias3 + vias4
                 all_swap_vias.extend(all_vias)
 
+                # Update all_stubs_by_layer to reflect the layer changes
+                # pair_name: src_layer -> tgt_layer
+                if src_layer in all_stubs_by_layer:
+                    all_stubs_by_layer[src_layer] = [
+                        s for s in all_stubs_by_layer[src_layer] if s[0] != pair_name
+                    ]
+                if tgt_layer not in all_stubs_by_layer:
+                    all_stubs_by_layer[tgt_layer] = []
+                all_stubs_by_layer[tgt_layer].append(
+                    (pair_name, src_p_stub.segments + src_n_stub.segments)
+                )
+                # swap_partner: other_src_layer -> src_layer
+                if other_src_layer in all_stubs_by_layer:
+                    all_stubs_by_layer[other_src_layer] = [
+                        s for s in all_stubs_by_layer[other_src_layer] if s[0] != swap_partner
+                    ]
+                if src_layer not in all_stubs_by_layer:
+                    all_stubs_by_layer[src_layer] = []
+                all_stubs_by_layer[src_layer].append(
+                    (swap_partner, other_src_p_stub.segments + other_src_n_stub.segments)
+                )
+
                 applied_swaps.add(pair_name)
                 applied_swaps.add(swap_partner)
                 swap_count += 1
@@ -764,6 +786,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 all_segment_modifications.extend(mods1 + mods2)
                 all_vias = vias1 + vias2
                 all_swap_vias.extend(all_vias)
+
+                # Update all_stubs_by_layer to reflect the layer change
+                # Structure is (pair_name, segments) tuples
+                # Remove from old layer and add to new layer
+                if src_layer in all_stubs_by_layer:
+                    all_stubs_by_layer[src_layer] = [
+                        s for s in all_stubs_by_layer[src_layer]
+                        if s[0] != pair_name  # s[0] is pair_name
+                    ]
+                if tgt_layer not in all_stubs_by_layer:
+                    all_stubs_by_layer[tgt_layer] = []
+                # Add combined segments for this pair on new layer
+                combined_segments = src_p_stub.segments + src_n_stub.segments
+                all_stubs_by_layer[tgt_layer].append((pair_name, combined_segments))
 
                 applied_swaps.add(pair_name)
                 solo_src_count += 1
@@ -937,6 +973,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 all_segment_modifications.extend(mods1 + mods2)
                 all_vias = vias1 + vias2
                 all_swap_vias.extend(all_vias)
+
+                # Update all_stubs_by_layer to reflect the layer change
+                # Structure is (pair_name, segments) tuples
+                if tgt_layer in all_stubs_by_layer:
+                    all_stubs_by_layer[tgt_layer] = [
+                        s for s in all_stubs_by_layer[tgt_layer]
+                        if s[0] != pair_name
+                    ]
+                if src_layer not in all_stubs_by_layer:
+                    all_stubs_by_layer[src_layer] = []
+                combined_segments = tgt_p_stub.segments + tgt_n_stub.segments
+                all_stubs_by_layer[src_layer].append((pair_name, combined_segments))
 
                 applied_swaps.add(pair_name)
                 solo_switch_count += 1

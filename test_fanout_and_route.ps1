@@ -24,6 +24,3 @@ python3 check_drc.py routed_output.kicad_pcb
 # Check connections
 python3 check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
 
-# Put clk signals on a separate layer
-# python3 switch_to_layer.py "*rx*top*" --input routed_output.kicad_pcb --output routed_output.kicad_pcb --to-layer "In3.Cu"
-
