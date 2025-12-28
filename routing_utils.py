@@ -1309,7 +1309,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         ordered_units.extend(sorted_winners)
         if sorted_winners:
             winner_names = [unit_names.get(uid, f"Net {uid}") for uid in sorted_winners]
-            print(f"MPS Round {orig_round_num}: {len(sorted_winners)} units")
+            names_str = ", ".join(winner_names)
+            print(f"MPS Round {orig_round_num}: {len(sorted_winners)} units: {names_str}")
 
     # Expand ordered units back to net IDs
     ordered = []
