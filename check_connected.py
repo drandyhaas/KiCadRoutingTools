@@ -67,7 +67,40 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         - debug_info: dict with detailed component info (when verbose=True)
     """
     uf = UnionFind()
-    all_copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+
+    # Detect all copper layers from segments, vias, and pads
+    copper_layer_set = set()
+    for seg in segments:
+        if seg.layer.endswith('.Cu'):
+            copper_layer_set.add(seg.layer)
+    for via in vias:
+        if via.layers:
+            for layer in via.layers:
+                if layer.endswith('.Cu'):
+                    copper_layer_set.add(layer)
+    for pad in pads:
+        for layer in pad.layers:
+            if layer.endswith('.Cu'):
+                copper_layer_set.add(layer)
+
+    # Sort layers: F.Cu first, then In*.Cu in order, then B.Cu last
+    def layer_sort_key(layer):
+        if layer == 'F.Cu':
+            return (0, 0)
+        elif layer == 'B.Cu':
+            return (2, 0)
+        elif layer.startswith('In') and layer.endswith('.Cu'):
+            try:
+                num = int(layer[2:-3])  # Extract number from 'InX.Cu'
+                return (1, num)
+            except ValueError:
+                return (1, 999)
+        else:
+            return (3, 0)
+
+    all_copper_layers = sorted(copper_layer_set, key=layer_sort_key)
+    if not all_copper_layers:
+        all_copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']  # Fallback
 
     # Collect all points with their actual coordinates and size info
     # Each point: (x, y, layer, point_id, size, type, extra_info)
