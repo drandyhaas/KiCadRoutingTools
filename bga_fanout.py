@@ -1612,11 +1612,26 @@ def assign_layers_smart(routes: List[FanoutRoute],
         if route.pair_id:
             pair_routes[route.pair_id].append(route)
 
+    # Identify half-edge pairs (pairs where one route is an edge route)
+    # These pairs should have ALL routes on F.Cu, not just the edge route
+    half_edge_pairs: Set[str] = set()
+    for pair_id, routes_in_pair in pair_routes.items():
+        if any(r.is_edge for r in routes_in_pair):
+            half_edge_pairs.add(pair_id)
+            # Set ALL routes in this pair to F.Cu
+            for r in routes_in_pair:
+                r.layer = available_layers[0]
+                if r not in edge_routes:
+                    edge_routes.append(r)
+
     # Group inner routes by (channel_index, escape_direction)
     by_channel_dir: Dict[Tuple[int, str], List[FanoutRoute]] = defaultdict(list)
     for route in routes:
         if route.is_edge:
             continue  # Skip edge pads
+        # Skip routes that are part of half-edge pairs (already assigned to F.Cu)
+        if route.pair_id in half_edge_pairs:
+            continue
         key = (route.channel.index, route.escape_dir)
         by_channel_dir[key].append(route)
 
@@ -3229,36 +3244,145 @@ def generate_bga_fanout(footprint: Footprint,
 
     # Post-resolution layer rebalancing for even distribution
     # Only rebalance if there are no collisions remaining
-    inner_layers = layers[1:] if len(layers) > 1 else layers  # Exclude F.Cu from rebalancing targets
+    # Include F.Cu for edge routes, inner layers for non-edge routes
+    inner_layers = layers[1:] if len(layers) > 1 else layers
+    all_layers = layers  # All layers including F.Cu
 
-    if collisions_remaining == 0 and len(inner_layers) > 1:
-        rebalanced_count = 0
-        max_rebalance_rounds = 10  # Limit iterations
+    if collisions_remaining == 0 and len(all_layers) > 1:
+        max_rebalance_iterations = 100  # Limit total moves
 
-        for round_num in range(max_rebalance_rounds):
-            # Count routes per inner layer (exclude edge routes on F.Cu)
-            layer_counts = {layer: 0 for layer in inner_layers}
+        # Track original layers to count net changes at the end
+        original_layers = {id(route): route.layer for route in routes}
+
+        # Identify edge/half-edge pairs BEFORE rebalancing to protect some on F.Cu
+        edge_pair_ids = set()
+        for route in routes:
+            if route.pair_id and route.is_edge:
+                edge_pair_ids.add(route.pair_id)
+        for route in routes:
+            if route.pair_id:
+                partner_routes = [r for r in routes if r.pair_id == route.pair_id and r is not route]
+                if any(r.is_edge for r in partner_routes):
+                    edge_pair_ids.add(route.pair_id)
+
+        # Categorize edge pairs by their escape direction (which edge they're on)
+        # Store (position_along_edge, pair_id) for sorting
+        edge_pairs_by_dir: Dict[str, List[Tuple[float, str]]] = {'left': [], 'right': [], 'up': [], 'down': []}
+        seen_pairs = set()
+        for route in routes:
+            if route.pair_id in edge_pair_ids and route.is_edge and route.pair_id not in seen_pairs:
+                esc_dir = route.escape_dir
+                if esc_dir and esc_dir in edge_pairs_by_dir:
+                    seen_pairs.add(route.pair_id)
+                    # Position along edge: Y for left/right edges, X for up/down edges
+                    if esc_dir in ['left', 'right']:
+                        pos = route.pad_pos[1]  # Y position
+                    else:
+                        pos = route.pad_pos[0]  # X position
+                    edge_pairs_by_dir[esc_dir].append((pos, route.pair_id))
+
+        # Sort each direction's pairs by position along the edge
+        for d in edge_pairs_by_dir:
+            edge_pairs_by_dir[d].sort(key=lambda x: x[0])
+
+        # Calculate how many edge pairs should stay on F.Cu for balanced total routes
+        total_routes = len(routes)
+        avg_routes_per_layer = total_routes / len(all_layers)
+        target_pairs_on_fcu = int(avg_routes_per_layer / 2 + 0.5)
+
+        # Distribute target pairs evenly across edge directions
+        directions = [d for d in ['up', 'down', 'left', 'right'] if edge_pairs_by_dir[d]]
+        pairs_to_keep_per_dir = {}
+        if directions:
+            base_per_dir = target_pairs_on_fcu // len(directions)
+            remainder = target_pairs_on_fcu % len(directions)
+            for i, d in enumerate(directions):
+                pairs_to_keep_per_dir[d] = min(base_per_dir + (1 if i < remainder else 0),
+                                               len(edge_pairs_by_dir[d]))
+
+        # Mark which pairs should stay on F.Cu - select evenly spaced pairs along each edge
+        pairs_to_keep_on_fcu = set()
+        for d, keep_count in pairs_to_keep_per_dir.items():
+            pairs_on_edge = edge_pairs_by_dir[d]
+            n = len(pairs_on_edge)
+            if keep_count >= n:
+                # Keep all
+                for _, pair_id in pairs_on_edge:
+                    pairs_to_keep_on_fcu.add(pair_id)
+            elif keep_count > 0:
+                # Select evenly spaced indices
+                # E.g., if n=14 and keep_count=3, pick indices at 0, 7, 13 (roughly evenly spaced)
+                for i in range(keep_count):
+                    idx = (i * (n - 1)) // (keep_count - 1) if keep_count > 1 else n // 2
+                    pairs_to_keep_on_fcu.add(pairs_on_edge[idx][1])
+
+
+        # Cycle through target layers for better spatial distribution
+        target_layer_idx = 0
+
+        def check_conflicts_on_layer(pair_routes_to_check, all_route_segs, all_net_ids, target_layer):
+            """Check if routes can move to target_layer without conflicts."""
+            # Check against other routes on target layer
+            for other in routes:
+                if other in pair_routes_to_check or other.layer != target_layer:
+                    continue
+                other_segs = [(other.pad_pos, other.stub_end),
+                              (other.stub_end, other.exit_pos)]
+                for rs, re in all_route_segs:
+                    for os, oe in other_segs:
+                        if check_segment_collision(rs, re, os, oe, min_spacing):
+                            return True
+
+            # Check against existing tracks on target layer
+            for existing in existing_tracks:
+                if existing['layer'] != target_layer:
+                    continue
+                for seg_start, seg_end in all_route_segs:
+                    if check_segment_collision(seg_start, seg_end,
+                                               existing['start'], existing['end'],
+                                               min_spacing):
+                        return True
+
+            # Check against new tracks already on target layer (from other nets)
+            for track in tracks:
+                if track['layer'] != target_layer:
+                    continue
+                if track.get('net_id') in all_net_ids:
+                    continue  # Skip our own tracks
+                for seg_start, seg_end in all_route_segs:
+                    if check_segment_collision(seg_start, seg_end,
+                                               track['start'], track['end'],
+                                               min_spacing):
+                        return True
+
+            return False
+
+        for iteration in range(max_rebalance_iterations):
+            # Count routes per layer
+            layer_counts = {layer: 0 for layer in all_layers}
             for route in routes:
-                if route.layer in layer_counts and not route.is_edge:
+                if route.layer in layer_counts:
                     layer_counts[route.layer] += 1
 
             if not any(layer_counts.values()):
-                break  # No inner routes to rebalance
+                break  # No routes to rebalance
 
-            # Find most and least crowded layers
-            max_layer = max(inner_layers, key=lambda l: layer_counts[l])
-            min_layer = min(inner_layers, key=lambda l: layer_counts[l])
+            # Find most crowded layer and check if balanced
+            max_layer = max(all_layers, key=lambda l: layer_counts[l])
+            min_count = min(layer_counts.values())
+            max_count = layer_counts[max_layer]
 
             # Stop if difference is small enough (balanced)
-            if layer_counts[max_layer] - layer_counts[min_layer] <= 1:
+            if max_count - min_count <= 1:
                 break
 
-            # Try to move a route (or diff pair) from max_layer to min_layer
+            # Try to move a route from most crowded layer to a less crowded layer
+            # Cycle through target layers for spatial distribution
             moved_one = False
             processed_pairs = set()
 
             for route in routes:
-                if route.is_edge or route.layer != max_layer:
+                if route.layer != max_layer:
                     continue
 
                 # For diff pairs, process both together and skip if already processed
@@ -3266,6 +3390,9 @@ def generate_bga_fanout(footprint: Footprint,
                     if route.pair_id in processed_pairs:
                         continue
                     processed_pairs.add(route.pair_id)
+                    # Skip edge pairs that should stay on F.Cu
+                    if route.pair_id in pairs_to_keep_on_fcu and max_layer == layers[0]:
+                        continue
                     # Find both routes in the pair
                     pair_routes = [r for r in routes if r.pair_id == route.pair_id]
                     # Skip if not all on same layer
@@ -3274,81 +3401,161 @@ def generate_bga_fanout(footprint: Footprint,
                 else:
                     pair_routes = [route]
 
-                # Build segments for all routes being moved
+                # Build segments for all routes being moved (including channel points for half-edge)
                 all_route_segs = []
                 all_net_ids = set()
                 for r in pair_routes:
-                    all_route_segs.extend([
-                        (r.pad_pos, r.stub_end),
-                        (r.stub_end, r.exit_pos)
-                    ])
+                    if r.channel_point:
+                        # Half-edge inner route: pad -> channel_point -> channel_point2 -> stub_end -> exit
+                        all_route_segs.append((r.pad_pos, r.channel_point))
+                        if r.channel_point2:
+                            all_route_segs.append((r.channel_point, r.channel_point2))
+                            all_route_segs.append((r.channel_point2, r.stub_end))
+                        else:
+                            all_route_segs.append((r.channel_point, r.stub_end))
+                    else:
+                        all_route_segs.append((r.pad_pos, r.stub_end))
+                    all_route_segs.append((r.stub_end, r.exit_pos))
                     all_net_ids.add(r.net_id)
 
-                # Check if these routes can move to min_layer without conflicts
-                conflict = False
+                # Try each layer in cycling order, starting from current target_layer_idx
+                # Skip layers that are already at or above average, and skip source layer
+                avg_count = sum(layer_counts.values()) / len(all_layers)
 
-                # Check against other routes on target layer
-                for other in routes:
-                    if other in pair_routes or other.layer != min_layer:
+                for i in range(len(all_layers)):
+                    try_layer = all_layers[(target_layer_idx + i) % len(all_layers)]
+
+                    # Skip source layer
+                    if try_layer == max_layer:
                         continue
-                    other_segs = [(other.pad_pos, other.stub_end),
-                                  (other.stub_end, other.exit_pos)]
-                    for rs, re in all_route_segs:
-                        for os, oe in other_segs:
-                            if check_segment_collision(rs, re, os, oe, min_spacing):
-                                conflict = True
-                                break
-                        if conflict:
-                            break
-                    if conflict:
+
+                    # Skip layers that are already crowded (at or above average)
+                    if layer_counts[try_layer] >= avg_count:
+                        continue
+
+                    # Non-edge routes should NOT move TO F.Cu (would conflict with pads)
+                    if not route.is_edge and try_layer == layers[0]:
+                        continue
+
+                    # Check for conflicts on this target layer
+                    if not check_conflicts_on_layer(pair_routes, all_route_segs, all_net_ids, try_layer):
+                        # No conflict - move to this layer
+                        old_layer = pair_routes[0].layer
+                        for r in pair_routes:
+                            r.layer = try_layer
+                        # Update tracks for these routes
+                        for track in tracks:
+                            if track.get('net_id') in all_net_ids and track['layer'] == old_layer:
+                                track['layer'] = try_layer
+                        moved_one = True
+                        # Advance the cycle for next move
+                        target_layer_idx = (target_layer_idx + 1) % len(all_layers)
                         break
 
-                # Check against existing tracks on target layer
-                if not conflict:
-                    for existing in existing_tracks:
-                        if existing['layer'] != min_layer:
-                            continue
-                        for seg_start, seg_end in all_route_segs:
-                            if check_segment_collision(seg_start, seg_end,
-                                                       existing['start'], existing['end'],
-                                                       min_spacing):
-                                conflict = True
-                                break
-                        if conflict:
-                            break
-
-                # Check against new tracks already on target layer (from other nets)
-                if not conflict:
-                    for track in tracks:
-                        if track['layer'] != min_layer:
-                            continue
-                        if track.get('net_id') in all_net_ids:
-                            continue  # Skip our own tracks
-                        for seg_start, seg_end in all_route_segs:
-                            if check_segment_collision(seg_start, seg_end,
-                                                       track['start'], track['end'],
-                                                       min_spacing):
-                                conflict = True
-                                break
-                        if conflict:
-                            break
-
-                if not conflict:
-                    # Move all routes in the pair/single
-                    old_layer = pair_routes[0].layer
-                    for r in pair_routes:
-                        r.layer = min_layer
-                    # Update tracks for these routes
-                    for track in tracks:
-                        if track.get('net_id') in all_net_ids and track['layer'] == old_layer:
-                            track['layer'] = min_layer
-                    rebalanced_count += len(pair_routes)
-                    moved_one = True
+                if moved_one:
                     break  # Move one at a time, then recount
 
             if not moved_one:
                 break  # No more moves possible
 
+        # Phase 2: Distribute remaining edge/half-edge pairs evenly across all layers
+        # (pairs_to_keep_on_fcu was already calculated above and respected in phase 1)
+        if edge_pair_ids:
+            # Move edge pairs from layers with too many to layers with fewer
+            for iteration in range(50):  # Limit iterations
+                # Count total routes per layer
+                total_layer_counts = {layer: 0 for layer in all_layers}
+                for route in routes:
+                    if route.layer in total_layer_counts:
+                        total_layer_counts[route.layer] += 1
+
+                # Count edge pairs per layer
+                edge_layer_counts = {layer: 0 for layer in all_layers}
+                processed = set()
+                for route in routes:
+                    if route.pair_id in edge_pair_ids and route.pair_id not in processed:
+                        processed.add(route.pair_id)
+                        edge_layer_counts[route.layer] += 1
+
+                # Find layer with most edge pairs
+                max_edge_layer = max(all_layers, key=lambda l: edge_layer_counts[l])
+                min_edge_count = min(edge_layer_counts.values())
+
+                # Stop if edge pairs are balanced (difference <= 1)
+                if edge_layer_counts[max_edge_layer] - min_edge_count <= 1:
+                    break
+
+                # Average total route count for balance check
+                avg_total = sum(total_layer_counts.values()) / len(all_layers)
+
+                # Try to move one edge pair from max_edge_layer to a layer with fewer edge pairs
+                moved_one = False
+                processed_pairs = set()
+
+                for route in routes:
+                    if route.pair_id not in edge_pair_ids:
+                        continue
+                    if route.pair_id in processed_pairs:
+                        continue
+                    if route.layer != max_edge_layer:
+                        continue
+                    # Skip pairs that should stay on F.Cu
+                    if route.pair_id in pairs_to_keep_on_fcu and max_edge_layer == layers[0]:
+                        continue
+
+                    processed_pairs.add(route.pair_id)
+                    pair_routes = [r for r in routes if r.pair_id == route.pair_id]
+                    if not all(r.layer == max_edge_layer for r in pair_routes):
+                        continue
+
+                    # Build segments (including channel points for half-edge)
+                    all_route_segs = []
+                    all_net_ids = set()
+                    for r in pair_routes:
+                        if r.channel_point:
+                            # Half-edge inner route: pad -> channel_point -> channel_point2 -> stub_end -> exit
+                            all_route_segs.append((r.pad_pos, r.channel_point))
+                            if r.channel_point2:
+                                all_route_segs.append((r.channel_point, r.channel_point2))
+                                all_route_segs.append((r.channel_point2, r.stub_end))
+                            else:
+                                all_route_segs.append((r.channel_point, r.stub_end))
+                        else:
+                            all_route_segs.append((r.pad_pos, r.stub_end))
+                        all_route_segs.append((r.stub_end, r.exit_pos))
+                        all_net_ids.add(r.net_id)
+
+                    # Try layers with fewer edge pairs, preferring those that won't exceed avg total
+                    candidate_layers = [l for l in all_layers if l != max_edge_layer and
+                                        edge_layer_counts[l] < edge_layer_counts[max_edge_layer]]
+                    # Sort by edge count (fewer first), then by total count (fewer first)
+                    candidate_layers.sort(key=lambda l: (edge_layer_counts[l], total_layer_counts[l]))
+
+                    for try_layer in candidate_layers:
+                        # Don't move if it would make target layer have too many total routes
+                        # (more than 2 above average)
+                        if total_layer_counts[try_layer] + len(pair_routes) > avg_total + 2:
+                            continue
+
+                        if not check_conflicts_on_layer(pair_routes, all_route_segs, all_net_ids, try_layer):
+                            # Move the pair
+                            old_layer = pair_routes[0].layer
+                            for r in pair_routes:
+                                r.layer = try_layer
+                            for track in tracks:
+                                if track.get('net_id') in all_net_ids and track['layer'] == old_layer:
+                                    track['layer'] = try_layer
+                            moved_one = True
+                            break
+
+                    if moved_one:
+                        break
+
+                if not moved_one:
+                    break
+
+        # Count routes that ended up on a different layer than they started
+        rebalanced_count = sum(1 for route in routes if route.layer != original_layers[id(route)])
         if rebalanced_count > 0:
             print(f"  Rebalanced {rebalanced_count} routes for even layer distribution")
 
