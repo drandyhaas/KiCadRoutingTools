@@ -3373,8 +3373,8 @@ Differential pair routing:
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
     parser.add_argument("--max-setback-angle", type=float, default=45.0,
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
-    parser.add_argument("--routing-clearance-margin", type=float, default=1.15,
-                        help="Multiplier on track-via clearance (1.0 = minimum DRC, 1.15 = safe default)")
+    parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
+                        help="Multiplier on track-via clearance (1.0 = minimum DRC)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",

@@ -243,7 +243,7 @@ Examples:
     router_group.add_argument('--max-setback-angle', type=float,
                               help='Maximum angle (degrees) for setback position search (default: 45.0)')
     router_group.add_argument('--routing-clearance-margin', type=float,
-                              help='Multiplier on track-via clearance (1.0 = minimum DRC, default: 1.15)')
+                              help='Multiplier on track-via clearance (default: 1.0 = minimum DRC)')
     router_group.add_argument('--swappable-nets', nargs='+',
                               help='Glob patterns for diff pairs that can have targets swapped (e.g., rx1_*)')
     router_group.add_argument('--crossing-penalty', type=float,

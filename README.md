@@ -130,7 +130,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --heuristic-weight 1.9       # A* greediness (>1 = faster)
 --max-ripup 3                # Max blockers to rip up at once (1-N progressive)
 --max-setback-angle 45       # Max angle for setback search (degrees)
---routing-clearance-margin 1.15  # Multiplier on track-via clearance (1.0 = min DRC)
+--routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)
 
 # Strategy
 --ordering mps          # mps | inside_out | original
