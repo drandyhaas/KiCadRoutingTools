@@ -242,6 +242,8 @@ Examples:
                               help='Maximum blockers to rip up at once during rip-up and retry (default: 3)')
     router_group.add_argument('--max-setback-angle', type=float,
                               help='Maximum angle (degrees) for setback position search (default: 45.0)')
+    router_group.add_argument('--routing-clearance-margin', type=float,
+                              help='Multiplier on track-via clearance (1.0 = minimum DRC, default: 1.15)')
     router_group.add_argument('--swappable-nets', nargs='+',
                               help='Glob patterns for diff pairs that can have targets swapped (e.g., rx1_*)')
     router_group.add_argument('--crossing-penalty', type=float,
@@ -377,6 +379,8 @@ Examples:
         router_cmd.extend(["--max-ripup", str(args.max_ripup)])
     if args.max_setback_angle is not None:
         router_cmd.extend(["--max-setback-angle", str(args.max_setback_angle)])
+    if args.routing_clearance_margin is not None:
+        router_cmd.extend(["--routing-clearance-margin", str(args.routing_clearance_margin)])
     if args.swappable_nets:
         router_cmd.extend(["--swappable-nets"] + args.swappable_nets)
     if args.crossing_penalty is not None:

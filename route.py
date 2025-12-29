@@ -346,6 +346,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 crossing_penalty: float = 1000.0,
                 mps_unroll: bool = True,
                 skip_routing: bool = False,
+                routing_clearance_margin: float = 1.15,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -435,6 +436,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         max_setback_angle=max_setback_angle,
         target_swap_crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check,
+        routing_clearance_margin=routing_clearance_margin,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -3296,6 +3298,8 @@ Differential pair routing:
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
     parser.add_argument("--max-setback-angle", type=float, default=45.0,
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
+    parser.add_argument("--routing-clearance-margin", type=float, default=1.15,
+                        help="Multiplier on track-via clearance (1.0 = minimum DRC, 1.15 = safe default)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
@@ -3377,4 +3381,5 @@ Differential pair routing:
                 swappable_net_patterns=args.swappable_nets,
                 crossing_penalty=args.crossing_penalty,
                 skip_routing=args.skip_routing,
+                routing_clearance_margin=args.routing_clearance_margin,
                 vis_callback=vis_callback)

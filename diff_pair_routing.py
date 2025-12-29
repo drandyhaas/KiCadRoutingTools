@@ -449,7 +449,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # When centerline places a via, P/N vias are offset by via_spacing perpendicular to path
     # via_spacing is larger than spacing_mm to ensure via-via clearance
     # We need to prevent centerline from returning near the via such that offset tracks would conflict
-    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.15
+    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
     min_via_spacing = config.via_size + config.clearance  # Minimum via center-to-center distance
     min_via_spacing_for_track = track_via_clearance - spacing_mm
     via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
@@ -1556,7 +1556,7 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
     Handles multiple layer changes by processing in reverse order.
     """
     min_via_spacing = config.via_size + config.clearance  # Minimum center-to-center distance
-    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * 1.15
+    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
 
     if not p_float_path or not n_float_path or len(simplified_path) < 2:
         return p_float_path, n_float_path
