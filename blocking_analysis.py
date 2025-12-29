@@ -38,6 +38,8 @@ class BlockingInfo:
     track_cells: int    # Cells blocked by tracks
     via_cells: int      # Cells blocked by vias
     unique_cells: int   # Cells where this net is the ONLY blocker
+    near_target_cells: int  # Cells within proximity of target (more critical)
+    near_source_cells: int  # Cells within proximity of source
     details: str        # Human-readable details
 
 
@@ -157,6 +159,8 @@ def analyze_frontier_blocking(
     routed_net_paths: Dict[int, List[Tuple[int, int, int]]],
     exclude_net_ids: Optional[Set[int]] = None,
     extra_clearance: float = 0.0,
+    target_xy: Optional[Tuple[float, float]] = None,
+    source_xy: Optional[Tuple[float, float]] = None,
 ) -> List[BlockingInfo]:
     """
     Analyze which nets are blocking based on frontier data.
@@ -168,15 +172,29 @@ def analyze_frontier_blocking(
         config: Routing configuration
         routed_net_paths: Dict mapping net_id -> routed path for previously routed nets
         exclude_net_ids: Net IDs to exclude from analysis (e.g., the current net)
+        extra_clearance: Extra clearance for diff pair centerline routing
+        target_xy: Optional (x, y) target coordinates in mm for proximity analysis
+        source_xy: Optional (x, y) source coordinates in mm for proximity analysis
 
     Returns:
-        List of BlockingInfo sorted by blocked_count (highest first)
+        List of BlockingInfo sorted by blocking priority
     """
     if not blocked_cells:
         return []
 
     exclude_net_ids = exclude_net_ids or set()
     blocked_set = set(blocked_cells)
+
+    # Compute source/target grid coords and proximity threshold
+    coord = GridCoord(config.grid_step)
+    target_gx, target_gy = None, None
+    source_gx, source_gy = None, None
+    # "Near" = within 3mm (30 grid cells at 0.1mm grid)
+    near_radius_grid = int(3.0 / config.grid_step)
+    if target_xy is not None:
+        target_gx, target_gy = coord.to_grid(target_xy[0], target_xy[1])
+    if source_xy is not None:
+        source_gx, source_gy = coord.to_grid(source_xy[0], source_xy[1])
 
     # First pass: compute obstacle cells for each net and track which nets block each cell
     cell_to_blockers: Dict[Tuple[int, int, int], Set[int]] = defaultdict(set)
@@ -203,7 +221,7 @@ def analyze_frontier_blocking(
             for cell in blocking_total:
                 cell_to_blockers[cell].add(net_id)
 
-    # Second pass: count unique blocking (cells where this net is the only blocker)
+    # Second pass: count unique blocking and near-source/target blocking
     results = []
     for net_id, (track_cells, via_cells, blocking_track, blocking_via, blocking_total) in net_blocking_data.items():
         net = pcb_data.nets.get(net_id)
@@ -211,6 +229,19 @@ def analyze_frontier_blocking(
 
         # Count cells where this net is the ONLY blocker
         unique_count = sum(1 for cell in blocking_total if len(cell_to_blockers[cell]) == 1)
+
+        # Count cells near target and source
+        near_target_count = 0
+        near_source_count = 0
+        for gx, gy, _ in blocking_total:
+            if target_gx is not None:
+                dist_sq = (gx - target_gx) ** 2 + (gy - target_gy) ** 2
+                if dist_sq <= near_radius_grid ** 2:
+                    near_target_count += 1
+            if source_gx is not None:
+                dist_sq = (gx - source_gx) ** 2 + (gy - source_gy) ** 2
+                if dist_sq <= near_radius_grid ** 2:
+                    near_source_count += 1
 
         details = f"{len(blocking_track)} track, {len(blocking_via)} via cells on frontier"
         results.append(BlockingInfo(
@@ -220,22 +251,29 @@ def analyze_frontier_blocking(
             track_cells=len(blocking_track),
             via_cells=len(blocking_via),
             unique_cells=unique_count,
+            near_target_cells=near_target_count,
+            near_source_cells=near_source_count,
             details=details
         ))
 
     # Sort to prioritize nets that will actually open up routing:
     # 1. Nets with 100% unique blocking are top priority (guaranteed to help)
-    # 2. For others, use weighted score: unique_cells + 0.5 * shared_cells
-    #    This prioritizes unique blocking while still considering total blocking
+    # 2. For others, use weighted score that considers:
+    #    - unique_cells (guaranteed to open up)
+    #    - near_target_cells and near_source_cells (blocking critical areas)
+    #    - shared blocking (partial credit)
     def sort_key(x):
+        near_endpoint = x.near_target_cells + x.near_source_cells
         if x.blocked_count > 0 and x.unique_cells == x.blocked_count:
-            # 100% unique - highest priority, sort by count
-            return (2, x.unique_cells)
+            # 100% unique - highest priority, use near_endpoint as tiebreaker
+            return (2, x.unique_cells, near_endpoint)
         else:
-            # Weighted: unique counts full, shared counts half
+            # Weighted score: unique counts full, near-endpoint unique counts extra, shared counts half
             shared = x.blocked_count - x.unique_cells
-            score = x.unique_cells + 0.5 * shared
-            return (1, score)
+            # Near-endpoint unique cells are extra valuable
+            near_endpoint_unique = min(near_endpoint, x.unique_cells)
+            score = x.unique_cells + near_endpoint_unique + 0.5 * shared
+            return (1, score, near_endpoint)
 
     results.sort(key=sort_key, reverse=True)
 
@@ -254,16 +292,31 @@ def print_blocking_analysis(
 
     total_blocked = sum(b.blocked_count for b in blockers)
     total_unique = sum(b.unique_cells for b in blockers)
-    print(f"{prefix}Frontier blocked by {len(blockers)} nets ({total_blocked} cells, {total_unique} uniquely blocked)")
+    total_near_target = sum(b.near_target_cells for b in blockers)
+    total_near_source = sum(b.near_source_cells for b in blockers)
+
+    summary = f"{prefix}Frontier blocked by {len(blockers)} nets ({total_blocked} cells, {total_unique} unique"
+    if total_near_source > 0 or total_near_target > 0:
+        summary += f"; near: {total_near_source} src, {total_near_target} tgt"
+    summary += ")"
+    print(summary)
+
     print(f"{prefix}Top blockers:")
     for i, info in enumerate(blockers[:max_display]):
         pct = 100.0 * info.blocked_count / total_blocked if total_blocked > 0 else 0
         unique_pct = 100.0 * info.unique_cells / info.blocked_count if info.blocked_count > 0 else 0
-        # Show unique blocking prominently if it's significant
+
+        # Build output string
+        parts = [f"{info.blocked_count} ({pct:.1f}%)"]
         if info.unique_cells > 0:
-            print(f"{prefix}  {i+1}. {info.net_name}: {info.blocked_count} cells ({pct:.1f}%), {info.unique_cells} unique ({unique_pct:.0f}%)")
+            parts.append(f"{info.unique_cells} uniq ({unique_pct:.0f}%)")
         else:
-            print(f"{prefix}  {i+1}. {info.net_name}: {info.blocked_count} cells ({pct:.1f}%), no unique")
+            parts.append("no uniq")
+        # Show near-source and near-target if either is non-zero
+        if info.near_source_cells > 0 or info.near_target_cells > 0:
+            parts.append(f"near: {info.near_source_cells} src, {info.near_target_cells} tgt")
+
+        print(f"{prefix}  {i+1}. {info.net_name}: {', '.join(parts)}")
 
     if len(blockers) > max_display:
         remaining = sum(b.blocked_count for b in blockers[max_display:])

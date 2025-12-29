@@ -1517,6 +1517,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # from routing through them. Exclude the stub endpoints where we need to connect.
         add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
 
+        # Get source/target coordinates for blocking analysis (center of P/N endpoints)
+        from diff_pair_routing import get_diff_pair_endpoints
+        sources, targets, _ = get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
+        source_xy = None
+        target_xy = None
+        if sources:
+            src = sources[0]  # Use first source pair
+            # Source center = average of P and N source coords (indices 5,6 and 7,8 are float coords)
+            source_xy = ((src[5] + src[7]) / 2, (src[6] + src[8]) / 2)
+        if targets:
+            tgt = targets[0]  # Use first target pair
+            # Target center = average of P and N target coords
+            target_xy = ((tgt[5] + tgt[7]) / 2, (tgt[6] + tgt[8]) / 2)
+
         # Route the differential pair
         # Pass both diff pair obstacles (with extra clearance) and base obstacles (for extension routing)
         # Also pass unrouted stubs for finding clear extension endpoints
@@ -1540,7 +1554,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             blockers = analyze_frontier_blocking(
                 blocked_cells, pcb_data, config, routed_net_paths,
                 exclude_net_ids={pair.p_net_id, pair.n_net_id},
-                extra_clearance=config.diff_pair_gap / 2
+                extra_clearance=config.diff_pair_gap / 2,
+                target_xy=target_xy,
+                source_xy=source_xy
             )
 
             # Filter to rippable blockers (only those we've routed)
@@ -1728,7 +1744,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
                         exclude_net_ids={pair.p_net_id, pair.n_net_id},
-                        extra_clearance=diff_pair_extra_clearance
+                        extra_clearance=diff_pair_extra_clearance,
+                        target_xy=target_xy,
+                        source_xy=source_xy
                     )
                     print_blocking_analysis(blockers)
 
@@ -1759,7 +1777,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             fresh_blockers = analyze_frontier_blocking(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                 exclude_net_ids={pair.p_net_id, pair.n_net_id},
-                                extra_clearance=diff_pair_extra_clearance
+                                extra_clearance=diff_pair_extra_clearance,
+                                target_xy=target_xy,
+                                source_xy=source_xy
                             )
                             print_blocking_analysis(fresh_blockers, prefix="    ")
                             # Find the most-blocking net that isn't already ripped
@@ -2112,9 +2132,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     blocked_cells = list(set(fwd_cells + bwd_cells))
 
                 if blocked_cells:
+                    # Get source/target coordinates for blocking analysis
+                    from routing_utils import get_net_endpoints as get_single_net_endpoints
+                    single_sources, single_targets, _ = get_single_net_endpoints(pcb_data, net_id, config)
+                    single_source_xy = None
+                    single_target_xy = None
+                    if single_sources:
+                        single_source_xy = (single_sources[0][3], single_sources[0][4])  # orig_x, orig_y
+                    if single_targets:
+                        single_target_xy = (single_targets[0][3], single_targets[0][4])  # orig_x, orig_y
+
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
                         exclude_net_ids={net_id},
+                        target_xy=single_target_xy,
+                        source_xy=single_source_xy
                     )
                     print_blocking_analysis(blockers)
 
@@ -2143,6 +2175,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             fresh_blockers = analyze_frontier_blocking(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                 exclude_net_ids={net_id},
+                                target_xy=single_target_xy,
+                                source_xy=single_source_xy
                             )
                             print_blocking_analysis(fresh_blockers, prefix="    ")
                             # Find the most-blocking net that isn't already ripped
@@ -2386,9 +2420,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     blocked_cells = list(set(fwd_cells + bwd_cells))
 
                     if blocked_cells:
+                        # Get source/target coordinates for blocking analysis
+                        from routing_utils import get_net_endpoints as get_single_net_endpoints
+                        reroute_sources, reroute_targets, _ = get_single_net_endpoints(pcb_data, ripped_net_id, config)
+                        reroute_source_xy = None
+                        reroute_target_xy = None
+                        if reroute_sources:
+                            reroute_source_xy = (reroute_sources[0][3], reroute_sources[0][4])  # orig_x, orig_y
+                        if reroute_targets:
+                            reroute_target_xy = (reroute_targets[0][3], reroute_targets[0][4])  # orig_x, orig_y
+
                         blockers = analyze_frontier_blocking(
                             blocked_cells, pcb_data, config, routed_net_paths,
                             exclude_net_ids={ripped_net_id},
+                            target_xy=reroute_target_xy,
+                            source_xy=reroute_source_xy
                         )
                         print_blocking_analysis(blockers)
 
@@ -2415,6 +2461,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                     exclude_net_ids={ripped_net_id},
+                                    target_xy=reroute_target_xy,
+                                    source_xy=reroute_source_xy
                                 )
                                 print_blocking_analysis(fresh_blockers, prefix="    ")
                                 # Find the most-blocking net that isn't already ripped
@@ -2605,6 +2653,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             merge_track_proximity_costs(obstacles, track_proximity_cache)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
+
+            # Get source/target coordinates for blocking analysis
+            reroute_sources, reroute_targets, _ = get_diff_pair_endpoints(pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config)
+            reroute_source_xy = None
+            reroute_target_xy = None
+            if reroute_sources:
+                src = reroute_sources[0]
+                reroute_source_xy = ((src[5] + src[7]) / 2, (src[6] + src[8]) / 2)
+            if reroute_targets:
+                tgt = reroute_targets[0]
+                reroute_target_xy = ((tgt[5] + tgt[7]) / 2, (tgt[6] + tgt[8]) / 2)
             add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
 
             result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs)
@@ -2658,7 +2717,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         blockers = analyze_frontier_blocking(
                             blocked_cells, pcb_data, config, routed_net_paths,
                             exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
-                            extra_clearance=diff_pair_extra_clearance
+                            extra_clearance=diff_pair_extra_clearance,
+                            target_xy=reroute_target_xy,
+                            source_xy=reroute_source_xy
                         )
                         print_blocking_analysis(blockers)
 
@@ -2696,7 +2757,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                     exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
-                                    extra_clearance=diff_pair_extra_clearance
+                                    extra_clearance=diff_pair_extra_clearance,
+                                    target_xy=reroute_target_xy,
+                                    source_xy=reroute_source_xy
                                 )
                                 print_blocking_analysis(fresh_blockers, prefix="    ")
                                 # Find the most-blocking net that isn't already ripped
