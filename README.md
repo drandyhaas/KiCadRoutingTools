@@ -96,12 +96,12 @@ KiCadRoutingTools/
 | Module | Lines | Purpose |
 |--------|-------|---------|
 | `routing_config.py` | 87 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
-| `routing_utils.py` | 1944 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
+| `routing_utils.py` | 1953 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
 | `obstacle_map.py` | 1015 | Obstacle map building from PCB data |
 | `single_ended_routing.py` | 589 | Single-ended net routing with A* |
 | `diff_pair_routing.py` | 1777 | Differential pair centerline + offset routing |
 | `stub_layer_switching.py` | 682 | Stub layer swap optimization for diff pairs and single-ended nets |
-| `route.py` | 3456 | CLI and batch routing orchestration |
+| `route.py` | 3460 | CLI and batch routing orchestration |
 
 ## Performance
 

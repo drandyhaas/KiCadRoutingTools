@@ -41,9 +41,11 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 |--------|---------|-------------|
 | `--via-cost` | 50 | Via penalty in grid steps (doubled for diff pairs) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
+| `--max-probe-iterations` | 5000 | Quick probe per direction to detect stuck routes |
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
+| `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
 
 ### Routing Strategy Options
 
@@ -95,12 +97,21 @@ These options control stub layer switching, which moves stubs to different layer
 - For **solo switches**, a single stub moves when it doesn't conflict with other stubs
 - Multiple swap options are tried: src/src, tgt/tgt, src/tgt, tgt/src
 
+### Visualization Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--visualize` / `-V` | false | Show real-time visualization of routing (requires pygame) |
+| `--auto` | false | Auto-advance to next net without waiting (with `--visualize`) |
+| `--display-time` | 0.0 | Seconds to display completed route before advancing (with `--visualize --auto`) |
+
 ### Debug Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
 | `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, etc.) |
+| `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 
 ## GridRouteConfig Class
 
@@ -125,6 +136,7 @@ class GridRouteConfig:
     heuristic_weight: float = 1.9
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
     max_setback_angle: float = 45.0  # degrees
+    routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
 
     # Layers
     layers: List[str] = ['F.Cu', 'B.Cu']
@@ -135,7 +147,11 @@ class GridRouteConfig:
     # Stub proximity
     stub_proximity_radius: float = 2.0   # mm
     stub_proximity_cost: float = 0.2     # mm equivalent
-    via_proximity_cost: float = 50.0     # multiplier for vias near stubs (uses via_cost value)
+    via_proximity_cost: float = 50.0     # multiplier for vias near stubs
+
+    # BGA proximity
+    bga_proximity_radius: float = 10.0   # mm from BGA edges
+    bga_proximity_cost: float = 0.2      # mm equivalent
 
     # Track proximity (same layer)
     track_proximity_distance: float = 2.0  # mm
@@ -147,12 +163,15 @@ class GridRouteConfig:
     # Differential pairs
     diff_pair_gap: float = 0.101         # mm between P and N
     diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
+    min_turning_radius: float = 0.2      # mm for pose-based routing
     fix_polarity: bool = True            # swap target pads if polarity swap needed
     stub_layer_swap: bool = True         # enable stub layer switching optimization
     target_swap_crossing_penalty: float = 1000.0  # penalty for crossing assignments
+    crossing_layer_check: bool = True    # only count crossings on same layer
 
     # Debug
     debug_lines: bool = False
+    verbose: bool = False
 ```
 
 ## Parameter Guidelines
