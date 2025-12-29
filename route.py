@@ -1755,11 +1755,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # For N > 1, re-analyze from the last retry's blocked cells
                         # to find the most blocking net from that specific failure
                         if N > 1 and last_retry_blocked_cells:
+                            print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                             fresh_blockers = analyze_frontier_blocking(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                 exclude_net_ids={pair.p_net_id, pair.n_net_id},
                                 extra_clearance=diff_pair_extra_clearance
                             )
+                            print_blocking_analysis(fresh_blockers, prefix="    ")
                             # Find the most-blocking net that isn't already ripped
                             next_blocker = None
                             for b in fresh_blockers:
@@ -1825,9 +1827,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             blocker = rippable_blockers[N-1]
                             if blocker.net_id in diff_pair_by_net_id:
                                 ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
-                                print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp} (most blocking from retry)...")
+                                print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp}...")
                             else:
-                                print(f"  Extending to N={N}: ripping {blocker.net_name} (most blocking from retry)...")
+                                print(f"  Extending to N={N}: ripping {blocker.net_name}...")
 
                         for i in range(len(ripped_items), N):
                             blocker = rippable_blockers[i]
@@ -2137,10 +2139,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # For N > 1, re-analyze from the last retry's blocked cells
                         # to find the most blocking net from that specific failure
                         if N > 1 and last_retry_blocked_cells:
+                            print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                             fresh_blockers = analyze_frontier_blocking(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                 exclude_net_ids={net_id},
                             )
+                            print_blocking_analysis(fresh_blockers, prefix="    ")
                             # Find the most-blocking net that isn't already ripped
                             next_blocker = None
                             for b in fresh_blockers:
@@ -2202,9 +2206,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             blocker = rippable_blockers[N-1]
                             if blocker.net_id in diff_pair_by_net_id:
                                 ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
-                                print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp} (most blocking from retry)...")
+                                print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp}...")
                             else:
-                                print(f"  Extending to N={N}: ripping {blocker.net_name} (most blocking from retry)...")
+                                print(f"  Extending to N={N}: ripping {blocker.net_name}...")
 
                         for i in range(len(ripped_items), N):
                             blocker = rippable_blockers[i]
@@ -2407,10 +2411,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             # For N > 1, re-analyze from the last retry's blocked cells
                             # to find the most blocking net from that specific failure
                             if N > 1 and last_retry_blocked_cells:
+                                print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                     exclude_net_ids={ripped_net_id},
                                 )
+                                print_blocking_analysis(fresh_blockers, prefix="    ")
                                 # Find the most-blocking net that isn't already ripped
                                 next_blocker = None
                                 for b in fresh_blockers:
@@ -2458,9 +2464,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 blocker = rippable_blockers[N-1]
                                 if blocker.net_id in diff_pair_by_net_id:
                                     ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
-                                    print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp} (most blocking from retry)...")
+                                    print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp}...")
                                 else:
-                                    print(f"  Extending to N={N}: ripping {blocker.net_name} (most blocking from retry)...")
+                                    print(f"  Extending to N={N}: ripping {blocker.net_name}...")
 
                             for i in range(len(ripped_items), N):
                                 blocker = rippable_blockers[i]
@@ -2686,11 +2692,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             # For N > 1, re-analyze from the last retry's blocked cells
                             # to find the most blocking net from that specific failure
                             if N > 1 and last_retry_blocked_cells:
+                                print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                     exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
                                     extra_clearance=diff_pair_extra_clearance
                                 )
+                                print_blocking_analysis(fresh_blockers, prefix="    ")
                                 # Find the most-blocking net that isn't already ripped
                                 next_blocker = None
                                 for b in fresh_blockers:
@@ -2748,9 +2756,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 blocker = rippable_blockers[N-1]
                                 if blocker.net_id in diff_pair_by_net_id:
                                     ripped_pair_name_tmp, _ = diff_pair_by_net_id[blocker.net_id]
-                                    print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp} (most blocking from retry)...")
+                                    print(f"  Extending to N={N}: ripping diff pair {ripped_pair_name_tmp}...")
                                 else:
-                                    print(f"  Extending to N={N}: ripping {blocker.net_name} (most blocking from retry)...")
+                                    print(f"  Extending to N={N}: ripping {blocker.net_name}...")
 
                             for i in range(len(ripped_items), N):
                                 blocker = rippable_blockers[i]

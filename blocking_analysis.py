@@ -37,6 +37,7 @@ class BlockingInfo:
     blocked_count: int  # Number of frontier cells blocked by this net
     track_cells: int    # Cells blocked by tracks
     via_cells: int      # Cells blocked by vias
+    unique_cells: int   # Cells where this net is the ONLY blocker
     details: str        # Human-readable details
 
 
@@ -177,15 +178,13 @@ def analyze_frontier_blocking(
     exclude_net_ids = exclude_net_ids or set()
     blocked_set = set(blocked_cells)
 
-    results = []
+    # First pass: compute obstacle cells for each net and track which nets block each cell
+    cell_to_blockers: Dict[Tuple[int, int, int], Set[int]] = defaultdict(set)
+    net_blocking_data = {}  # net_id -> (track_cells, via_cells, blocking_track, blocking_via, blocking_total)
 
-    # Check each routed net
     for net_id, path in routed_net_paths.items():
         if net_id in exclude_net_ids:
             continue
-
-        net = pcb_data.nets.get(net_id)
-        net_name = net.name if net else f"Net {net_id}"
 
         # Get all obstacle cells for this net
         track_cells, via_cells = compute_net_obstacle_cells(
@@ -199,41 +198,65 @@ def analyze_frontier_blocking(
         blocking_total = blocked_set & all_cells
 
         if len(blocking_total) > 0:
-            details = f"{len(blocking_track)} track, {len(blocking_via)} via cells on frontier"
-            results.append(BlockingInfo(
-                net_id=net_id,
-                net_name=net_name,
-                blocked_count=len(blocking_total),
-                track_cells=len(blocking_track),
-                via_cells=len(blocking_via),
-                details=details
-            ))
+            net_blocking_data[net_id] = (track_cells, via_cells, blocking_track, blocking_via, blocking_total)
+            # Track which nets block each cell
+            for cell in blocking_total:
+                cell_to_blockers[cell].add(net_id)
 
-    # Sort by blocked count (most blocking first)
-    results.sort(key=lambda x: x.blocked_count, reverse=True)
+    # Second pass: count unique blocking (cells where this net is the only blocker)
+    results = []
+    for net_id, (track_cells, via_cells, blocking_track, blocking_via, blocking_total) in net_blocking_data.items():
+        net = pcb_data.nets.get(net_id)
+        net_name = net.name if net else f"Net {net_id}"
+
+        # Count cells where this net is the ONLY blocker
+        unique_count = sum(1 for cell in blocking_total if len(cell_to_blockers[cell]) == 1)
+
+        details = f"{len(blocking_track)} track, {len(blocking_via)} via cells on frontier"
+        results.append(BlockingInfo(
+            net_id=net_id,
+            net_name=net_name,
+            blocked_count=len(blocking_total),
+            track_cells=len(blocking_track),
+            via_cells=len(blocking_via),
+            unique_cells=unique_count,
+            details=details
+        ))
+
+    # Sort by blocked count (primary), then by unique cells (secondary)
+    # Nets with high unique blocking are better rip-up candidates since removing them
+    # guarantees opening up routing options
+    results.sort(key=lambda x: (x.blocked_count, x.unique_cells), reverse=True)
 
     return results
 
 
 def print_blocking_analysis(
     blockers: List[BlockingInfo],
-    max_display: int = 10
+    max_display: int = 10,
+    prefix: str = "  "
 ):
     """Print blocking analysis results."""
     if not blockers:
-        print("  No previously-routed nets blocking (likely blocked by pads/stubs/zones)")
+        print(f"{prefix}No previously-routed nets blocking (likely blocked by pads/stubs/zones)")
         return
 
     total_blocked = sum(b.blocked_count for b in blockers)
-    print(f"  Frontier blocked by {len(blockers)} nets ({total_blocked} total cells)")
-    print(f"  Top blockers:")
+    total_unique = sum(b.unique_cells for b in blockers)
+    print(f"{prefix}Frontier blocked by {len(blockers)} nets ({total_blocked} cells, {total_unique} uniquely blocked)")
+    print(f"{prefix}Top blockers:")
     for i, info in enumerate(blockers[:max_display]):
         pct = 100.0 * info.blocked_count / total_blocked if total_blocked > 0 else 0
-        print(f"    {i+1}. {info.net_name}: {info.blocked_count} cells ({pct:.1f}%) - {info.details}")
+        unique_pct = 100.0 * info.unique_cells / info.blocked_count if info.blocked_count > 0 else 0
+        # Show unique blocking prominently if it's significant
+        if info.unique_cells > 0:
+            print(f"{prefix}  {i+1}. {info.net_name}: {info.blocked_count} cells ({pct:.1f}%), {info.unique_cells} unique ({unique_pct:.0f}%)")
+        else:
+            print(f"{prefix}  {i+1}. {info.net_name}: {info.blocked_count} cells ({pct:.1f}%), no unique")
 
     if len(blockers) > max_display:
         remaining = sum(b.blocked_count for b in blockers[max_display:])
-        print(f"    ... and {len(blockers) - max_display} more nets ({remaining} cells)")
+        print(f"{prefix}  ... and {len(blockers) - max_display} more nets ({remaining} cells)")
 
 
 if __name__ == "__main__":
