@@ -177,6 +177,13 @@ def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord:
     sy = 1 if gy1 < gy2 else -1
     err = dx - dy
 
+    # For diagonal segments, the actual line passes between grid points,
+    # so we need a slightly larger blocking radius to ensure clearance is maintained.
+    # Using +0.25 catches sqrt(10)~3.16 but not sqrt(11)~3.32.
+    is_diagonal = dx > 0 and dy > 0
+    effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
+    via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
+
     gx, gy = gx1, gy1
     while True:
         # Skip if this cell is in the exclusion zone
@@ -185,9 +192,9 @@ def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord:
                 for ey in range(-expansion_grid, expansion_grid + 1):
                     if (gx + ex, gy + ey) not in exclude_cells:
                         obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-            for ex in range(-via_block_grid, via_block_grid + 1):
-                for ey in range(-via_block_grid, via_block_grid + 1):
-                    if ex*ex + ey*ey <= via_block_grid * via_block_grid:
+            for ex in range(-via_block_range, via_block_range + 1):
+                for ey in range(-via_block_range, via_block_range + 1):
+                    if ex*ex + ey*ey <= effective_via_block_sq:
                         if (gx + ex, gy + ey) not in exclude_cells:
                             obstacles.add_blocked_via(gx + ex, gy + ey)
 
@@ -267,14 +274,22 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
     sy = 1 if gy1 < gy2 else -1
     err = dx - dy
 
+    # For diagonal segments, the actual line passes between grid points,
+    # so we need a slightly larger blocking radius to ensure clearance is maintained.
+    # Using +0.25 catches sqrt(10)~3.16 but not sqrt(11)~3.32.
+    is_diagonal = dx > 0 and dy > 0
+    effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
+    # Need to iterate over slightly larger range for diagonal segments
+    via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
+
     gx, gy = gx1, gy1
     while True:
         for ex in range(-expansion_grid, expansion_grid + 1):
             for ey in range(-expansion_grid, expansion_grid + 1):
                 obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-        for ex in range(-via_block_grid, via_block_grid + 1):
-            for ey in range(-via_block_grid, via_block_grid + 1):
-                if ex*ex + ey*ey <= via_block_grid * via_block_grid:
+        for ex in range(-via_block_range, via_block_range + 1):
+            for ey in range(-via_block_range, via_block_range + 1):
+                if ex*ex + ey*ey <= effective_via_block_sq:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
 
         if gx == gx2 and gy == gy2:
@@ -292,10 +307,13 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
                       num_layers: int, via_track_expansion_grid: int, via_via_expansion_grid: int):
     """Add a via as obstacle to the map."""
     gx, gy = coord.to_grid(via.x, via.y)
-    # Block cells for track routing
-    for ex in range(-via_track_expansion_grid, via_track_expansion_grid + 1):
-        for ey in range(-via_track_expansion_grid, via_track_expansion_grid + 1):
-            if ex*ex + ey*ey <= via_track_expansion_grid * via_track_expansion_grid:
+    # Block cells for track routing.
+    # Add +0.25 margin to catch diagonal segments that pass between grid points.
+    effective_track_block_sq = (via_track_expansion_grid + 0.25) ** 2
+    track_block_range = via_track_expansion_grid + 1
+    for ex in range(-track_block_range, track_block_range + 1):
+        for ey in range(-track_block_range, track_block_range + 1):
+            if ex*ex + ey*ey <= effective_track_block_sq:
                 for layer_idx in range(num_layers):
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
     # Block cells for via placement
@@ -352,10 +370,12 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
         gx2, gy2, layer2 = path[i + 1]
 
         if layer1 != layer2:
-            # Via - add via obstacle
-            for ex in range(-via_track_expansion_grid, via_track_expansion_grid + 1):
-                for ey in range(-via_track_expansion_grid, via_track_expansion_grid + 1):
-                    if ex*ex + ey*ey <= via_track_expansion_grid * via_track_expansion_grid:
+            # Via - add via obstacle with +0.25 margin to catch diagonal segments
+            effective_track_block_sq = (via_track_expansion_grid + 0.25) ** 2
+            track_block_range = via_track_expansion_grid + 1
+            for ex in range(-track_block_range, track_block_range + 1):
+                for ey in range(-track_block_range, track_block_range + 1):
+                    if ex*ex + ey*ey <= effective_track_block_sq:
                         for layer_idx in range(num_layers):
                             obstacles.add_blocked_cell(gx1 + ex, gy1 + ey, layer_idx)
             for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
@@ -370,14 +390,19 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
             sy = 1 if gy1 < gy2 else -1
             err = dx - dy
 
+            # For diagonal segments, add +0.25 margin to via blocking
+            is_diagonal = dx > 0 and dy > 0
+            effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
+            via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
+
             gx, gy = gx1, gy1
             while True:
                 for ex in range(-expansion_grid, expansion_grid + 1):
                     for ey in range(-expansion_grid, expansion_grid + 1):
                         obstacles.add_blocked_cell(gx + ex, gy + ey, layer1)
-                for ex in range(-via_block_grid, via_block_grid + 1):
-                    for ey in range(-via_block_grid, via_block_grid + 1):
-                        if ex*ex + ey*ey <= via_block_grid * via_block_grid:
+                for ex in range(-via_block_range, via_block_range + 1):
+                    for ey in range(-via_block_range, via_block_range + 1):
+                        if ex*ex + ey*ey <= effective_via_block_sq:
                             obstacles.add_blocked_via(gx + ex, gy + ey)
 
                 if gx == gx2 and gy == gy2:
@@ -689,15 +714,22 @@ def _add_segment_obstacle_vis(obstacles: GridObstacleMap, seg, coord: GridCoord,
     sy = 1 if gy1 < gy2 else -1
     err = dx - dy
 
+    # For diagonal segments, the actual line passes between grid points,
+    # so we need a slightly larger blocking radius to ensure clearance is maintained.
+    # Using +0.25 catches sqrt(10)~3.16 but not sqrt(11)~3.32.
+    is_diagonal = dx > 0 and dy > 0
+    effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
+    via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
+
     gx, gy = gx1, gy1
     while True:
         for ex in range(-expansion_grid, expansion_grid + 1):
             for ey in range(-expansion_grid, expansion_grid + 1):
                 obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
                 blocked_cells[layer_idx].add((gx + ex, gy + ey))
-        for ex in range(-via_block_grid, via_block_grid + 1):
-            for ey in range(-via_block_grid, via_block_grid + 1):
-                if ex*ex + ey*ey <= via_block_grid * via_block_grid:
+        for ex in range(-via_block_range, via_block_range + 1):
+            for ey in range(-via_block_range, via_block_range + 1):
+                if ex*ex + ey*ey <= effective_via_block_sq:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
                     blocked_vias.add((gx + ex, gy + ey))
 
@@ -718,10 +750,13 @@ def _add_via_obstacle_vis(obstacles: GridObstacleMap, via, coord: GridCoord,
                            blocked_vias: Set[Tuple[int, int]]):
     """Add a via as obstacle and capture vis data."""
     gx, gy = coord.to_grid(via.x, via.y)
-    # Block cells for track routing
-    for ex in range(-via_track_expansion_grid, via_track_expansion_grid + 1):
-        for ey in range(-via_track_expansion_grid, via_track_expansion_grid + 1):
-            if ex*ex + ey*ey <= via_track_expansion_grid * via_track_expansion_grid:
+    # Block cells for track routing.
+    # Add +0.25 margin to catch diagonal segments that pass between grid points.
+    effective_track_block_sq = (via_track_expansion_grid + 0.25) ** 2
+    track_block_range = via_track_expansion_grid + 1
+    for ex in range(-track_block_range, track_block_range + 1):
+        for ey in range(-track_block_range, track_block_range + 1):
+            if ex*ex + ey*ey <= effective_track_block_sq:
                 for layer_idx in range(num_layers):
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
                     blocked_cells[layer_idx].add((gx + ex, gy + ey))

@@ -76,3 +76,11 @@ class GridCoord:
     def to_grid_dist(self, dist_mm: float) -> int:
         """Convert a distance in mm to grid units."""
         return round(dist_mm * self.inv_step)
+
+    def to_grid_dist_safe(self, dist_mm: float) -> int:
+        """Convert a distance in mm to grid units with a small safety margin.
+
+        Adds half a grid step to the distance before rounding to account for
+        discretization effects that can cause minor DRC violations.
+        """
+        return round((dist_mm + self.grid_step * 0.5) * self.inv_step)
