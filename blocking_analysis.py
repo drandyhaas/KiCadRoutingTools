@@ -223,10 +223,21 @@ def analyze_frontier_blocking(
             details=details
         ))
 
-    # Sort by blocked count (primary), then by unique cells (secondary)
-    # Nets with high unique blocking are better rip-up candidates since removing them
-    # guarantees opening up routing options
-    results.sort(key=lambda x: (x.blocked_count, x.unique_cells), reverse=True)
+    # Sort to prioritize nets that will actually open up routing:
+    # 1. Nets with 100% unique blocking are top priority (guaranteed to help)
+    # 2. For others, use weighted score: unique_cells + 0.5 * shared_cells
+    #    This prioritizes unique blocking while still considering total blocking
+    def sort_key(x):
+        if x.blocked_count > 0 and x.unique_cells == x.blocked_count:
+            # 100% unique - highest priority, sort by count
+            return (2, x.unique_cells)
+        else:
+            # Weighted: unique counts full, shared counts half
+            shared = x.blocked_count - x.unique_cells
+            score = x.unique_cells + 0.5 * shared
+            return (1, score)
+
+    results.sort(key=sort_key, reverse=True)
 
     return results
 
