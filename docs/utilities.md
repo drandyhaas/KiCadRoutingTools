@@ -227,6 +227,42 @@ Options:
 python qfn_fanout.py board.kicad_pcb fanout.kicad_pcb U3
 ```
 
+## Layer Switcher (`switch_to_layer.py`)
+
+Moves all segments for matching nets to a specified layer, adding vias where needed.
+
+### Usage
+
+```bash
+python switch_to_layer.py NET_PATTERNS --input input.kicad_pcb --output output.kicad_pcb --to-layer LAYER
+
+Options:
+  --input, -i FILE     Input PCB file
+  --output, -o FILE    Output PCB file
+  --to-layer, -l LAYER Target layer (e.g., "In3.Cu", "F.Cu", "B.Cu")
+  --via-size FLOAT     Via outer diameter in mm (default: 0.3)
+  --via-drill FLOAT    Via drill diameter in mm (default: 0.2)
+  --dry-run, -n        Show what would be changed without writing output
+```
+
+### Examples
+
+```bash
+# Move all rx_top nets to In3.Cu
+python switch_to_layer.py "*rx*top*" --input board.kicad_pcb --output modified.kicad_pcb --to-layer In3.Cu
+
+# Preview changes without modifying
+python switch_to_layer.py "*lvds*" -i board.kicad_pcb -o out.kicad_pcb -l B.Cu --dry-run
+```
+
+### What It Does
+
+1. Finds all segments belonging to nets matching the patterns
+2. Changes each segment's layer to the target layer
+3. Adds vias at segment endpoints where layer transitions occur
+
+Useful for post-routing layer adjustments when you want to move certain signals to a different layer.
+
 ## Build Script (`build_router.py`)
 
 Builds the Rust router module.
