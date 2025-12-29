@@ -3029,16 +3029,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if target_swap_info:
             print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
             for swap in target_swap_info:
+                # Get layer info for filtering (prevents swapping stubs that share XY on different layers)
+                p1_layer = swap.get('p1_layer')
+                p2_layer = swap.get('p2_layer')
+
                 # Swap segments at p1's target: p1 net -> p2 net
                 content, p1_p_seg = swap_segment_nets_at_positions(
-                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'])
+                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'], layer=p1_layer)
                 content, p1_n_seg = swap_segment_nets_at_positions(
-                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'])
+                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'], layer=p1_layer)
                 # Swap segments at p2's target: p2 net -> p1 net
                 content, p2_p_seg = swap_segment_nets_at_positions(
-                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'])
+                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'], layer=p2_layer)
                 content, p2_n_seg = swap_segment_nets_at_positions(
-                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'])
+                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'], layer=p2_layer)
 
                 # Swap vias at p1's target
                 content, p1_p_via = swap_via_nets_at_positions(

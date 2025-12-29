@@ -739,7 +739,8 @@ def apply_single_swap(
     p2_pair: DiffPair,
     p2_targets: List,
     target_swaps: Dict[str, str],
-    target_swap_info: List[Dict]
+    target_swap_info: List[Dict],
+    config: 'GridRouteConfig' = None
 ) -> bool:
     """
     Apply a single pairwise target swap to pcb_data.
@@ -757,6 +758,7 @@ def apply_single_swap(
         p2_targets: Target endpoints for second pair
         target_swaps: Dict to update with swap mapping
         target_swap_info: List to append swap details for output file
+        config: GridRouteConfig with layer info (optional, for layer filtering)
 
     Returns:
         True if swap was applied successfully
@@ -775,13 +777,19 @@ def apply_single_swap(
     p2_p_pos = (p2_tgt[5], p2_tgt[6])  # P target position for pair 2
     p2_n_pos = (p2_tgt[7], p2_tgt[8])  # N target position for pair 2
 
+    # Get layer names for filtering (when stubs share XY positions on different layers)
+    p1_layer = config.layers[p1_tgt[4]] if config else None
+    p2_layer = config.layers[p2_tgt[4]] if config else None
+
     # Find all segment positions connected to each target stub
-    p1_p_positions = find_connected_segment_positions(pcb_data, p1_p_pos[0], p1_p_pos[1], p1_pair.p_net_id)
-    p1_n_positions = find_connected_segment_positions(pcb_data, p1_n_pos[0], p1_n_pos[1], p1_pair.n_net_id)
-    p2_p_positions = find_connected_segment_positions(pcb_data, p2_p_pos[0], p2_p_pos[1], p2_pair.p_net_id)
-    p2_n_positions = find_connected_segment_positions(pcb_data, p2_n_pos[0], p2_n_pos[1], p2_pair.n_net_id)
+    # Pass layer to prevent mixing stubs that share XY coords on different layers
+    p1_p_positions = find_connected_segment_positions(pcb_data, p1_p_pos[0], p1_p_pos[1], p1_pair.p_net_id, layer=p1_layer)
+    p1_n_positions = find_connected_segment_positions(pcb_data, p1_n_pos[0], p1_n_pos[1], p1_pair.n_net_id, layer=p1_layer)
+    p2_p_positions = find_connected_segment_positions(pcb_data, p2_p_pos[0], p2_p_pos[1], p2_pair.p_net_id, layer=p2_layer)
+    p2_n_positions = find_connected_segment_positions(pcb_data, p2_n_pos[0], p2_n_pos[1], p2_pair.n_net_id, layer=p2_layer)
 
     # Swap net IDs in pcb_data segments at target positions
+    # Also filter by layer when layers are known (prevents mixing stubs sharing XY on different layers)
     p1_p_seg_count = 0
     p1_n_seg_count = 0
     p2_p_seg_count = 0
@@ -790,20 +798,24 @@ def apply_single_swap(
     for seg in pcb_data.segments:
         seg_positions = {pos_key(seg.start_x, seg.start_y),
                         pos_key(seg.end_x, seg.end_y)}
-        # p1 target: p1_pair.p_net_id -> p2_pair.p_net_id
+        # p1 target: p1_pair.p_net_id -> p2_pair.p_net_id (must be on p1_layer)
         if seg.net_id == p1_pair.p_net_id and seg_positions & p1_p_positions:
-            seg.net_id = p2_pair.p_net_id
-            p1_p_seg_count += 1
+            if p1_layer is None or seg.layer == p1_layer:
+                seg.net_id = p2_pair.p_net_id
+                p1_p_seg_count += 1
         elif seg.net_id == p1_pair.n_net_id and seg_positions & p1_n_positions:
-            seg.net_id = p2_pair.n_net_id
-            p1_n_seg_count += 1
-        # p2 target: p2_pair.p_net_id -> p1_pair.p_net_id
+            if p1_layer is None or seg.layer == p1_layer:
+                seg.net_id = p2_pair.n_net_id
+                p1_n_seg_count += 1
+        # p2 target: p2_pair.p_net_id -> p1_pair.p_net_id (must be on p2_layer)
         elif seg.net_id == p2_pair.p_net_id and seg_positions & p2_p_positions:
-            seg.net_id = p1_pair.p_net_id
-            p2_p_seg_count += 1
+            if p2_layer is None or seg.layer == p2_layer:
+                seg.net_id = p1_pair.p_net_id
+                p2_p_seg_count += 1
         elif seg.net_id == p2_pair.n_net_id and seg_positions & p2_n_positions:
-            seg.net_id = p1_pair.n_net_id
-            p2_n_seg_count += 1
+            if p2_layer is None or seg.layer == p2_layer:
+                seg.net_id = p1_pair.n_net_id
+                p2_n_seg_count += 1
 
     print(f"  Swapped segments: {p1_name} target: {p1_p_seg_count}P+{p1_n_seg_count}N, {p2_name} target: {p2_p_seg_count}P+{p2_n_seg_count}N")
 
@@ -871,11 +883,17 @@ def apply_single_swap(
         pcb_data.pads_by_net.setdefault(p1_pair.n_net_id, []).append(p2_n_pad)
 
     # Store swap info for output file writing
-    # IMPORTANT: Exclude overlapping positions from p2 to prevent double-swapping in output file
-    # When positions overlap, a segment would be swapped twice (758->780, then 780->758) and end up
-    # back at its original net. By excluding overlaps from p2, each segment is swapped exactly once.
-    p2_p_positions_no_overlap = p2_p_positions - p1_p_positions
-    p2_n_positions_no_overlap = p2_n_positions - p1_n_positions
+    # NOTE: Previously we excluded overlapping positions from p2 to prevent double-swapping.
+    # With layer filtering in swap_segment_nets_at_positions, this is no longer needed when
+    # p1 and p2 are on different layers (segments at same XY but different layers won't double-swap).
+    # We only exclude overlaps when BOTH stubs are on the same layer.
+    if p1_layer == p2_layer:
+        p2_p_positions_no_overlap = p2_p_positions - p1_p_positions
+        p2_n_positions_no_overlap = p2_n_positions - p1_n_positions
+    else:
+        # Different layers - no overlap issue since layer filtering prevents double-swapping
+        p2_p_positions_no_overlap = p2_p_positions
+        p2_n_positions_no_overlap = p2_n_positions
 
     target_swap_info.append({
         'p1_name': p1_name,
@@ -886,12 +904,14 @@ def apply_single_swap(
         'p2_n_net_id': p2_pair.n_net_id,
         'p1_p_positions': p1_p_positions,
         'p1_n_positions': p1_n_positions,
-        'p2_p_positions': p2_p_positions_no_overlap,  # Excludes overlapping positions
-        'p2_n_positions': p2_n_positions_no_overlap,  # Excludes overlapping positions
+        'p2_p_positions': p2_p_positions_no_overlap,
+        'p2_n_positions': p2_n_positions_no_overlap,
         'p1_p_pad': p1_p_pad,
         'p1_n_pad': p1_n_pad,
         'p2_p_pad': p2_p_pad,
         'p2_n_pad': p2_n_pad,
+        'p1_layer': p1_layer,  # Layer for filtering output file swaps
+        'p2_layer': p2_layer,  # Layer for filtering output file swaps
     })
 
     return True
@@ -1358,7 +1378,8 @@ def apply_target_swaps(
                 pcb_data,
                 src_name, p1_pair, p1_targets,
                 tgt_name, p2_pair, p2_targets,
-                target_swaps, target_swap_info
+                target_swaps, target_swap_info,
+                config
             )
 
             # Update lookup with swapped targets for subsequent rounds
@@ -1381,7 +1402,8 @@ def apply_target_swaps(
                 pcb_data,
                 src_name, p1_pair, p1_targets,
                 tgt_name, p2_pair, p2_targets,
-                target_swaps, target_swap_info
+                target_swaps, target_swap_info,
+                config
             )
 
     return target_swaps, target_swap_info

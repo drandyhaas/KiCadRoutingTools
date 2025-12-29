@@ -1851,15 +1851,24 @@ def find_pad_nearest_to_position(pcb_data: PCBData, net_id: int, x: float, y: fl
 
 
 def find_connected_segment_positions(pcb_data: PCBData, start_x: float, start_y: float,
-                                      net_id: int, tolerance: float = 0.1) -> set:
+                                      net_id: int, tolerance: float = 0.1,
+                                      layer: str = None) -> set:
     """
     Find all segment endpoint positions connected to a starting position for a given net.
 
     Uses BFS to traverse the segment chain from the starting position.
     Returns a set of (x, y) tuples for all endpoints in the connected stub chain.
+
+    Args:
+        layer: Optional layer name to filter segments. When specified, only segments
+               on this layer are considered. This prevents incorrectly connecting
+               stubs that share XY coordinates but are on different layers.
     """
-    # Get all segments for this net
-    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    # Get all segments for this net (optionally filtered by layer)
+    if layer:
+        net_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == layer]
+    else:
+        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
 
     # Build adjacency: position -> list of connected positions
     adjacency = {}

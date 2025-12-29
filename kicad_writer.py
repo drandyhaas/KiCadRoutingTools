@@ -303,13 +303,24 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
 
 
 def swap_segment_nets_at_positions(content: str, positions: set,
-                                   old_net_id: int, new_net_id: int) -> Tuple[str, int]:
+                                   old_net_id: int, new_net_id: int,
+                                   layer: str = None) -> Tuple[str, int]:
     """
     Swap net IDs of segments that have endpoints at the given positions.
 
+    Args:
+        content: KiCad file content
+        positions: Set of position keys to match
+        old_net_id: Net ID to replace
+        new_net_id: Net ID to replace with
+        layer: Optional layer name to filter segments. When specified, only segments
+               on this layer are swapped. This prevents incorrectly swapping
+               stubs that share XY coordinates but are on different layers.
+
     Returns (modified_content, count_of_swapped_segments).
     """
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+(\d+)\)'
+    # Pattern now captures layer as well
+    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
 
     count = 0
 
@@ -317,15 +328,18 @@ def swap_segment_nets_at_positions(content: str, positions: set,
         nonlocal count
         start_x, start_y = float(match.group(1)), float(match.group(2))
         end_x, end_y = float(match.group(3)), float(match.group(4))
-        seg_net_id = int(match.group(5))
+        seg_layer = match.group(5)
+        seg_net_id = int(match.group(6))
 
         start_key = pos_key(start_x, start_y)
         end_key = pos_key(end_x, end_y)
 
         # Check if this segment has endpoints in our position set and correct net ID
+        # Also filter by layer if specified
         if seg_net_id == old_net_id and (start_key in positions or end_key in positions):
-            count += 1
-            return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
+            if layer is None or seg_layer == layer:
+                count += 1
+                return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)
 
     result = re.sub(segment_pattern, replace_net, content, flags=re.DOTALL)
