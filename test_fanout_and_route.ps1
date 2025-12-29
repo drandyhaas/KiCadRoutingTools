@@ -24,3 +24,6 @@ python3 check_drc.py routed_output.kicad_pcb
 # Check connections
 python3 check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
 
+# Test
+# python3 test_all_diffpairs.py --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu
+

@@ -1318,7 +1318,20 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             orig_x, orig_y = original_start
             if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
                 # Use pre-calculated extension to make P and N connectors parallel
+                # But skip extension if route start is between stub and extension point
+                # (otherwise we'd create a U-turn that could cross the other net)
+                use_extension = False
                 if src_extension > 0.001:
+                    # Check where route start is relative to stub in stub direction
+                    to_route_x = first_x - orig_x
+                    to_route_y = first_y - orig_y
+                    dot = to_route_x * src_stub_dir[0] + to_route_y * src_stub_dir[1]
+                    # U-turn zone: route is between stub (0) and extension point (src_extension)
+                    # Only use extension if route is NOT in U-turn zone
+                    if dot <= 0.001 or dot >= src_extension - 0.001:
+                        use_extension = True
+
+                if use_extension:
                     # Add extension segment in stub direction
                     ext_x = orig_x + src_stub_dir[0] * src_extension
                     ext_y = orig_y + src_stub_dir[1] * src_extension
@@ -1383,7 +1396,23 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
             orig_x, orig_y = original_end
             if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
                 # Use pre-calculated extension to make P and N connectors parallel
+                # But skip extension if route end is between stub and extension point
+                # (otherwise we'd create a U-turn that could cross the other net)
+                use_extension = False
                 if tgt_extension > 0.001:
+                    # Check where route end is relative to stub in stub direction
+                    # Vector from stub to route end
+                    to_route_x = last_x - orig_x
+                    to_route_y = last_y - orig_y
+                    # Dot product with stub direction - positive means route is in stub direction
+                    dot = to_route_x * tgt_stub_dir[0] + to_route_y * tgt_stub_dir[1]
+                    # U-turn zone: route is between stub (0) and extension point (tgt_extension)
+                    # Only use extension if route is NOT in U-turn zone
+                    # i.e., route is on pad side of stub (dot <= 0) or past extension (dot >= extension)
+                    if dot <= 0.001 or dot >= tgt_extension - 0.001:
+                        use_extension = True
+
+                if use_extension:
                     # Extend along stub direction (toward route area)
                     ext_x = orig_x + tgt_stub_dir[0] * tgt_extension
                     ext_y = orig_y + tgt_stub_dir[1] * tgt_extension
