@@ -513,13 +513,19 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     allow_radius = 2
 
     def find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, sb, label):
-        """Find all open positions at the given setback distance, sorted by preference.
+        """Find open position, preferring 0° but angling away from nearby stubs if needed.
 
-        Scans 9 angles (0, ±max/4, ±max/2, ±3*max/4, ±max) and returns all valid
-        candidates sorted by separation from neighboring stub endpoints (best first).
-        Returns list of (gx, gy, actual_dir_x, actual_dir_y, angle_deg, min_dist) or empty list if all blocked.
+        Only angles away from 0° if the nearest unrouted stub is too close (within
+        required diff pair clearance). Returns list with best candidate first.
         """
-        # Generate 9 angles: 0, ±max/4, ±max/2, ±3*max/4, ±max
+        current_layer = layer_names[layer_idx]
+
+        # Required clearance from centerline to neighboring stub
+        # P/N tracks are at ±spacing_mm from centerline, need config.clearance to other stub
+        # Add factor of 2 for extra margin to ensure future routes have room
+        required_clearance = 2 * (spacing_mm + config.clearance)
+
+        # Generate angles: 0, then ±max/4, ±max/2, ±3*max/4, ±max
         max_angle = config.max_setback_angle
         angles_deg = [0,
                       max_angle / 4, -max_angle / 4,
@@ -527,13 +533,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                       3 * max_angle / 4, -3 * max_angle / 4,
                       max_angle, -max_angle]
 
-        # Collect all valid candidates: (angle_deg, gx, gy, dx, dy, x, y)
-        valid_candidates = []
-        for angle_deg in angles_deg:
+        def check_angle_valid(angle_deg):
+            """Check if angle is valid (not blocked). Returns (gx, gy, dx, dy, x, y) or None."""
             angle_rad = math.radians(angle_deg)
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
-            # Rotate (dir_x, dir_y) by angle
             dx = dir_x * cos_a - dir_y * sin_a
             dy = dir_x * sin_a + dir_y * cos_a
 
@@ -541,60 +545,113 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             y = center_y + dy * sb
             gx, gy = coord.to_grid(x, y)
 
-            # Check track blocking at setback position
-            setback_blocked = obstacles.is_blocked(gx, gy, layer_idx)
-            if not setback_blocked:
-                # Also check the connector path from stub center to setback position
-                connector_clear = check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config)
-                if connector_clear:
-                    # Check that the routing direction is open (not immediately blocked)
-                    # Probe a short distance in the routing direction to ensure route can proceed
-                    probe_dist = config.grid_step * 3  # Check 3 grid cells ahead
-                    probe_x = x + dx * probe_dist
-                    probe_y = y + dy * probe_dist
-                    probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
-                    probe_blocked = obstacles.is_blocked(probe_gx, probe_gy, layer_idx)
-                    if not probe_blocked:
-                        valid_candidates.append((angle_deg, gx, gy, dx, dy, x, y))
-                        if config.verbose:
-                            print(f"      {label} {angle_deg:+.1f}°: OK")
-                    elif config.verbose:
-                        print(f"      {label} {angle_deg:+.1f}°: probe ahead blocked at ({probe_gx},{probe_gy})")
-                elif config.verbose:
-                    print(f"      {label} {angle_deg:+.1f}°: connector path blocked")
-            elif config.verbose:
-                print(f"      {label} {angle_deg:+.1f}°: setback position blocked at ({gx},{gy})")
+            if obstacles.is_blocked(gx, gy, layer_idx):
+                return None
+            if not check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
+                return None
+            # Probe ahead
+            probe_dist = config.grid_step * 3
+            probe_x = x + dx * probe_dist
+            probe_y = y + dy * probe_dist
+            probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
+            if obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
+                return None
+            return (gx, gy, dx, dy, x, y)
+
+        def find_nearest_stub(x, y):
+            """Find nearest same-layer stub from position (x, y). Returns (dist, stub_x, stub_y) or (inf, None, None)."""
+            min_dist = float('inf')
+            closest = (None, None)
+            if neighbor_stubs:
+                for stub_x, stub_y, stub_layer in neighbor_stubs:
+                    if stub_layer != current_layer:
+                        continue
+                    dist = math.sqrt((x - stub_x)**2 + (y - stub_y)**2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest = (stub_x, stub_y)
+            return min_dist, closest[0], closest[1]
+
+        # Check 0° first
+        zero_result = check_angle_valid(0)
+        if zero_result:
+            gx, gy, dx, dy, x, y = zero_result
+            dist, stub_x, stub_y = find_nearest_stub(x, y)
+
+            # Collect all valid angles as fallbacks (sorted by angle magnitude)
+            other_candidates = []
+            for angle_deg in sorted(angles_deg, key=abs):
+                if angle_deg == 0:
+                    continue
+                result = check_angle_valid(angle_deg)
+                if result:
+                    ax, ay, adx, ady, ax_pos, ay_pos = result
+                    a_dist, _, _ = find_nearest_stub(ax_pos, ay_pos)
+                    other_candidates.append((ax, ay, adx, ady, angle_deg, a_dist))
+
+            if dist >= required_clearance:
+                # 0° is valid and has enough clearance - use it as primary
+                if config.verbose:
+                    if stub_x is not None:
+                        print(f"      {label} 0.0°: OK (nearest stub at ({stub_x:.1f},{stub_y:.1f}) dist={dist:.2f}mm >= {required_clearance:.2f}mm)")
+                    else:
+                        print(f"      {label} 0.0°: OK (no nearby stubs on {current_layer})")
+                return [(gx, gy, dx, dy, 0.0, dist)] + other_candidates
+
+            # 0° is valid but too close to stub - need to angle away
+            if config.verbose:
+                print(f"      {label} 0.0°: too close to stub at ({stub_x:.1f},{stub_y:.1f}) dist={dist:.2f}mm < {required_clearance:.2f}mm")
+
+            # Determine which direction to angle based on stub position
+            # Cross product: positive means stub is on left (+angle side)
+            stub_vec_x = stub_x - center_x
+            stub_vec_y = stub_y - center_y
+            cross = dir_x * stub_vec_y - dir_y * stub_vec_x
+            # Angle away from stub: if stub on left (cross > 0), go negative angle
+            preferred_sign = -1 if cross > 0 else 1
+
+            # Find the best angle that clears
+            best_clearing_angle = None
+            for cand in other_candidates:
+                if cand[4] * preferred_sign > 0 and cand[5] >= required_clearance:
+                    best_clearing_angle = cand
+                    if config.verbose:
+                        print(f"      {label} {cand[4]:+.1f}°: OK (cleared to {cand[5]:.2f}mm)")
+                    break
+
+            if best_clearing_angle:
+                # Put clearing angle first, then 0°, then others
+                remaining = [c for c in other_candidates if c != best_clearing_angle]
+                return [best_clearing_angle, (gx, gy, dx, dy, 0.0, dist)] + remaining
+            else:
+                # No angle clears - use 0° as primary anyway
+                if config.verbose:
+                    print(f"      {label} using 0.0° (no angle clears {required_clearance:.2f}mm)")
+                return [(gx, gy, dx, dy, 0.0, dist)] + other_candidates
+
+        # 0° is blocked - find any valid angle, prefer smaller angles
+        if config.verbose:
+            print(f"      {label} 0.0°: blocked")
+
+        valid_candidates = []
+        for angle_deg in sorted(angles_deg, key=abs):
+            if angle_deg == 0:
+                continue
+            result = check_angle_valid(angle_deg)
+            if result:
+                gx, gy, dx, dy, x, y = result
+                dist, _, _ = find_nearest_stub(x, y)
+                valid_candidates.append((gx, gy, dx, dy, angle_deg, dist))
+                if config.verbose:
+                    print(f"      {label} {angle_deg:+.1f}°: OK (dist={dist:.2f}mm)")
 
         if not valid_candidates:
             print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
             return []
 
-        # Score each candidate by minimum distance to neighbor stubs ON THE SAME LAYER
-        current_layer = layer_names[layer_idx]
-        scored_candidates = []
-        for angle_deg, gx, gy, dx, dy, x, y in valid_candidates:
-            min_dist = float('inf')
-            closest_stub = None
-            if neighbor_stubs:
-                for stub in neighbor_stubs:
-                    stub_x, stub_y, stub_layer = stub
-                    if stub_layer != current_layer:
-                        continue  # Only consider stubs on same layer
-                    dist = math.sqrt((x - stub_x)**2 + (y - stub_y)**2)
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_stub = (stub_x, stub_y)
-            if config.verbose and closest_stub:
-                print(f"        {label} {angle_deg:+.1f}°: nearest same-layer stub at {closest_stub[0]:.2f},{closest_stub[1]:.2f} dist={min_dist:.2f}mm")
-            # Use negative angle magnitude as tiebreaker (prefer smaller angles)
-            scored_candidates.append((min_dist, -abs(angle_deg), gx, gy, dx, dy, angle_deg))
-
-        # Sort by min_dist descending (larger is better), then by angle magnitude ascending
-        scored_candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-
-        # Return as list of (gx, gy, dx, dy, angle_deg, min_dist)
-        return [(gx, gy, dx, dy, angle_deg, min_dist)
-                for min_dist, _, gx, gy, dx, dy, angle_deg in scored_candidates]
+        # Sort by clearance (larger better), then by angle magnitude (smaller better)
+        valid_candidates.sort(key=lambda c: (c[5], -abs(c[4])), reverse=True)
+        return valid_candidates
 
     def collect_setback_blocked_cells(center_x, center_y, dir_x, dir_y, layer_idx, sb):
         """Collect blocked cells at setback positions for rip-up analysis.
