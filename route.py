@@ -348,6 +348,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 skip_routing: bool = False,
                 routing_clearance_margin: float = 1.15,
                 max_turn_angle: float = 270.0,
+                gnd_via_enabled: bool = True,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -439,6 +440,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         crossing_layer_check=crossing_layer_check,
         routing_clearance_margin=routing_clearance_margin,
         max_turn_angle=max_turn_angle,
+        gnd_via_enabled=gnd_via_enabled,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -3361,6 +3363,8 @@ Differential pair routing:
                         help="Disable stub layer switching optimization (enabled by default)")
     parser.add_argument("--no-crossing-layer-check", action="store_true",
                         help="Count crossings regardless of layer overlap (by default, only same-layer crossings count)")
+    parser.add_argument("--no-gnd-vias", action="store_true",
+                        help="Disable GND via placement near diff pair signal vias (enabled by default)")
     parser.add_argument("--can-swap-to-top-layer", action="store_true",
                         help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
     parser.add_argument("--swappable-nets", nargs="+",
@@ -3462,4 +3466,5 @@ Differential pair routing:
                 skip_routing=args.skip_routing,
                 routing_clearance_margin=args.routing_clearance_margin,
                 max_turn_angle=args.max_turn_angle,
+                gnd_via_enabled=not args.no_gnd_vias,
                 vis_callback=vis_callback)

@@ -236,6 +236,8 @@ Examples:
                               help="Don't swap target pad nets if polarity swap is needed (default: fix polarity)")
     router_group.add_argument('--no-stub-layer-swap', action='store_true',
                               help='Disable stub layer switching optimization (enabled by default)')
+    router_group.add_argument('--no-gnd-vias', action='store_true',
+                              help='Disable GND via placement near diff pair signal vias (enabled by default)')
     router_group.add_argument('--can-swap-to-top-layer', action='store_true',
                               help='Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.')
     router_group.add_argument('--max-ripup', type=int,
@@ -375,6 +377,8 @@ Examples:
         router_cmd.append("--no-fix-polarity")
     if args.no_stub_layer_swap:
         router_cmd.append("--no-stub-layer-swap")
+    if args.no_gnd_vias:
+        router_cmd.append("--no-gnd-vias")
     if args.can_swap_to_top_layer:
         router_cmd.append("--can-swap-to-top-layer")
     if args.max_ripup is not None:

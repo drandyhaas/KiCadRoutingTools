@@ -734,6 +734,17 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     diff_pair_spacing_grid = max(1, int(2 * spacing_mm / config.grid_step + 0.5))
     # Convert max_turn_angle from degrees to 45° units
     max_turn_units = int(config.max_turn_angle / 45.0 + 0.5)
+
+    # Calculate GND via spacing if enabled
+    # GND via center = P/N track outer edge + clearance + via_radius
+    gnd_via_perp_grid = 0
+    gnd_via_along_grid = 0
+    if config.gnd_via_enabled:
+        gnd_via_perp_mm = spacing_mm + config.track_width/2 + config.clearance + config.via_size/2
+        via_via_dist_mm = config.via_size + config.clearance
+        gnd_via_perp_grid = coord.to_grid_dist(gnd_via_perp_mm)
+        gnd_via_along_grid = coord.to_grid_dist(via_via_dist_mm)
+
     pose_router = PoseRouter(
         via_cost=config.via_cost * 1000 * 2,
         h_weight=config.heuristic_weight,
@@ -741,7 +752,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         min_radius_grid=min_radius_grid,
         via_proximity_cost=int(config.via_proximity_cost),
         diff_pair_spacing=diff_pair_spacing_grid,
-        max_turn_units=max_turn_units
+        max_turn_units=max_turn_units,
+        gnd_via_perp_offset=gnd_via_perp_grid,
+        gnd_via_along_offset=gnd_via_along_grid
     )
 
     # Route using pose-based A* with Dubins heuristic
@@ -914,6 +927,14 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     """
     p_net_id = diff_pair.p_net_id
     n_net_id = diff_pair.n_net_id
+
+    # Find GND net ID for GND via placement (if enabled)
+    gnd_net_id = None
+    if config.gnd_via_enabled:
+        for net_id, net in pcb_data.nets.items():
+            if net.name.upper() == 'GND':
+                gnd_net_id = net_id
+                break
 
     # Find endpoints
     sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
@@ -1561,6 +1582,74 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
     debug_connector_lines.extend(n_conn_lines)
+
+    # Create GND vias at layer changes if enabled
+    gnd_vias_created = 0
+    if gnd_net_id is not None and len(simplified_path) >= 2:
+        # Calculate GND via perpendicular offset: track edge + clearance + via radius
+        gnd_via_perp_mm = spacing_mm + config.track_width/2 + config.clearance + config.via_size/2
+        via_via_dist_mm = config.via_size + config.clearance
+
+        # Find layer changes in centerline path
+        for i in range(len(simplified_path) - 1):
+            gx1, gy1, layer1 = simplified_path[i]
+            gx2, gy2, layer2 = simplified_path[i + 1]
+
+            if layer1 != layer2:
+                # Layer change - calculate centerline position and direction
+                cx, cy = coord.to_float(gx1, gy1)
+
+                # Get heading direction (from via to next point)
+                next_cx, next_cy = coord.to_float(gx2, gy2)
+                dx = next_cx - cx
+                dy = next_cy - cy
+                length = math.sqrt(dx*dx + dy*dy)
+                if length > 0.001:
+                    dx /= length
+                    dy /= length
+                else:
+                    # Fallback: use direction from previous point
+                    if i > 0:
+                        prev_gx, prev_gy, _ = simplified_path[i - 1]
+                        prev_cx, prev_cy = coord.to_float(prev_gx, prev_gy)
+                        dx = cx - prev_cx
+                        dy = cy - prev_cy
+                        length = math.sqrt(dx*dx + dy*dy)
+                        if length > 0.001:
+                            dx /= length
+                            dy /= length
+                        else:
+                            dx, dy = 1.0, 0.0
+                    else:
+                        dx, dy = 1.0, 0.0
+
+                # Perpendicular direction: rotate 90° -> (-dy, dx)
+                perp_x = -dy
+                perp_y = dx
+
+                # GND via positions: perpendicular offset + along-heading offset
+                # Use "ahead" direction (+heading) since Rust router validated this works
+                gnd_p_x = cx + perp_x * gnd_via_perp_mm + dx * via_via_dist_mm
+                gnd_p_y = cy + perp_y * gnd_via_perp_mm + dy * via_via_dist_mm
+                gnd_n_x = cx - perp_x * gnd_via_perp_mm + dx * via_via_dist_mm
+                gnd_n_y = cy - perp_y * gnd_via_perp_mm + dy * via_via_dist_mm
+
+                # Create GND vias (same layers as signal vias)
+                new_vias.append(Via(
+                    x=gnd_p_x, y=gnd_p_y,
+                    size=config.via_size,
+                    drill=config.via_drill,
+                    layers=[layer_names[layer1], layer_names[layer2]],
+                    net_id=gnd_net_id
+                ))
+                new_vias.append(Via(
+                    x=gnd_n_x, y=gnd_n_y,
+                    size=config.via_size,
+                    drill=config.via_drill,
+                    layers=[layer_names[layer1], layer_names[layer2]],
+                    net_id=gnd_net_id
+                ))
+                gnd_vias_created += 2
 
     # Convert float paths back to grid format for return value
     p_path = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)

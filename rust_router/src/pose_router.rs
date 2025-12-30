@@ -22,17 +22,19 @@ pub struct PoseRouter {
     straight_after_via: i32,  // Required straight steps after via (derived from min_radius_grid)
     diff_pair_spacing: i32,  // P/N spacing in grid units (0 = not a diff pair)
     max_turn_units: i32,  // Max cumulative turn in 45° units before reset (default 6 = 270°)
+    gnd_via_perp_offset: i32,  // GND via perpendicular offset from centerline (grid units, 0 = disabled)
+    gnd_via_along_offset: i32,  // GND via along-heading offset from signal vias (grid units)
 }
 
 #[pymethods]
 impl PoseRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=6))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=6, gnd_via_perp_offset=0, gnd_via_along_offset=0))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32) -> Self {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
         let straight_after_via = (min_radius_grid.ceil() as i32 + 1).max(3);
-        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units }
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset }
     }
 
     /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
@@ -266,6 +268,43 @@ impl PoseRouter {
                     let n_via_y = current.gy - perp_y * spacing;
                     if obstacles.is_via_blocked(p_via_x, p_via_y) || obstacles.is_via_blocked(n_via_x, n_via_y) {
                         via_positions_clear = false;
+                    }
+
+                    // Check GND via positions if enabled (gnd_via_perp_offset > 0)
+                    // GND vias are placed outside P/N tracks, offset along heading (ahead or behind)
+                    if via_positions_clear && self.gnd_via_perp_offset > 0 {
+                        let gnd_p_base_x = current.gx + perp_x * self.gnd_via_perp_offset;
+                        let gnd_p_base_y = current.gy + perp_y * self.gnd_via_perp_offset;
+                        let gnd_n_base_x = current.gx - perp_x * self.gnd_via_perp_offset;
+                        let gnd_n_base_y = current.gy - perp_y * self.gnd_via_perp_offset;
+
+                        // Try ahead first (+heading), then behind (-heading)
+                        let ahead_offset_x = dx * self.gnd_via_along_offset;
+                        let ahead_offset_y = dy * self.gnd_via_along_offset;
+
+                        let gnd_p_ahead_x = gnd_p_base_x + ahead_offset_x;
+                        let gnd_p_ahead_y = gnd_p_base_y + ahead_offset_y;
+                        let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
+                        let gnd_n_ahead_y = gnd_n_base_y + ahead_offset_y;
+
+                        let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
+                            && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
+
+                        if !ahead_clear {
+                            // Try behind (-heading)
+                            let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
+                            let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
+                            let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
+                            let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
+
+                            let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
+                                && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
+
+                            if !behind_clear {
+                                // Both ahead and behind blocked - can't place GND vias here
+                                via_positions_clear = false;
+                            }
+                        }
                     }
                 }
             }
@@ -510,6 +549,48 @@ impl PoseRouter {
                             }
                             if n_blocked {
                                 tracker.track(n_via_x, n_via_y, layer);
+                            }
+                        }
+                    }
+
+                    // Check GND via positions if enabled (gnd_via_perp_offset > 0)
+                    if via_positions_clear && self.gnd_via_perp_offset > 0 {
+                        let gnd_p_base_x = current.gx + perp_x * self.gnd_via_perp_offset;
+                        let gnd_p_base_y = current.gy + perp_y * self.gnd_via_perp_offset;
+                        let gnd_n_base_x = current.gx - perp_x * self.gnd_via_perp_offset;
+                        let gnd_n_base_y = current.gy - perp_y * self.gnd_via_perp_offset;
+
+                        let ahead_offset_x = dx * self.gnd_via_along_offset;
+                        let ahead_offset_y = dy * self.gnd_via_along_offset;
+
+                        // Try ahead first
+                        let gnd_p_ahead_x = gnd_p_base_x + ahead_offset_x;
+                        let gnd_p_ahead_y = gnd_p_base_y + ahead_offset_y;
+                        let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
+                        let gnd_n_ahead_y = gnd_n_base_y + ahead_offset_y;
+
+                        let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
+                            && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
+
+                        if !ahead_clear {
+                            // Try behind
+                            let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
+                            let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
+                            let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
+                            let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
+
+                            let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
+                                && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
+
+                            if !behind_clear {
+                                // Both blocked - track all GND via positions
+                                via_positions_clear = false;
+                                for layer in 0..obstacles.num_layers as u8 {
+                                    tracker.track(gnd_p_ahead_x, gnd_p_ahead_y, layer);
+                                    tracker.track(gnd_n_ahead_x, gnd_n_ahead_y, layer);
+                                    tracker.track(gnd_p_behind_x, gnd_p_behind_y, layer);
+                                    tracker.track(gnd_n_behind_x, gnd_n_behind_y, layer);
+                                }
                             }
                         }
                     }

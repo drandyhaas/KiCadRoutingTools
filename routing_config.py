@@ -59,6 +59,7 @@ class GridRouteConfig:
     crossing_layer_check: bool = True  # Only count crossings when routes share a layer
     routing_clearance_margin: float = 1.15  # Multiplier on track-via clearance (1.0 = minimum DRC, 1.15 = safe)
     max_turn_angle: float = 270.0  # Max cumulative turn angle (degrees) before reset, to prevent loops
+    gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
 
 
 class GridCoord:
