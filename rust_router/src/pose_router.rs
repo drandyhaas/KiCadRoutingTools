@@ -33,7 +33,15 @@ impl PoseRouter {
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32) -> Self {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
-        let straight_after_via = (min_radius_grid.ceil() as i32 + 1).max(3);
+        let base_straight = (min_radius_grid.ceil() as i32 + 1).max(3);
+        // When GND vias are enabled, need extra straight distance to clear them before turning.
+        // The GND vias are placed at gnd_via_along_offset ahead/behind, so we need to go
+        // at least that far plus the base margin to avoid P/N tracks overlapping the GND vias.
+        let straight_after_via = if gnd_via_along_offset > 0 {
+            base_straight + gnd_via_along_offset
+        } else {
+            base_straight
+        };
         Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset }
     }
 

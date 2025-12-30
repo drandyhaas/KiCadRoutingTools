@@ -3189,7 +3189,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             for via in result['new_vias']:
                 routing_text += generate_via_sexpr(
                     via.x, via.y, via.size, via.drill,
-                    via.layers, via.net_id
+                    via.layers, via.net_id, getattr(via, 'free', False)
                 ) + "\n"
 
         # Add vias from stub layer swapping
@@ -3198,7 +3198,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             for via in all_swap_vias:
                 routing_text += generate_via_sexpr(
                     via.x, via.y, via.size, via.drill,
-                    via.layers, via.net_id
+                    via.layers, via.net_id, getattr(via, 'free', False)
                 ) + "\n"
 
         # Add debug paths if enabled (using gr_line for User layers)

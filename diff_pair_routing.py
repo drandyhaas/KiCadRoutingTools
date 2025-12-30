@@ -1645,19 +1645,22 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 gnd_n_y = cy - perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
 
                 # Create GND vias (same layers as signal vias)
+                # Use free=True to prevent KiCad from auto-assigning net based on overlapping tracks
                 new_vias.append(Via(
                     x=gnd_p_x, y=gnd_p_y,
                     size=config.via_size,
                     drill=config.via_drill,
                     layers=[layer_names[layer1], layer_names[layer2]],
-                    net_id=gnd_net_id
+                    net_id=gnd_net_id,
+                    free=True
                 ))
                 new_vias.append(Via(
                     x=gnd_n_x, y=gnd_n_y,
                     size=config.via_size,
                     drill=config.via_drill,
                     layers=[layer_names[layer1], layer_names[layer2]],
-                    net_id=gnd_net_id
+                    net_id=gnd_net_id,
+                    free=True
                 ))
                 gnd_vias_created += 2
 

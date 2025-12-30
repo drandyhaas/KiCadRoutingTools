@@ -39,14 +39,19 @@ def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 
 
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
-                       layers: List[str], net_id: int) -> str:
-    """Generate KiCad S-expression for a via."""
+                       layers: List[str], net_id: int, free: bool = False) -> str:
+    """Generate KiCad S-expression for a via.
+
+    Args:
+        free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
+    """
     layers_str = '" "'.join(layers)
+    free_str = "\n\t\t(free yes)" if free else ""
     return f'''	(via
 		(at {x:.6f} {y:.6f})
 		(size {size})
 		(drill {drill})
-		(layers "{layers_str}")
+		(layers "{layers_str}"){free_str}
 		(net {net_id})
 		(uuid "{uuid.uuid4()}")
 	)'''
@@ -198,7 +203,8 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                 via['size'],
                 via['drill'],
                 via['layers'],
-                via['net_id']
+                via['net_id'],
+                via.get('free', False)
             )
             elements.append(v)
 

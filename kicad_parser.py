@@ -40,6 +40,7 @@ class Via:
     layers: List[str]
     net_id: int
     uuid: str = ""
+    free: bool = False  # If True, KiCad won't auto-assign net based on overlapping tracks
 
 
 @dataclass
@@ -389,18 +390,20 @@ def extract_vias(content: str) -> List[Via]:
     """Extract all vias from PCB file."""
     vias = []
 
-    # Find via blocks
-    via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # Find via blocks - (free yes) is optional between layers and net
+    via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
+        free_value = m.group(7)  # "yes", "no", or None
         via = Via(
             x=float(m.group(1)),
             y=float(m.group(2)),
             size=float(m.group(3)),
             drill=float(m.group(4)),
             layers=[m.group(5), m.group(6)],
-            net_id=int(m.group(7)),
-            uuid=m.group(8)
+            net_id=int(m.group(8)),
+            uuid=m.group(9),
+            free=(free_value == "yes")
         )
         vias.append(via)
 
