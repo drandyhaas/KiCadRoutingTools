@@ -51,7 +51,9 @@ impl PoseRouter {
     ///         perpendicular to the heading are clear.
     ///
     /// Returns:
-    ///     (path, iterations) where path is list of (gx, gy, theta_idx, layer) or None
+    ///     (path, iterations, gnd_via_directions) where:
+    ///     - path is list of (gx, gy, theta_idx, layer) or None
+    ///     - gnd_via_directions is list of i8 (1=ahead, -1=behind) for each layer change
     #[pyo3(signature = (obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations, diff_pair_via_spacing=None))]
     pub fn route_pose(
         &self,
@@ -60,7 +62,7 @@ impl PoseRouter {
         tgt_x: i32, tgt_y: i32, tgt_layer: u8, tgt_theta_idx: u8,
         max_iterations: u32,
         diff_pair_via_spacing: Option<i32>,
-    ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32) {
+    ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32, Vec<i8>) {
         let dubins = DubinsCalculator::new(self.min_radius_grid);
 
         let start = PoseState::new(src_x, src_y, src_theta_idx, src_layer);
@@ -126,7 +128,8 @@ impl PoseRouter {
             // Goal check: position AND orientation must match
             if current_key == goal_key {
                 let path = self.reconstruct_pose_path(&parents, current_key);
-                return (Some(path), iterations);
+                let gnd_via_dirs = self.compute_gnd_via_directions(obstacles, &path);
+                return (Some(path), iterations, gnd_via_dirs);
             }
 
             closed.insert(current_key);
@@ -356,7 +359,7 @@ impl PoseRouter {
             }
         }
 
-        (None, iterations)
+        (None, iterations, Vec::new())
     }
 
     /// Route with frontier analysis - returns blocked cells on failure.
@@ -364,8 +367,8 @@ impl PoseRouter {
     /// Same as route_pose but on failure returns the set of blocked cells
     /// that were encountered during the search.
     ///
-    /// Returns (path, iterations, blocked_cells) where:
-    /// - On success: path is Some, blocked_cells is empty
+    /// Returns (path, iterations, blocked_cells, gnd_via_directions) where:
+    /// - On success: path is Some, blocked_cells is empty, gnd_via_directions has entries
     /// - On failure: path is None, blocked_cells contains cells that blocked expansion
     #[pyo3(signature = (obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations, diff_pair_via_spacing=None))]
     pub fn route_pose_with_frontier(
@@ -375,7 +378,7 @@ impl PoseRouter {
         tgt_x: i32, tgt_y: i32, tgt_layer: u8, tgt_theta_idx: u8,
         max_iterations: u32,
         diff_pair_via_spacing: Option<i32>,
-    ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32, Vec<(i32, i32, u8)>) {
+    ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32, Vec<(i32, i32, u8)>, Vec<i8>) {
         let mut tracker = BlockedCellTracker::new();
         let dubins = DubinsCalculator::new(self.min_radius_grid);
 
@@ -419,7 +422,8 @@ impl PoseRouter {
 
             if current_key == goal_key {
                 let path = self.reconstruct_pose_path(&parents, current_key);
-                return (Some(path), iterations, Vec::new());
+                let gnd_via_dirs = self.compute_gnd_via_directions(obstacles, &path);
+                return (Some(path), iterations, Vec::new(), gnd_via_dirs);
             }
 
             closed.insert(current_key);
@@ -636,7 +640,7 @@ impl PoseRouter {
             }
         }
 
-        (None, iterations, tracker.get_blocked())
+        (None, iterations, tracker.get_blocked(), Vec::new())
     }
 }
 
@@ -657,6 +661,73 @@ impl PoseRouter {
         }
 
         (h as f32 * self.h_weight) as i32
+    }
+
+    /// Compute GND via directions for each layer change in the path.
+    /// Returns a Vec<i8> with one entry per layer change: 1 = ahead, -1 = behind.
+    /// If gnd_via_perp_offset is 0, returns empty vec.
+    fn compute_gnd_via_directions(&self, obstacles: &GridObstacleMap, path: &[(i32, i32, u8, u8)]) -> Vec<i8> {
+        if self.gnd_via_perp_offset == 0 || path.len() < 2 {
+            return Vec::new();
+        }
+
+        let mut directions = Vec::new();
+
+        for i in 0..path.len() - 1 {
+            let (gx, gy, theta_idx, layer) = path[i];
+            let (_, _, _, next_layer) = path[i + 1];
+
+            // Check for layer change
+            if layer != next_layer {
+                // Get heading direction from theta_idx
+                let (dx, dy) = DIRECTIONS[theta_idx as usize];
+
+                // Perpendicular direction (90° rotation: (-dy, dx))
+                let perp_x = -dy;
+                let perp_y = dx;
+
+                // GND via base positions (perpendicular offset from centerline)
+                let gnd_p_base_x = gx + perp_x * self.gnd_via_perp_offset;
+                let gnd_p_base_y = gy + perp_y * self.gnd_via_perp_offset;
+                let gnd_n_base_x = gx - perp_x * self.gnd_via_perp_offset;
+                let gnd_n_base_y = gy - perp_y * self.gnd_via_perp_offset;
+
+                // Along-heading offsets
+                let ahead_offset_x = dx * self.gnd_via_along_offset;
+                let ahead_offset_y = dy * self.gnd_via_along_offset;
+
+                // Check ahead positions
+                let gnd_p_ahead_x = gnd_p_base_x + ahead_offset_x;
+                let gnd_p_ahead_y = gnd_p_base_y + ahead_offset_y;
+                let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
+                let gnd_n_ahead_y = gnd_n_base_y + ahead_offset_y;
+
+                let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
+                    && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
+
+                if ahead_clear {
+                    directions.push(1);  // Use ahead
+                } else {
+                    // Try behind
+                    let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
+                    let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
+                    let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
+                    let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
+
+                    let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
+                        && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
+
+                    if behind_clear {
+                        directions.push(-1);  // Use behind
+                    } else {
+                        // Both blocked - shouldn't happen if routing succeeded, but default to ahead
+                        directions.push(1);
+                    }
+                }
+            }
+        }
+
+        directions
     }
 
     /// Reconstruct path from parents map

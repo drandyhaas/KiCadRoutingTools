@@ -1473,6 +1473,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     all_unrouted_net_ids = set(get_all_unrouted_net_ids(pcb_data))
     print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
 
+    # Find GND net ID for GND via obstacle tracking (if GND vias enabled)
+    gnd_net_id = None
+    if config.gnd_via_enabled:
+        for net_id, net in pcb_data.nets.items():
+            if net.name.upper() == 'GND':
+                gnd_net_id = net_id
+                break
+        if gnd_net_id:
+            print(f"GND net ID: {gnd_net_id} (GND vias will be added as obstacles)")
+
     route_index = 0
 
     # Route differential pairs first (they're more constrained)
@@ -1494,6 +1504,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
             add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
             add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+
+        # Add GND vias as obstacles (they were placed with previous diff pair routes)
+        if gnd_net_id is not None:
+            add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
 
         # Add other unrouted nets' stubs, vias, and pads as obstacles (excluding both P and N)
         other_unrouted = [nid for nid in remaining_net_ids
@@ -1604,6 +1618,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
                 add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
                 add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config, extra_clearance=config.diff_pair_gap / 2)
+            # Add GND vias as obstacles
+            if gnd_net_id is not None:
+                add_net_vias_as_obstacles(retry_obstacles, pcb_data, gnd_net_id, config, extra_clearance=config.diff_pair_gap / 2)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
             add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, config.diff_pair_gap / 2)
@@ -1897,6 +1914,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                             add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                             add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                        # Add GND vias as obstacles
+                        if gnd_net_id is not None:
+                            add_net_vias_as_obstacles(retry_obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
                         other_unrouted = [nid for nid in remaining_net_ids
                                          if nid != pair.p_net_id and nid != pair.n_net_id]
                         for other_net_id in other_unrouted:
@@ -2032,6 +2052,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
                 add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config)
                 add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config)
+
+        # Add GND vias as obstacles (from previous diff pair routing)
+        if gnd_net_id is not None:
+            add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config)
 
         # Add other unrouted nets' stubs, vias, and pads as obstacles (not the current net)
         other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
@@ -2288,6 +2312,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
                             add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
                             add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                        # Add GND vias as obstacles
+                        if gnd_net_id is not None:
+                            add_net_vias_as_obstacles(retry_obstacles, pcb_data, gnd_net_id, config)
                         other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
                         for other_net_id in other_unrouted:
                             add_net_stubs_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
@@ -2381,6 +2408,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
                 add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config)
                 add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config)
+            # Add GND vias as obstacles
+            if gnd_net_id is not None:
+                add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config)
             other_unrouted = [nid for nid in remaining_net_ids if nid != ripped_net_id]
             for other_net_id in other_unrouted:
                 add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
@@ -2555,6 +2585,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
                                 add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
                                 add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config)
+                            # Add GND vias as obstacles
+                            if gnd_net_id is not None:
+                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, gnd_net_id, config)
                             other_unrouted = [nid for nid in remaining_net_ids if nid != ripped_net_id]
                             for other_net_id in other_unrouted:
                                 add_net_stubs_as_obstacles(retry_obstacles, pcb_data, other_net_id, config)
@@ -2642,6 +2675,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                 add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                 add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+            # Add GND vias as obstacles
+            if gnd_net_id is not None:
+                add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
             other_unrouted = [nid for nid in remaining_net_ids
                              if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id]
             for other_net_id in other_unrouted:
@@ -2862,6 +2898,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                                 add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                                 add_net_pads_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
+                            # Add GND vias as obstacles
+                            if gnd_net_id is not None:
+                                add_net_vias_as_obstacles(retry_obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
                             other_unrouted = [nid for nid in remaining_net_ids
                                              if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id]
                             for other_net_id in other_unrouted:

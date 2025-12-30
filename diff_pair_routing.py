@@ -784,7 +784,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         tgt_combos = tgt_candidates[:1]
 
     # Helper to build route_data dict
-    def make_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle):
+    def make_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle, gnd_via_dirs=None):
         return {
             'pose_path': pose_path,
             'p_src_x': p_src_x, 'p_src_y': p_src_y,
@@ -799,6 +799,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
             'via_spacing': via_spacing,
             'best_src_angle': src_angle, 'best_tgt_angle': tgt_angle,
+            'gnd_via_dirs': gnd_via_dirs if gnd_via_dirs is not None else [],
         }
 
     # Helper to setup and run a single route attempt
@@ -817,12 +818,12 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         s_theta = direction_to_theta_idx(s_dx, s_dy)
         t_theta = direction_to_theta_idx(-t_dx, -t_dy)
 
-        path, iters, blocked = pose_router.route_pose_with_frontier(
+        path, iters, blocked, gnd_via_dirs = pose_router.route_pose_with_frontier(
             obstacles, s_gx, s_gy, src_layer, s_theta,
             t_gx, t_gy, tgt_layer, t_theta,
             max_iters, diff_pair_via_spacing=via_spacing_grid
         )
-        return path, iters, blocked, (s_dx, s_dy), (t_dx, t_dy), s_ang, t_ang
+        return path, iters, blocked, (s_dx, s_dy), (t_dx, t_dy), s_ang, t_ang, gnd_via_dirs
 
     # Select best angles - during probe, try angles sequentially until one works
     selected_src = src_combos[0]
@@ -840,11 +841,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         first_blocked_cells = []
         if len(src_combos) > 1:
             for src_cand in src_combos:
-                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(src_cand, tgt_combos[0])
+                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(src_cand, tgt_combos[0])
                 total_iterations += iters
 
                 if path is not None:
-                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
+                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), total_iterations, [], None
                 if iters >= max_iters:
                     selected_src = src_cand
                     found_first = True
@@ -867,11 +868,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         second_blocked_cells = []
         if len(tgt_combos) > 1:
             for tgt_cand in tgt_combos:
-                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(selected_src, tgt_cand)
+                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(selected_src, tgt_cand)
                 total_iterations += iters
 
                 if path is not None:
-                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
+                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), total_iterations, [], None
                 if iters >= max_iters:
                     selected_tgt = tgt_cand
                     found_second = True
@@ -905,11 +906,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     tgt_theta_idx = direction_to_theta_idx(-tgt_actual_dir_x, -tgt_actual_dir_y)
     print(f"  Pose routing: src_theta={src_theta_idx} ({src_actual_dir_x:.2f},{src_actual_dir_y:.2f}), tgt_theta={tgt_theta_idx} (arriving from {-tgt_actual_dir_x:.2f},{-tgt_actual_dir_y:.2f})")
 
-    path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang = try_route(selected_src, selected_tgt)
+    path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(selected_src, selected_tgt)
     total_iterations += iters
 
     if path is not None:
-        return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang), total_iterations, [], None
+        return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), total_iterations, [], None
     return None, total_iterations, blocked, None
 
 
@@ -1207,6 +1208,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     center_src_x, center_src_y = route_data['center_src_x'], route_data['center_src_y']
     center_tgt_x, center_tgt_y = route_data['center_tgt_x'], route_data['center_tgt_y']
     via_spacing = route_data['via_spacing']
+    gnd_via_dirs = route_data.get('gnd_via_dirs', [])
 
     # Convert pose path (gx, gy, theta_idx, layer) to grid path (gx, gy, layer)
     # Filter out in-place turns (same position, different theta)
@@ -1590,6 +1592,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
         gnd_via_perp_mm = spacing_mm + config.track_width/2 + config.clearance + config.via_size/2
         via_via_dist_mm = config.via_size + config.clearance
 
+        # Track which layer change we're processing to get direction from gnd_via_dirs
+        via_idx = 0
+
         # Find layer changes in centerline path
         for i in range(len(simplified_path) - 1):
             gx1, gy1, layer1 = simplified_path[i]
@@ -1627,12 +1632,17 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
                 perp_x = -dy
                 perp_y = dx
 
+                # Get GND via direction from Rust router (1=ahead, -1=behind)
+                # Default to ahead if no direction info available
+                gnd_dir = gnd_via_dirs[via_idx] if via_idx < len(gnd_via_dirs) else 1
+                via_idx += 1
+
                 # GND via positions: perpendicular offset + along-heading offset
-                # Use "ahead" direction (+heading) since Rust router validated this works
-                gnd_p_x = cx + perp_x * gnd_via_perp_mm + dx * via_via_dist_mm
-                gnd_p_y = cy + perp_y * gnd_via_perp_mm + dy * via_via_dist_mm
-                gnd_n_x = cx - perp_x * gnd_via_perp_mm + dx * via_via_dist_mm
-                gnd_n_y = cy - perp_y * gnd_via_perp_mm + dy * via_via_dist_mm
+                # Direction: +1 = ahead (+heading), -1 = behind (-heading)
+                gnd_p_x = cx + perp_x * gnd_via_perp_mm + dx * via_via_dist_mm * gnd_dir
+                gnd_p_y = cy + perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
+                gnd_n_x = cx - perp_x * gnd_via_perp_mm + dx * via_via_dist_mm * gnd_dir
+                gnd_n_y = cy - perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
 
                 # Create GND vias (same layers as signal vias)
                 new_vias.append(Via(
