@@ -745,6 +745,10 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         gnd_via_perp_grid = coord.to_grid_dist(gnd_via_perp_mm)
         gnd_via_along_grid = coord.to_grid_dist(via_via_dist_mm)
 
+    # Calculate vertical attraction parameters
+    attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
+    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+
     pose_router = PoseRouter(
         via_cost=config.via_cost * 1000 * 2,
         h_weight=config.heuristic_weight,
@@ -754,7 +758,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         diff_pair_spacing=diff_pair_spacing_grid,
         max_turn_units=max_turn_units,
         gnd_via_perp_offset=gnd_via_perp_grid,
-        gnd_via_along_offset=gnd_via_along_grid
+        gnd_via_along_offset=gnd_via_along_grid,
+        vertical_attraction_radius=attraction_radius_grid,
+        vertical_attraction_bonus=attraction_bonus
     )
 
     # Route using pose-based A* with Dubins heuristic

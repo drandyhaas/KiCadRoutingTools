@@ -258,6 +258,10 @@ Examples:
                               help='Skip actual routing, only do swaps and write debug info')
     router_group.add_argument('--no-crossing-layer-check', action='store_true',
                               help='Count crossings regardless of layer overlap')
+    router_group.add_argument('--vertical-attraction-radius', type=float,
+                              help='Radius in mm for cross-layer track attraction (0 = disabled)')
+    router_group.add_argument('--vertical-attraction-cost', type=float,
+                              help='Cost bonus in mm equivalent for tracks aligned with other layers')
 
     args = parser.parse_args()
 
@@ -399,6 +403,10 @@ Examples:
         router_cmd.append("--skip-routing")
     if args.no_crossing_layer_check:
         router_cmd.append("--no-crossing-layer-check")
+    if args.vertical_attraction_radius is not None:
+        router_cmd.extend(["--vertical-attraction-radius", str(args.vertical_attraction_radius)])
+    if args.vertical_attraction_cost is not None:
+        router_cmd.extend(["--vertical-attraction-cost", str(args.vertical_attraction_cost)])
     router_cmd.extend(["--diff-pairs", diff_pair_pattern])
 
     result = run_command(

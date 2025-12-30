@@ -570,6 +570,101 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
                 obstacles.set_layer_proximity(gx, gy, layer_idx, cost)
 
 
+def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,
+                            config: GridRouteConfig, layer_map: Dict[str, int],
+                            exclude_net_ids: Set[int] = None):
+    """Populate cross-layer track positions for vertical alignment attraction.
+
+    Adds positions of all routed tracks (excluding specified nets) to the
+    obstacle map's cross-layer lookup structure. This enables the router
+    to give a cost bonus for routing on top of existing tracks on other layers.
+
+    Args:
+        obstacles: The obstacle map to populate
+        pcb_data: PCB data containing segments
+        config: Routing configuration with vertical_attraction_radius
+        layer_map: Mapping of layer names to layer indices
+        exclude_net_ids: Set of net IDs to exclude (typically the net being routed)
+    """
+    if config.vertical_attraction_radius <= 0:
+        return  # Feature disabled
+
+    coord = GridCoord(config.grid_step)
+    exclude_set = exclude_net_ids or set()
+
+    # Sample every ~0.5mm along segments for reasonable density
+    sample_interval = max(1, int(0.5 / config.grid_step))
+
+    for seg in pcb_data.segments:
+        if seg.net_id in exclude_set:
+            continue
+
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        _add_segment_cross_layer_track(obstacles, seg, coord, layer_idx, sample_interval)
+
+
+def _add_segment_cross_layer_track(obstacles: GridObstacleMap, seg, coord: GridCoord,
+                                    layer_idx: int, sample_interval: int):
+    """Add a single segment's positions to the cross-layer track data."""
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+    err = dx - dy
+    gx, gy = gx1, gy1
+    step_count = 0
+
+    while True:
+        if step_count % sample_interval == 0:
+            obstacles.add_cross_layer_track(gx, gy, layer_idx)
+
+        if gx == gx2 and gy == gy2:
+            break
+
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            gx += sx
+        if e2 < dx:
+            err += dx
+            gy += sy
+        step_count += 1
+
+
+def add_routed_path_cross_layer_tracks(obstacles: GridObstacleMap,
+                                        new_segments: List,
+                                        config: GridRouteConfig,
+                                        layer_map: Dict[str, int]):
+    """Add newly routed path segments to the cross-layer track data.
+
+    Call this after successfully routing a path to make it an attractor
+    for future paths on different layers.
+
+    Args:
+        obstacles: The obstacle map to update
+        new_segments: List of Segment objects from the routed path
+        config: Routing configuration
+        layer_map: Mapping of layer names to layer indices
+    """
+    if config.vertical_attraction_radius <= 0:
+        return  # Feature disabled
+
+    coord = GridCoord(config.grid_step)
+    sample_interval = max(1, int(0.5 / config.grid_step))
+
+    for seg in new_segments:
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+        _add_segment_cross_layer_track(obstacles, seg, coord, layer_idx, sample_interval)
+
+
 def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
                                routed_net_ids: List[int], config: GridRouteConfig,
                                layer_map: Dict[str, int]):

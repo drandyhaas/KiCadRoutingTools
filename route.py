@@ -39,7 +39,7 @@ from obstacle_map import (
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
     VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
-    compute_track_proximity_for_net, merge_track_proximity_costs
+    compute_track_proximity_for_net, merge_track_proximity_costs, add_cross_layer_tracks
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -349,6 +349,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 routing_clearance_margin: float = 1.15,
                 max_turn_angle: float = 180.0,
                 gnd_via_enabled: bool = True,
+                vertical_attraction_radius: float = 1.0,
+                vertical_attraction_cost: float = 0.1,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -441,6 +443,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         routing_clearance_margin=routing_clearance_margin,
         max_turn_angle=max_turn_angle,
         gnd_via_enabled=gnd_via_enabled,
+        vertical_attraction_radius=vertical_attraction_radius,
+        vertical_attraction_cost=vertical_attraction_cost,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -1527,6 +1531,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Add track proximity costs for previously routed tracks (same layer only)
         merge_track_proximity_costs(obstacles, track_proximity_cache)
 
+        # Add cross-layer track data for vertical alignment attraction
+        # This includes previously routed tracks (newly routed segments are in pcb_data.segments)
+        add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
+                                exclude_net_ids={pair.p_net_id, pair.n_net_id})
+
         # Add same-net via clearance for both P and N
         add_same_net_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
         add_same_net_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
@@ -2077,6 +2086,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Add track proximity costs for previously routed tracks (same layer only)
         merge_track_proximity_costs(obstacles, track_proximity_cache)
 
+        # Add cross-layer track data for vertical alignment attraction
+        add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
+                                exclude_net_ids={net_id})
+
         # Add same-net via clearance blocking (for DRC - vias can't be too close even on same net)
         add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
 
@@ -2422,6 +2435,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if unrouted_stubs:
                 add_stub_proximity_costs(obstacles, unrouted_stubs, config)
             merge_track_proximity_costs(obstacles, track_proximity_cache)
+            add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
+                                    exclude_net_ids={ripped_net_id})
             add_same_net_via_clearance(obstacles, pcb_data, ripped_net_id, config)
 
             result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
@@ -2691,6 +2706,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if unrouted_stubs:
                 add_stub_proximity_costs(obstacles, unrouted_stubs, config)
             merge_track_proximity_costs(obstacles, track_proximity_cache)
+            add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
+                                    exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id})
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
             add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
 
@@ -3423,6 +3440,12 @@ Differential pair routing:
     parser.add_argument("--max-turn-angle", type=float, default=180.0,
                         help="Max cumulative turn angle (degrees) before reset, to prevent U-turns (default: 180)")
 
+    # Vertical alignment attraction options
+    parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
+                        help="Radius in mm for cross-layer track attraction (0 = disabled, default: 1.0)")
+    parser.add_argument("--vertical-attraction-cost", type=float, default=0.1,
+                        help="Cost bonus in mm equivalent for tracks aligned with other layers (default: 0.1)")
+
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
@@ -3506,4 +3529,6 @@ Differential pair routing:
                 routing_clearance_margin=args.routing_clearance_margin,
                 max_turn_angle=args.max_turn_angle,
                 gnd_via_enabled=not args.no_gnd_vias,
+                vertical_attraction_radius=args.vertical_attraction_radius,
+                vertical_attraction_cost=args.vertical_attraction_cost,
                 vis_callback=vis_callback)

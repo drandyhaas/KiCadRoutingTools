@@ -27,6 +27,9 @@ pub struct GridObstacleMap {
     /// These override regular blocking but NOT BGA zone blocking
     /// Stored per-layer: layer -> set of (gx, gy) packed as u64
     pub source_target_cells: Vec<FxHashSet<u64>>,
+    /// Cross-layer track positions for vertical alignment attraction
+    /// Key: packed (gx, gy), Value: bitmask of layers that have tracks here
+    pub cross_layer_tracks: FxHashMap<u64, u8>,
 }
 
 #[pymethods]
@@ -42,6 +45,7 @@ impl GridObstacleMap {
             bga_zones: Vec::new(),
             allowed_cells: FxHashSet::default(),
             source_target_cells: (0..num_layers).map(|_| FxHashSet::default()).collect(),
+            cross_layer_tracks: FxHashMap::default(),
         }
     }
 
@@ -71,6 +75,7 @@ impl GridObstacleMap {
             bga_zones: self.bga_zones.clone(),
             allowed_cells: self.allowed_cells.clone(),
             source_target_cells: self.source_target_cells.clone(),
+            cross_layer_tracks: self.cross_layer_tracks.clone(),
         }
     }
 
@@ -205,5 +210,63 @@ impl GridObstacleMap {
         for layer_map in &mut self.layer_proximity_costs {
             layer_map.clear();
         }
+    }
+
+    /// Add a track position for cross-layer attraction lookup
+    pub fn add_cross_layer_track(&mut self, gx: i32, gy: i32, layer: usize) {
+        if layer < self.num_layers && layer < 8 {
+            // u8 bitmask supports up to 8 layers
+            let key = pack_xy(gx, gy);
+            let entry = self.cross_layer_tracks.entry(key).or_insert(0);
+            *entry |= 1 << layer;
+        }
+    }
+
+    /// Get cross-layer attraction bonus (positive = cost reduction) at position for given layer
+    /// Returns a bonus if OTHER layers have tracks here (not the current layer)
+    #[inline]
+    pub fn get_cross_layer_attraction(
+        &self,
+        gx: i32,
+        gy: i32,
+        current_layer: usize,
+        attraction_radius: i32,
+        attraction_bonus: i32,
+    ) -> i32 {
+        if attraction_radius <= 0 || attraction_bonus <= 0 {
+            return 0;
+        }
+
+        let radius_sq = attraction_radius * attraction_radius;
+        let mut max_bonus = 0;
+
+        for dx in -attraction_radius..=attraction_radius {
+            for dy in -attraction_radius..=attraction_radius {
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq > radius_sq {
+                    continue;
+                }
+
+                let key = pack_xy(gx + dx, gy + dy);
+                if let Some(&layers_mask) = self.cross_layer_tracks.get(&key) {
+                    // Check if any OTHER layer has a track here
+                    let other_layers = layers_mask & !(1u8 << current_layer);
+                    if other_layers != 0 {
+                        // Linear falloff: full bonus at center, zero at radius edge
+                        let dist = (dist_sq as f32).sqrt();
+                        let falloff = 1.0 - (dist / attraction_radius as f32);
+                        let bonus = (falloff * attraction_bonus as f32) as i32;
+                        max_bonus = max_bonus.max(bonus);
+                    }
+                }
+            }
+        }
+
+        max_bonus
+    }
+
+    /// Clear cross-layer track data
+    pub fn clear_cross_layer_tracks(&mut self) {
+        self.cross_layer_tracks.clear();
     }
 }

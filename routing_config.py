@@ -60,6 +60,9 @@ class GridRouteConfig:
     routing_clearance_margin: float = 1.15  # Multiplier on track-via clearance (1.0 = minimum DRC, 1.15 = safe)
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
+    # Vertical alignment attraction - encourages tracks on different layers to stack
+    vertical_attraction_radius: float = 1.0  # mm - radius for attraction lookup (0 = disabled)
+    vertical_attraction_cost: float = 0.1  # mm equivalent bonus for aligned positions
 
 
 class GridCoord:
