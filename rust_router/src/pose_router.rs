@@ -34,11 +34,12 @@ impl PoseRouter {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
         let base_straight = (min_radius_grid.ceil() as i32 + 1).max(3);
-        // When GND vias are enabled, need extra straight distance to clear them before turning.
-        // The GND vias are placed at gnd_via_along_offset ahead/behind, so we need to go
-        // at least that far plus the base margin to avoid P/N tracks overlapping the GND vias.
+        // When GND vias are enabled, need enough straight distance to clear them.
+        // The P/N tracks curve when turning, so we need to go past the GND via's
+        // along-position plus a margin (2 grid) before turning is safe.
+        // Testing showed +1 causes DRC failures, +2 is the minimum that works.
         let straight_after_via = if gnd_via_along_offset > 0 {
-            base_straight + gnd_via_along_offset
+            base_straight.max(gnd_via_along_offset + 2)
         } else {
             base_straight
         };
@@ -283,6 +284,7 @@ impl PoseRouter {
 
                     // Check GND via positions if enabled (gnd_via_perp_offset > 0)
                     // GND vias are placed outside P/N tracks, offset along heading (ahead or behind)
+                    // We also check that the P/N track path has sufficient clearance from GND vias.
                     if via_positions_clear && self.gnd_via_perp_offset > 0 {
                         let gnd_p_base_x = current.gx + perp_x * self.gnd_via_perp_offset;
                         let gnd_p_base_y = current.gy + perp_y * self.gnd_via_perp_offset;
@@ -298,23 +300,25 @@ impl PoseRouter {
                         let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
                         let gnd_n_ahead_y = gnd_n_base_y + ahead_offset_y;
 
+                        // For "ahead" placement: need straight continuation after via
+                        // Check GND via positions aren't blocked
                         let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
                             && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
 
-                        if !ahead_clear {
-                            // Try behind (-heading)
-                            let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
-                            let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
-                            let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
-                            let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
+                        // For "behind" placement: already had straight approach (enforced by can_place_via)
+                        // Check GND via positions aren't blocked
+                        let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
+                        let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
+                        let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
+                        let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
 
-                            let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
-                                && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
+                        let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
+                            && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
 
-                            if !behind_clear {
-                                // Both ahead and behind blocked - can't place GND vias here
-                                via_positions_clear = false;
-                            }
+                        // Prefer ahead, but if blocked fall back to behind
+                        if !ahead_clear && !behind_clear {
+                            // Both ahead and behind blocked - can't place GND vias here
+                            via_positions_clear = false;
                         }
                     }
                 }
@@ -566,6 +570,7 @@ impl PoseRouter {
                     }
 
                     // Check GND via positions if enabled (gnd_via_perp_offset > 0)
+                    // We also check that the P/N track path has sufficient clearance from GND vias.
                     if via_positions_clear && self.gnd_via_perp_offset > 0 {
                         let gnd_p_base_x = current.gx + perp_x * self.gnd_via_perp_offset;
                         let gnd_p_base_y = current.gy + perp_y * self.gnd_via_perp_offset;
@@ -575,7 +580,7 @@ impl PoseRouter {
                         let ahead_offset_x = dx * self.gnd_via_along_offset;
                         let ahead_offset_y = dy * self.gnd_via_along_offset;
 
-                        // Try ahead first
+                        // Check ahead positions
                         let gnd_p_ahead_x = gnd_p_base_x + ahead_offset_x;
                         let gnd_p_ahead_y = gnd_p_base_y + ahead_offset_y;
                         let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
@@ -584,25 +589,23 @@ impl PoseRouter {
                         let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
                             && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
 
-                        if !ahead_clear {
-                            // Try behind
-                            let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
-                            let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
-                            let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
-                            let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
+                        // Check behind positions
+                        let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
+                        let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
+                        let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
+                        let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
 
-                            let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
-                                && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
+                        let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
+                            && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
 
-                            if !behind_clear {
-                                // Both blocked - track all GND via positions
-                                via_positions_clear = false;
-                                for layer in 0..obstacles.num_layers as u8 {
-                                    tracker.track(gnd_p_ahead_x, gnd_p_ahead_y, layer);
-                                    tracker.track(gnd_n_ahead_x, gnd_n_ahead_y, layer);
-                                    tracker.track(gnd_p_behind_x, gnd_p_behind_y, layer);
-                                    tracker.track(gnd_n_behind_x, gnd_n_behind_y, layer);
-                                }
+                        if !ahead_clear && !behind_clear {
+                            // Both blocked - track all GND via positions
+                            via_positions_clear = false;
+                            for layer in 0..obstacles.num_layers as u8 {
+                                tracker.track(gnd_p_ahead_x, gnd_p_ahead_y, layer);
+                                tracker.track(gnd_n_ahead_x, gnd_n_ahead_y, layer);
+                                tracker.track(gnd_p_behind_x, gnd_p_behind_y, layer);
+                                tracker.track(gnd_n_behind_x, gnd_n_behind_y, layer);
                             }
                         }
                     }
