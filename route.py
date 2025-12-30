@@ -1416,9 +1416,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
 
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
-    # Extra clearance = offset from centerline to P/N track outer edge
-    # (P/N tracks extend offset + track_width/2 from centerline)
-    diff_pair_extra_clearance = (config.track_width + config.diff_pair_gap) / 2 + config.track_width / 2
+    # Extra clearance = spacing from centerline to P/N track center
+    # (The obstacle formulas already include track_width/2, so we only need spacing)
+    diff_pair_extra_clearance = (config.track_width + config.diff_pair_gap) / 2
     print(f"Building diff pair obstacle map (extra clearance: {diff_pair_extra_clearance:.3f}mm)...")
     dp_base_start = time.time()
     diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route, diff_pair_extra_clearance)
