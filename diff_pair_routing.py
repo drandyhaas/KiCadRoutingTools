@@ -732,13 +732,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # diff_pair_spacing is the P/N offset from centerline in grid units (for self-intersection prevention)
     # Use 2*spacing to prevent P/N tracks from crossing when centerline loops
     diff_pair_spacing_grid = max(1, int(2 * spacing_mm / config.grid_step + 0.5))
+    # Convert max_turn_angle from degrees to 45° units
+    max_turn_units = int(config.max_turn_angle / 45.0 + 0.5)
     pose_router = PoseRouter(
         via_cost=config.via_cost * 1000 * 2,
         h_weight=config.heuristic_weight,
         turn_cost=turn_cost,
         min_radius_grid=min_radius_grid,
         via_proximity_cost=int(config.via_proximity_cost),
-        diff_pair_spacing=diff_pair_spacing_grid
+        diff_pair_spacing=diff_pair_spacing_grid,
+        max_turn_units=max_turn_units
     )
 
     # Route using pose-based A* with Dubins heuristic

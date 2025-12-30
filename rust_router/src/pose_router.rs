@@ -21,17 +21,18 @@ pub struct PoseRouter {
     via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
     straight_after_via: i32,  // Required straight steps after via (derived from min_radius_grid)
     diff_pair_spacing: i32,  // P/N spacing in grid units (0 = not a diff pair)
+    max_turn_units: i32,  // Max cumulative turn in 45° units before reset (default 6 = 270°)
 }
 
 #[pymethods]
 impl PoseRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=6))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32) -> Self {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
         let straight_after_via = (min_radius_grid.ceil() as i32 + 1).max(3);
-        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing }
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units }
     }
 
     /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
@@ -190,8 +191,8 @@ impl PoseRouter {
                     let new_turn_1 = if new_steps % 100 == 0 { delta as i32 } else { current_turn_1 + delta as i32 };
                     let new_turn_2 = if new_steps % 100 == 50 { delta as i32 } else { current_turn_2 + delta as i32 };
 
-                    // For diff pairs, check both cumulative turn limits (270° = 6 units of 45°)
-                    if self.diff_pair_spacing > 0 && (new_turn_1.abs() > 6 || new_turn_2.abs() > 6) {
+                    // For diff pairs, check both cumulative turn limits (max_turn_units * 45°)
+                    if self.diff_pair_spacing > 0 && (new_turn_1.abs() > self.max_turn_units || new_turn_2.abs() > self.max_turn_units) {
                         continue;  // Would form a loop
                     }
 
@@ -433,8 +434,8 @@ impl PoseRouter {
                     let new_turn_1 = if new_steps % 100 == 0 { delta as i32 } else { current_turn_1 + delta as i32 };
                     let new_turn_2 = if new_steps % 100 == 50 { delta as i32 } else { current_turn_2 + delta as i32 };
 
-                    // For diff pairs, check both cumulative turn limits (270° = 6 units of 45°)
-                    if self.diff_pair_spacing > 0 && (new_turn_1.abs() > 6 || new_turn_2.abs() > 6) {
+                    // For diff pairs, check both cumulative turn limits (max_turn_units * 45°)
+                    if self.diff_pair_spacing > 0 && (new_turn_1.abs() > self.max_turn_units || new_turn_2.abs() > self.max_turn_units) {
                         continue;  // Would form a loop
                     }
 

@@ -347,6 +347,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 mps_unroll: bool = True,
                 skip_routing: bool = False,
                 routing_clearance_margin: float = 1.15,
+                max_turn_angle: float = 270.0,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -437,6 +438,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         target_swap_crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check,
         routing_clearance_margin=routing_clearance_margin,
+        max_turn_angle=max_turn_angle,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -3375,6 +3377,8 @@ Differential pair routing:
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
                         help="Multiplier on track-via clearance (1.0 = minimum DRC)")
+    parser.add_argument("--max-turn-angle", type=float, default=270.0,
+                        help="Max cumulative turn angle (degrees) before reset, to prevent loops (default: 270)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
@@ -3457,4 +3461,5 @@ Differential pair routing:
                 crossing_penalty=args.crossing_penalty,
                 skip_routing=args.skip_routing,
                 routing_clearance_margin=args.routing_clearance_margin,
+                max_turn_angle=args.max_turn_angle,
                 vis_callback=vis_callback)

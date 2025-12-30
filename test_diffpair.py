@@ -244,6 +244,8 @@ Examples:
                               help='Maximum angle (degrees) for setback position search (default: 45.0)')
     router_group.add_argument('--routing-clearance-margin', type=float,
                               help='Multiplier on track-via clearance (default: 1.0 = minimum DRC)')
+    router_group.add_argument('--max-turn-angle', type=float,
+                              help='Max cumulative turn angle (degrees) before reset, to prevent loops (default: 270)')
     router_group.add_argument('--swappable-nets', nargs='+',
                               help='Glob patterns for diff pairs that can have targets swapped (e.g., rx1_*)')
     router_group.add_argument('--crossing-penalty', type=float,
@@ -381,6 +383,8 @@ Examples:
         router_cmd.extend(["--max-setback-angle", str(args.max_setback_angle)])
     if args.routing_clearance_margin is not None:
         router_cmd.extend(["--routing-clearance-margin", str(args.routing_clearance_margin)])
+    if args.max_turn_angle is not None:
+        router_cmd.extend(["--max-turn-angle", str(args.max_turn_angle)])
     if args.swappable_nets:
         router_cmd.extend(["--swappable-nets"] + args.swappable_nets)
     if args.crossing_penalty is not None:
