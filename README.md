@@ -17,7 +17,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
 - **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced. Uses 0° when clearance to the nearest stub is sufficient (≥2× spacing), only angling away when stubs are too close
-- **Loop detection** - Prevents differential pair routes from forming loops (>270° turns)
+- **U-turn prevention** - Prevents differential pair routes from making U-turns (>180° cumulative turn)
+- **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 
@@ -93,15 +94,15 @@ KiCadRoutingTools/
 
 ## Module Overview
 
-| Module | Lines | Purpose |
-|--------|-------|---------|
-| `routing_config.py` | 87 | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
-| `routing_utils.py` | 1953 | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
-| `obstacle_map.py` | 1015 | Obstacle map building from PCB data |
-| `single_ended_routing.py` | 589 | Single-ended net routing with A* |
-| `diff_pair_routing.py` | 1777 | Differential pair centerline + offset routing |
-| `stub_layer_switching.py` | 682 | Stub layer swap optimization for diff pairs and single-ended nets |
-| `route.py` | 3460 | CLI and batch routing orchestration |
+| Module | Purpose |
+|--------|---------|
+| `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
+| `routing_utils.py` | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
+| `obstacle_map.py` | Obstacle map building from PCB data |
+| `single_ended_routing.py` | Single-ended net routing with A* |
+| `diff_pair_routing.py` | Differential pair centerline + offset routing with GND vias |
+| `stub_layer_switching.py` | Stub layer swap optimization for diff pairs and single-ended nets |
+| `route.py` | CLI and batch routing orchestration |
 
 ## Performance
 
@@ -150,7 +151,9 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --diff-pair-gap 0.101   # P-N gap (mm)
 --diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
 --min-turning-radius 0.2      # Min turn radius (mm)
+--max-turn-angle 180          # Max cumulative turn (degrees, prevents U-turns)
 --direction backward    # Route from target to source
+--no-gnd-vias           # Disable GND via placement (enabled by default)
 
 # Layer optimization (stub layer swap enabled by default for both diff pairs and single-ended)
 --no-stub-layer-swap    # Disable stub layer switching

@@ -247,7 +247,7 @@ Examples:
     router_group.add_argument('--routing-clearance-margin', type=float,
                               help='Multiplier on track-via clearance (default: 1.0 = minimum DRC)')
     router_group.add_argument('--max-turn-angle', type=float,
-                              help='Max cumulative turn angle (degrees) before reset, to prevent loops (default: 270)')
+                              help='Max cumulative turn angle (degrees) before reset, to prevent U-turns (default: 180)')
     router_group.add_argument('--swappable-nets', nargs='+',
                               help='Glob patterns for diff pairs that can have targets swapped (e.g., rx1_*)')
     router_group.add_argument('--crossing-penalty', type=float,

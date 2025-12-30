@@ -75,8 +75,10 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
+| `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
+| `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
@@ -164,8 +166,10 @@ class GridRouteConfig:
     diff_pair_gap: float = 0.101         # mm between P and N
     diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
     min_turning_radius: float = 0.2      # mm for pose-based routing
+    max_turn_angle: float = 180.0        # degrees, prevents U-turns
     fix_polarity: bool = True            # swap target pads if polarity swap needed
     stub_layer_swap: bool = True         # enable stub layer switching optimization
+    gnd_via_enabled: bool = True         # place GND vias near signal vias
     target_swap_crossing_penalty: float = 1000.0  # penalty for crossing assignments
     crossing_layer_check: bool = True    # only count crossings on same layer
 

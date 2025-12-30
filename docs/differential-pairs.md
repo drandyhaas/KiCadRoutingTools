@@ -250,6 +250,33 @@ inner_is_p = (p_sign > 0) if cross >= 0 else (p_sign < 0)
 outer_approach = inner_via + perpendicular * track_via_clearance
 ```
 
+### GND Via Placement
+
+By default, the router places GND vias adjacent to each differential pair signal via. This provides a return current path and improves signal integrity.
+
+```
+         GND via
+            ○
+            │
+    P via ○─┼─○ N via    (signal vias)
+            │
+            ○
+         GND via
+```
+
+**How it works:**
+
+1. **Rust router checks clearance** - During A* search, when evaluating via positions, the router also checks if GND via positions are clear
+2. **Ahead or behind** - GND vias can be placed ahead of or behind the signal vias along the route direction. The router tries both and picks the clear option
+3. **Direction stored** - The chosen direction (1=ahead, -1=behind) is stored per layer change
+4. **Python places vias** - After routing, Python uses the direction info to place GND vias connected to the GND net
+
+**GND via positions:**
+- Perpendicular offset: `P/N spacing + track_width/2 + clearance + via_size/2`
+- Along-heading offset: `via_size + clearance` (ahead or behind signal vias)
+
+Use `--no-gnd-vias` to disable this feature.
+
 ## Connectors
 
 Simple straight connectors link the original stub endpoints to the corresponding P/N track start/end points.
@@ -276,7 +303,9 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
+| `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
+| `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |

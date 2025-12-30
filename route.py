@@ -347,7 +347,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 mps_unroll: bool = True,
                 skip_routing: bool = False,
                 routing_clearance_margin: float = 1.15,
-                max_turn_angle: float = 270.0,
+                max_turn_angle: float = 180.0,
                 gnd_via_enabled: bool = True,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
@@ -3420,8 +3420,8 @@ Differential pair routing:
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
                         help="Multiplier on track-via clearance (1.0 = minimum DRC)")
-    parser.add_argument("--max-turn-angle", type=float, default=270.0,
-                        help="Max cumulative turn angle (degrees) before reset, to prevent loops (default: 270)")
+    parser.add_argument("--max-turn-angle", type=float, default=180.0,
+                        help="Max cumulative turn angle (degrees) before reset, to prevent U-turns (default: 180)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
