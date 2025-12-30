@@ -60,19 +60,22 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
             pad_x, pad_y = pad.global_x, pad.global_y
             break
 
-    # If not at a pad, search ALL segments on this layer (not just those from get_stub_segments,
-    # which might walk in the wrong direction) to find which pad connects to segments on this layer
-    if pad_x is None:
-        layer_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == stub_layer]
-        for seg in layer_segments:
-            for pad in net_pads:
-                # Check if pad is at either endpoint of this segment
-                if (abs(pad.global_x - seg.start_x) < tolerance and abs(pad.global_y - seg.start_y) < tolerance) or \
-                   (abs(pad.global_x - seg.end_x) < tolerance and abs(pad.global_y - seg.end_y) < tolerance):
-                    pad_x, pad_y = pad.global_x, pad.global_y
-                    break
-            if pad_x is not None:
+    # If not at a pad, walk the collected stub segments to find the pad end.
+    # get_stub_segments walks from free end toward pad, so follow the chain.
+    if pad_x is None and segments:
+        current_x, current_y = stub_x, stub_y
+        for seg in segments:
+            if abs(seg.start_x - current_x) < tolerance and abs(seg.start_y - current_y) < tolerance:
+                current_x, current_y = seg.end_x, seg.end_y
+            else:
+                current_x, current_y = seg.start_x, seg.start_y
+        # Find which pad is at the end position
+        for pad in net_pads:
+            if abs(pad.global_x - current_x) < tolerance and abs(pad.global_y - current_y) < tolerance:
+                pad_x, pad_y = pad.global_x, pad.global_y
                 break
+        if pad_x is None:
+            pad_x, pad_y = current_x, current_y  # Use chain end position
 
     if pad_x is None:
         # Use first pad as fallback
@@ -232,6 +235,7 @@ def check_segments_overlap(segments: List[Segment], other_segments: List[Segment
 
 def validate_stub_no_overlap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                               all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
+                              pcb_data: PCBData,
                               swap_partner_name: Optional[str] = None) -> Tuple[bool, str]:
     """
     Check that swapped stubs won't overlap with other stubs on destination layer.
@@ -240,12 +244,14 @@ def validate_stub_no_overlap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str
         stub_p, stub_n: P and N stub info to be swapped
         dest_layer: Destination layer after swap
         all_stubs_by_layer: Dict mapping layer -> list of (pair_name, segments)
+        pcb_data: PCB data with all segments
         swap_partner_name: Name of swap partner pair (excluded from overlap check)
 
     Returns:
         (is_valid, error_message) - True if no overlap, False with explanation otherwise
     """
     our_segments = stub_p.segments + stub_n.segments
+    our_net_ids = {stub_p.net_id, stub_n.net_id}
 
     # Check against all stubs on destination layer
     for pair_name, other_segments in all_stubs_by_layer.get(dest_layer, []):
@@ -255,6 +261,23 @@ def validate_stub_no_overlap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str
 
         if check_segments_overlap(our_segments, other_segments):
             return False, f"overlaps with {pair_name} on {dest_layer}"
+
+    # Also check against all existing segments on destination layer (catches segments not in collection)
+    for our_seg in our_segments:
+        seg_y_min = min(our_seg.start_y, our_seg.end_y) - 0.2
+        seg_y_max = max(our_seg.start_y, our_seg.end_y) + 0.2
+        seg_x_min = min(our_seg.start_x, our_seg.end_x)
+        seg_x_max = max(our_seg.start_x, our_seg.end_x)
+        for other in pcb_data.segments:
+            if other.layer != dest_layer or other.net_id in our_net_ids:
+                continue
+            other_y_min = min(other.start_y, other.end_y)
+            other_y_max = max(other.start_y, other.end_y)
+            if other_y_max >= seg_y_min and other_y_min <= seg_y_max:
+                other_x_min = min(other.start_x, other.end_x)
+                other_x_max = max(other.start_x, other.end_x)
+                if other_x_max >= seg_x_min and other_x_min <= seg_x_max:
+                    return False, f"overlaps with existing segment (net {other.net_id}) on {dest_layer}"
 
     return True, ""
 
@@ -399,7 +422,7 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     """
     # Check 1: No overlap with other stubs on dest layer
     overlap_valid, overlap_reason = validate_stub_no_overlap(
-        stub_p, stub_n, dest_layer, all_stubs_by_layer, swap_partner_name
+        stub_p, stub_n, dest_layer, all_stubs_by_layer, pcb_data, swap_partner_name
     )
     if not overlap_valid:
         return False, overlap_reason
