@@ -660,26 +660,60 @@ def find_components_by_type(pcb_data: 'PCBData', package_type: str) -> List[Foot
     return matches
 
 
-def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.5) -> List[Tuple[float, float, float, float]]:
+def detect_bga_pitch(footprint: Footprint) -> float:
+    """
+    Detect the pitch (pad spacing) of a BGA footprint.
+
+    Returns:
+        Pitch in mm, or 1.0 as default if cannot be detected
+    """
+    if not footprint.pads or len(footprint.pads) < 2:
+        return 1.0
+
+    # Get unique x and y positions
+    x_positions = sorted(set(p.global_x for p in footprint.pads))
+    y_positions = sorted(set(p.global_y for p in footprint.pads))
+
+    pitches = []
+    if len(x_positions) > 1:
+        x_diffs = [x_positions[i+1] - x_positions[i] for i in range(len(x_positions)-1)]
+        pitches.extend(x_diffs)
+    if len(y_positions) > 1:
+        y_diffs = [y_positions[i+1] - y_positions[i] for i in range(len(y_positions)-1)]
+        pitches.extend(y_diffs)
+
+    if pitches:
+        # Use minimum pitch (most common spacing)
+        return min(pitches)
+    return 1.0
+
+
+def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.5) -> List[Tuple[float, float, float, float, float]]:
     """
     Auto-detect BGA exclusion zones from all BGA components in the PCB.
 
     Via placement should be avoided inside BGA packages to prevent shorts
     with the BGA balls.
 
+    Returns zones as 5-tuples: (min_x, min_y, max_x, max_y, edge_tolerance)
+    where edge_tolerance = margin + pitch * 1.1 (pitch + 10%)
+
     Args:
         pcb_data: Parsed PCB data
         margin: Extra margin around BGA bounds (in mm)
 
     Returns:
-        List of (min_x, min_y, max_x, max_y) tuples for each BGA
+        List of (min_x, min_y, max_x, max_y, edge_tolerance) tuples for each BGA
     """
     zones = []
     bga_components = find_components_by_type(pcb_data, 'BGA')
 
     for fp in bga_components:
         bounds = get_footprint_bounds(fp, margin=margin)
-        zones.append(bounds)
+        pitch = detect_bga_pitch(fp)
+        # Edge tolerance = margin + pitch * 1.1 (pitch + 10% for tolerance)
+        edge_tolerance = margin + pitch * 1.1
+        zones.append((*bounds, edge_tolerance))
 
     return zones
 

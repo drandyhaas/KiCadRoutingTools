@@ -43,7 +43,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     # Set BGA exclusion zones - block vias AND tracks on ALL layers
     for zone in config.bga_exclusion_zones:
-        min_x, min_y, max_x, max_y = zone
+        min_x, min_y, max_x, max_y = zone[:4]
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
         obstacles.set_bga_zone(gmin_x, gmin_y, gmax_x, gmax_y)
@@ -449,7 +449,8 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
     radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
     cost_grid = int(config.bga_proximity_cost * 1000 / config.grid_step)
 
-    for min_x, min_y, max_x, max_y in config.bga_exclusion_zones:
+    for zone in config.bga_exclusion_zones:
+        min_x, min_y, max_x, max_y = zone[:4]
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
 
@@ -741,7 +742,7 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     obstacles.set_bga_proximity_radius(bga_prox_radius_grid)
 
     for zone in config.bga_exclusion_zones:
-        min_x, min_y, max_x, max_y = zone
+        min_x, min_y, max_x, max_y = zone[:4]
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
         obstacles.set_bga_zone(gmin_x, gmin_y, gmax_x, gmax_y)
@@ -1134,7 +1135,7 @@ def draw_exclusion_zones_debug(config: GridRouteConfig,
     # Draw BGA exclusion zone rectangles and proximity rectangles
     prox_radius = config.bga_proximity_radius
     for zone in config.bga_exclusion_zones:
-        min_x, min_y, max_x, max_y = zone
+        min_x, min_y, max_x, max_y = zone[:4]
         # Draw inner rectangle (BGA zone itself)
         corners = [
             (min_x, min_y), (max_x, min_y),

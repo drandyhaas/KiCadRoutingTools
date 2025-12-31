@@ -71,27 +71,31 @@ except ImportError as e:
     sys.exit(1)
 
 
-def is_edge_stub(x: float, y: float, bga_zones: List[Tuple[float, float, float, float]],
-                 edge_tolerance: float = 0.5) -> bool:
-    """Check if a position is on the edge of any BGA zone.
+def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
+    """Check if a pad is on the outer row/column of any BGA zone.
 
     Args:
-        x, y: Position to check
-        bga_zones: List of (min_x, min_y, max_x, max_y) BGA exclusion zones
-        edge_tolerance: Distance from zone edge to consider as "on edge" (mm)
+        pad_x, pad_y: Pad position to check (not stub endpoint)
+        bga_zones: List of BGA zones, either:
+                   - 4-tuple: (min_x, min_y, max_x, max_y) - uses default tolerance
+                   - 5-tuple: (min_x, min_y, max_x, max_y, edge_tolerance)
 
     Returns:
-        True if position is on or near the edge of any BGA zone
+        True if pad is inside a BGA zone AND in the outer row/column
     """
-    for min_x, min_y, max_x, max_y in bga_zones:
-        # Check if position is inside or near this zone
-        if (x >= min_x - edge_tolerance and x <= max_x + edge_tolerance and
-            y >= min_y - edge_tolerance and y <= max_y + edge_tolerance):
+    for zone in bga_zones:
+        min_x, min_y, max_x, max_y = zone[:4]
+        # Use per-zone tolerance if available, else default (0.5mm margin + 1mm pitch * 1.1)
+        edge_tolerance = zone[4] if len(zone) > 4 else 1.6
+        # Check if pad is INSIDE this zone (with small tolerance for floating point)
+        inside_tolerance = 0.01  # 10 microns
+        if (pad_x >= min_x - inside_tolerance and pad_x <= max_x + inside_tolerance and
+            pad_y >= min_y - inside_tolerance and pad_y <= max_y + inside_tolerance):
             # Check if it's on an edge (within tolerance of min/max)
-            on_left = abs(x - min_x) <= edge_tolerance
-            on_right = abs(x - max_x) <= edge_tolerance
-            on_bottom = abs(y - min_y) <= edge_tolerance
-            on_top = abs(y - max_y) <= edge_tolerance
+            on_left = abs(pad_x - min_x) <= edge_tolerance
+            on_right = abs(pad_x - max_x) <= edge_tolerance
+            on_bottom = abs(pad_y - min_y) <= edge_tolerance
+            on_top = abs(pad_y - max_y) <= edge_tolerance
             if on_left or on_right or on_bottom or on_top:
                 return True
     return False
@@ -434,7 +438,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             bga_components = find_components_by_type(pcb_data, 'BGA')
             print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")
             for i, (fp, zone) in enumerate(zip(bga_components, bga_exclusion_zones)):
-                print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f})")
+                edge_tol = zone[4] if len(zone) > 4 else 1.6
+                print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
         else:
             print("No BGA components detected - no exclusion zones needed")
 
@@ -754,13 +759,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     allow_swap = True
                     if tgt_layer == 'F.Cu':
                         # Our stubs would move to F.Cu - check if they're edge stubs
-                        if not (is_edge_stub(src_p_stub.x, src_p_stub.y, config.bga_exclusion_zones) or
-                                is_edge_stub(src_n_stub.x, src_n_stub.y, config.bga_exclusion_zones)):
+                        if not (is_edge_stub(src_p_stub.pad_x, src_p_stub.pad_y, config.bga_exclusion_zones) or
+                                is_edge_stub(src_n_stub.pad_x, src_n_stub.pad_y, config.bga_exclusion_zones)):
                             allow_swap = False
                     if src_layer == 'F.Cu' and allow_swap:
                         # Their stubs would move to F.Cu - check if they're edge stubs
-                        if not (is_edge_stub(other_src_p_stub.x, other_src_p_stub.y, config.bga_exclusion_zones) or
-                                is_edge_stub(other_src_n_stub.x, other_src_n_stub.y, config.bga_exclusion_zones)):
+                        if not (is_edge_stub(other_src_p_stub.pad_x, other_src_p_stub.pad_y, config.bga_exclusion_zones) or
+                                is_edge_stub(other_src_n_stub.pad_x, other_src_n_stub.pad_y, config.bga_exclusion_zones)):
                             allow_swap = False
                     if not allow_swap:
                         continue
@@ -845,8 +850,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Check if swap would move stubs to F.Cu (top layer)
             # Exception: allow edge stubs to swap to F.Cu
             if not can_swap_to_top_layer and tgt_layer == 'F.Cu':
-                if not (is_edge_stub(src_p_stub.x, src_p_stub.y, config.bga_exclusion_zones) or
-                        is_edge_stub(src_n_stub.x, src_n_stub.y, config.bga_exclusion_zones)):
+                if not (is_edge_stub(src_p_stub.pad_x, src_p_stub.pad_y, config.bga_exclusion_zones) or
+                        is_edge_stub(src_n_stub.pad_x, src_n_stub.pad_y, config.bga_exclusion_zones)):
                     continue
 
             # Validate solo switch: source stubs move to target layer
@@ -1006,13 +1011,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     allow_swap = True
                     if src_layer == 'F.Cu':
                         # Our stubs would move to F.Cu - check if they're edge stubs
-                        if not (is_edge_stub(tgt_p_stub.x, tgt_p_stub.y, config.bga_exclusion_zones) or
-                                is_edge_stub(tgt_n_stub.x, tgt_n_stub.y, config.bga_exclusion_zones)):
+                        if not (is_edge_stub(tgt_p_stub.pad_x, tgt_p_stub.pad_y, config.bga_exclusion_zones) or
+                                is_edge_stub(tgt_n_stub.pad_x, tgt_n_stub.pad_y, config.bga_exclusion_zones)):
                             allow_swap = False
                     if tgt_layer == 'F.Cu' and allow_swap:
                         # Their stubs would move to F.Cu - check if they're edge stubs
-                        if not (is_edge_stub(other_tgt_p_stub.x, other_tgt_p_stub.y, config.bga_exclusion_zones) or
-                                is_edge_stub(other_tgt_n_stub.x, other_tgt_n_stub.y, config.bga_exclusion_zones)):
+                        if not (is_edge_stub(other_tgt_p_stub.pad_x, other_tgt_p_stub.pad_y, config.bga_exclusion_zones) or
+                                is_edge_stub(other_tgt_n_stub.pad_x, other_tgt_n_stub.pad_y, config.bga_exclusion_zones)):
                             allow_swap = False
                     if not allow_swap:
                         continue
@@ -1083,8 +1088,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Check if swap would move stubs to F.Cu (top layer)
             # Exception: allow edge stubs to swap to F.Cu
             if not can_swap_to_top_layer and src_layer == 'F.Cu':
-                if not (is_edge_stub(tgt_p_stub.x, tgt_p_stub.y, config.bga_exclusion_zones) or
-                        is_edge_stub(tgt_n_stub.x, tgt_n_stub.y, config.bga_exclusion_zones)):
+                if not (is_edge_stub(tgt_p_stub.pad_x, tgt_p_stub.pad_y, config.bga_exclusion_zones) or
+                        is_edge_stub(tgt_n_stub.pad_x, tgt_n_stub.pad_y, config.bga_exclusion_zones)):
                     print(f"    Solo target switch skipped for {pair_name}: would move to F.Cu (top layer)")
                     continue
 
@@ -1157,8 +1162,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if not src_p_stub or not src_n_stub:
                         continue
                     if not can_swap_to_top_layer and tgt_layer == 'F.Cu':
-                        if not (is_edge_stub(src_p_stub.x, src_p_stub.y, config.bga_exclusion_zones) or
-                                is_edge_stub(src_n_stub.x, src_n_stub.y, config.bga_exclusion_zones)):
+                        if not (is_edge_stub(src_p_stub.pad_x, src_p_stub.pad_y, config.bga_exclusion_zones) or
+                                is_edge_stub(src_n_stub.pad_x, src_n_stub.pad_y, config.bga_exclusion_zones)):
                             continue
                     valid, reason = validate_swap(
                         src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
@@ -1199,8 +1204,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if not tgt_p_stub or not tgt_n_stub:
                         continue
                     if not can_swap_to_top_layer and src_layer == 'F.Cu':
-                        if not (is_edge_stub(tgt_p_stub.x, tgt_p_stub.y, config.bga_exclusion_zones) or
-                                is_edge_stub(tgt_n_stub.x, tgt_n_stub.y, config.bga_exclusion_zones)):
+                        if not (is_edge_stub(tgt_p_stub.pad_x, tgt_p_stub.pad_y, config.bga_exclusion_zones) or
+                                is_edge_stub(tgt_n_stub.pad_x, tgt_n_stub.pad_y, config.bga_exclusion_zones)):
                             continue
                     valid, reason = validate_swap(
                         tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
@@ -1298,12 +1303,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     allow_swap = True
                     if not can_swap_to_top_layer and (our_new_layer == 'F.Cu' or their_new_layer == 'F.Cu'):
                         if our_new_layer == 'F.Cu':
-                            if not (is_edge_stub(our_stubs[0].x, our_stubs[0].y, config.bga_exclusion_zones) or
-                                    is_edge_stub(our_stubs[1].x, our_stubs[1].y, config.bga_exclusion_zones)):
+                            if not (is_edge_stub(our_stubs[0].pad_x, our_stubs[0].pad_y, config.bga_exclusion_zones) or
+                                    is_edge_stub(our_stubs[1].pad_x, our_stubs[1].pad_y, config.bga_exclusion_zones)):
                                 allow_swap = False
                         if their_new_layer == 'F.Cu' and allow_swap:
-                            if not (is_edge_stub(their_stubs[0].x, their_stubs[0].y, config.bga_exclusion_zones) or
-                                    is_edge_stub(their_stubs[1].x, their_stubs[1].y, config.bga_exclusion_zones)):
+                            if not (is_edge_stub(their_stubs[0].pad_x, their_stubs[0].pad_y, config.bga_exclusion_zones) or
+                                    is_edge_stub(their_stubs[1].pad_x, their_stubs[1].pad_y, config.bga_exclusion_zones)):
                                 allow_swap = False
                     if not allow_swap:
                         pass  # Skip this swap - would move non-edge stubs to top layer
@@ -1384,12 +1389,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             allow_swap = True
                             if not can_swap_to_top_layer and (src_layer == 'F.Cu' or tgt_layer == 'F.Cu'):
                                 if src_layer == 'F.Cu':
-                                    if not (is_edge_stub(p_stub.x, p_stub.y, config.bga_exclusion_zones) or
-                                            is_edge_stub(n_stub.x, n_stub.y, config.bga_exclusion_zones)):
+                                    if not (is_edge_stub(p_stub.pad_x, p_stub.pad_y, config.bga_exclusion_zones) or
+                                            is_edge_stub(n_stub.pad_x, n_stub.pad_y, config.bga_exclusion_zones)):
                                         allow_swap = False
                                 if tgt_layer == 'F.Cu' and allow_swap:
-                                    if not (is_edge_stub(other_p_stub.x, other_p_stub.y, config.bga_exclusion_zones) or
-                                            is_edge_stub(other_n_stub.x, other_n_stub.y, config.bga_exclusion_zones)):
+                                    if not (is_edge_stub(other_p_stub.pad_x, other_p_stub.pad_y, config.bga_exclusion_zones) or
+                                            is_edge_stub(other_n_stub.pad_x, other_n_stub.pad_y, config.bga_exclusion_zones)):
                                         allow_swap = False
                             if not allow_swap:
                                 pass  # Skip this swap - would move non-edge stubs to top layer

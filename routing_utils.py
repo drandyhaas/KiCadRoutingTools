@@ -747,7 +747,7 @@ def find_containing_or_nearest_bga_zone(
 
     # First check if inside any zone
     for zone in bga_zones:
-        min_x, min_y, max_x, max_y = zone
+        min_x, min_y, max_x, max_y = zone[:4]
         if min_x <= x <= max_x and min_y <= y <= max_y:
             return zone
 
@@ -756,7 +756,7 @@ def find_containing_or_nearest_bga_zone(
     best_dist = float('inf')
 
     for zone in bga_zones:
-        min_x, min_y, max_x, max_y = zone
+        min_x, min_y, max_x, max_y = zone[:4]
         # Distance to bounding box
         dx = max(min_x - x, 0, x - max_x)
         dy = max(min_y - y, 0, y - max_y)
@@ -834,7 +834,7 @@ def compute_routing_aware_distance(
     """
     tx, ty = target_free_end
     sx, sy = source_chip_center
-    min_x, min_y, max_x, max_y = bga_zone
+    min_x, min_y, max_x, max_y = bga_zone[:4]
 
     def point_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
         return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)

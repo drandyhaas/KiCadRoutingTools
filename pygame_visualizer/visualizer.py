@@ -376,7 +376,7 @@ class RoutingVisualizer:
         # Render BGA zones as lighter gray outline (on top of blocked cells)
         bga_zone_color = (120, 120, 120)  # Lighter gray for BGA zones
         for zone in self.bga_zones:
-            zmin_gx, zmin_gy, zmax_gx, zmax_gy = zone
+            zmin_gx, zmin_gy, zmax_gx, zmax_gy = zone[:4]
             rect = Rect(
                 (zmin_gx - min_gx) * cell_size,
                 (zmin_gy - min_gy) * cell_size,
