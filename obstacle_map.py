@@ -736,6 +736,10 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     bga_zones_grid: List[Tuple[int, int, int, int]] = []
 
     # Set BGA exclusion zones - block vias AND tracks on ALL layers
+    # Set BGA proximity radius for vertical attraction exclusion
+    bga_prox_radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
+    obstacles.set_bga_proximity_radius(bga_prox_radius_grid)
+
     for zone in config.bga_exclusion_zones:
         min_x, min_y, max_x, max_y = zone
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
@@ -1106,3 +1110,70 @@ def get_net_bounds(pcb_data: PCBData, net_ids: List[int], padding: float = 5.0) 
         return (0, 0, 100, 100)
 
     return (min(xs) - padding, min(ys) - padding, max(xs) + padding, max(ys) + padding)
+
+
+def draw_exclusion_zones_debug(config: GridRouteConfig,
+                                unrouted_stubs: List[Tuple[float, float]] = None) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Get exclusion zone outline lines for User.5 layer debugging.
+
+    Returns line segments for:
+    - Circles around stub proximity zones
+    - Rectangles around BGA exclusion zones (inner and outer with proximity radius)
+
+    Args:
+        config: Routing configuration with exclusion zone settings
+        unrouted_stubs: List of (x, y) or (x, y, layer) tuples for stub positions
+
+    Returns:
+        List of ((x1, y1), (x2, y2)) line segment tuples
+    """
+    import math
+
+    lines = []
+
+    # Draw BGA exclusion zone rectangles and proximity rectangles
+    prox_radius = config.bga_proximity_radius
+    for zone in config.bga_exclusion_zones:
+        min_x, min_y, max_x, max_y = zone
+        # Draw inner rectangle (BGA zone itself)
+        corners = [
+            (min_x, min_y), (max_x, min_y),
+            (max_x, max_y), (min_x, max_y)
+        ]
+        for i in range(4):
+            x1, y1 = corners[i]
+            x2, y2 = corners[(i + 1) % 4]
+            lines.append(((x1, y1), (x2, y2)))
+
+        # Draw outer rectangle (BGA zone expanded by proximity radius)
+        if prox_radius > 0:
+            outer_corners = [
+                (min_x - prox_radius, min_y - prox_radius),
+                (max_x + prox_radius, min_y - prox_radius),
+                (max_x + prox_radius, max_y + prox_radius),
+                (min_x - prox_radius, max_y + prox_radius)
+            ]
+            for i in range(4):
+                x1, y1 = outer_corners[i]
+                x2, y2 = outer_corners[(i + 1) % 4]
+                lines.append(((x1, y1), (x2, y2)))
+
+    # Draw stub proximity circles
+    if unrouted_stubs and config.stub_proximity_radius > 0:
+        radius = config.stub_proximity_radius
+        num_segments = 16  # Circle approximation segments
+
+        for stub in unrouted_stubs:
+            cx, cy = stub[0], stub[1]
+
+            # Draw circle as connected line segments
+            for i in range(num_segments):
+                angle1 = 2 * math.pi * i / num_segments
+                angle2 = 2 * math.pi * (i + 1) / num_segments
+                x1 = cx + radius * math.cos(angle1)
+                y1 = cy + radius * math.sin(angle1)
+                x2 = cx + radius * math.cos(angle2)
+                y2 = cy + radius * math.sin(angle2)
+                lines.append(((x1, y1), (x2, y2)))
+
+    return lines

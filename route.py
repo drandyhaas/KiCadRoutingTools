@@ -39,7 +39,8 @@ from obstacle_map import (
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
     VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
-    compute_track_proximity_for_net, merge_track_proximity_costs, add_cross_layer_tracks
+    compute_track_proximity_for_net, merge_track_proximity_costs, add_cross_layer_tracks,
+    draw_exclusion_zones_debug
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -1598,6 +1599,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # (not just the ones we're routing in this batch)
     all_unrouted_net_ids = set(get_all_unrouted_net_ids(pcb_data))
     print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
+
+    # Get exclusion zone lines for User.5 if debug_lines is enabled
+    exclusion_zone_lines = []
+    if debug_lines:
+        all_unrouted_stubs = get_stub_endpoints(pcb_data, list(all_unrouted_net_ids))
+        exclusion_zone_lines = draw_exclusion_zones_debug(config, all_unrouted_stubs)
+        print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_unrouted_stubs)} stub proximity circles on User.5")
 
     # Find GND net ID for GND via obstacle tracking (if GND vias enabled)
     gnd_net_id = None
@@ -3356,7 +3364,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         # Add debug paths if enabled (using gr_line for User layers)
         if debug_lines:
-            print("Adding debug paths to User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
+            print("Adding debug paths to User.3 (connectors), User.4 (stub dirs), User.5 (exclusion zones), User.8 (simplified), User.9 (raw A*)")
             for result in results:
                 # Raw A* path on User.9
                 raw_path = result.get('raw_astar_path', [])
@@ -3397,6 +3405,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         start, end,
                         0.05, "User.4"
                     ) + "\n"
+
+            # Exclusion zones on User.5 (BGA zones + proximity, stub proximity circles)
+            for start, end in exclusion_zone_lines:
+                routing_text += generate_gr_line_sexpr(
+                    start, end,
+                    0.05, "User.5"
+                ) + "\n"
 
             # Boundary position labels on User.6 (from mps-unroll)
             if boundary_debug_labels:

@@ -21,6 +21,8 @@ pub struct GridObstacleMap {
     pub num_layers: usize,
     /// BGA exclusion zones (min_gx, min_gy, max_gx, max_gy) - multiple zones supported
     pub bga_zones: Vec<(i32, i32, i32, i32)>,
+    /// BGA proximity radius in grid units (for vertical attraction exclusion)
+    pub bga_proximity_radius: i32,
     /// Allowed cells that override BGA zone blocking (for source/target points inside BGA)
     pub allowed_cells: FxHashSet<u64>,
     /// Source/target cells that can be routed to even if near obstacles
@@ -43,10 +45,16 @@ impl GridObstacleMap {
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             num_layers,
             bga_zones: Vec::new(),
+            bga_proximity_radius: 0,
             allowed_cells: FxHashSet::default(),
             source_target_cells: (0..num_layers).map(|_| FxHashSet::default()).collect(),
             cross_layer_tracks: FxHashMap::default(),
         }
+    }
+
+    /// Set BGA proximity radius in grid units (for vertical attraction exclusion)
+    pub fn set_bga_proximity_radius(&mut self, radius: i32) {
+        self.bga_proximity_radius = radius;
     }
 
     /// Add a source/target cell that can be routed to even if near obstacles
@@ -73,6 +81,7 @@ impl GridObstacleMap {
             layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
             bga_zones: self.bga_zones.clone(),
+            bga_proximity_radius: self.bga_proximity_radius,
             allowed_cells: self.allowed_cells.clone(),
             source_target_cells: self.source_target_cells.clone(),
             cross_layer_tracks: self.cross_layer_tracks.clone(),
@@ -224,6 +233,7 @@ impl GridObstacleMap {
 
     /// Get cross-layer attraction bonus (positive = cost reduction) at position for given layer
     /// Returns a bonus if OTHER layers have tracks here (not the current layer)
+    /// Returns 0 if position is in stub proximity zone or BGA exclusion zone
     #[inline]
     pub fn get_cross_layer_attraction(
         &self,
@@ -234,6 +244,22 @@ impl GridObstacleMap {
         attraction_bonus: i32,
     ) -> i32 {
         if attraction_radius <= 0 || attraction_bonus <= 0 {
+            return 0;
+        }
+
+        // No attraction bonus in stub proximity zones (near unrouted stubs)
+        let key = pack_xy(gx, gy);
+        if self.stub_proximity.contains_key(&key) {
+            return 0;
+        }
+
+        // No attraction bonus inside BGA exclusion zones or within proximity radius of them
+        let radius = self.bga_proximity_radius;
+        let in_bga_proximity = self.bga_zones.iter().any(|(min_gx, min_gy, max_gx, max_gy)| {
+            gx >= (*min_gx - radius) && gx <= (*max_gx + radius) &&
+            gy >= (*min_gy - radius) && gy <= (*max_gy + radius)
+        });
+        if in_bga_proximity {
             return 0;
         }
 
