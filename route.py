@@ -1797,9 +1797,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 probe_ripped_items.clear()
                 break
 
-        # If probe rip-up exhausted attempts without success, restore all and mark as failed
+        # If probe rip-up exhausted attempts without success, restore all and try full route
         if result and result.get('probe_blocked'):
-            print(f"  {RED}Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), route FAILED{RESET}")
+            print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), trying full route...")
             for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
                 if ripped_saved:
                     add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
@@ -2531,6 +2531,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         if reroute_item[0] == 'single':
             _, ripped_net_name, ripped_net_id = reroute_item
+
+            # Skip if already routed (can happen if rerouted then ripped again, then successfully rerouted by another attempt)
+            if ripped_net_id in routed_results:
+                continue
+
             route_index += 1
             current_total = total_routes + len(reroute_queue)
             failed_str = f" ({failed} failed)" if failed > 0 else ""
@@ -2585,6 +2590,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 print(f"  REROUTE FAILED: ({elapsed:.2f}s) - attempting rip-up and retry...")
 
                 reroute_succeeded = False
+                ripped_items = []  # Initialize here so it's always defined
                 if routed_net_paths and result:
                     fwd_cells = result.get('blocked_cells_forward', [])
                     bwd_cells = result.get('blocked_cells_backward', [])
@@ -2618,9 +2624,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 if canonical not in seen_canonical_ids:
                                     seen_canonical_ids.add(canonical)
                                     rippable_blockers.append(b)
-
-                        # Progressive rip-up
-                        ripped_items = []
                         ripped_canonical_ids = set()  # Track which canonicals have been ripped
                         last_retry_blocked_cells = blocked_cells  # Start with initial failure's blocked cells
 
@@ -2800,6 +2803,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         elif reroute_item[0] == 'diff_pair':
             # Handle diff pairs that were ripped during single-ended routing
             _, ripped_pair_name, ripped_pair = reroute_item
+
+            # Skip if already routed (can happen if rerouted then ripped again, then successfully rerouted by another attempt)
+            if ripped_pair.p_net_id in routed_results and ripped_pair.n_net_id in routed_results:
+                continue
+
             route_index += 1
             current_total = total_routes + len(reroute_queue)
             failed_str = f" ({failed} failed)" if failed > 0 else ""
@@ -2880,6 +2888,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 print(f"  REROUTE FAILED: ({elapsed:.2f}s) - attempting rip-up and retry...")
 
                 reroute_succeeded = False
+                ripped_items = []  # Initialize here so it's always defined
                 if routed_net_paths and result:
                     # Find blocked cells from the failed route
                     if result.get('probe_blocked'):
@@ -2891,6 +2900,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             blocked_cells = result.get('blocked_cells_forward', [])
                         else:
                             blocked_cells = result.get('blocked_cells_backward', [])
+
+                    if not blocked_cells:
+                        print(f"  No blocked cells from router - cannot analyze blockers")
 
                     if blocked_cells:
                         blockers = analyze_frontier_blocking(
@@ -2922,9 +2934,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 else:
                                     unrippable_names.append(b.net_name)
                             print(f"  No rippable blockers (not yet routed): {', '.join(unrippable_names)}")
-
-                        # Progressive rip-up: try N=1, then N=2, etc
-                        ripped_items = []
                         ripped_canonical_ids = set()  # Track which canonicals have been ripped
                         last_retry_blocked_cells = blocked_cells  # Start with initial failure's blocked cells
 
@@ -3127,7 +3136,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 if not reroute_succeeded:
                     if not ripped_items:
-                        print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
+                        # No blocked cells or no rippable blockers - print final failure
+                        print(f"  {RED}REROUTE FAILED - could not find route{RESET}")
+                    # else: Already printed "All rip-up attempts failed" above
                     failed += 1
 
     # Notify visualization callback that all routing is complete
