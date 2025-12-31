@@ -332,10 +332,14 @@ impl PoseRouter {
                 }
             }
 
-            // Block or penalize vias within stub proximity radius (for diff pairs)
-            // If via_proximity_cost is 0, block vias near stubs; otherwise add cost
+            // Block or penalize vias within stub proximity or BGA proximity (for diff pairs)
+            // If via_proximity_cost is 0, block vias in these areas; otherwise multiply via cost
+            let in_stub_proximity = obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0;
+            let in_bga_proximity = obstacles.is_in_bga_proximity(current.gx, current.gy);
+            let in_proximity_zone = in_stub_proximity || in_bga_proximity;
+
             if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
-                if obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0 {
+                if in_proximity_zone {
                     via_positions_clear = false;
                 }
             }
@@ -354,9 +358,13 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !closed.contains(&neighbor_key) {
-                        // Apply via proximity cost (multiplier on stub proximity cost)
-                        let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * self.via_proximity_cost;
-                        let new_g = g + self.via_cost + proximity_cost;
+                        // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
+                        let via_cost = if in_proximity_zone {
+                            self.via_cost * self.via_proximity_cost
+                        } else {
+                            self.via_cost
+                        };
+                        let new_g = g + via_cost;
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                         if new_g < existing_g {
@@ -627,9 +635,13 @@ impl PoseRouter {
                 }
             }
 
-            // Block or penalize vias within stub proximity radius (for diff pairs)
+            // Block or penalize vias within stub proximity or BGA proximity (for diff pairs)
+            let in_stub_proximity = obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0;
+            let in_bga_proximity = obstacles.is_in_bga_proximity(current.gx, current.gy);
+            let in_proximity_zone = in_stub_proximity || in_bga_proximity;
+
             if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
-                if obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0 {
+                if in_proximity_zone {
                     via_positions_clear = false;
                 }
             }
@@ -647,9 +659,13 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !closed.contains(&neighbor_key) {
-                        // Apply via proximity cost (multiplier on stub proximity cost)
-                        let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * self.via_proximity_cost;
-                        let new_g = g + self.via_cost + proximity_cost;
+                        // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
+                        let via_cost = if in_proximity_zone {
+                            self.via_cost * self.via_proximity_cost
+                        } else {
+                            self.via_cost
+                        };
+                        let new_g = g + via_cost;
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                         if new_g < existing_g {

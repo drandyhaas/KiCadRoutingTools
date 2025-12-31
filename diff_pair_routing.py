@@ -728,7 +728,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     # Create pose-based router for centerline
     # Double via cost since diff pairs place two vias per layer change
-    # via_proximity_cost is a multiplier on stub proximity cost for vias (0 = block vias near stubs)
+    # via_proximity_cost is a multiplier on via cost in stub/BGA proximity zones (0 = block vias)
     # diff_pair_spacing is the P/N offset from centerline in grid units (for self-intersection prevention)
     # Use 2*spacing to prevent P/N tracks from crossing when centerline loops
     diff_pair_spacing_grid = max(1, int(2 * spacing_mm / config.grid_step + 0.5))
@@ -983,6 +983,18 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
     # Get P and N source/target coordinates
     original_src = sources[0]
     original_tgt = targets[0]
+
+    # Set endpoint exempt positions for stub proximity costs
+    # This allows routes to reach endpoints without being penalized by nearby stubs
+    min_stub_pair_spacing = config.track_width + config.diff_pair_gap + config.clearance
+    exempt_radius_grid = coord.to_grid_dist(min_stub_pair_spacing)
+    endpoint_positions = [
+        coord.to_grid(original_src[5], original_src[6]),  # Source P
+        coord.to_grid(original_src[7], original_src[8]),  # Source N
+        coord.to_grid(original_tgt[5], original_tgt[6]),  # Target P
+        coord.to_grid(original_tgt[7], original_tgt[8]),  # Target N
+    ]
+    obstacles.set_endpoint_exempt(endpoint_positions, exempt_radius_grid)
 
     # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2

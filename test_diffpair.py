@@ -204,6 +204,8 @@ Examples:
                               help='Grid resolution in mm (default: 0.1)')
     router_group.add_argument('--via-cost', type=int,
                               help='Via cost penalty in grid steps (default: 25)')
+    router_group.add_argument('--via-proximity-cost', type=int,
+                              help='Via cost multiplier in stub/BGA proximity zones (default: 10, 0=block)')
     router_group.add_argument('--max-iterations', type=int,
                               help='Max A* iterations (default: 200000)')
     router_group.add_argument('--max-probe-iterations', type=int,
@@ -349,6 +351,8 @@ Examples:
         router_cmd.extend(["--grid-step", str(args.grid_step)])
     if args.via_cost is not None:
         router_cmd.extend(["--via-cost", str(args.via_cost)])
+    if args.via_proximity_cost is not None:
+        router_cmd.extend(["--via-proximity-cost", str(args.via_proximity_cost)])
     if args.max_iterations is not None:
         router_cmd.extend(["--max-iterations", str(args.max_iterations)])
     if args.max_probe_iterations is not None:

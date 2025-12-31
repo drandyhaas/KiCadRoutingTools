@@ -3704,6 +3704,8 @@ Differential pair routing:
                         help="Grid resolution in mm (default: 0.1)")
     parser.add_argument("--via-cost", type=int, default=50,
                         help="Penalty for placing a via in grid steps (default: 50, doubled for diff pairs)")
+    parser.add_argument("--via-proximity-cost", type=int, default=10,
+                        help="Via cost multiplier in stub/BGA proximity zones (default: 10, 0=block vias)")
     parser.add_argument("--max-iterations", type=int, default=200000,
                         help="Max A* iterations before giving up (default: 200000)")
     parser.add_argument("--max-probe-iterations", type=int, default=5000,
@@ -3831,7 +3833,7 @@ Differential pair routing:
                 heuristic_weight=args.heuristic_weight,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
-                via_proximity_cost=args.via_cost,
+                via_proximity_cost=args.via_proximity_cost,
                 bga_proximity_radius=args.bga_proximity_radius,
                 bga_proximity_cost=args.bga_proximity_cost,
                 track_proximity_distance=args.track_proximity_distance,

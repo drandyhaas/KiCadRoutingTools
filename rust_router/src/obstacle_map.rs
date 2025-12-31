@@ -32,6 +32,10 @@ pub struct GridObstacleMap {
     /// Cross-layer track positions for vertical alignment attraction
     /// Key: packed (gx, gy), Value: bitmask of layers that have tracks here
     pub cross_layer_tracks: FxHashMap<u64, u8>,
+    /// Endpoint positions exempt from stub proximity costs (source and target)
+    pub endpoint_exempt_positions: Vec<(i32, i32)>,
+    /// Radius around endpoints to exempt from stub proximity costs
+    pub endpoint_exempt_radius: i32,
 }
 
 #[pymethods]
@@ -49,7 +53,22 @@ impl GridObstacleMap {
             allowed_cells: FxHashSet::default(),
             source_target_cells: (0..num_layers).map(|_| FxHashSet::default()).collect(),
             cross_layer_tracks: FxHashMap::default(),
+            endpoint_exempt_positions: Vec::new(),
+            endpoint_exempt_radius: 0,
         }
+    }
+
+    /// Set endpoint positions exempt from stub proximity costs
+    /// Call this before routing each net with source and target positions
+    pub fn set_endpoint_exempt(&mut self, positions: Vec<(i32, i32)>, radius: i32) {
+        self.endpoint_exempt_positions = positions;
+        self.endpoint_exempt_radius = radius;
+    }
+
+    /// Clear endpoint exemptions
+    pub fn clear_endpoint_exempt(&mut self) {
+        self.endpoint_exempt_positions.clear();
+        self.endpoint_exempt_radius = 0;
     }
 
     /// Set BGA proximity radius in grid units (for vertical attraction exclusion)
@@ -85,6 +104,8 @@ impl GridObstacleMap {
             allowed_cells: self.allowed_cells.clone(),
             source_target_cells: self.source_target_cells.clone(),
             cross_layer_tracks: self.cross_layer_tracks.clone(),
+            endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
+            endpoint_exempt_radius: self.endpoint_exempt_radius,
         }
     }
 
@@ -187,9 +208,41 @@ impl GridObstacleMap {
         false
     }
 
+    /// Check if position is within BGA proximity radius of any BGA zone
+    #[inline]
+    pub fn is_in_bga_proximity(&self, gx: i32, gy: i32) -> bool {
+        if self.bga_proximity_radius <= 0 {
+            return false;
+        }
+        for (min_gx, min_gy, max_gx, max_gy) in &self.bga_zones {
+            // Expand zone by proximity radius
+            let expanded_min_gx = min_gx - self.bga_proximity_radius;
+            let expanded_min_gy = min_gy - self.bga_proximity_radius;
+            let expanded_max_gx = max_gx + self.bga_proximity_radius;
+            let expanded_max_gy = max_gy + self.bga_proximity_radius;
+            if gx >= expanded_min_gx && gx <= expanded_max_gx &&
+               gy >= expanded_min_gy && gy <= expanded_max_gy {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Get stub proximity cost
+    /// Returns 0 if position is within endpoint_exempt_radius of any endpoint
     #[inline]
     pub fn get_stub_proximity_cost(&self, gx: i32, gy: i32) -> i32 {
+        // Check if exempt due to being near an endpoint (source/target)
+        if self.endpoint_exempt_radius > 0 {
+            let radius_sq = self.endpoint_exempt_radius * self.endpoint_exempt_radius;
+            for (ex, ey) in &self.endpoint_exempt_positions {
+                let dx = gx - ex;
+                let dy = gy - ey;
+                if dx * dx + dy * dy <= radius_sq {
+                    return 0;
+                }
+            }
+        }
         self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0)
     }
 
