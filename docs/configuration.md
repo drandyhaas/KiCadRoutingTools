@@ -66,6 +66,8 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
 | `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
+| `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
+| `--vertical-attraction-cost` | 0.1 | Cost bonus for aligning with tracks on other layers (mm) |
 
 ### Differential Pair Options
 
@@ -158,6 +160,10 @@ class GridRouteConfig:
     # Track proximity (same layer)
     track_proximity_distance: float = 2.0  # mm
     track_proximity_cost: float = 0.2      # mm equivalent
+
+    # Vertical track alignment (cross-layer attraction)
+    vertical_attraction_radius: float = 1.0  # mm
+    vertical_attraction_cost: float = 0.1    # mm equivalent bonus
 
     # Direction
     direction_order: str = "forward"     # forward, backward, or random

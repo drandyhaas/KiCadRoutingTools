@@ -396,17 +396,58 @@ def validate_setback_clear(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     return False, f"all setback angles blocked on {dest_layer}"
 
 
+def validate_stub_endpoint_proximity(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
+                                      stub_endpoints_by_layer: Dict[str, List[Tuple[str, List[Tuple[float, float]]]]],
+                                      config: GridRouteConfig,
+                                      swap_partner_name: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Check that stub endpoints won't be too close to other stub endpoints on destination layer.
+
+    This prevents placing stubs at positions where their endpoints would be within
+    clearance distance of other stub endpoints, which would cause routing conflicts.
+
+    Args:
+        stub_p, stub_n: P and N stub info to be swapped
+        dest_layer: Destination layer after swap
+        stub_endpoints_by_layer: Dict mapping layer -> list of (pair_name, [(x, y), ...])
+        config: Routing configuration
+        swap_partner_name: Name of swap partner (excluded from check)
+
+    Returns:
+        (is_valid, error_message) - True if no proximity conflict, False otherwise
+    """
+    # Minimum distance between stub endpoints (track width + gap + margin)
+    min_distance = config.track_width + config.clearance + config.diff_pair_gap
+
+    our_endpoints = [(stub_p.x, stub_p.y), (stub_n.x, stub_n.y)]
+
+    for pair_name, other_endpoints in stub_endpoints_by_layer.get(dest_layer, []):
+        # Skip swap partner (their stubs are moving away)
+        if swap_partner_name and pair_name == swap_partner_name:
+            continue
+
+        for our_x, our_y in our_endpoints:
+            for other_x, other_y in other_endpoints:
+                dist = math.sqrt((our_x - other_x) ** 2 + (our_y - other_y) ** 2)
+                if dist < min_distance:
+                    return False, f"stub endpoint too close to {pair_name} on {dest_layer} (dist={dist:.3f}mm < {min_distance:.3f}mm)"
+
+    return True, ""
+
+
 def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                   all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
                   pcb_data: PCBData, config: GridRouteConfig,
                   swap_partner_name: Optional[str] = None,
-                  swap_partner_net_ids: Set[int] = None) -> Tuple[bool, str]:
+                  swap_partner_net_ids: Set[int] = None,
+                  stub_endpoints_by_layer: Dict[str, List[Tuple[str, List[Tuple[float, float]]]]] = None) -> Tuple[bool, str]:
     """
     Validate that a stub layer swap is safe to apply.
 
-    Checks both:
+    Checks:
     1. No stub overlap with other pairs on destination layer
-    2. Setback position is clear on destination layer
+    2. Stub endpoints not too close to other stub endpoints
+    3. Setback position is clear on destination layer
 
     Args:
         stub_p, stub_n: P and N stub info to validate
@@ -416,6 +457,7 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
         config: Routing configuration
         swap_partner_name: Name of swap partner (excluded from overlap check)
         swap_partner_net_ids: Net IDs of swap partner (excluded from setback check)
+        stub_endpoints_by_layer: Pre-computed stub endpoints by layer (optional)
 
     Returns:
         (is_valid, error_message)
@@ -427,7 +469,15 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     if not overlap_valid:
         return False, overlap_reason
 
-    # Check 2: Setback is clear on dest layer
+    # Check 2: Stub endpoints not too close to other stub endpoints
+    if stub_endpoints_by_layer:
+        proximity_valid, proximity_reason = validate_stub_endpoint_proximity(
+            stub_p, stub_n, dest_layer, stub_endpoints_by_layer, config, swap_partner_name
+        )
+        if not proximity_valid:
+            return False, proximity_reason
+
+    # Check 3: Setback is clear on dest layer
     exclude_nets = swap_partner_net_ids if swap_partner_net_ids else set()
     setback_valid, setback_reason = validate_setback_clear(
         stub_p, stub_n, dest_layer, pcb_data, config, exclude_nets
@@ -477,6 +527,37 @@ def collect_stubs_by_layer(pcb_data: PCBData, all_pair_layer_info: Dict,
             stubs_by_layer[tgt_layer].append((pair_name, segments))
 
     return stubs_by_layer
+
+
+def collect_stub_endpoints_by_layer(pcb_data: PCBData, all_pair_layer_info: Dict,
+                                     config: GridRouteConfig) -> Dict[str, List[Tuple[str, List[Tuple[float, float]]]]]:
+    """
+    Pre-collect all stub endpoint positions grouped by layer for proximity checking.
+
+    Args:
+        pcb_data: PCB data
+        all_pair_layer_info: Dict mapping pair_name -> (src_layer, tgt_layer, sources, targets, pair)
+        config: Routing configuration
+
+    Returns:
+        Dict mapping layer_name -> list of (pair_name, [(p_x, p_y), (n_x, n_y)])
+    """
+    endpoints_by_layer: Dict[str, List[Tuple[str, List[Tuple[float, float]]]]] = {}
+
+    for pair_name, (src_layer, tgt_layer, sources, targets, pair) in all_pair_layer_info.items():
+        # Collect source stub endpoints
+        src_endpoints = [(sources[0][5], sources[0][6]), (sources[0][7], sources[0][8])]
+        if src_layer not in endpoints_by_layer:
+            endpoints_by_layer[src_layer] = []
+        endpoints_by_layer[src_layer].append((pair_name, src_endpoints))
+
+        # Collect target stub endpoints
+        tgt_endpoints = [(targets[0][5], targets[0][6]), (targets[0][7], targets[0][8])]
+        if tgt_layer not in endpoints_by_layer:
+            endpoints_by_layer[tgt_layer] = []
+        endpoints_by_layer[tgt_layer].append((pair_name, tgt_endpoints))
+
+    return endpoints_by_layer
 
 
 # ============================================================================

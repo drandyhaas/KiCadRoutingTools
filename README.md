@@ -10,12 +10,13 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
 - **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
-- **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations.
+- **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations. Validates that stub endpoints won't be too close to other stubs on the destination layer.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
 - **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance), inside-out (BGA), or original order
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
+- **Vertical track alignment** - Attracts tracks on different layers to stack vertically (on top of each other), consolidating routing corridors and leaving more room for through-hole vias
 - **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced. Uses 0° when clearance to the nearest stub is sufficient (≥2× spacing), only angling away when stubs are too close
 - **U-turn prevention** - Prevents differential pair routes from making U-turns (>180° cumulative turn)
 - **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
@@ -145,6 +146,8 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
 --track-proximity-distance 2.0  # Radius around routed tracks to penalize (mm, same layer)
 --track-proximity-cost 0.2   # Cost penalty near routed tracks (mm equivalent)
+--vertical-attraction-radius 1.0  # Radius for cross-layer track attraction (mm)
+--vertical-attraction-cost 0.1    # Cost bonus for aligning with tracks on other layers (mm)
 
 # Differential pairs
 --diff-pairs "*lvds*"   # Pattern for diff pair nets

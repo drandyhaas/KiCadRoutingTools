@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.8.0**
+**Current Version: 0.8.1**
 
 ## Features
 
@@ -11,6 +11,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - Via cost and layer transitions
 - BGA exclusion zone with allowed cell overrides
 - Stub proximity costs to avoid blocking unrouted nets
+- **Cross-layer track attraction** for vertical alignment - attracts routes to stack on top of tracks on other layers
 - **Pose-based routing with Dubins heuristic** for differential pair centerlines (orientation-aware A*)
 - **Rectangular pad obstacle blocking** with proper rotation handling
 - **Collinear via constraint** for differential pair routing (ensures clean via geometry)
@@ -148,6 +149,9 @@ Methods:
 - `is_blocked(gx, gy, layer)` - Check if cell is blocked
 - `is_via_blocked(gx, gy)` - Check if via position is blocked
 - `get_stub_proximity_cost(gx, gy)` - Get proximity cost for a cell
+- `add_cross_layer_track(gx, gy, layer)` - Mark a position as having a track on specified layer (for vertical attraction)
+- `get_cross_layer_attraction(gx, gy, current_layer, radius, bonus)` - Get attraction bonus for positions near tracks on other layers
+- `clear_cross_layer_tracks()` - Clear all cross-layer track data
 - `clone()` - Create a deep copy of the obstacle map (for incremental caching)
 
 ### GridRouter
@@ -167,7 +171,9 @@ Methods:
 Orientation-aware A* router using Dubins path length as heuristic. Used for differential pair centerline routing where start and end orientations are constrained by stub directions.
 
 ```python
-router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float, via_proximity_cost: int = 50)
+router = PoseRouter(via_cost: int, h_weight: float, turn_cost: int, min_radius_grid: float,
+                    via_proximity_cost: int = 50,
+                    vertical_attraction_radius: int = 0, vertical_attraction_bonus: int = 0)
 ```
 
 Parameters:
@@ -176,6 +182,8 @@ Parameters:
 - `turn_cost`: Cost for 45° in-place turn (typically `min_radius * π/4 * 1000`)
 - `min_radius_grid`: Minimum turning radius in grid units
 - `via_proximity_cost`: Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
+- `vertical_attraction_radius`: Grid units radius for cross-layer track attraction (0 = disabled)
+- `vertical_attraction_bonus`: Cost reduction for positions aligned with tracks on other layers
 
 Methods:
 - `route_pose(obstacles, src_x, src_y, src_layer, src_theta, tgt_x, tgt_y, tgt_layer, tgt_theta, max_iterations, diff_pair_via_spacing=None)`
@@ -226,6 +234,7 @@ src/
 
 ## Version History
 
+- **0.8.1**: Added cross-layer track attraction for vertical alignment. New `vertical_attraction_radius` and `vertical_attraction_bonus` parameters to PoseRouter. New GridObstacleMap methods: `add_cross_layer_track()`, `get_cross_layer_attraction()`, `clear_cross_layer_tracks()`. Attracts routes to stack on top of tracks on other layers, consolidating routing corridors and leaving more room for through-hole vias.
 - **0.8.0**: Added `via_proximity_cost` parameter to PoseRouter - allows vias near stubs with cost penalty instead of blocking (default: 10, set to 0 for old blocking behavior). Improved turn radius enforcement: minimum turn radius is now enforced for ALL route steps (not just near vias), ensuring smooth paths throughout. `straight_after_via` is based on `min_radius_grid + 1` instead of hardcoded 2 steps, preventing DRC violations where P/N tracks turn too sharply after vias. Added `route_pose_with_frontier()` method that returns blocked cells on failure for blocking analysis.
 - **0.7.0**: Added `PoseRouter` with Dubins path heuristic for orientation-aware differential pair centerline routing. State space expanded to (x, y, θ, layer) where θ is one of 8 directions (45° increments). Dubins path length used as heuristic for better routing with prescribed start/end orientations.
 - **0.5.1**: Added `via_exclusion_radius` parameter to prevent routes from conflicting with their own vias. Tracks via positions along each path and blocks moves that would cause P/N offset tracks to intersect P/N vias.

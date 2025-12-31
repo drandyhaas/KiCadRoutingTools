@@ -586,7 +586,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
     if enable_layer_switch and diff_pair_ids_to_route_set:
-        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer, validate_swap, validate_single_swap, collect_single_ended_stubs_by_layer
+        from stub_layer_switching import get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer, collect_stub_endpoints_by_layer, validate_swap, validate_single_swap, collect_single_ended_stubs_by_layer
         from diff_pair_routing import get_diff_pair_endpoints
 
         print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route_set)} diff pair(s)...")
@@ -613,6 +613,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         # Pre-collect all stub segments by layer for validation
         all_stubs_by_layer = collect_stubs_by_layer(pcb_data, all_pair_layer_info, config)
+        # Pre-collect all stub endpoints by layer for proximity checking
+        stub_endpoints_by_layer = collect_stub_endpoints_by_layer(pcb_data, all_pair_layer_info, config)
 
         # Find pairs that need layer switches (src != tgt layer)
         pairs_needing_via = [(name, info) for name, info in pair_layer_info.items()
@@ -702,12 +704,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 our_valid, our_reason = validate_swap(
                     src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
                     pcb_data, config, swap_partner_name=swap_partner,
-                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id},
+                    stub_endpoints_by_layer=stub_endpoints_by_layer
                 )
                 partner_valid, partner_reason = validate_swap(
                     other_src_p_stub, other_src_n_stub, src_layer, all_stubs_by_layer,
                     pcb_data, config, swap_partner_name=pair_name,
-                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id},
+                    stub_endpoints_by_layer=stub_endpoints_by_layer
                 )
 
                 if not our_valid or not partner_valid:
@@ -753,6 +757,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     (swap_partner, other_src_p_stub.segments + other_src_n_stub.segments)
                 )
 
+                # Update stub_endpoints_by_layer to reflect the layer changes
+                if src_layer in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[src_layer] = [
+                        e for e in stub_endpoints_by_layer[src_layer] if e[0] != pair_name
+                    ]
+                if tgt_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[tgt_layer] = []
+                stub_endpoints_by_layer[tgt_layer].append(
+                    (pair_name, [(src_p_stub.x, src_p_stub.y), (src_n_stub.x, src_n_stub.y)])
+                )
+                if other_src_layer in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[other_src_layer] = [
+                        e for e in stub_endpoints_by_layer[other_src_layer] if e[0] != swap_partner
+                    ]
+                if src_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[src_layer] = []
+                stub_endpoints_by_layer[src_layer].append(
+                    (swap_partner, [(other_src_p_stub.x, other_src_p_stub.y), (other_src_n_stub.x, other_src_n_stub.y)])
+                )
+
                 applied_swaps.add(pair_name)
                 applied_swaps.add(swap_partner)
                 swap_count += 1
@@ -786,7 +810,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             valid, reason = validate_swap(
                 src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
                 pcb_data, config, swap_partner_name=None,
-                swap_partner_net_ids=set()
+                swap_partner_net_ids=set(),
+                stub_endpoints_by_layer=stub_endpoints_by_layer
             )
 
             if valid:
@@ -810,6 +835,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Add combined segments for this pair on new layer
                 combined_segments = src_p_stub.segments + src_n_stub.segments
                 all_stubs_by_layer[tgt_layer].append((pair_name, combined_segments))
+
+                # Update stub_endpoints_by_layer
+                if src_layer in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[src_layer] = [
+                        e for e in stub_endpoints_by_layer[src_layer] if e[0] != pair_name
+                    ]
+                if tgt_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[tgt_layer] = []
+                stub_endpoints_by_layer[tgt_layer].append(
+                    (pair_name, [(src_p_stub.x, src_p_stub.y), (src_n_stub.x, src_n_stub.y)])
+                )
 
                 applied_swaps.add(pair_name)
                 solo_src_count += 1
@@ -904,12 +940,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 our_valid, our_reason = validate_swap(
                     tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
                     pcb_data, config, swap_partner_name=swap_partner,
-                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id},
+                    stub_endpoints_by_layer=stub_endpoints_by_layer
                 )
                 partner_valid, partner_reason = validate_swap(
                     other_tgt_p_stub, other_tgt_n_stub, tgt_layer, all_stubs_by_layer,
                     pcb_data, config, swap_partner_name=pair_name,
-                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id},
+                    stub_endpoints_by_layer=stub_endpoints_by_layer
                 )
 
                 if not our_valid or not partner_valid:
@@ -932,6 +970,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
                 all_vias = vias1 + vias2 + vias3 + vias4
                 all_swap_vias.extend(all_vias)
+
+                # Update stub_endpoints_by_layer for both pairs
+                # Our targets move from tgt_layer to src_layer
+                if tgt_layer in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[tgt_layer] = [
+                        e for e in stub_endpoints_by_layer[tgt_layer] if e[0] != pair_name
+                    ]
+                if src_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[src_layer] = []
+                stub_endpoints_by_layer[src_layer].append(
+                    (pair_name, [(tgt_p_stub.x, tgt_p_stub.y), (tgt_n_stub.x, tgt_n_stub.y)])
+                )
+                # Their targets move from other_tgt_layer to tgt_layer
+                if other_tgt_layer in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[other_tgt_layer] = [
+                        e for e in stub_endpoints_by_layer[other_tgt_layer] if e[0] != swap_partner
+                    ]
+                if tgt_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[tgt_layer] = []
+                stub_endpoints_by_layer[tgt_layer].append(
+                    (swap_partner, [(other_tgt_p_stub.x, other_tgt_p_stub.y), (other_tgt_n_stub.x, other_tgt_n_stub.y)])
+                )
 
                 applied_swaps.add(pair_name)
                 applied_swaps.add(swap_partner)
@@ -973,7 +1033,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             valid, reason = validate_swap(
                 tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
                 pcb_data, config, swap_partner_name=None,
-                swap_partner_net_ids=set()
+                swap_partner_net_ids=set(),
+                stub_endpoints_by_layer=stub_endpoints_by_layer
             )
 
             if valid:
@@ -995,6 +1056,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     all_stubs_by_layer[src_layer] = []
                 combined_segments = tgt_p_stub.segments + tgt_n_stub.segments
                 all_stubs_by_layer[src_layer].append((pair_name, combined_segments))
+
+                # Update stub_endpoints_by_layer
+                if tgt_layer in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[tgt_layer] = [
+                        e for e in stub_endpoints_by_layer[tgt_layer] if e[0] != pair_name
+                    ]
+                if src_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[src_layer] = []
+                stub_endpoints_by_layer[src_layer].append(
+                    (pair_name, [(tgt_p_stub.x, tgt_p_stub.y), (tgt_n_stub.x, tgt_n_stub.y)])
+                )
 
                 applied_swaps.add(pair_name)
                 solo_switch_count += 1
@@ -1075,12 +1147,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         our_valid, our_reason = validate_swap(
                             our_stubs[0], our_stubs[1], our_new_layer, all_stubs_by_layer,
                             pcb_data, config, swap_partner_name=other_name,
-                            swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                            swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id},
+                            stub_endpoints_by_layer=stub_endpoints_by_layer
                         )
                         their_valid, their_reason = validate_swap(
                             their_stubs[0], their_stubs[1], their_new_layer, all_stubs_by_layer,
                             pcb_data, config, swap_partner_name=pair_name,
-                            swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                            swap_partner_net_ids={pair.p_net_id, pair.n_net_id},
+                            stub_endpoints_by_layer=stub_endpoints_by_layer
                         )
 
                         if not our_valid or not their_valid:
@@ -1094,6 +1168,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
                             _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
                             all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+
+                            # Update stub_endpoints_by_layer for both pairs
+                            # Our pair moves to our_new_layer
+                            our_orig_layer = src_layer if swap_type == "source" else tgt_layer
+                            if our_orig_layer in stub_endpoints_by_layer:
+                                stub_endpoints_by_layer[our_orig_layer] = [
+                                    e for e in stub_endpoints_by_layer[our_orig_layer] if e[0] != pair_name
+                                ]
+                            if our_new_layer not in stub_endpoints_by_layer:
+                                stub_endpoints_by_layer[our_new_layer] = []
+                            stub_endpoints_by_layer[our_new_layer].append(
+                                (pair_name, [(our_stubs[0].x, our_stubs[0].y), (our_stubs[1].x, our_stubs[1].y)])
+                            )
+                            # Their pair moves to their_new_layer
+                            their_orig_layer = other_src if swap_type == "source" else other_tgt
+                            if their_orig_layer in stub_endpoints_by_layer:
+                                stub_endpoints_by_layer[their_orig_layer] = [
+                                    e for e in stub_endpoints_by_layer[their_orig_layer] if e[0] != other_name
+                                ]
+                            if their_new_layer not in stub_endpoints_by_layer:
+                                stub_endpoints_by_layer[their_new_layer] = []
+                            stub_endpoints_by_layer[their_new_layer].append(
+                                (other_name, [(their_stubs[0].x, their_stubs[0].y), (their_stubs[1].x, their_stubs[1].y)])
+                            )
 
                             applied_swaps.add(pair_name)
                             applied_swaps.add(other_name)
@@ -1125,12 +1223,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 our_valid, our_reason = validate_swap(
                                     p_stub, n_stub, src_layer, all_stubs_by_layer,
                                     pcb_data, config, swap_partner_name=other_name,
-                                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id}
+                                    swap_partner_net_ids={other_pair.p_net_id, other_pair.n_net_id},
+                                    stub_endpoints_by_layer=stub_endpoints_by_layer
                                 )
                                 their_valid, their_reason = validate_swap(
                                     other_p_stub, other_n_stub, tgt_layer, all_stubs_by_layer,
                                     pcb_data, config, swap_partner_name=pair_name,
-                                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id}
+                                    swap_partner_net_ids={pair.p_net_id, pair.n_net_id},
+                                    stub_endpoints_by_layer=stub_endpoints_by_layer
                                 )
 
                                 if not our_valid or not their_valid:
@@ -1142,6 +1242,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
                                     _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
                                     all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
+
+                                    # Update stub_endpoints_by_layer for both pairs
+                                    # Our targets move from tgt_layer to src_layer
+                                    if tgt_layer in stub_endpoints_by_layer:
+                                        stub_endpoints_by_layer[tgt_layer] = [
+                                            e for e in stub_endpoints_by_layer[tgt_layer] if e[0] != pair_name
+                                        ]
+                                    if src_layer not in stub_endpoints_by_layer:
+                                        stub_endpoints_by_layer[src_layer] = []
+                                    stub_endpoints_by_layer[src_layer].append(
+                                        (pair_name, [(p_stub.x, p_stub.y), (n_stub.x, n_stub.y)])
+                                    )
+                                    # Their targets move from other_tgt to tgt_layer
+                                    if other_tgt in stub_endpoints_by_layer:
+                                        stub_endpoints_by_layer[other_tgt] = [
+                                            e for e in stub_endpoints_by_layer[other_tgt] if e[0] != other_name
+                                        ]
+                                    if tgt_layer not in stub_endpoints_by_layer:
+                                        stub_endpoints_by_layer[tgt_layer] = []
+                                    stub_endpoints_by_layer[tgt_layer].append(
+                                        (other_name, [(other_p_stub.x, other_p_stub.y), (other_n_stub.x, other_n_stub.y)])
+                                    )
 
                                     applied_swaps.add(pair_name)
                                     applied_swaps.add(other_name)
