@@ -3122,6 +3122,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                         print(f"    Retry had {len(last_retry_blocked_cells)} blocked cells")
                                     else:
                                         print(f"    No blocked cells from retry to analyze")
+                                else:
+                                    print(f"    Retry returned no result (endpoint error?)")
+                                    last_retry_blocked_cells = []
 
                         # If all N levels failed, restore all ripped nets
                         if not reroute_succeeded and ripped_items:

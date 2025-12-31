@@ -259,9 +259,9 @@ Examples:
     router_group.add_argument('--no-crossing-layer-check', action='store_true',
                               help='Count crossings regardless of layer overlap')
     router_group.add_argument('--vertical-attraction-radius', type=float,
-                              help='Radius in mm for cross-layer track attraction (0 = disabled)')
+                              help='Radius in mm for cross-layer track attraction (0 = disabled, default: 1.0)')
     router_group.add_argument('--vertical-attraction-cost', type=float,
-                              help='Cost bonus in mm equivalent for tracks aligned with other layers')
+                              help='Cost bonus in mm equivalent for tracks aligned with other layers (default: 0.1)')
 
     args = parser.parse_args()
 
