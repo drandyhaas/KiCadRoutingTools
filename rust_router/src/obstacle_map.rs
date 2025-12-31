@@ -253,13 +253,11 @@ impl GridObstacleMap {
             return 0;
         }
 
-        // No attraction bonus inside BGA exclusion zones or within proximity radius of them
-        let radius = self.bga_proximity_radius;
-        let in_bga_proximity = self.bga_zones.iter().any(|(min_gx, min_gy, max_gx, max_gy)| {
-            gx >= (*min_gx - radius) && gx <= (*max_gx + radius) &&
-            gy >= (*min_gy - radius) && gy <= (*max_gy + radius)
+        // No attraction bonus inside BGA exclusion zones (but allow within proximity radius)
+        let in_bga_zone = self.bga_zones.iter().any(|(min_gx, min_gy, max_gx, max_gy)| {
+            gx >= *min_gx && gx <= *max_gx && gy >= *min_gy && gy <= *max_gy
         });
-        if in_bga_proximity {
+        if in_bga_zone {
             return 0;
         }
 
