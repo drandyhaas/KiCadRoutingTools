@@ -71,6 +71,32 @@ except ImportError as e:
     sys.exit(1)
 
 
+def is_edge_stub(x: float, y: float, bga_zones: List[Tuple[float, float, float, float]],
+                 edge_tolerance: float = 0.5) -> bool:
+    """Check if a position is on the edge of any BGA zone.
+
+    Args:
+        x, y: Position to check
+        bga_zones: List of (min_x, min_y, max_x, max_y) BGA exclusion zones
+        edge_tolerance: Distance from zone edge to consider as "on edge" (mm)
+
+    Returns:
+        True if position is on or near the edge of any BGA zone
+    """
+    for min_x, min_y, max_x, max_y in bga_zones:
+        # Check if position is inside or near this zone
+        if (x >= min_x - edge_tolerance and x <= max_x + edge_tolerance and
+            y >= min_y - edge_tolerance and y <= max_y + edge_tolerance):
+            # Check if it's on an edge (within tolerance of min/max)
+            on_left = abs(x - min_x) <= edge_tolerance
+            on_right = abs(x - max_x) <= edge_tolerance
+            on_bottom = abs(y - min_y) <= edge_tolerance
+            on_top = abs(y - max_y) <= edge_tolerance
+            if on_left or on_right or on_bottom or on_top:
+                return True
+    return False
+
+
 def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float = 0.01) -> Optional[Pad]:
     """Find a pad at the given position within tolerance."""
     for pads in pcb_data.pads_by_net.values():
@@ -722,9 +748,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 # Check if swap would move stubs to F.Cu (top layer)
                 # Skip if can_swap_to_top_layer is False and either destination is F.Cu
+                # Exception: allow edge stubs (on BGA boundary) to swap to F.Cu
                 if not can_swap_to_top_layer and (tgt_layer == 'F.Cu' or src_layer == 'F.Cu'):
-                    # Skip this swap - would move stubs to top layer
-                    continue
+                    # Check if stubs moving to F.Cu are edge stubs
+                    allow_swap = True
+                    if tgt_layer == 'F.Cu':
+                        # Our stubs would move to F.Cu - check if they're edge stubs
+                        if not (is_edge_stub(src_p_stub.x, src_p_stub.y, config.bga_exclusion_zones) or
+                                is_edge_stub(src_n_stub.x, src_n_stub.y, config.bga_exclusion_zones)):
+                            allow_swap = False
+                    if src_layer == 'F.Cu' and allow_swap:
+                        # Their stubs would move to F.Cu - check if they're edge stubs
+                        if not (is_edge_stub(other_src_p_stub.x, other_src_p_stub.y, config.bga_exclusion_zones) or
+                                is_edge_stub(other_src_n_stub.x, other_src_n_stub.y, config.bga_exclusion_zones)):
+                            allow_swap = False
+                    if not allow_swap:
+                        continue
 
                 # Our source: src_layer -> tgt_layer
                 # Their source: other_src_layer (=tgt_layer) -> src_layer
@@ -804,8 +843,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 continue
 
             # Check if swap would move stubs to F.Cu (top layer)
+            # Exception: allow edge stubs to swap to F.Cu
             if not can_swap_to_top_layer and tgt_layer == 'F.Cu':
-                continue
+                if not (is_edge_stub(src_p_stub.x, src_p_stub.y, config.bga_exclusion_zones) or
+                        is_edge_stub(src_n_stub.x, src_n_stub.y, config.bga_exclusion_zones)):
+                    continue
 
             # Validate solo switch: source stubs move to target layer
             valid, reason = validate_swap(
@@ -958,9 +1000,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                 # Check if swap would move stubs to F.Cu (top layer)
                 # Skip if can_swap_to_top_layer is False and either destination is F.Cu
+                # Exception: allow edge stubs to swap to F.Cu
                 if not can_swap_to_top_layer and (src_layer == 'F.Cu' or tgt_layer == 'F.Cu'):
-                    # Skip this swap - would move stubs to top layer
-                    continue
+                    # Check if stubs moving to F.Cu are edge stubs
+                    allow_swap = True
+                    if src_layer == 'F.Cu':
+                        # Our stubs would move to F.Cu - check if they're edge stubs
+                        if not (is_edge_stub(tgt_p_stub.x, tgt_p_stub.y, config.bga_exclusion_zones) or
+                                is_edge_stub(tgt_n_stub.x, tgt_n_stub.y, config.bga_exclusion_zones)):
+                            allow_swap = False
+                    if tgt_layer == 'F.Cu' and allow_swap:
+                        # Their stubs would move to F.Cu - check if they're edge stubs
+                        if not (is_edge_stub(other_tgt_p_stub.x, other_tgt_p_stub.y, config.bga_exclusion_zones) or
+                                is_edge_stub(other_tgt_n_stub.x, other_tgt_n_stub.y, config.bga_exclusion_zones)):
+                            allow_swap = False
+                    if not allow_swap:
+                        continue
 
                 # Our target: tgt_layer -> src_layer
                 # Their target: other_tgt_layer (=src_layer) -> tgt_layer
@@ -1026,9 +1081,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 continue
 
             # Check if swap would move stubs to F.Cu (top layer)
+            # Exception: allow edge stubs to swap to F.Cu
             if not can_swap_to_top_layer and src_layer == 'F.Cu':
-                print(f"    Solo target switch skipped for {pair_name}: would move to F.Cu (top layer)")
-                continue
+                if not (is_edge_stub(tgt_p_stub.x, tgt_p_stub.y, config.bga_exclusion_zones) or
+                        is_edge_stub(tgt_n_stub.x, tgt_n_stub.y, config.bga_exclusion_zones)):
+                    print(f"    Solo target switch skipped for {pair_name}: would move to F.Cu (top layer)")
+                    continue
 
             # Validate solo switch: target stubs move to source layer
             valid, reason = validate_swap(
@@ -1079,6 +1137,102 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         if solo_switch_count > 0:
             print(f"Applied {solo_switch_count} solo target layer switch(es)")
+
+        # Retry solo switches if any progress was made (newly freed layers may allow more switches)
+        if solo_src_count > 0 or solo_switch_count > 0:
+            retry_round = 1
+            while True:
+                retry_round += 1
+                retry_src_count = 0
+                retry_tgt_count = 0
+
+                # Retry solo source switches
+                for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+                    if pair_name in applied_swaps:
+                        continue
+                    src_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                               sources[0][5], sources[0][6], src_layer)
+                    src_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                               sources[0][7], sources[0][8], src_layer)
+                    if not src_p_stub or not src_n_stub:
+                        continue
+                    if not can_swap_to_top_layer and tgt_layer == 'F.Cu':
+                        if not (is_edge_stub(src_p_stub.x, src_p_stub.y, config.bga_exclusion_zones) or
+                                is_edge_stub(src_n_stub.x, src_n_stub.y, config.bga_exclusion_zones)):
+                            continue
+                    valid, reason = validate_swap(
+                        src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
+                        pcb_data, config, swap_partner_name=None,
+                        swap_partner_net_ids=set(),
+                        stub_endpoints_by_layer=stub_endpoints_by_layer
+                    )
+                    if valid:
+                        vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
+                        vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
+                        all_segment_modifications.extend(mods1 + mods2)
+                        all_vias = vias1 + vias2
+                        all_swap_vias.extend(all_vias)
+                        if src_layer in all_stubs_by_layer:
+                            all_stubs_by_layer[src_layer] = [s for s in all_stubs_by_layer[src_layer] if s[0] != pair_name]
+                        if tgt_layer not in all_stubs_by_layer:
+                            all_stubs_by_layer[tgt_layer] = []
+                        all_stubs_by_layer[tgt_layer].append((pair_name, src_p_stub.segments + src_n_stub.segments))
+                        if src_layer in stub_endpoints_by_layer:
+                            stub_endpoints_by_layer[src_layer] = [e for e in stub_endpoints_by_layer[src_layer] if e[0] != pair_name]
+                        if tgt_layer not in stub_endpoints_by_layer:
+                            stub_endpoints_by_layer[tgt_layer] = []
+                        stub_endpoints_by_layer[tgt_layer].append((pair_name, [(src_p_stub.x, src_p_stub.y), (src_n_stub.x, src_n_stub.y)]))
+                        applied_swaps.add(pair_name)
+                        retry_src_count += 1
+                        total_layer_swaps += 1
+                        via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                        print(f"  Solo source switch (round {retry_round}): {pair_name} ({src_layer}->{tgt_layer}){via_msg}")
+
+                # Retry solo target switches
+                for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+                    if pair_name in applied_swaps:
+                        continue
+                    tgt_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                               targets[0][5], targets[0][6], tgt_layer)
+                    tgt_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                               targets[0][7], targets[0][8], tgt_layer)
+                    if not tgt_p_stub or not tgt_n_stub:
+                        continue
+                    if not can_swap_to_top_layer and src_layer == 'F.Cu':
+                        if not (is_edge_stub(tgt_p_stub.x, tgt_p_stub.y, config.bga_exclusion_zones) or
+                                is_edge_stub(tgt_n_stub.x, tgt_n_stub.y, config.bga_exclusion_zones)):
+                            continue
+                    valid, reason = validate_swap(
+                        tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
+                        pcb_data, config, swap_partner_name=None,
+                        swap_partner_net_ids=set(),
+                        stub_endpoints_by_layer=stub_endpoints_by_layer
+                    )
+                    if valid:
+                        vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
+                        vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
+                        all_segment_modifications.extend(mods1 + mods2)
+                        all_vias = vias1 + vias2
+                        all_swap_vias.extend(all_vias)
+                        if tgt_layer in all_stubs_by_layer:
+                            all_stubs_by_layer[tgt_layer] = [s for s in all_stubs_by_layer[tgt_layer] if s[0] != pair_name]
+                        if src_layer not in all_stubs_by_layer:
+                            all_stubs_by_layer[src_layer] = []
+                        all_stubs_by_layer[src_layer].append((pair_name, tgt_p_stub.segments + tgt_n_stub.segments))
+                        if tgt_layer in stub_endpoints_by_layer:
+                            stub_endpoints_by_layer[tgt_layer] = [e for e in stub_endpoints_by_layer[tgt_layer] if e[0] != pair_name]
+                        if src_layer not in stub_endpoints_by_layer:
+                            stub_endpoints_by_layer[src_layer] = []
+                        stub_endpoints_by_layer[src_layer].append((pair_name, [(tgt_p_stub.x, tgt_p_stub.y), (tgt_n_stub.x, tgt_n_stub.y)]))
+                        applied_swaps.add(pair_name)
+                        retry_tgt_count += 1
+                        total_layer_swaps += 1
+                        via_msg = f", added {len(all_vias)} pad via(s)" if all_vias else ""
+                        print(f"  Solo target switch (round {retry_round}): {pair_name} ({tgt_layer}->{src_layer}){via_msg}")
+
+                if retry_src_count == 0 and retry_tgt_count == 0:
+                    break  # No more progress
+                print(f"Applied {retry_src_count + retry_tgt_count} additional solo switch(es) in round {retry_round}")
 
         # Now try two-pair swaps for remaining pairs that weren't handled
         for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
@@ -1140,9 +1294,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Try swap if we have valid stubs, otherwise try the other side
                 if swap_type and our_stubs[0] and our_stubs[1] and their_stubs[0] and their_stubs[1]:
                     # Check if swap would move stubs to F.Cu (top layer)
+                    # Exception: allow edge stubs to swap to F.Cu
+                    allow_swap = True
                     if not can_swap_to_top_layer and (our_new_layer == 'F.Cu' or their_new_layer == 'F.Cu'):
-                        # Skip this swap - would move stubs to top layer
-                        pass
+                        if our_new_layer == 'F.Cu':
+                            if not (is_edge_stub(our_stubs[0].x, our_stubs[0].y, config.bga_exclusion_zones) or
+                                    is_edge_stub(our_stubs[1].x, our_stubs[1].y, config.bga_exclusion_zones)):
+                                allow_swap = False
+                        if their_new_layer == 'F.Cu' and allow_swap:
+                            if not (is_edge_stub(their_stubs[0].x, their_stubs[0].y, config.bga_exclusion_zones) or
+                                    is_edge_stub(their_stubs[1].x, their_stubs[1].y, config.bga_exclusion_zones)):
+                                allow_swap = False
+                    if not allow_swap:
+                        pass  # Skip this swap - would move non-edge stubs to top layer
                     else:
                         # Validate swap before applying
                         our_valid, our_reason = validate_swap(
@@ -1216,9 +1380,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                         if p_stub and n_stub and other_p_stub and other_n_stub:
                             # Check if swap would move stubs to F.Cu (top layer)
+                            # Exception: allow edge stubs to swap to F.Cu
+                            allow_swap = True
                             if not can_swap_to_top_layer and (src_layer == 'F.Cu' or tgt_layer == 'F.Cu'):
-                                # Skip this swap - would move stubs to top layer
-                                pass
+                                if src_layer == 'F.Cu':
+                                    if not (is_edge_stub(p_stub.x, p_stub.y, config.bga_exclusion_zones) or
+                                            is_edge_stub(n_stub.x, n_stub.y, config.bga_exclusion_zones)):
+                                        allow_swap = False
+                                if tgt_layer == 'F.Cu' and allow_swap:
+                                    if not (is_edge_stub(other_p_stub.x, other_p_stub.y, config.bga_exclusion_zones) or
+                                            is_edge_stub(other_n_stub.x, other_n_stub.y, config.bga_exclusion_zones)):
+                                        allow_swap = False
+                            if not allow_swap:
+                                pass  # Skip this swap - would move non-edge stubs to top layer
                             else:
                                 # Validate fallback target swap before applying
                                 our_valid, our_reason = validate_swap(
