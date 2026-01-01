@@ -29,8 +29,9 @@ python3 check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
 # python3 test_diffpair.py "*rx1_*" --swappable-nets "*rx1_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu
 
 # Route diff pairs
-# python3 test_diffpair.py "*rx1_*" "*rx2_*" "*rx*clkin1*" "*rx*clkin2*" --swappable-nets "*rx1_*" "*rx2_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --output 12.pcb
-# python3 test_diffpair.py "*rx3_*" "*rx4_*" "*rx*clkin3*" "*rx*clkin4*" --swappable-nets "*rx3_*" "*rx4_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --input 12.pcb
+# python3 test_diffpair.py "*rx1_*" "*rx2_*" "*rx*clkin1*" "*rx*clkin2*" --swappable-nets "*rx1_*" "*rx2_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 7 --output 12.pcb
+# python3 test_diffpair.py "*rx3_*" "*rx4_*" "*rx*clkin3*" "*rx*clkin4*" --swappable-nets "*rx3_*" "*rx4_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 7 --input 12.pcb
+# rm 12.pcb
 
 # Fanout remaining RAM chip
 # python3 bga_fanout.py --component U1 --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --nets --net "*U1A*" "*U1B*" --check-for-previous --output test_diffpair.py test_diffpair.kicad_pcb
