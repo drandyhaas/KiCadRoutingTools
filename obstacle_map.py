@@ -223,8 +223,14 @@ def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
 def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
-                               extra_clearance: float = 0.0):
-    """Add a net's vias as obstacles to the map."""
+                               extra_clearance: float = 0.0,
+                               diagonal_margin: float = 0.0):
+    """Add a net's vias as obstacles to the map.
+
+    Args:
+        diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
+                        segments that pass between grid points. Use 0.25 for single-ended routing.
+    """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 
@@ -234,7 +240,7 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid)
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
 
 
 def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -304,11 +310,17 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
 
 
 def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
-                      num_layers: int, via_track_expansion_grid: int, via_via_expansion_grid: int):
-    """Add a via as obstacle to the map."""
+                      num_layers: int, via_track_expansion_grid: int, via_via_expansion_grid: int,
+                      diagonal_margin: float = 0.0):
+    """Add a via as obstacle to the map.
+
+    Args:
+        diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
+                        segments that pass between grid points. Use 0.25 for single-ended routing.
+    """
     gx, gy = coord.to_grid(via.x, via.y)
     # Block cells for track routing.
-    effective_track_block_sq = via_track_expansion_grid ** 2
+    effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
     track_block_range = via_track_expansion_grid + 1
     for ex in range(-track_block_range, track_block_range + 1):
         for ey in range(-track_block_range, track_block_range + 1):
@@ -352,8 +364,13 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
 
 
 def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, int, int]],
-                               config: GridRouteConfig):
-    """Add a newly routed path as obstacles to the map."""
+                               config: GridRouteConfig, diagonal_margin: float = 0.0):
+    """Add a newly routed path as obstacles to the map.
+
+    Args:
+        diagonal_margin: Extra margin (in grid units) for track blocking around vias to catch
+                        diagonal segments that pass between grid points. Use 0.25 for single-ended routing.
+    """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 
@@ -370,7 +387,7 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
 
         if layer1 != layer2:
             # Via - add via obstacle
-            effective_track_block_sq = via_track_expansion_grid ** 2
+            effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
             track_block_range = via_track_expansion_grid + 1
             for ex in range(-track_block_range, track_block_range + 1):
                 for ey in range(-track_block_range, track_block_range + 1):
@@ -846,11 +863,12 @@ def _add_segment_obstacle_vis(obstacles: GridObstacleMap, seg, coord: GridCoord,
 def _add_via_obstacle_vis(obstacles: GridObstacleMap, via, coord: GridCoord,
                            num_layers: int, via_track_expansion_grid: int, via_via_expansion_grid: int,
                            blocked_cells: List[Set[Tuple[int, int]]],
-                           blocked_vias: Set[Tuple[int, int]]):
+                           blocked_vias: Set[Tuple[int, int]],
+                           diagonal_margin: float = 0.0):
     """Add a via as obstacle and capture vis data."""
     gx, gy = coord.to_grid(via.x, via.y)
     # Block cells for track routing.
-    effective_track_block_sq = via_track_expansion_grid ** 2
+    effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
     track_block_range = via_track_expansion_grid + 1
     for ex in range(-track_block_range, track_block_range + 1):
         for ey in range(-track_block_range, track_block_range + 1):
@@ -903,11 +921,16 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig,
                                 extra_clearance: float = 0.0,
                                 blocked_cells: List[Set[Tuple[int, int]]] = None,
-                                blocked_vias: Set[Tuple[int, int]] = None):
+                                blocked_vias: Set[Tuple[int, int]] = None,
+                                diagonal_margin: float = 0.0):
     """Add a net's segments, vias, and pads as obstacles, capturing vis data.
 
     This is a combined function for adding all of a net's obstacles at once,
     useful for incrementally building obstacles during batch routing.
+
+    Args:
+        diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
+                        segments that pass between grid points. Use 0.25 for single-ended routing.
     """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
@@ -940,7 +963,7 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
         if via.net_id != net_id:
             continue
         _add_via_obstacle_vis(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
-                               blocked_cells, blocked_vias)
+                               blocked_cells, blocked_vias, diagonal_margin)
 
     # Add pads
     pads = pcb_data.pads_by_net.get(net_id, [])
