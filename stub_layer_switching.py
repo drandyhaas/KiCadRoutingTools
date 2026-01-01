@@ -74,12 +74,49 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
             if abs(pad.global_x - current_x) < tolerance and abs(pad.global_y - current_y) < tolerance:
                 pad_x, pad_y = pad.global_x, pad.global_y
                 break
-        if pad_x is None:
-            pad_x, pad_y = current_x, current_y  # Use chain end position
+
+    # If chain walk didn't find a pad, use BFS from chain end to find a connected pad.
+    # This handles cases where get_stub_segments walked wrong direction or chain was incomplete.
+    # Using BFS ensures we find a pad that's actually connected to our chain, not a different chain.
+    if pad_x is None:
+        layer_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == stub_layer]
+        # BFS from chain end position to find connected pad
+        visited = set()
+        queue = [(current_x, current_y)]
+        visited.add((round(current_x, 2), round(current_y, 2)))
+        while queue and pad_x is None:
+            pos_x, pos_y = queue.pop(0)
+            # Check if we're at a pad
+            for pad in net_pads:
+                if abs(pad.global_x - pos_x) < tolerance and abs(pad.global_y - pos_y) < tolerance:
+                    pad_x, pad_y = pad.global_x, pad.global_y
+                    break
+            if pad_x is not None:
+                break
+            # Find segments connected to this position and add their other endpoints
+            for seg in layer_segments:
+                if abs(seg.start_x - pos_x) < tolerance and abs(seg.start_y - pos_y) < tolerance:
+                    key = (round(seg.end_x, 2), round(seg.end_y, 2))
+                    if key not in visited:
+                        visited.add(key)
+                        queue.append((seg.end_x, seg.end_y))
+                elif abs(seg.end_x - pos_x) < tolerance and abs(seg.end_y - pos_y) < tolerance:
+                    key = (round(seg.start_x, 2), round(seg.start_y, 2))
+                    if key not in visited:
+                        visited.add(key)
+                        queue.append((seg.start_x, seg.start_y))
 
     if pad_x is None:
-        # Use first pad as fallback
-        pad_x, pad_y = net_pads[0].global_x, net_pads[0].global_y
+        # For diff pairs (chain walk succeeded but didn't reach pad), use chain end position.
+        # For single-ended (where chain walk may go wrong direction), try to find a connected pad.
+        # If chain made progress from stub position, trust the chain end as the direction toward pad.
+        stub_dist = math.sqrt((current_x - stub_x) ** 2 + (current_y - stub_y) ** 2)
+        if stub_dist > tolerance:
+            # Chain made progress, use chain end position (like original git code)
+            pad_x, pad_y = current_x, current_y
+        else:
+            # Chain didn't move from stub, use first pad as fallback
+            pad_x, pad_y = net_pads[0].global_x, net_pads[0].global_y
 
     # Check if pad already has a via (connecting to other layers)
     has_pad_via = False
