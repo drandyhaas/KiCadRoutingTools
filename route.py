@@ -346,7 +346,9 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             all_unrouted_net_ids, gnd_net_id,
                             track_proximity_cache: dict,
                             diff_pair_extra_clearance: float,
-                            all_swap_vias: list, all_segment_modifications: list):
+                            all_swap_vias: list, all_segment_modifications: list,
+                            all_stubs_by_layer: dict = None,
+                            stub_endpoints_by_layer: dict = None):
     """
     Try to swap the blocked side's stubs to another layer as a fallback when routing fails.
 
@@ -376,10 +378,18 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
     if not sides_to_try:
         return False, None, [], []
 
-    # Build stubs_by_layer for validation
-    pair_info = {pair_name: (src_layer, tgt_layer, sources, targets, pair)}
-    stubs_by_layer = collect_stubs_by_layer(pcb_data, pair_info, config)
-    endpoints_by_layer = collect_stub_endpoints_by_layer(pcb_data, pair_info, config)
+    # Use provided stubs_by_layer or build minimal version as fallback
+    if all_stubs_by_layer is None:
+        pair_info = {pair_name: (src_layer, tgt_layer, sources, targets, pair)}
+        stubs_by_layer = collect_stubs_by_layer(pcb_data, pair_info, config)
+    else:
+        stubs_by_layer = all_stubs_by_layer
+
+    if stub_endpoints_by_layer is None:
+        pair_info = {pair_name: (src_layer, tgt_layer, sources, targets, pair)}
+        endpoints_by_layer = collect_stub_endpoints_by_layer(pcb_data, pair_info, config)
+    else:
+        endpoints_by_layer = stub_endpoints_by_layer
 
     for side, endpoints, initial_layer in sides_to_try:
         # Track current layer (changes after each failed swap since we don't revert)
@@ -450,6 +460,20 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                 # SUCCESS - track vias and mods for file writing
                 all_swap_vias.extend(all_vias)
                 all_segment_modifications.extend(all_mods)
+
+                # Update stubs_by_layer to reflect the layer change (for subsequent fallbacks)
+                if stubs_by_layer is not None:
+                    combined_segments = p_stub.segments + n_stub.segments
+                    # Remove from old layer
+                    if current_layer in stubs_by_layer:
+                        stubs_by_layer[current_layer] = [
+                            s for s in stubs_by_layer[current_layer] if s[0] != pair_name
+                        ]
+                    # Add to new layer
+                    if candidate_layer not in stubs_by_layer:
+                        stubs_by_layer[candidate_layer] = []
+                    stubs_by_layer[candidate_layer].append((pair_name, combined_segments))
+
                 return True, retry_result, all_vias, all_mods
             else:
                 print(f"    Retry failed after {side} swap to {candidate_layer}")
@@ -2459,7 +2483,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     routed_net_ids, remaining_net_ids,
                     all_unrouted_net_ids, gnd_net_id,
                     track_proximity_cache, diff_pair_extra_clearance,
-                    all_swap_vias, all_segment_modifications)
+                    all_swap_vias, all_segment_modifications,
+                    all_stubs_by_layer, stub_endpoints_by_layer)
 
                 if swap_success and swap_result:
                     print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
@@ -3499,7 +3524,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             routed_net_ids, remaining_net_ids,
                             all_unrouted_net_ids, gnd_net_id,
                             track_proximity_cache, diff_pair_extra_clearance,
-                            all_swap_vias, all_segment_modifications)
+                            all_swap_vias, all_segment_modifications,
+                            all_stubs_by_layer, stub_endpoints_by_layer)
 
                         if swap_success and swap_result:
                             print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
