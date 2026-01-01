@@ -502,7 +502,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     else:
         setback = spacing_mm * 4  # Default: 4x the P-N half-spacing = 2x total P-N distance
 
-    if direction_label:
+    if direction_label and config.verbose:
         print(f"  Probing {direction_label}...")
 
     # Use base_obstacles for connector clearance checks if available
@@ -809,9 +809,14 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         }
 
     # Helper to setup and run a single route attempt
-    def try_route(src_cand, tgt_cand):
+    def try_route(src_cand, tgt_cand, is_probe_attempt=False):
         s_gx, s_gy, s_dx, s_dy, s_ang, _ = src_cand
         t_gx, t_gy, t_dx, t_dy, t_ang, _ = tgt_cand
+
+        # During probe, clear previous attempt's cells to keep each attempt independent
+        if is_probe_attempt:
+            obstacles.clear_allowed_cells()
+            obstacles.clear_source_target_cells()
 
         # Add allowed cells around source and target
         for dx in range(-allow_radius, allow_radius + 1):
@@ -843,86 +848,113 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     if is_probe:
         # Probe angles at the routing source (first endpoint we're routing from)
+        # Track the best individual iteration count (not sum) for accurate reporting
         found_first = False
         first_blocked_cells = []
+        best_first_iters = 0
         if len(src_combos) > 1:
             for src_cand in src_combos:
-                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(src_cand, tgt_combos[0])
+                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(src_cand, tgt_combos[0], is_probe_attempt=True)
                 total_iterations += iters
+                best_first_iters = max(best_first_iters, iters)
 
                 if path is not None:
-                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), total_iterations, [], None
+                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), iters, [], None
                 if iters >= max_iters:
                     selected_src = src_cand
                     found_first = True
-                    print(f"    {first_label} {src_cand[4]:+.1f}° OK")
+                    if config.verbose:
+                        print(f"    {first_label} {src_cand[4]:+.1f}° OK ({iters} iters)")
                     break
-                print(f"    {first_label} {src_cand[4]:+.1f}° blocked")
+                if config.verbose:
+                    print(f"    {first_label} {src_cand[4]:+.1f}° blocked ({iters} iters)")
                 # Collect blocked cells from this attempt
                 first_blocked_cells.extend(blocked)
 
             if not found_first:
                 # All source angles blocked - return probe_blocked state for rip-up
-                return None, total_iterations, first_blocked_cells, ('probe_blocked', 'first', selected_src, selected_tgt)
+                # Return best individual iteration count, not sum
+                return None, best_first_iters, first_blocked_cells, ('probe_blocked', 'first', selected_src, selected_tgt)
         else:
             # Only one source option - still need to test it (don't assume it works)
-            path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(src_combos[0], tgt_combos[0])
+            path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(src_combos[0], tgt_combos[0], is_probe_attempt=True)
             total_iterations += iters
+            best_first_iters = iters
 
             if path is not None:
-                return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), total_iterations, [], None
+                return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), iters, [], None
             if iters >= max_iters:
-                print(f"    {first_label} {src_combos[0][4]:+.1f}° OK")
+                if config.verbose:
+                    print(f"    {first_label} {src_combos[0][4]:+.1f}° OK ({iters} iters)")
                 found_first = True
             else:
-                print(f"    {first_label} {src_combos[0][4]:+.1f}° blocked")
+                if config.verbose:
+                    print(f"    {first_label} {src_combos[0][4]:+.1f}° blocked ({iters} iters)")
                 first_blocked_cells.extend(blocked)
-                return None, total_iterations, first_blocked_cells, ('probe_blocked', 'first', selected_src, selected_tgt)
+                return None, iters, first_blocked_cells, ('probe_blocked', 'first', selected_src, selected_tgt)
 
         # Probe angles at the routing target (second endpoint)
         found_second = False
         second_blocked_cells = []
+        best_second_iters = 0
         if len(tgt_combos) > 1:
             for tgt_cand in tgt_combos:
-                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(selected_src, tgt_cand)
+                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(selected_src, tgt_cand, is_probe_attempt=True)
                 total_iterations += iters
+                best_second_iters = max(best_second_iters, iters)
 
                 if path is not None:
-                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), total_iterations, [], None
+                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), best_first_iters + iters, [], None
                 if iters >= max_iters:
                     selected_tgt = tgt_cand
                     found_second = True
-                    print(f"    {second_label} {tgt_cand[4]:+.1f}° OK")
+                    if config.verbose:
+                        print(f"    {second_label} {tgt_cand[4]:+.1f}° OK ({iters} iters)")
                     break
-                print(f"    {second_label} {tgt_cand[4]:+.1f}° blocked")
+                if config.verbose:
+                    print(f"    {second_label} {tgt_cand[4]:+.1f}° blocked ({iters} iters)")
                 # Collect blocked cells from this attempt
                 second_blocked_cells.extend(blocked)
 
             if not found_second:
                 # All target angles blocked - return probe_blocked state for rip-up
-                return None, total_iterations, second_blocked_cells, ('probe_blocked', 'second', selected_src, selected_tgt)
+                # Return best individual iteration count (min of source success and best target attempt)
+                return None, min(best_first_iters, best_second_iters), second_blocked_cells, ('probe_blocked', 'second', selected_src, selected_tgt)
         else:
             # Only one target option - if source had multiple combos, we need to test selected_src with this target
             if len(src_combos) > 1:
-                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(selected_src, tgt_combos[0])
+                path, iters, blocked, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs = try_route(selected_src, tgt_combos[0], is_probe_attempt=True)
                 total_iterations += iters
+                best_second_iters = iters
 
                 if path is not None:
-                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), total_iterations, [], None
+                    return make_route_data(path, src_dir, tgt_dir, s_ang, t_ang, gnd_dirs), best_first_iters + iters, [], None
                 if iters >= max_iters:
-                    print(f"    {second_label} {tgt_combos[0][4]:+.1f}° OK")
+                    if config.verbose:
+                        print(f"    {second_label} {tgt_combos[0][4]:+.1f}° OK ({iters} iters)")
                 else:
-                    print(f"    {second_label} {tgt_combos[0][4]:+.1f}° blocked")
+                    if config.verbose:
+                        print(f"    {second_label} {tgt_combos[0][4]:+.1f}° blocked ({iters} iters)")
                     second_blocked_cells.extend(blocked)
-                    return None, total_iterations, second_blocked_cells, ('probe_blocked', 'second', selected_src, selected_tgt)
+                    return None, min(best_first_iters, iters), second_blocked_cells, ('probe_blocked', 'second', selected_src, selected_tgt)
             else:
                 # Both source and target have only 1 option - we already tested this in source section
-                print(f"    {second_label} {tgt_combos[0][4]:+.1f}° OK")
+                # best_first_iters already has the iteration count from that test
+                best_second_iters = best_first_iters
+                if config.verbose:
+                    print(f"    {second_label} {tgt_combos[0][4]:+.1f}° OK ({best_first_iters} iters)")
 
         # Return selected angles for full search
-        return None, total_iterations, [], (0, 0, selected_src, selected_tgt)
+        # Return the best iteration count from the successful probes (min of source and target)
+        # This represents what the selected combo achieved
+        best_probe_iters = min(best_first_iters, best_second_iters)
+        return None, best_probe_iters, [], (0, 0, selected_src, selected_tgt)
 
     # Non-probe: run single route attempt with selected angles
+    # Clear any leftover cells from probing and set up fresh for full search
+    obstacles.clear_allowed_cells()
+    obstacles.clear_source_target_cells()
+
     src_gx, src_gy, src_actual_dir_x, src_actual_dir_y, src_angle, src_dist = selected_src
     tgt_gx, tgt_gy, tgt_actual_dir_x, tgt_actual_dir_y, tgt_angle, tgt_dist = selected_tgt
 

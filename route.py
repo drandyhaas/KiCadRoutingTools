@@ -417,7 +417,6 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                     if pname == swap_partner_name:
                         lookup_p_net_id = ppair.p_net_id
                         lookup_n_net_id = ppair.n_net_id
-                        print(f"    Using swap partner {swap_partner_name} net_ids for {side} lookup: P={lookup_p_net_id}, N={lookup_n_net_id}")
                         break
 
         # Try each candidate layer
@@ -450,9 +449,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
 
             # Apply the swap
             print(f"    Applying fallback {side} swap: {current_layer} -> {candidate_layer}")
-            vias1, mods1 = apply_stub_layer_switch(pcb_data, p_stub, candidate_layer, config, debug=True)
-            vias2, mods2 = apply_stub_layer_switch(pcb_data, n_stub, candidate_layer, config, debug=True)
-            print(f"      Recorded {len(mods1) + len(mods2)} segment modifications")
+            vias1, mods1 = apply_stub_layer_switch(pcb_data, p_stub, candidate_layer, config, debug=False)
+            vias2, mods2 = apply_stub_layer_switch(pcb_data, n_stub, candidate_layer, config, debug=False)
             all_mods = mods1 + mods2
             all_vias = vias1 + vias2
 
