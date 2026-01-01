@@ -40,7 +40,7 @@ from obstacle_map import (
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
     VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
     compute_track_proximity_for_net, merge_track_proximity_costs, add_cross_layer_tracks,
-    draw_exclusion_zones_debug
+    draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -353,7 +353,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             routed_results: dict = None,
                             diff_pair_by_net_id: dict = None,
                             layer_map: dict = None,
-                            target_swaps: dict = None):
+                            target_swaps: dict = None,
+                            results: list = None):
     """
     Try to swap the blocked side's stubs to another layer as a fallback when routing fails.
     After applying the swap, attempts rip-up and reroute if the initial route fails.
@@ -559,13 +560,17 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                         # Save and remove the blocking route
                         saved_result = routed_results.get(rip_net_ids[0])
                         if saved_result:
+                            # Track if was in results list (for restore and reroute handling)
+                            was_in_results = results is not None and saved_result in results
+                            if was_in_results:
+                                results.remove(saved_result)
                             remove_route_from_pcb_data(pcb_data, saved_result)
                             for rid in rip_net_ids:
                                 if rid in routed_net_ids:
                                     routed_net_ids.remove(rid)
                                 if rid not in remaining_net_ids:
                                     remaining_net_ids.append(rid)
-                            ripped_items.append((blocker, saved_result, rip_net_ids))
+                            ripped_items.append((blocker, saved_result, rip_net_ids, was_in_results))
 
                             # Rebuild obstacles and retry
                             rip_obstacles = diff_pair_base_obstacles.clone()
@@ -598,7 +603,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                 print(f"      Rip-up succeeded after {side} swap to {candidate_layer}")
                                 # Re-route the ripped nets
                                 all_ripped_rerouted = True
-                                for ripped_blocker, ripped_saved, ripped_ids in ripped_items:
+                                for ripped_blocker, ripped_saved, ripped_ids, ripped_was_in_results in ripped_items:
                                     if ripped_blocker.net_id in diff_pair_by_net_id:
                                         ripped_pair_name, ripped_pair = diff_pair_by_net_id[ripped_blocker.net_id]
                                         # Rebuild obstacles for rerouting the ripped pair
@@ -614,6 +619,13 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                         add_net_vias_as_obstacles(reroute_obstacles, pcb_data, pair.n_net_id, config, diff_pair_extra_clearance)
                                         if gnd_net_id is not None:
                                             add_net_vias_as_obstacles(reroute_obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
+                                            # Also add GND vias from rip_result (the just-routed pair) which aren't in pcb_data yet
+                                            gnd_vias_from_result = [v for v in rip_result.get('new_vias', []) if v.net_id == gnd_net_id]
+                                            if gnd_vias_from_result:
+                                                add_vias_list_as_obstacles(reroute_obstacles, gnd_vias_from_result, config, diff_pair_extra_clearance)
+                                        # Also add segments from rip_result (the just-routed pair) which aren't in pcb_data yet
+                                        if rip_result.get('new_segments'):
+                                            add_segments_list_as_obstacles(reroute_obstacles, rip_result['new_segments'], config, diff_pair_extra_clearance)
                                         reroute_stubs = get_stub_endpoints(pcb_data, [nid for nid in all_unrouted_net_ids
                                                                                        if nid not in routed_net_ids
                                                                                        and nid != ripped_pair.p_net_id
@@ -625,6 +637,9 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                         reroute_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, reroute_obstacles, base_obstacles, reroute_stubs)
                                         if reroute_result and not reroute_result.get('failed') and not reroute_result.get('probe_blocked'):
                                             add_route_to_pcb_data(pcb_data, reroute_result, debug_lines=config.debug_lines)
+                                            # Add to results list if the ripped result was in it
+                                            if ripped_was_in_results and results is not None:
+                                                results.append(reroute_result)
                                             for rid in ripped_ids:
                                                 if rid not in routed_net_ids:
                                                     routed_net_ids.append(rid)
@@ -656,9 +671,11 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                     return True, rip_result, all_vias, all_mods
                                 else:
                                     # Failed to reroute ripped nets - restore them
-                                    for ripped_blocker, ripped_saved, ripped_ids in ripped_items:
+                                    for ripped_blocker, ripped_saved, ripped_ids, ripped_was_in_results in ripped_items:
                                         if ripped_saved:
                                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                                            if ripped_was_in_results and results is not None:
+                                                results.append(ripped_saved)
                                             for rid in ripped_ids:
                                                 if rid not in routed_net_ids:
                                                     routed_net_ids.append(rid)
@@ -672,9 +689,11 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                     blocked_cells = rip_result.get('blocked_cells', [])
 
                     # If rip-up didn't succeed, restore all ripped nets
-                    for ripped_blocker, ripped_saved, ripped_ids in ripped_items:
+                    for ripped_blocker, ripped_saved, ripped_ids, ripped_was_in_results in ripped_items:
                         if ripped_saved and ripped_ids[0] not in routed_net_ids:
                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                            if ripped_was_in_results and results is not None:
+                                results.append(ripped_saved)
                             for rid in ripped_ids:
                                 if rid not in routed_net_ids:
                                     routed_net_ids.append(rid)
@@ -2702,11 +2721,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     all_swap_vias, all_segment_modifications,
                     all_stubs_by_layer, stub_endpoints_by_layer,
                     routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
-                    target_swaps)
+                    target_swaps, results=results)
 
                 if swap_success and swap_result:
                     print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
-                    results.append(swap_result)
+                    results.append(swap_result)  # Add the main swap result
                     successful += 1
                     total_iterations += swap_result['iterations']
 
@@ -3746,11 +3765,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             all_swap_vias, all_segment_modifications,
                             all_stubs_by_layer, stub_endpoints_by_layer,
                             routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
-                            target_swaps)
+                            target_swaps, results=results)
 
                         if swap_success and swap_result:
                             print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
-                            results.append(swap_result)
+                            results.append(swap_result)  # Add the main swap result
                             successful += 1
                             total_iterations += swap_result['iterations']
                             rerouted_pairs.add(ripped_pair_name)

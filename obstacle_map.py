@@ -243,6 +243,56 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
 
 
+def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
+                                config: GridRouteConfig,
+                                extra_clearance: float = 0.0,
+                                diagonal_margin: float = 0.0):
+    """Add a list of Via objects as obstacles to the map.
+
+    This is useful for adding vias from a route result before it's committed to pcb_data.
+
+    Args:
+        obstacles: The obstacle map to add to
+        vias: List of Via objects to add as obstacles
+        config: Routing configuration
+        extra_clearance: Additional clearance to add (for diff pairs)
+        diagonal_margin: Extra margin (in grid units) for track blocking
+    """
+    coord = GridCoord(config.grid_step)
+    num_layers = len(config.layers)
+
+    via_track_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+
+    for via in vias:
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+
+
+def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
+                                    config: GridRouteConfig,
+                                    extra_clearance: float = 0.0):
+    """Add a list of Segment objects as obstacles to the map.
+
+    This is useful for adding segments from a route result before it's committed to pcb_data.
+
+    Args:
+        obstacles: The obstacle map to add to
+        segments: List of Segment objects to add as obstacles
+        config: Routing configuration
+        extra_clearance: Additional clearance to add (for diff pairs)
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = {name: i for i, name in enumerate(config.layers)}
+
+    expansion_grid = max(1, coord.to_grid_dist(config.track_width / 2 + config.clearance + extra_clearance))
+    via_block_grid = max(1, coord.to_grid_dist(config.track_width / 2 + config.via_size / 2 + config.clearance))
+
+    for seg in segments:
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is not None:
+            _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid)
+
+
 def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig):
     """Add via-via clearance blocking for same-net vias.
