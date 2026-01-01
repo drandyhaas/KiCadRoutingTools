@@ -198,6 +198,33 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
     return new_vias, segment_mods
 
 
+def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_vias: List) -> None:
+    """
+    Revert a previously applied stub layer switch.
+
+    Args:
+        pcb_data: PCB data to modify
+        segment_mods: List of segment modifications from apply_stub_layer_switch
+        new_vias: List of vias that were added (to be removed)
+    """
+    # Restore segment layers from modification records
+    for mod in segment_mods:
+        for seg in pcb_data.segments:
+            if (seg.net_id == mod['net_id'] and
+                abs(seg.start_x - mod['start'][0]) < 0.001 and
+                abs(seg.start_y - mod['start'][1]) < 0.001 and
+                abs(seg.end_x - mod['end'][0]) < 0.001 and
+                abs(seg.end_y - mod['end'][1]) < 0.001 and
+                seg.layer == mod['new_layer']):
+                seg.layer = mod['old_layer']
+                break
+
+    # Remove added vias
+    for via in new_vias:
+        if via in pcb_data.vias:
+            pcb_data.vias.remove(via)
+
+
 def check_segments_overlap(segments: List[Segment], other_segments: List[Segment],
                            y_tolerance: float = 0.2) -> bool:
     """
@@ -277,7 +304,9 @@ def validate_stub_no_overlap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str
                 other_x_min = min(other.start_x, other.end_x)
                 other_x_max = max(other.start_x, other.end_x)
                 if other_x_max >= seg_x_min and other_x_min <= seg_x_max:
-                    return False, f"overlaps with existing segment (net {other.net_id}) on {dest_layer}"
+                    net = pcb_data.nets.get(other.net_id)
+                    net_name = net.name if net else f"net {other.net_id}"
+                    return False, f"stub ({our_seg.start_x:.1f},{our_seg.start_y:.1f})-({our_seg.end_x:.1f},{our_seg.end_y:.1f}) overlaps {net_name} at ({other.start_x:.1f},{other.start_y:.1f})-({other.end_x:.1f},{other.end_y:.1f}) on {dest_layer}"
 
     return True, ""
 
