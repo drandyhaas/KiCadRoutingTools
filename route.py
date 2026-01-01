@@ -352,7 +352,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             routed_net_paths: dict = None,
                             routed_results: dict = None,
                             diff_pair_by_net_id: dict = None,
-                            layer_map: dict = None):
+                            layer_map: dict = None,
+                            target_swaps: dict = None):
     """
     Try to swap the blocked side's stubs to another layer as a fallback when routing fails.
     After applying the swap, attempts rip-up and reroute if the initial route fails.
@@ -404,15 +405,31 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
         # Track current layer (changes after each failed swap since we don't revert)
         current_layer = initial_layer
 
+        # Determine correct net_ids to use for looking up stubs in pcb_data
+        # After target swap, TARGET stubs have the swap partner's net_ids in pcb_data
+        lookup_p_net_id = pair.p_net_id
+        lookup_n_net_id = pair.n_net_id
+        if side == 'target' and target_swaps and pair_name in target_swaps:
+            swap_partner_name = target_swaps[pair_name]
+            # Find swap partner's net IDs
+            if diff_pair_by_net_id:
+                for net_id, (pname, ppair) in diff_pair_by_net_id.items():
+                    if pname == swap_partner_name:
+                        lookup_p_net_id = ppair.p_net_id
+                        lookup_n_net_id = ppair.n_net_id
+                        print(f"    Using swap partner {swap_partner_name} net_ids for {side} lookup: P={lookup_p_net_id}, N={lookup_n_net_id}")
+                        break
+
         # Try each candidate layer
         for candidate_layer in config.layers:
             if candidate_layer == current_layer:
                 continue
 
             # Get fresh stub info on current layer (may have changed from previous swap)
-            p_stub = get_stub_info(pcb_data, pair.p_net_id,
+            # Use lookup_*_net_id which may be swap partner's for target stubs with target swap
+            p_stub = get_stub_info(pcb_data, lookup_p_net_id,
                                    endpoints[0][5], endpoints[0][6], current_layer)
-            n_stub = get_stub_info(pcb_data, pair.n_net_id,
+            n_stub = get_stub_info(pcb_data, lookup_n_net_id,
                                    endpoints[0][7], endpoints[0][8], current_layer)
 
             if not p_stub or not n_stub:
@@ -438,6 +455,9 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
             print(f"      Recorded {len(mods1) + len(mods2)} segment modifications")
             all_mods = mods1 + mods2
             all_vias = vias1 + vias2
+
+            # Note: No net_id translation needed - we looked up stubs with the correct
+            # net_ids (swap partner's for target side), so modifications are recorded correctly
 
             # Accumulate modifications (even if routing fails, segments are changed)
             accumulated_mods.extend(all_mods)
@@ -2683,7 +2703,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     track_proximity_cache, diff_pair_extra_clearance,
                     all_swap_vias, all_segment_modifications,
                     all_stubs_by_layer, stub_endpoints_by_layer,
-                    routed_net_paths, routed_results, diff_pair_by_net_id, layer_map)
+                    routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
+                    target_swaps)
 
                 if swap_success and swap_result:
                     print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
@@ -3725,7 +3746,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             track_proximity_cache, diff_pair_extra_clearance,
                             all_swap_vias, all_segment_modifications,
                             all_stubs_by_layer, stub_endpoints_by_layer,
-                            routed_net_paths, routed_results, diff_pair_by_net_id, layer_map)
+                            routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
+                            target_swaps)
 
                         if swap_success and swap_result:
                             print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")

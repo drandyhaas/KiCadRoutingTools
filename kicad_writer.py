@@ -257,6 +257,8 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         return (round(x, 3), round(y, 3))
 
     mod_lookup = {}
+    # Secondary lookup by coordinates only (for fallback when net_id doesn't match due to swaps)
+    mod_lookup_by_coords = {}
     for mod in segment_mods:
         start_key = coord_key(mod['start'][0], mod['start'][1])
         end_key = coord_key(mod['end'][0], mod['end'][1])
@@ -265,6 +267,15 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         key_rev = (end_key, start_key, mod['net_id'])
         mod_lookup[key] = mod
         mod_lookup[key_rev] = mod
+        # Coordinate-only lookup (list to handle multiple mods at same coords)
+        coord_only_key = (start_key, end_key)
+        coord_only_key_rev = (end_key, start_key)
+        if coord_only_key not in mod_lookup_by_coords:
+            mod_lookup_by_coords[coord_only_key] = []
+        mod_lookup_by_coords[coord_only_key].append(mod)
+        if coord_only_key_rev not in mod_lookup_by_coords:
+            mod_lookup_by_coords[coord_only_key_rev] = []
+        mod_lookup_by_coords[coord_only_key_rev].append(mod)
 
     count = 0
 
@@ -282,21 +293,33 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
     def replace_layer(match):
         nonlocal count
         full_match = match.group(0)
-        prefix = match.group(1)
         start_x = float(match.group(2))
         start_y = float(match.group(3))
         end_x = float(match.group(4))
         end_y = float(match.group(5))
         layer = match.group(6)
-        layer_suffix = match.group(7)
         net_id = int(match.group(8))
 
         start_key = coord_key(start_x, start_y)
         end_key = coord_key(end_x, end_y)
         key = (start_key, end_key, net_id)
+        coord_only_key = (start_key, end_key)
 
+        mod = None
+        # First try exact match by (coords, net_id)
         if key in mod_lookup:
             mod = mod_lookup[key]
+        # Fallback: try coordinate-only match
+        # This handles cases where net_id changed due to target swaps
+        # Only use fallback if the segment's current layer is one of the expected old_layers
+        elif coord_only_key in mod_lookup_by_coords:
+            mods_at_coords = mod_lookup_by_coords[coord_only_key]
+            # Check if current layer matches any old_layer in the chain
+            if any(m.get('old_layer') == layer for m in mods_at_coords):
+                # Use the last mod (final target layer for chained swaps)
+                mod = mods_at_coords[-1]
+
+        if mod:
             new_layer = mod['new_layer']
             if layer != new_layer:
                 count += 1
