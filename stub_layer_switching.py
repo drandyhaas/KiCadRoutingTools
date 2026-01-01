@@ -225,6 +225,54 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
             pcb_data.vias.remove(via)
 
 
+def segments_intersect_2d(seg1_start: Tuple[float, float], seg1_end: Tuple[float, float],
+                          seg2_start: Tuple[float, float], seg2_end: Tuple[float, float],
+                          tolerance: float = 0.001) -> bool:
+    """
+    Check if two 2D line segments actually intersect (not just bounding boxes).
+
+    Uses cross product method to determine if segments cross each other.
+
+    Args:
+        seg1_start, seg1_end: Endpoints of first segment
+        seg2_start, seg2_end: Endpoints of second segment
+        tolerance: Numerical tolerance for collinear/touching cases
+
+    Returns:
+        True if segments intersect, False otherwise
+    """
+    # Vector cross product: (v1 x v2) = v1.x * v2.y - v1.y * v2.x
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    # Check if point c is on segment a-b (when collinear)
+    def on_segment(a, b, c):
+        return (min(a[0], b[0]) - tolerance <= c[0] <= max(a[0], b[0]) + tolerance and
+                min(a[1], b[1]) - tolerance <= c[1] <= max(a[1], b[1]) + tolerance)
+
+    d1 = cross(seg2_start, seg2_end, seg1_start)
+    d2 = cross(seg2_start, seg2_end, seg1_end)
+    d3 = cross(seg1_start, seg1_end, seg2_start)
+    d4 = cross(seg1_start, seg1_end, seg2_end)
+
+    # Standard intersection: segments cross each other
+    if ((d1 > tolerance and d2 < -tolerance) or (d1 < -tolerance and d2 > tolerance)) and \
+       ((d3 > tolerance and d4 < -tolerance) or (d3 < -tolerance and d4 > tolerance)):
+        return True
+
+    # Collinear cases: check if endpoints lie on the other segment
+    if abs(d1) <= tolerance and on_segment(seg2_start, seg2_end, seg1_start):
+        return True
+    if abs(d2) <= tolerance and on_segment(seg2_start, seg2_end, seg1_end):
+        return True
+    if abs(d3) <= tolerance and on_segment(seg1_start, seg1_end, seg2_start):
+        return True
+    if abs(d4) <= tolerance and on_segment(seg1_start, seg1_end, seg2_end):
+        return True
+
+    return False
+
+
 def check_segments_overlap(segments: List[Segment], other_segments: List[Segment],
                            y_tolerance: float = 0.2) -> bool:
     """
@@ -290,23 +338,19 @@ def validate_stub_no_overlap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str
             return False, f"overlaps with {pair_name} on {dest_layer}"
 
     # Also check against all existing segments on destination layer (catches segments not in collection)
+    # Use actual 2D segment intersection test, not just bounding box overlap
     for our_seg in our_segments:
-        seg_y_min = min(our_seg.start_y, our_seg.end_y) - 0.2
-        seg_y_max = max(our_seg.start_y, our_seg.end_y) + 0.2
-        seg_x_min = min(our_seg.start_x, our_seg.end_x)
-        seg_x_max = max(our_seg.start_x, our_seg.end_x)
         for other in pcb_data.segments:
             if other.layer != dest_layer or other.net_id in our_net_ids:
                 continue
-            other_y_min = min(other.start_y, other.end_y)
-            other_y_max = max(other.start_y, other.end_y)
-            if other_y_max >= seg_y_min and other_y_min <= seg_y_max:
-                other_x_min = min(other.start_x, other.end_x)
-                other_x_max = max(other.start_x, other.end_x)
-                if other_x_max >= seg_x_min and other_x_min <= seg_x_max:
-                    net = pcb_data.nets.get(other.net_id)
-                    net_name = net.name if net else f"net {other.net_id}"
-                    return False, f"stub ({our_seg.start_x:.1f},{our_seg.start_y:.1f})-({our_seg.end_x:.1f},{our_seg.end_y:.1f}) overlaps {net_name} at ({other.start_x:.1f},{other.start_y:.1f})-({other.end_x:.1f},{other.end_y:.1f}) on {dest_layer}"
+            # Check if the 2D line segments actually intersect
+            if segments_intersect_2d(
+                (our_seg.start_x, our_seg.start_y), (our_seg.end_x, our_seg.end_y),
+                (other.start_x, other.start_y), (other.end_x, other.end_y)
+            ):
+                net = pcb_data.nets.get(other.net_id)
+                net_name = net.name if net else f"net {other.net_id}"
+                return False, f"stub ({our_seg.start_x:.1f},{our_seg.start_y:.1f})-({our_seg.end_x:.1f},{our_seg.end_y:.1f}) overlaps {net_name} at ({other.start_x:.1f},{other.start_y:.1f})-({other.end_x:.1f},{other.end_y:.1f}) on {dest_layer}"
 
     return True, ""
 
