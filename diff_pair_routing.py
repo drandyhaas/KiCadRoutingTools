@@ -364,6 +364,231 @@ def _detect_polarity(simplified_path, coord,
     return p_sign, polarity_fixed, polarity_swap_needed, has_layer_change
 
 
+def _calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_sign):
+    """Calculate extensions for P and N tracks to make their connectors parallel.
+
+    The key insight: for connectors to be parallel, the extending track must
+    extend along the stub direction until its connector is parallel to the
+    non-extended track's connector.
+
+    Formula derivation:
+    - V_p = R_p - S_p (direct connector for P)
+    - V_n = R_n - S_n (direct connector for N)
+    - For P extended by E: V_p' = V_p - E*D
+    - For V_p' || V_n: (V_p - E*D) × V_n = 0
+    - E = (V_p × V_n) / (D × V_n)
+
+    Returns (p_extension, n_extension) where one will be positive, the other 0.
+    """
+    dx, dy = stub_dir
+
+    # Direct connector vectors
+    v_p = (p_route[0] - p_stub[0], p_route[1] - p_stub[1])
+    v_n = (n_route[0] - n_stub[0], n_route[1] - n_stub[1])
+
+    # Cross product of connector vectors: tells us if connectors are already parallel
+    # and which direction the divergence is
+    v_cross = v_p[0] * v_n[1] - v_p[1] * v_n[0]
+
+    # If connectors are nearly parallel, no extension needed
+    if abs(v_cross) < 0.0001:
+        return 0.0, 0.0
+
+    # Cross product D × V_n (for extending P)
+    d_cross_vn = dx * v_n[1] - dy * v_n[0]
+    # Cross product D × V_p (for extending N)
+    d_cross_vp = dx * v_p[1] - dy * v_p[0]
+
+    # Calculate extensions for both tracks
+    # E_p = (V_p × V_n) / (D × V_n) makes V_p' parallel to V_n
+    # E_n = (V_n × V_p) / (D × V_p) = -v_cross / d_cross_vp makes V_n' parallel to V_p
+    p_ext = v_cross / d_cross_vn if abs(d_cross_vn) > 0.0001 else 0.0
+    n_ext = -v_cross / d_cross_vp if abs(d_cross_vp) > 0.0001 else 0.0
+
+    # Use whichever extension is positive (extending in stub direction)
+    # If both are positive, prefer the one for the "outside" track
+    if p_ext > 0.001 and n_ext > 0.001:
+        # Both positive - use the outside track based on geometry
+        is_p_outside = (v_cross > 0 and p_sign < 0) or (v_cross < 0 and p_sign > 0)
+        if is_p_outside:
+            return p_ext, 0.0
+        else:
+            return 0.0, n_ext
+    elif p_ext > 0.001:
+        return p_ext, 0.0
+    elif n_ext > 0.001:
+        return 0.0, n_ext
+
+    return 0.0, 0.0
+
+
+def _float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
+                            src_stub_dir, tgt_stub_dir, src_extension, tgt_extension,
+                            config, layer_names):
+    """Convert floating-point path (x, y, layer) to segments and vias.
+
+    Adds extension segments to ensure P and N connectors are parallel.
+
+    Args:
+        float_path: List of (x, y, layer_idx) tuples
+        net_id: Network ID for the segments
+        original_start: (x, y) start position or None
+        original_end: (x, y) end position or None
+        sign: +1 or -1 indicating which side of centerline this track is on
+        src_stub_dir: (dx, dy) stub direction at source (pointing into route area)
+        tgt_stub_dir: (dx, dy) stub direction at target (pointing into route area)
+        src_extension: pre-calculated extension length at source end
+        tgt_extension: pre-calculated extension length at target end
+        config: GridRouteConfig with track_width, via_size, via_drill, debug_lines
+        layer_names: List of layer names indexed by layer_idx
+
+    Returns:
+        (segments, vias, connector_lines) tuple
+    """
+    segs = []
+    vias = []
+    connector_lines = []  # Debug lines for connectors
+    num_segments = len(float_path) - 1
+
+    # Add connecting segment from original start if needed
+    if original_start and len(float_path) > 0:
+        first_x, first_y, first_layer = float_path[0]
+        orig_x, orig_y = original_start
+        if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
+            # Use pre-calculated extension to make P and N connectors parallel
+            # But skip extension if route start is between stub and extension point
+            # (otherwise we'd create a U-turn that could cross the other net)
+            use_extension = False
+            if src_extension > 0.001:
+                # Check where route start is relative to stub in stub direction
+                to_route_x = first_x - orig_x
+                to_route_y = first_y - orig_y
+                dot = to_route_x * src_stub_dir[0] + to_route_y * src_stub_dir[1]
+                # U-turn zone: route is between stub (0) and extension point (src_extension)
+                # Only use extension if route is NOT in U-turn zone
+                if dot <= 0.001 or dot >= src_extension - 0.001:
+                    use_extension = True
+
+            if use_extension:
+                # Add extension segment in stub direction
+                ext_x = orig_x + src_stub_dir[0] * src_extension
+                ext_y = orig_y + src_stub_dir[1] * src_extension
+
+                segs.append(Segment(
+                    start_x=orig_x, start_y=orig_y,
+                    end_x=ext_x, end_y=ext_y,
+                    width=config.track_width,
+                    layer=layer_names[first_layer],
+                    net_id=net_id
+                ))
+                # Connector from extension to route
+                segs.append(Segment(
+                    start_x=ext_x, start_y=ext_y,
+                    end_x=first_x, end_y=first_y,
+                    width=config.track_width,
+                    layer=layer_names[first_layer],
+                    net_id=net_id
+                ))
+                if config.debug_lines:
+                    connector_lines.append(((orig_x, orig_y), (ext_x, ext_y)))
+                    connector_lines.append(((ext_x, ext_y), (first_x, first_y)))
+            else:
+                # No extension needed, direct connector
+                segs.append(Segment(
+                    start_x=orig_x, start_y=orig_y,
+                    end_x=first_x, end_y=first_y,
+                    width=config.track_width,
+                    layer=layer_names[first_layer],
+                    net_id=net_id
+                ))
+                if config.debug_lines:
+                    connector_lines.append(((orig_x, orig_y), (first_x, first_y)))
+
+    # Convert path segments
+    for i in range(num_segments):
+        x1, y1, layer1 = float_path[i]
+        x2, y2, layer2 = float_path[i + 1]
+
+        if layer1 != layer2:
+            # Layer change - add via
+            vias.append(Via(
+                x=x1, y=y1,
+                size=config.via_size,
+                drill=config.via_drill,
+                layers=[layer_names[layer1], layer_names[layer2]],
+                net_id=net_id
+            ))
+        elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
+            # Always use actual layer for segment
+            segs.append(Segment(
+                start_x=x1, start_y=y1,
+                end_x=x2, end_y=y2,
+                width=config.track_width,
+                layer=layer_names[layer1],
+                net_id=net_id
+            ))
+
+    # Add connecting segment to original end if needed
+    if original_end and len(float_path) > 0:
+        last_x, last_y, last_layer = float_path[-1]
+        orig_x, orig_y = original_end
+        if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
+            # Use pre-calculated extension to make P and N connectors parallel
+            # But skip extension if route end is between stub and extension point
+            # (otherwise we'd create a U-turn that could cross the other net)
+            use_extension = False
+            if tgt_extension > 0.001:
+                # Check where route end is relative to stub in stub direction
+                # Vector from stub to route end
+                to_route_x = last_x - orig_x
+                to_route_y = last_y - orig_y
+                # Dot product with stub direction - positive means route is in stub direction
+                dot = to_route_x * tgt_stub_dir[0] + to_route_y * tgt_stub_dir[1]
+                # U-turn zone: route is between stub (0) and extension point (tgt_extension)
+                # Only use extension if route is NOT in U-turn zone
+                # i.e., route is on pad side of stub (dot <= 0) or past extension (dot >= extension)
+                if dot <= 0.001 or dot >= tgt_extension - 0.001:
+                    use_extension = True
+
+            if use_extension:
+                # Extend along stub direction (toward route area)
+                ext_x = orig_x + tgt_stub_dir[0] * tgt_extension
+                ext_y = orig_y + tgt_stub_dir[1] * tgt_extension
+
+                # Connector from route to extension point
+                segs.append(Segment(
+                    start_x=last_x, start_y=last_y,
+                    end_x=ext_x, end_y=ext_y,
+                    width=config.track_width,
+                    layer=layer_names[last_layer],
+                    net_id=net_id
+                ))
+                # Extension back to stub endpoint
+                segs.append(Segment(
+                    start_x=ext_x, start_y=ext_y,
+                    end_x=orig_x, end_y=orig_y,
+                    width=config.track_width,
+                    layer=layer_names[last_layer],
+                    net_id=net_id
+                ))
+                if config.debug_lines:
+                    connector_lines.append(((last_x, last_y), (ext_x, ext_y)))
+                    connector_lines.append(((ext_x, ext_y), (orig_x, orig_y)))
+            else:
+                # No extension needed, direct connector
+                segs.append(Segment(
+                    start_x=last_x, start_y=last_y,
+                    end_x=orig_x, end_y=orig_y,
+                    width=config.track_width,
+                    layer=layer_names[last_layer],
+                    net_id=net_id
+                ))
+                if config.debug_lines:
+                    connector_lines.append(((last_x, last_y), (orig_x, orig_y)))
+
+    return segs, vias, connector_lines
+
+
 def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
                              config: GridRouteConfig) -> Tuple[List, List, str]:
     """
@@ -1447,219 +1672,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     new_vias = []
     debug_connector_lines = []  # For User.3 layer (connectors)
 
-    def calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_sign):
-        """Calculate extensions for P and N tracks to make their connectors parallel.
-
-        The key insight: for connectors to be parallel, the extending track must
-        extend along the stub direction until its connector is parallel to the
-        non-extended track's connector.
-
-        Formula derivation:
-        - V_p = R_p - S_p (direct connector for P)
-        - V_n = R_n - S_n (direct connector for N)
-        - For P extended by E: V_p' = V_p - E*D
-        - For V_p' || V_n: (V_p - E*D) × V_n = 0
-        - E = (V_p × V_n) / (D × V_n)
-
-        Returns (p_extension, n_extension) where one will be positive, the other 0.
-        """
-        dx, dy = stub_dir
-
-        # Direct connector vectors
-        v_p = (p_route[0] - p_stub[0], p_route[1] - p_stub[1])
-        v_n = (n_route[0] - n_stub[0], n_route[1] - n_stub[1])
-
-        # Cross product of connector vectors: tells us if connectors are already parallel
-        # and which direction the divergence is
-        v_cross = v_p[0] * v_n[1] - v_p[1] * v_n[0]
-
-        # If connectors are nearly parallel, no extension needed
-        if abs(v_cross) < 0.0001:
-            return 0.0, 0.0
-
-        # Cross product D × V_n (for extending P)
-        d_cross_vn = dx * v_n[1] - dy * v_n[0]
-        # Cross product D × V_p (for extending N)
-        d_cross_vp = dx * v_p[1] - dy * v_p[0]
-
-        # Calculate extensions for both tracks
-        # E_p = (V_p × V_n) / (D × V_n) makes V_p' parallel to V_n
-        # E_n = (V_n × V_p) / (D × V_p) = -v_cross / d_cross_vp makes V_n' parallel to V_p
-        p_ext = v_cross / d_cross_vn if abs(d_cross_vn) > 0.0001 else 0.0
-        n_ext = -v_cross / d_cross_vp if abs(d_cross_vp) > 0.0001 else 0.0
-
-        # Use whichever extension is positive (extending in stub direction)
-        # If both are positive, prefer the one for the "outside" track
-        if p_ext > 0.001 and n_ext > 0.001:
-            # Both positive - use the outside track based on geometry
-            is_p_outside = (v_cross > 0 and p_sign < 0) or (v_cross < 0 and p_sign > 0)
-            if is_p_outside:
-                return p_ext, 0.0
-            else:
-                return 0.0, n_ext
-        elif p_ext > 0.001:
-            return p_ext, 0.0
-        elif n_ext > 0.001:
-            return 0.0, n_ext
-
-        return 0.0, 0.0
-
-    def float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
-                                src_stub_dir, tgt_stub_dir, src_extension, tgt_extension):
-        """Convert floating-point path (x, y, layer) to segments and vias.
-
-        Adds extension segments to ensure P and N connectors are parallel.
-
-        Args:
-            sign: +1 or -1 indicating which side of centerline this track is on
-            src_stub_dir: (dx, dy) stub direction at source (pointing into route area)
-            tgt_stub_dir: (dx, dy) stub direction at target (pointing into route area)
-            src_extension: pre-calculated extension length at source end
-            tgt_extension: pre-calculated extension length at target end
-        """
-        segs = []
-        vias = []
-        connector_lines = []  # Debug lines for connectors
-        num_segments = len(float_path) - 1
-
-        # Add connecting segment from original start if needed
-        if original_start and len(float_path) > 0:
-            first_x, first_y, first_layer = float_path[0]
-            orig_x, orig_y = original_start
-            if abs(orig_x - first_x) > 0.001 or abs(orig_y - first_y) > 0.001:
-                # Use pre-calculated extension to make P and N connectors parallel
-                # But skip extension if route start is between stub and extension point
-                # (otherwise we'd create a U-turn that could cross the other net)
-                use_extension = False
-                if src_extension > 0.001:
-                    # Check where route start is relative to stub in stub direction
-                    to_route_x = first_x - orig_x
-                    to_route_y = first_y - orig_y
-                    dot = to_route_x * src_stub_dir[0] + to_route_y * src_stub_dir[1]
-                    # U-turn zone: route is between stub (0) and extension point (src_extension)
-                    # Only use extension if route is NOT in U-turn zone
-                    if dot <= 0.001 or dot >= src_extension - 0.001:
-                        use_extension = True
-
-                if use_extension:
-                    # Add extension segment in stub direction
-                    ext_x = orig_x + src_stub_dir[0] * src_extension
-                    ext_y = orig_y + src_stub_dir[1] * src_extension
-
-                    segs.append(Segment(
-                        start_x=orig_x, start_y=orig_y,
-                        end_x=ext_x, end_y=ext_y,
-                        width=config.track_width,
-                        layer=layer_names[first_layer],
-                        net_id=net_id
-                    ))
-                    # Connector from extension to route
-                    segs.append(Segment(
-                        start_x=ext_x, start_y=ext_y,
-                        end_x=first_x, end_y=first_y,
-                        width=config.track_width,
-                        layer=layer_names[first_layer],
-                        net_id=net_id
-                    ))
-                    if config.debug_lines:
-                        connector_lines.append(((orig_x, orig_y), (ext_x, ext_y)))
-                        connector_lines.append(((ext_x, ext_y), (first_x, first_y)))
-                else:
-                    # No extension needed, direct connector
-                    segs.append(Segment(
-                        start_x=orig_x, start_y=orig_y,
-                        end_x=first_x, end_y=first_y,
-                        width=config.track_width,
-                        layer=layer_names[first_layer],
-                        net_id=net_id
-                    ))
-                    if config.debug_lines:
-                        connector_lines.append(((orig_x, orig_y), (first_x, first_y)))
-
-        # Convert path segments
-        for i in range(num_segments):
-            x1, y1, layer1 = float_path[i]
-            x2, y2, layer2 = float_path[i + 1]
-
-            if layer1 != layer2:
-                # Layer change - add via
-                vias.append(Via(
-                    x=x1, y=y1,
-                    size=config.via_size,
-                    drill=config.via_drill,
-                    layers=[layer_names[layer1], layer_names[layer2]],
-                    net_id=net_id
-                ))
-            elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
-                # Always use actual layer for segment
-                segs.append(Segment(
-                    start_x=x1, start_y=y1,
-                    end_x=x2, end_y=y2,
-                    width=config.track_width,
-                    layer=layer_names[layer1],
-                    net_id=net_id
-                ))
-
-        # Add connecting segment to original end if needed
-        if original_end and len(float_path) > 0:
-            last_x, last_y, last_layer = float_path[-1]
-            orig_x, orig_y = original_end
-            if abs(orig_x - last_x) > 0.001 or abs(orig_y - last_y) > 0.001:
-                # Use pre-calculated extension to make P and N connectors parallel
-                # But skip extension if route end is between stub and extension point
-                # (otherwise we'd create a U-turn that could cross the other net)
-                use_extension = False
-                if tgt_extension > 0.001:
-                    # Check where route end is relative to stub in stub direction
-                    # Vector from stub to route end
-                    to_route_x = last_x - orig_x
-                    to_route_y = last_y - orig_y
-                    # Dot product with stub direction - positive means route is in stub direction
-                    dot = to_route_x * tgt_stub_dir[0] + to_route_y * tgt_stub_dir[1]
-                    # U-turn zone: route is between stub (0) and extension point (tgt_extension)
-                    # Only use extension if route is NOT in U-turn zone
-                    # i.e., route is on pad side of stub (dot <= 0) or past extension (dot >= extension)
-                    if dot <= 0.001 or dot >= tgt_extension - 0.001:
-                        use_extension = True
-
-                if use_extension:
-                    # Extend along stub direction (toward route area)
-                    ext_x = orig_x + tgt_stub_dir[0] * tgt_extension
-                    ext_y = orig_y + tgt_stub_dir[1] * tgt_extension
-
-                    # Connector from route to extension point
-                    segs.append(Segment(
-                        start_x=last_x, start_y=last_y,
-                        end_x=ext_x, end_y=ext_y,
-                        width=config.track_width,
-                        layer=layer_names[last_layer],
-                        net_id=net_id
-                    ))
-                    # Extension back to stub endpoint
-                    segs.append(Segment(
-                        start_x=ext_x, start_y=ext_y,
-                        end_x=orig_x, end_y=orig_y,
-                        width=config.track_width,
-                        layer=layer_names[last_layer],
-                        net_id=net_id
-                    ))
-                    if config.debug_lines:
-                        connector_lines.append(((last_x, last_y), (ext_x, ext_y)))
-                        connector_lines.append(((ext_x, ext_y), (orig_x, orig_y)))
-                else:
-                    # No extension needed, direct connector
-                    segs.append(Segment(
-                        start_x=last_x, start_y=last_y,
-                        end_x=orig_x, end_y=orig_y,
-                        width=config.track_width,
-                        layer=layer_names[last_layer],
-                        net_id=net_id
-                    ))
-                    if config.debug_lines:
-                        connector_lines.append(((last_x, last_y), (orig_x, orig_y)))
-
-        return segs, vias, connector_lines
-
     # Get original coordinates for P and N nets
     p_start = (p_src_x, p_src_y)
     n_start = (n_src_x, n_src_y)
@@ -1681,7 +1693,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # Source end
     p_src_route = p_float_path[0][:2] if p_float_path else p_start
     n_src_route = n_float_path[0][:2] if n_float_path else n_start
-    src_p_ext, src_n_ext = calculate_parallel_extension(
+    src_p_ext, src_n_ext = _calculate_parallel_extension(
         p_start, n_start, p_src_route, n_src_route,
         src_stub_dir_tuple, p_sign
     )
@@ -1689,24 +1701,26 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # Target end
     p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
     n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
-    tgt_p_ext, tgt_n_ext = calculate_parallel_extension(
+    tgt_p_ext, tgt_n_ext = _calculate_parallel_extension(
         p_end, n_end, p_tgt_route, n_tgt_route,
         tgt_stub_dir_tuple, p_sign
     )
 
     # Convert P path
-    p_segs, p_vias, p_conn_lines = float_path_to_geometry(
+    p_segs, p_vias, p_conn_lines = _float_path_to_geometry(
         p_float_path, p_net_id, p_start, p_end, p_sign,
-        src_stub_dir_tuple, tgt_stub_dir_tuple, src_p_ext, tgt_p_ext
+        src_stub_dir_tuple, tgt_stub_dir_tuple, src_p_ext, tgt_p_ext,
+        config, layer_names
     )
     new_segments.extend(p_segs)
     new_vias.extend(p_vias)
     debug_connector_lines.extend(p_conn_lines)
 
     # Convert N path
-    n_segs, n_vias, n_conn_lines = float_path_to_geometry(
+    n_segs, n_vias, n_conn_lines = _float_path_to_geometry(
         n_float_path, n_net_id, n_start, n_end, n_sign,
-        src_stub_dir_tuple, tgt_stub_dir_tuple, src_n_ext, tgt_n_ext
+        src_stub_dir_tuple, tgt_stub_dir_tuple, src_n_ext, tgt_n_ext,
+        config, layer_names
     )
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
