@@ -4,31 +4,69 @@ This document describes the internal architecture of the KiCad Grid Router, incl
 
 ## Module Structure
 
-The router is organized into focused modules:
+The router is organized into focused modules with clear separation of concerns:
 
 ```
 KiCadRoutingTools/
-├── route.py      # Main CLI and batch orchestration
-├── routing_config.py         # Configuration dataclasses
-├── routing_utils.py          # Shared utilities
-├── obstacle_map.py           # Obstacle map building
-├── single_ended_routing.py   # Single-ended net routing
-├── diff_pair_routing.py      # Differential pair routing
-├── kicad_parser.py           # KiCad file parsing
-├── kicad_writer.py           # KiCad S-expression output
-└── rust_router/              # Rust A* implementation
+├── route.py                   # Main CLI and batch orchestration
+├── routing_config.py          # Configuration dataclasses
+├── routing_state.py           # RoutingState - tracks progress and results
+├── routing_context.py         # Helper functions for obstacle building
+├── routing_utils.py           # Shared utilities
+├── obstacle_map.py            # Obstacle map building
+│
+├── diff_pair_loop.py          # Diff pair routing main loop
+├── single_ended_loop.py       # Single-ended routing main loop
+├── reroute_loop.py            # Reroute queue processing
+├── diff_pair_routing.py       # Diff pair A* implementation
+├── single_ended_routing.py    # Single-ended A* implementation
+│
+├── layer_swap_upfront.py      # Upfront layer optimization
+├── layer_swap_optimization.py # Layer swap cost analysis
+├── layer_swap_fallback.py     # Fallback layer swap on failure
+├── rip_up_reroute.py          # Rip-up and reroute logic
+├── blocking_analysis.py       # Analyze blocking nets
+├── target_swap.py             # Target assignment optimization
+│
+├── kicad_parser.py            # KiCad file parsing
+├── kicad_writer.py            # KiCad S-expression output
+├── output_writer.py           # Route output and debug geometry
+└── rust_router/               # Rust A* implementation
 ```
 
 ### Module Responsibilities
 
+#### Core
+
 | Module | Purpose |
 |--------|---------|
+| `route.py` | CLI interface and batch routing orchestration |
 | `routing_config.py` | `GridRouteConfig`, `GridCoord`, `DiffPair` dataclasses |
+| `routing_state.py` | `RoutingState` class tracking routing progress, results, and PCB modifications |
+| `routing_context.py` | Helper functions for building obstacles and recording route success |
 | `routing_utils.py` | Connectivity analysis, endpoint finding, MPS ordering, segment cleanup |
 | `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones) |
+
+#### Routing Loops
+
+| Module | Purpose |
+|--------|---------|
+| `diff_pair_loop.py` | Main loop iterating over differential pairs to route |
+| `single_ended_loop.py` | Main loop iterating over single-ended nets to route |
+| `reroute_loop.py` | Processes queue of routes that need rerouting after rip-up |
+| `diff_pair_routing.py` | Routes P/N pairs using centerline + offset approach with GND vias |
 | `single_ended_routing.py` | Routes individual nets using A* pathfinding |
-| `diff_pair_routing.py` | Routes P/N pairs using centerline + offset approach |
-| `route.py` | CLI interface and batch routing orchestration |
+
+#### Optimization
+
+| Module | Purpose |
+|--------|---------|
+| `layer_swap_upfront.py` | Analyzes and performs layer swaps before routing starts |
+| `layer_swap_optimization.py` | Cost/benefit analysis for layer swap decisions |
+| `layer_swap_fallback.py` | Attempts layer swap when a route fails |
+| `rip_up_reroute.py` | Rips up blocking routes and adds them to reroute queue |
+| `blocking_analysis.py` | Identifies which previously-routed nets are blocking |
+| `target_swap.py` | Hungarian algorithm for optimal source-to-target assignment |
 
 ## Grid Coordinate System
 

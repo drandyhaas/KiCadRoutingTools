@@ -72,13 +72,31 @@ python check_connected.py output.kicad_pcb --nets "*DATA*"
 KiCadRoutingTools/
 ├── route.py                  # Main CLI - batch routing orchestration
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
+├── routing_state.py          # RoutingState class - tracks routing progress
+├── routing_context.py        # Helper functions for obstacle building
 ├── routing_utils.py          # Shared utilities (connectivity, MPS, cleanup)
 ├── obstacle_map.py           # Obstacle map building functions
-├── single_ended_routing.py   # Single-ended net routing
-├── diff_pair_routing.py      # Differential pair routing
+│
+├── diff_pair_loop.py         # Differential pair routing loop
+├── single_ended_loop.py      # Single-ended routing loop
+├── reroute_loop.py           # Reroute queue processing
+├── diff_pair_routing.py      # Diff pair A* routing implementation
+├── single_ended_routing.py   # Single-ended A* routing implementation
+│
+├── layer_swap_upfront.py     # Upfront layer swap optimization
+├── layer_swap_optimization.py # Layer swap cost optimization
+├── layer_swap_fallback.py    # Fallback layer swap on failure
+├── stub_layer_switching.py   # Stub layer swap utilities
+├── polarity_swap.py          # P/N polarity swap handling
+├── target_swap.py            # Target assignment optimization
+├── rip_up_reroute.py         # Rip-up and reroute logic
+├── blocking_analysis.py      # Analyze blocking nets
+│
 ├── kicad_parser.py           # KiCad .kicad_pcb file parser
 ├── kicad_writer.py           # KiCad S-expression generator
-├── stub_layer_switching.py   # Stub layer swap optimization
+├── output_writer.py          # Route output and debug geometry
+├── chip_boundary.py          # Chip boundary detection
+│
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
 ├── bga_fanout.py             # BGA differential pair fanout generator
@@ -87,7 +105,8 @@ KiCadRoutingTools/
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
 ├── test_diffpair.py          # Test single/multiple diff pairs with DRC
-├── test_all_diffpairs.py     # Batch test all diff pairs (parallel, extensive options)
+├── test_all_diffpairs.py     # Batch test all diff pairs (parallel)
+│
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
 └── docs/                     # Documentation
@@ -95,15 +114,39 @@ KiCadRoutingTools/
 
 ## Module Overview
 
+### Core Routing
+
 | Module | Purpose |
 |--------|---------|
+| `route.py` | CLI and batch routing orchestration |
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
+| `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
+| `routing_context.py` | Helper functions for building obstacles and recording success |
 | `routing_utils.py` | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
 | `obstacle_map.py` | Obstacle map building from PCB data |
-| `single_ended_routing.py` | Single-ended net routing with A* |
-| `diff_pair_routing.py` | Differential pair centerline + offset routing with GND vias |
-| `stub_layer_switching.py` | Stub layer swap optimization for diff pairs and single-ended nets |
-| `route.py` | CLI and batch routing orchestration |
+
+### Routing Loops
+
+| Module | Purpose |
+|--------|---------|
+| `diff_pair_loop.py` | Main loop for routing differential pairs |
+| `single_ended_loop.py` | Main loop for routing single-ended nets |
+| `reroute_loop.py` | Processes reroute queue for failed routes |
+| `diff_pair_routing.py` | Differential pair A* with centerline + offset and GND vias |
+| `single_ended_routing.py` | Single-ended net A* routing |
+
+### Optimization
+
+| Module | Purpose |
+|--------|---------|
+| `layer_swap_upfront.py` | Upfront layer swap optimization before routing |
+| `layer_swap_optimization.py` | Layer swap cost/benefit analysis |
+| `layer_swap_fallback.py` | Try layer swap when route fails |
+| `stub_layer_switching.py` | Low-level stub layer swap utilities |
+| `polarity_swap.py` | P/N polarity swap for differential pairs |
+| `target_swap.py` | Hungarian algorithm for optimal target assignment |
+| `rip_up_reroute.py` | Rip-up blocking routes and retry |
+| `blocking_analysis.py` | Analyze which nets are blocking |
 
 ## Performance
 
