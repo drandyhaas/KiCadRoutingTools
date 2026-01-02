@@ -65,6 +65,305 @@ def direction_to_theta_idx(dx: float, dy: float) -> int:
     return theta_idx
 
 
+def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
+                         label, layer_names, spacing_mm, config, obstacles,
+                         connector_obstacles, coord, neighbor_stubs):
+    """Find open position for setback, preferring 0° but angling away from nearby stubs if needed.
+
+    Only angles away from 0° if the nearest unrouted stub is too close (within
+    required diff pair clearance). Returns list with best candidate first.
+
+    Each candidate is (gx, gy, dx, dy, angle_deg, dist_to_nearest_stub).
+    """
+    current_layer = layer_names[layer_idx]
+
+    # Required clearance from centerline to neighboring stub
+    # P/N tracks are at ±spacing_mm from centerline, need config.clearance to other stub
+    # Add factor of 2 for extra margin to ensure future routes have room
+    required_clearance = 2 * (spacing_mm + config.clearance)
+
+    # Generate angles: 0, then ±max/4, ±max/2, ±3*max/4, ±max
+    max_angle = config.max_setback_angle
+    angles_deg = [0,
+                  max_angle / 4, -max_angle / 4,
+                  max_angle / 2, -max_angle / 2,
+                  3 * max_angle / 4, -3 * max_angle / 4,
+                  max_angle, -max_angle]
+
+    def check_angle_valid(angle_deg):
+        """Check if angle is valid (not blocked). Returns (gx, gy, dx, dy, x, y) or None."""
+        angle_rad = math.radians(angle_deg)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        dx = dir_x * cos_a - dir_y * sin_a
+        dy = dir_x * sin_a + dir_y * cos_a
+
+        x = center_x + dx * setback
+        y = center_y + dy * setback
+        gx, gy = coord.to_grid(x, y)
+
+        if obstacles.is_blocked(gx, gy, layer_idx):
+            return None
+        if not check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
+            return None
+        # Probe ahead
+        probe_dist = config.grid_step * 3
+        probe_x = x + dx * probe_dist
+        probe_y = y + dy * probe_dist
+        probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
+        if obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
+            return None
+        return (gx, gy, dx, dy, x, y)
+
+    def find_nearest_stub(x, y):
+        """Find nearest same-layer stub from position (x, y). Returns (dist, stub_x, stub_y) or (inf, None, None)."""
+        min_dist = float('inf')
+        closest = (None, None)
+        if neighbor_stubs:
+            for stub_x, stub_y, stub_layer in neighbor_stubs:
+                if stub_layer != current_layer:
+                    continue
+                dist = math.sqrt((x - stub_x)**2 + (y - stub_y)**2)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest = (stub_x, stub_y)
+        return min_dist, closest[0], closest[1]
+
+    # Check 0° first
+    zero_result = check_angle_valid(0)
+    if zero_result:
+        gx, gy, dx, dy, x, y = zero_result
+        dist, stub_x, stub_y = find_nearest_stub(x, y)
+
+        # Collect all valid angles as fallbacks (sorted by angle magnitude)
+        other_candidates = []
+        for angle_deg in sorted(angles_deg, key=abs):
+            if angle_deg == 0:
+                continue
+            result = check_angle_valid(angle_deg)
+            if result:
+                ax, ay, adx, ady, ax_pos, ay_pos = result
+                a_dist, _, _ = find_nearest_stub(ax_pos, ay_pos)
+                other_candidates.append((ax, ay, adx, ady, angle_deg, a_dist))
+
+        if dist >= required_clearance:
+            # 0° is valid and has enough clearance - use it as primary
+            if config.verbose:
+                if stub_x is not None:
+                    print(f"      {label} 0.0°: OK (nearest stub at ({stub_x:.1f},{stub_y:.1f}) dist={dist:.2f}mm >= {required_clearance:.2f}mm)")
+                else:
+                    print(f"      {label} 0.0°: OK (no nearby stubs on {current_layer})")
+            return [(gx, gy, dx, dy, 0.0, dist)] + other_candidates
+
+        # 0° is valid but too close to stub - need to angle away
+        if config.verbose:
+            print(f"      {label} 0.0°: too close to stub at ({stub_x:.1f},{stub_y:.1f}) dist={dist:.2f}mm < {required_clearance:.2f}mm")
+
+        # Determine which direction to angle based on stub position
+        # Cross product: positive means stub is on left (+angle side)
+        stub_vec_x = stub_x - center_x
+        stub_vec_y = stub_y - center_y
+        cross = dir_x * stub_vec_y - dir_y * stub_vec_x
+        # Angle away from stub: if stub on left (cross > 0), go negative angle
+        preferred_sign = -1 if cross > 0 else 1
+
+        # Find the best angle that clears
+        best_clearing_angle = None
+        for cand in other_candidates:
+            if cand[4] * preferred_sign > 0 and cand[5] >= required_clearance:
+                best_clearing_angle = cand
+                if config.verbose:
+                    print(f"      {label} {cand[4]:+.1f}°: OK (cleared to {cand[5]:.2f}mm)")
+                break
+
+        if best_clearing_angle:
+            # Put clearing angle first, then 0°, then others
+            remaining = [c for c in other_candidates if c != best_clearing_angle]
+            return [best_clearing_angle, (gx, gy, dx, dy, 0.0, dist)] + remaining
+        else:
+            # No angle clears - use 0° as primary anyway
+            if config.verbose:
+                print(f"      {label} using 0.0° (no angle clears {required_clearance:.2f}mm)")
+            return [(gx, gy, dx, dy, 0.0, dist)] + other_candidates
+
+    # 0° is blocked - find any valid angle, prefer smaller angles
+    if config.verbose:
+        print(f"      {label} 0.0°: blocked")
+
+    valid_candidates = []
+    for angle_deg in sorted(angles_deg, key=abs):
+        if angle_deg == 0:
+            continue
+        result = check_angle_valid(angle_deg)
+        if result:
+            gx, gy, dx, dy, x, y = result
+            dist, _, _ = find_nearest_stub(x, y)
+            valid_candidates.append((gx, gy, dx, dy, angle_deg, dist))
+            if config.verbose:
+                print(f"      {label} {angle_deg:+.1f}°: OK (dist={dist:.2f}mm)")
+
+    if not valid_candidates:
+        print(f"  Error: {label} - no valid position at setback={setback:.2f}mm (all angles blocked)")
+        return []
+
+    # Sort by clearance (larger better), then by angle magnitude (smaller better)
+    valid_candidates.sort(key=lambda c: (c[5], -abs(c[4])), reverse=True)
+    return valid_candidates
+
+
+def _collect_setback_blocked_cells(center_x, center_y, dir_x, dir_y, layer_idx, setback,
+                                    config, obstacles, connector_obstacles, coord):
+    """Collect blocked cells at setback positions for rip-up analysis.
+    Called only after _find_open_positions returns empty list.
+    """
+    max_angle = config.max_setback_angle
+    angles_deg = [0,
+                  max_angle / 4, -max_angle / 4,
+                  max_angle / 2, -max_angle / 2,
+                  3 * max_angle / 4, -3 * max_angle / 4,
+                  max_angle, -max_angle]
+    blocked = []
+    step = config.grid_step / 2
+
+    for angle_deg in angles_deg:
+        angle_rad = math.radians(angle_deg)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        dx = dir_x * cos_a - dir_y * sin_a
+        dy = dir_x * sin_a + dir_y * cos_a
+
+        x = center_x + dx * setback
+        y = center_y + dy * setback
+        gx, gy = coord.to_grid(x, y)
+
+        # Collect blocked setback position
+        if obstacles.is_blocked(gx, gy, layer_idx):
+            if (gx, gy, layer_idx) not in blocked:
+                blocked.append((gx, gy, layer_idx))
+
+        # Collect blocked cells along connector path
+        length = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+        if length > 0:
+            path_dx = (x - center_x) / length
+            path_dy = (y - center_y) / length
+            dist = 0.0
+            while dist <= length:
+                px = center_x + path_dx * dist
+                py = center_y + path_dy * dist
+                pgx, pgy = coord.to_grid(px, py)
+                if connector_obstacles.is_blocked(pgx, pgy, layer_idx):
+                    if (pgx, pgy, layer_idx) not in blocked:
+                        blocked.append((pgx, pgy, layer_idx))
+                dist += step
+
+        # Also collect "probe ahead" blocked cells (3 grid cells ahead of setback)
+        # This catches cases where setback and connector are clear but routing direction is blocked
+        probe_dist = config.grid_step * 3
+        probe_x = x + dx * probe_dist
+        probe_y = y + dy * probe_dist
+        probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
+        if obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
+            if (probe_gx, probe_gy, layer_idx) not in blocked:
+                blocked.append((probe_gx, probe_gy, layer_idx))
+
+    return blocked
+
+
+def _detect_polarity(simplified_path, coord,
+                     p_src_x, p_src_y, n_src_x, n_src_y,
+                     p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
+                     config):
+    """
+    Detect which side of the centerline P should be on and whether polarity swap is needed.
+
+    Args:
+        simplified_path: List of (gx, gy, layer) representing simplified centerline
+        coord: GridCoord for coordinate conversion
+        p_src_x, p_src_y: P source position in mm
+        n_src_x, n_src_y: N source position in mm
+        p_tgt_x, p_tgt_y: P target position in mm
+        n_tgt_x, n_tgt_y: N target position in mm
+        config: Routing config (for fix_polarity flag)
+
+    Returns:
+        (p_sign, polarity_fixed, polarity_swap_needed, has_layer_change)
+        - p_sign: +1 or -1, which perpendicular side P should be offset to
+        - polarity_fixed: True if we'll swap target pads in output
+        - polarity_swap_needed: True if source and target polarities differ
+        - has_layer_change: True if path has vias (layer changes)
+    """
+    # Determine which side of the centerline P is on
+    # Use the first segment direction of the simplified path
+    if len(simplified_path) >= 2:
+        first_gx, first_gy, _ = simplified_path[0]
+        second_gx, second_gy, _ = simplified_path[1]
+        first_x, first_y = coord.to_float(first_gx, first_gy)
+        second_x, second_y = coord.to_float(second_gx, second_gy)
+        path_dir_x = second_x - first_x
+        path_dir_y = second_y - first_y
+    else:
+        path_dir_x, path_dir_y = 1.0, 0.0
+
+    # Vector from source midpoint to P source position
+    src_midpoint_x = (p_src_x + n_src_x) / 2
+    src_midpoint_y = (p_src_y + n_src_y) / 2
+    to_p_dx = p_src_x - src_midpoint_x
+    to_p_dy = p_src_y - src_midpoint_y
+
+    # Cross product: determines which side of the path direction P is on at source
+    src_cross = path_dir_x * to_p_dy - path_dir_y * to_p_dx
+    src_p_sign = +1 if src_cross >= 0 else -1
+
+    # Calculate target polarity using path direction at target end
+    # Path arrives at target, so use negative of last segment direction
+    if len(simplified_path) >= 2:
+        last_gx1, last_gy1, _ = simplified_path[-2]
+        last_gx2, last_gy2, _ = simplified_path[-1]
+        last_cx1, last_cy1 = coord.to_float(last_gx1, last_gy1)
+        last_cx2, last_cy2 = coord.to_float(last_gx2, last_gy2)
+        last_len = math.sqrt((last_cx2 - last_cx1)**2 + (last_cy2 - last_cy1)**2)
+        if last_len > 0.001:
+            tgt_path_dir_x = (last_cx2 - last_cx1) / last_len
+            tgt_path_dir_y = (last_cy2 - last_cy1) / last_len
+        else:
+            tgt_path_dir_x, tgt_path_dir_y = path_dir_x, path_dir_y
+    else:
+        tgt_path_dir_x, tgt_path_dir_y = path_dir_x, path_dir_y
+
+    # Vector from target midpoint to P target position
+    tgt_midpoint_x = (p_tgt_x + n_tgt_x) / 2
+    tgt_midpoint_y = (p_tgt_y + n_tgt_y) / 2
+    tgt_to_p_dx = p_tgt_x - tgt_midpoint_x
+    tgt_to_p_dy = p_tgt_y - tgt_midpoint_y
+
+    # Cross product: determines which side of the path direction P is on at target
+    tgt_cross = tgt_path_dir_x * tgt_to_p_dy - tgt_path_dir_y * tgt_to_p_dx
+    tgt_p_sign = +1 if tgt_cross >= 0 else -1
+
+    # Check if polarity differs between source and target
+    polarity_swap_needed = (src_p_sign != tgt_p_sign)
+
+    # Check if path has layer changes (vias)
+    has_layer_change = False
+    for i in range(len(simplified_path) - 1):
+        if simplified_path[i][2] != simplified_path[i + 1][2]:
+            has_layer_change = True
+            break
+
+    # Handle polarity fix - mark for pad/stub net swap in output file
+    # We DON'T swap coordinates here - instead we'll swap target pad and stub nets
+    # This preserves the P→P, N→N geometry and fixes polarity at the schematic level
+    polarity_fixed = False
+    if polarity_swap_needed and config.fix_polarity:
+        print(f"  Polarity swap needed - will swap target pad and stub nets in output")
+        polarity_fixed = True
+
+    # Always use source polarity
+    p_sign = src_p_sign
+
+    return p_sign, polarity_fixed, polarity_swap_needed, has_layer_change
+
+
 def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
                              config: GridRouteConfig) -> Tuple[List, List, str]:
     """
@@ -509,215 +808,30 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # (connectors are single tracks that don't need diff pair extra clearance)
     connector_obstacles = base_obstacles if base_obstacles is not None else obstacles
 
-    # Find open positions for source and target centerline points
+    # Allow radius for finding open positions near blocked cells
     allow_radius = 2
 
-    def find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, sb, label):
-        """Find open position, preferring 0° but angling away from nearby stubs if needed.
-
-        Only angles away from 0° if the nearest unrouted stub is too close (within
-        required diff pair clearance). Returns list with best candidate first.
-        """
-        current_layer = layer_names[layer_idx]
-
-        # Required clearance from centerline to neighboring stub
-        # P/N tracks are at ±spacing_mm from centerline, need config.clearance to other stub
-        # Add factor of 2 for extra margin to ensure future routes have room
-        required_clearance = 2 * (spacing_mm + config.clearance)
-
-        # Generate angles: 0, then ±max/4, ±max/2, ±3*max/4, ±max
-        max_angle = config.max_setback_angle
-        angles_deg = [0,
-                      max_angle / 4, -max_angle / 4,
-                      max_angle / 2, -max_angle / 2,
-                      3 * max_angle / 4, -3 * max_angle / 4,
-                      max_angle, -max_angle]
-
-        def check_angle_valid(angle_deg):
-            """Check if angle is valid (not blocked). Returns (gx, gy, dx, dy, x, y) or None."""
-            angle_rad = math.radians(angle_deg)
-            cos_a = math.cos(angle_rad)
-            sin_a = math.sin(angle_rad)
-            dx = dir_x * cos_a - dir_y * sin_a
-            dy = dir_x * sin_a + dir_y * cos_a
-
-            x = center_x + dx * sb
-            y = center_y + dy * sb
-            gx, gy = coord.to_grid(x, y)
-
-            if obstacles.is_blocked(gx, gy, layer_idx):
-                return None
-            if not check_line_clearance(connector_obstacles, center_x, center_y, x, y, layer_idx, config):
-                return None
-            # Probe ahead
-            probe_dist = config.grid_step * 3
-            probe_x = x + dx * probe_dist
-            probe_y = y + dy * probe_dist
-            probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
-            if obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
-                return None
-            return (gx, gy, dx, dy, x, y)
-
-        def find_nearest_stub(x, y):
-            """Find nearest same-layer stub from position (x, y). Returns (dist, stub_x, stub_y) or (inf, None, None)."""
-            min_dist = float('inf')
-            closest = (None, None)
-            if neighbor_stubs:
-                for stub_x, stub_y, stub_layer in neighbor_stubs:
-                    if stub_layer != current_layer:
-                        continue
-                    dist = math.sqrt((x - stub_x)**2 + (y - stub_y)**2)
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest = (stub_x, stub_y)
-            return min_dist, closest[0], closest[1]
-
-        # Check 0° first
-        zero_result = check_angle_valid(0)
-        if zero_result:
-            gx, gy, dx, dy, x, y = zero_result
-            dist, stub_x, stub_y = find_nearest_stub(x, y)
-
-            # Collect all valid angles as fallbacks (sorted by angle magnitude)
-            other_candidates = []
-            for angle_deg in sorted(angles_deg, key=abs):
-                if angle_deg == 0:
-                    continue
-                result = check_angle_valid(angle_deg)
-                if result:
-                    ax, ay, adx, ady, ax_pos, ay_pos = result
-                    a_dist, _, _ = find_nearest_stub(ax_pos, ay_pos)
-                    other_candidates.append((ax, ay, adx, ady, angle_deg, a_dist))
-
-            if dist >= required_clearance:
-                # 0° is valid and has enough clearance - use it as primary
-                if config.verbose:
-                    if stub_x is not None:
-                        print(f"      {label} 0.0°: OK (nearest stub at ({stub_x:.1f},{stub_y:.1f}) dist={dist:.2f}mm >= {required_clearance:.2f}mm)")
-                    else:
-                        print(f"      {label} 0.0°: OK (no nearby stubs on {current_layer})")
-                return [(gx, gy, dx, dy, 0.0, dist)] + other_candidates
-
-            # 0° is valid but too close to stub - need to angle away
-            if config.verbose:
-                print(f"      {label} 0.0°: too close to stub at ({stub_x:.1f},{stub_y:.1f}) dist={dist:.2f}mm < {required_clearance:.2f}mm")
-
-            # Determine which direction to angle based on stub position
-            # Cross product: positive means stub is on left (+angle side)
-            stub_vec_x = stub_x - center_x
-            stub_vec_y = stub_y - center_y
-            cross = dir_x * stub_vec_y - dir_y * stub_vec_x
-            # Angle away from stub: if stub on left (cross > 0), go negative angle
-            preferred_sign = -1 if cross > 0 else 1
-
-            # Find the best angle that clears
-            best_clearing_angle = None
-            for cand in other_candidates:
-                if cand[4] * preferred_sign > 0 and cand[5] >= required_clearance:
-                    best_clearing_angle = cand
-                    if config.verbose:
-                        print(f"      {label} {cand[4]:+.1f}°: OK (cleared to {cand[5]:.2f}mm)")
-                    break
-
-            if best_clearing_angle:
-                # Put clearing angle first, then 0°, then others
-                remaining = [c for c in other_candidates if c != best_clearing_angle]
-                return [best_clearing_angle, (gx, gy, dx, dy, 0.0, dist)] + remaining
-            else:
-                # No angle clears - use 0° as primary anyway
-                if config.verbose:
-                    print(f"      {label} using 0.0° (no angle clears {required_clearance:.2f}mm)")
-                return [(gx, gy, dx, dy, 0.0, dist)] + other_candidates
-
-        # 0° is blocked - find any valid angle, prefer smaller angles
-        if config.verbose:
-            print(f"      {label} 0.0°: blocked")
-
-        valid_candidates = []
-        for angle_deg in sorted(angles_deg, key=abs):
-            if angle_deg == 0:
-                continue
-            result = check_angle_valid(angle_deg)
-            if result:
-                gx, gy, dx, dy, x, y = result
-                dist, _, _ = find_nearest_stub(x, y)
-                valid_candidates.append((gx, gy, dx, dy, angle_deg, dist))
-                if config.verbose:
-                    print(f"      {label} {angle_deg:+.1f}°: OK (dist={dist:.2f}mm)")
-
-        if not valid_candidates:
-            print(f"  Error: {label} - no valid position at setback={sb:.2f}mm (all angles blocked)")
-            return []
-
-        # Sort by clearance (larger better), then by angle magnitude (smaller better)
-        valid_candidates.sort(key=lambda c: (c[5], -abs(c[4])), reverse=True)
-        return valid_candidates
-
-    def collect_setback_blocked_cells(center_x, center_y, dir_x, dir_y, layer_idx, sb):
-        """Collect blocked cells at setback positions for rip-up analysis.
-        Called only after find_open_position returns None.
-        """
-        max_angle = config.max_setback_angle
-        angles_deg = [0,
-                      max_angle / 4, -max_angle / 4,
-                      max_angle / 2, -max_angle / 2,
-                      3 * max_angle / 4, -3 * max_angle / 4,
-                      max_angle, -max_angle]
-        blocked = []
-        step = config.grid_step / 2
-
-        for angle_deg in angles_deg:
-            angle_rad = math.radians(angle_deg)
-            cos_a = math.cos(angle_rad)
-            sin_a = math.sin(angle_rad)
-            dx = dir_x * cos_a - dir_y * sin_a
-            dy = dir_x * sin_a + dir_y * cos_a
-
-            x = center_x + dx * sb
-            y = center_y + dy * sb
-            gx, gy = coord.to_grid(x, y)
-
-            # Collect blocked setback position
-            if obstacles.is_blocked(gx, gy, layer_idx):
-                if (gx, gy, layer_idx) not in blocked:
-                    blocked.append((gx, gy, layer_idx))
-
-            # Collect blocked cells along connector path
-            length = math.sqrt((x - center_x)**2 + (y - center_y)**2)
-            if length > 0:
-                path_dx = (x - center_x) / length
-                path_dy = (y - center_y) / length
-                dist = 0.0
-                while dist <= length:
-                    px = center_x + path_dx * dist
-                    py = center_y + path_dy * dist
-                    pgx, pgy = coord.to_grid(px, py)
-                    if connector_obstacles.is_blocked(pgx, pgy, layer_idx):
-                        if (pgx, pgy, layer_idx) not in blocked:
-                            blocked.append((pgx, pgy, layer_idx))
-                    dist += step
-
-            # Also collect "probe ahead" blocked cells (3 grid cells ahead of setback)
-            # This catches cases where setback and connector are clear but routing direction is blocked
-            probe_dist = config.grid_step * 3
-            probe_x = x + dx * probe_dist
-            probe_y = y + dy * probe_dist
-            probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
-            if obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
-                if (probe_gx, probe_gy, layer_idx) not in blocked:
-                    blocked.append((probe_gx, probe_gy, layer_idx))
-
-        return blocked
-
     # Get all valid setback positions for source and target, sorted by preference
-    src_candidates = find_open_positions(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source")
+    src_candidates = _find_open_positions(
+        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
+        layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+    )
     if not src_candidates:
-        blocked = collect_setback_blocked_cells(center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback)
+        blocked = _collect_setback_blocked_cells(
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+            config, obstacles, connector_obstacles, coord
+        )
         return None, 0, blocked, None
 
-    tgt_candidates = find_open_positions(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target")
+    tgt_candidates = _find_open_positions(
+        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
+        layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+    )
     if not tgt_candidates:
-        blocked = collect_setback_blocked_cells(center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback)
+        blocked = _collect_setback_blocked_cells(
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+            config, obstacles, connector_obstacles, coord
+        )
         return None, 0, blocked, None
 
     # Calculate turning radius in grid units
@@ -1303,74 +1417,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     simplified_path_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], layer)
                              for gx, gy, layer in simplified_path]
 
-    # Determine which side of the centerline P is on
-    # Use the first segment direction of the simplified path
-    if len(simplified_path) >= 2:
-        first_gx, first_gy, _ = simplified_path[0]
-        second_gx, second_gy, _ = simplified_path[1]
-        first_x, first_y = coord.to_float(first_gx, first_gy)
-        second_x, second_y = coord.to_float(second_gx, second_gy)
-        path_dir_x = second_x - first_x
-        path_dir_y = second_y - first_y
-    else:
-        path_dir_x, path_dir_y = 1.0, 0.0
-
-    # Vector from source midpoint to P source position
-    src_midpoint_x = (p_src_x + n_src_x) / 2
-    src_midpoint_y = (p_src_y + n_src_y) / 2
-    to_p_dx = p_src_x - src_midpoint_x
-    to_p_dy = p_src_y - src_midpoint_y
-
-    # Cross product: determines which side of the path direction P is on at source
-    src_cross = path_dir_x * to_p_dy - path_dir_y * to_p_dx
-    src_p_sign = +1 if src_cross >= 0 else -1
-
-    # Calculate target polarity using path direction at target end
-    # Path arrives at target, so use negative of last segment direction
-    if len(simplified_path) >= 2:
-        last_gx1, last_gy1, _ = simplified_path[-2]
-        last_gx2, last_gy2, _ = simplified_path[-1]
-        last_cx1, last_cy1 = coord.to_float(last_gx1, last_gy1)
-        last_cx2, last_cy2 = coord.to_float(last_gx2, last_gy2)
-        last_len = math.sqrt((last_cx2 - last_cx1)**2 + (last_cy2 - last_cy1)**2)
-        if last_len > 0.001:
-            tgt_path_dir_x = (last_cx2 - last_cx1) / last_len
-            tgt_path_dir_y = (last_cy2 - last_cy1) / last_len
-        else:
-            tgt_path_dir_x, tgt_path_dir_y = path_dir_x, path_dir_y
-    else:
-        tgt_path_dir_x, tgt_path_dir_y = path_dir_x, path_dir_y
-
-    # Vector from target midpoint to P target position
-    tgt_midpoint_x = (p_tgt_x + n_tgt_x) / 2
-    tgt_midpoint_y = (p_tgt_y + n_tgt_y) / 2
-    tgt_to_p_dx = p_tgt_x - tgt_midpoint_x
-    tgt_to_p_dy = p_tgt_y - tgt_midpoint_y
-
-    # Cross product: determines which side of the path direction P is on at target
-    tgt_cross = tgt_path_dir_x * tgt_to_p_dy - tgt_path_dir_y * tgt_to_p_dx
-    tgt_p_sign = +1 if tgt_cross >= 0 else -1
-
-    # Check if polarity differs between source and target
-    polarity_swap_needed = (src_p_sign != tgt_p_sign)
-
-    # Check if path has layer changes (vias)
-    has_layer_change = False
-    for i in range(len(simplified_path) - 1):
-        if simplified_path[i][2] != simplified_path[i + 1][2]:
-            has_layer_change = True
-            break
-
-    # Handle polarity fix - mark for pad/stub net swap in output file
-    # We DON'T swap coordinates here - instead we'll swap target pad and stub nets
-    # This preserves the P→P, N→N geometry and fixes polarity at the schematic level
-    polarity_fixed = False
-    if polarity_swap_needed and config.fix_polarity:
-        print(f"  Polarity swap needed - will swap target pad and stub nets in output")
-        polarity_fixed = True
-
-    # Always use source polarity
-    p_sign = src_p_sign
+    # Detect polarity (which side of centerline P should be on)
+    p_sign, polarity_fixed, polarity_swap_needed, has_layer_change = _detect_polarity(
+        simplified_path, coord,
+        p_src_x, p_src_y, n_src_x, n_src_y,
+        p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
+        config
+    )
     n_sign = -p_sign
 
     # Create P and N paths using perpendicular offsets from centerline
