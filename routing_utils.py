@@ -31,6 +31,88 @@ def pos_key(x: float, y: float) -> Tuple[float, float]:
     return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS))
 
 
+def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
+    """Check if a pad is on the outer row/column of any BGA zone.
+
+    Args:
+        pad_x, pad_y: Pad position to check (not stub endpoint)
+        bga_zones: List of BGA zones, either:
+                   - 4-tuple: (min_x, min_y, max_x, max_y) - uses default tolerance
+                   - 5-tuple: (min_x, min_y, max_x, max_y, edge_tolerance)
+
+    Returns:
+        True if pad is inside a BGA zone AND in the outer row/column
+    """
+    for zone in bga_zones:
+        min_x, min_y, max_x, max_y = zone[:4]
+        # Use per-zone tolerance if available, else default (0.5mm margin + 1mm pitch * 1.1)
+        edge_tolerance = zone[4] if len(zone) > 4 else 1.6
+        # Check if pad is INSIDE this zone (with small tolerance for floating point)
+        inside_tolerance = 0.01  # 10 microns
+        if (pad_x >= min_x - inside_tolerance and pad_x <= max_x + inside_tolerance and
+            pad_y >= min_y - inside_tolerance and pad_y <= max_y + inside_tolerance):
+            # Check if it's on an edge (within tolerance of min/max)
+            on_left = abs(pad_x - min_x) <= edge_tolerance
+            on_right = abs(pad_x - max_x) <= edge_tolerance
+            on_bottom = abs(pad_y - min_y) <= edge_tolerance
+            on_top = abs(pad_y - max_y) <= edge_tolerance
+            if on_left or on_right or on_bottom or on_top:
+                return True
+    return False
+
+
+def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float = 0.01) -> Optional[Pad]:
+    """Find a pad at the given position within tolerance."""
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if abs(pad.global_x - x) < tolerance and abs(pad.global_y - y) < tolerance:
+                return pad
+    return None
+
+
+def expand_net_patterns(pcb_data: PCBData, patterns: List[str]) -> List[str]:
+    """
+    Expand wildcard patterns to matching net names.
+
+    Patterns can include * and ? wildcards (fnmatch style).
+    Example: "Net-(U2A-DATA_*)" matches Net-(U2A-DATA_0), Net-(U2A-DATA_1), etc.
+
+    Returns list of unique net names in sorted order for patterns,
+    preserving order of non-pattern names.
+    """
+    # Collect net names from both pcb.nets and pads_by_net
+    all_net_names = set(net.name for net in pcb_data.nets.values())
+    # Also include net names from pads (for nets not in pcb.nets)
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if pad.net_name:
+                all_net_names.add(pad.net_name)
+                break  # Only need one pad's net_name per net
+    all_net_names = list(all_net_names)
+    result = []
+    seen = set()
+
+    for pattern in patterns:
+        if '*' in pattern or '?' in pattern:
+            # It's a wildcard pattern - find all matching nets
+            matches = sorted([name for name in all_net_names if fnmatch.fnmatch(name, pattern)])
+            if not matches:
+                print(f"Warning: Pattern '{pattern}' matched no nets")
+            else:
+                print(f"Pattern '{pattern}' matched {len(matches)} nets")
+            for name in matches:
+                if name not in seen:
+                    result.append(name)
+                    seen.add(name)
+        else:
+            # Literal net name
+            if pattern not in seen:
+                result.append(pattern)
+                seen.add(pattern)
+
+    return result
+
+
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     """
     Extract differential pair base name and polarity from net name.
