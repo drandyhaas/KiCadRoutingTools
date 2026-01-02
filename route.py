@@ -55,6 +55,7 @@ from routing_context import (
     record_single_ended_success, record_diff_pair_success,
     restore_ripped_net
 )
+from routing_state import RoutingState, create_routing_state
 import re
 
 # ANSI color codes for terminal output
@@ -529,24 +530,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if visualize:
         vis_callback.on_routing_start(total_routes, layers, grid_step)
 
-    # Track which nets have been routed (their segments/vias are now in pcb_data)
-    routed_net_ids = []
-    routed_net_paths = {}  # net_id -> path (grid coords) for blocking analysis
-    routed_results = {}  # net_id -> result dict (for rip-up)
-    diff_pair_by_net_id = {}  # net_id -> (pair_name, pair) for looking up diff pairs
-    # Cache for track proximity costs: net_id -> {layer_idx -> {(gx,gy) -> cost}}
-    # Computed once when route succeeds, removed when ripped up
-    track_proximity_cache = {}
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
-    reroute_queue = []  # List of (pair_name, pair) or (net_name, net_id) for ripped-up nets
-    polarity_swapped_pairs = set()  # Track pairs that have already had polarity swap applied
-    rip_and_retry_history = set()  # Set of (routing_net_id, frozenset(ripped_net_ids)) to prevent infinite loops
-    ripup_success_pairs = set()  # Pairs that succeeded after ripping up blockers
-    rerouted_pairs = set()  # Pairs that were ripped up and then successfully rerouted
-    remaining_net_ids = list(all_net_ids_to_route)
-
     # Get ALL unrouted nets in the PCB for stub proximity costs
-    # (not just the ones we're routing in this batch)
     all_unrouted_net_ids = set(get_all_unrouted_net_ids(pcb_data))
     print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
 
@@ -567,6 +551,45 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if gnd_net_id:
             print(f"GND net ID: {gnd_net_id} (GND vias will be added as obstacles)")
 
+    # Create routing state object to hold all shared state
+    state = create_routing_state(
+        pcb_data=pcb_data,
+        config=config,
+        all_net_ids_to_route=all_net_ids_to_route,
+        base_obstacles=base_obstacles,
+        diff_pair_base_obstacles=diff_pair_base_obstacles,
+        diff_pair_extra_clearance=diff_pair_extra_clearance,
+        gnd_net_id=gnd_net_id,
+        all_unrouted_net_ids=all_unrouted_net_ids,
+        total_routes=total_routes,
+        enable_layer_switch=enable_layer_switch,
+        debug_lines=debug_lines,
+        target_swaps=target_swaps,
+        target_swap_info=target_swap_info,
+        single_ended_target_swaps=single_ended_target_swaps,
+        single_ended_target_swap_info=single_ended_target_swap_info,
+        all_segment_modifications=all_segment_modifications,
+        all_swap_vias=all_swap_vias,
+        total_layer_swaps=total_layer_swaps,
+    )
+
+    # Create local aliases for frequently-used state fields (enables gradual migration)
+    routed_net_ids = state.routed_net_ids
+    routed_net_paths = state.routed_net_paths
+    routed_results = state.routed_results
+    diff_pair_by_net_id = state.diff_pair_by_net_id
+    track_proximity_cache = state.track_proximity_cache
+    layer_map = state.layer_map
+    reroute_queue = state.reroute_queue
+    polarity_swapped_pairs = state.polarity_swapped_pairs
+    rip_and_retry_history = state.rip_and_retry_history
+    ripup_success_pairs = state.ripup_success_pairs
+    rerouted_pairs = state.rerouted_pairs
+    remaining_net_ids = state.remaining_net_ids
+    results = state.results
+    pad_swaps = state.pad_swaps
+
+    # Counters (kept as locals, not aliased from state)
     route_index = 0
 
     # Route differential pairs first (they're more constrained)
