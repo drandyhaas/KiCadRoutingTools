@@ -1105,10 +1105,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         start_time = time.time()
 
-        # Clone base obstacles
-        obstacles = base_obstacles.clone()
-
-        # Build visualization data if needed
+        # Build obstacles (with visualization tracking if needed)
         vis_data = None
         if visualize:
             # Clone the base vis data
@@ -1118,48 +1115,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bga_zones_grid=list(base_vis_data.bga_zones_grid),
                 bounds=base_vis_data.bounds
             )
-
-        # Add previously routed nets' segments/vias/pads as obstacles (from pcb_data)
-        # Use diagonal_margin=0.25 to catch diagonal segments near vias (fixes DRC for single-ended)
-        for routed_id in routed_net_ids:
-            if visualize:
+            # Build obstacles with visualization tracking (inline for debug visibility)
+            obstacles = base_obstacles.clone()
+            for routed_id in routed_net_ids:
                 add_net_obstacles_with_vis(obstacles, pcb_data, routed_id, config, 0.0,
                                             vis_data.blocked_cells, vis_data.blocked_vias, diagonal_margin=0.25)
-            else:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
-                add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diagonal_margin=0.25)
-                add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config)
-
-        # Add GND vias as obstacles (from previous diff pair routing)
-        if gnd_net_id is not None:
-            add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diagonal_margin=0.25)
-
-        # Add other unrouted nets' stubs, vias, and pads as obstacles (not the current net)
-        other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
-        for other_net_id in other_unrouted:
-            if visualize:
+            if gnd_net_id is not None:
+                add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diagonal_margin=0.25)
+            other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
+            for other_net_id in other_unrouted:
                 add_net_obstacles_with_vis(obstacles, pcb_data, other_net_id, config, 0.0,
                                             vis_data.blocked_cells, vis_data.blocked_vias, diagonal_margin=0.25)
-            else:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
-                add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diagonal_margin=0.25)
-                add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
-
-        # Add stub proximity costs for ALL unrouted nets in PCB (not just current batch)
-        stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
-                                   if nid != net_id and nid not in routed_net_ids]
-        unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-        if unrouted_stubs:
-            add_stub_proximity_costs(obstacles, unrouted_stubs, config)
-        # Add track proximity costs for previously routed tracks (same layer only)
-        merge_track_proximity_costs(obstacles, track_proximity_cache)
-
-        # Add cross-layer track data for vertical alignment attraction
-        add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
-                                exclude_net_ids={net_id})
-
-        # Add same-net via clearance blocking (for DRC - vias can't be too close even on same net)
-        add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
+            # Add stub/track proximity, cross-layer tracks, same-net via clearance
+            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                                       if nid != net_id and nid not in routed_net_ids]
+            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+            if unrouted_stubs:
+                add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+            merge_track_proximity_costs(obstacles, track_proximity_cache)
+            add_cross_layer_tracks(obstacles, pcb_data, config, layer_map, exclude_net_ids={net_id})
+            add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
+        else:
+            # Use helper for non-visualization case
+            obstacles, _ = build_single_ended_obstacles(
+                base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
+            )
 
         # Route the net using the prepared obstacles
         if visualize:
@@ -1201,15 +1182,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
-            add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-            remaining_net_ids.remove(net_id)
-            routed_net_ids.append(net_id)
-            routed_results[net_id] = result  # Track for summary
-            # Track path for blocking analysis
-            if result.get('path'):
-                routed_net_paths[net_id] = result['path']
-            # Add to track proximity cache
-            track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+            record_single_ended_success(
+                pcb_data, result, net_id, config, remaining_net_ids,
+                routed_net_ids, routed_net_paths, routed_results,
+                track_proximity_cache, layer_map
+            )
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
@@ -1489,28 +1466,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print("-" * 40)
 
             start_time = time.time()
-            obstacles = base_obstacles.clone()
-            for routed_id in routed_net_ids:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
-                add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diagonal_margin=0.25)
-                add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config)
-            # Add GND vias as obstacles
-            if gnd_net_id is not None:
-                add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diagonal_margin=0.25)
-            other_unrouted = [nid for nid in remaining_net_ids if nid != ripped_net_id]
-            for other_net_id in other_unrouted:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
-                add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diagonal_margin=0.25)
-                add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
-            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
-                                       if nid != ripped_net_id and nid not in routed_net_ids]
-            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-            if unrouted_stubs:
-                add_stub_proximity_costs(obstacles, unrouted_stubs, config)
-            merge_track_proximity_costs(obstacles, track_proximity_cache)
-            add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
-                                    exclude_net_ids={ripped_net_id})
-            add_same_net_via_clearance(obstacles, pcb_data, ripped_net_id, config)
+            obstacles, _ = build_single_ended_obstacles(
+                base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                all_unrouted_net_ids, ripped_net_id, gnd_net_id, track_proximity_cache, layer_map
+            )
 
             result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
             elapsed = time.time() - start_time
@@ -1521,14 +1480,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 results.append(result)
                 successful += 1
                 total_iterations += result['iterations']
-                add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-                if ripped_net_id in remaining_net_ids:
-                    remaining_net_ids.remove(ripped_net_id)
-                routed_net_ids.append(ripped_net_id)
-                routed_results[ripped_net_id] = result
-                if result.get('path'):
-                    routed_net_paths[ripped_net_id] = result['path']
-                track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(pcb_data, ripped_net_id, config, layer_map)
+                record_single_ended_success(
+                    pcb_data, result, ripped_net_id, config, remaining_net_ids,
+                    routed_net_ids, routed_net_paths, routed_results,
+                    track_proximity_cache, layer_map
+                )
             else:
                 # Reroute failed - try rip-up and retry
                 iterations = result['iterations'] if result else 0
@@ -1761,31 +1717,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print("-" * 40)
 
             start_time = time.time()
-            obstacles = diff_pair_base_obstacles.clone()
-            for routed_id in routed_net_ids:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-                add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-                add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-            # Add GND vias as obstacles
-            if gnd_net_id is not None:
-                add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
-            other_unrouted = [nid for nid in remaining_net_ids
-                             if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id]
-            for other_net_id in other_unrouted:
-                add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-                add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-                add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
-                                       if nid != ripped_pair.p_net_id and nid != ripped_pair.n_net_id
-                                       and nid not in routed_net_ids]
-            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-            if unrouted_stubs:
-                add_stub_proximity_costs(obstacles, unrouted_stubs, config)
-            merge_track_proximity_costs(obstacles, track_proximity_cache)
-            add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
-                                    exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id})
-            add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.p_net_id, config)
-            add_same_net_via_clearance(obstacles, pcb_data, ripped_pair.n_net_id, config)
+            obstacles, unrouted_stubs = build_diff_pair_obstacles(
+                diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id, gnd_net_id,
+                track_proximity_cache, layer_map, diff_pair_extra_clearance,
+                add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair
+            )
 
             # Get source/target coordinates for blocking analysis
             reroute_sources, reroute_targets, _ = get_diff_pair_endpoints(pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config)
@@ -1797,7 +1734,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if reroute_targets:
                 tgt = reroute_targets[0]
                 reroute_target_xy = ((tgt[5] + tgt[7]) / 2, (tgt[6] + tgt[8]) / 2)
-            add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, ripped_pair.p_net_id, ripped_pair.n_net_id, config, diff_pair_extra_clearance)
 
             result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, obstacles, base_obstacles, unrouted_stubs)
             elapsed = time.time() - start_time
@@ -1810,23 +1746,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 total_iterations += result['iterations']
                 rerouted_pairs.add(ripped_pair_name)
                 apply_polarity_swap(pcb_data, result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
-                add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-                if ripped_pair.p_net_id in remaining_net_ids:
-                    remaining_net_ids.remove(ripped_pair.p_net_id)
-                if ripped_pair.n_net_id in remaining_net_ids:
-                    remaining_net_ids.remove(ripped_pair.n_net_id)
-                routed_net_ids.append(ripped_pair.p_net_id)
-                routed_net_ids.append(ripped_pair.n_net_id)
-                if result.get('p_path'):
-                    routed_net_paths[ripped_pair.p_net_id] = result['p_path']
-                if result.get('n_path'):
-                    routed_net_paths[ripped_pair.n_net_id] = result['n_path']
-                routed_results[ripped_pair.p_net_id] = result
-                routed_results[ripped_pair.n_net_id] = result
-                diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
-                diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
-                track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
-                track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
+                record_diff_pair_success(
+                    pcb_data, result, ripped_pair, ripped_pair_name, config,
+                    remaining_net_ids, routed_net_ids, routed_net_paths, routed_results,
+                    diff_pair_by_net_id, track_proximity_cache, layer_map
+                )
             else:
                 # Reroute failed - try rip-up and retry
                 iterations = result['iterations'] if result else 0
