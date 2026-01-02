@@ -25,6 +25,8 @@ import fnmatch
 import re
 from typing import List, Set, Tuple, Optional
 
+from routing_utils import extract_diff_pair_base
+
 
 def run_command(cmd, description, capture_output=False):
     """Run a command and print its output.
@@ -73,37 +75,6 @@ def run_command(cmd, description, capture_output=False):
         return Result(process.returncode, ''.join(stdout_lines))
     else:
         return subprocess.run(cmd, text=True)
-
-
-def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
-    """
-    Extract differential pair base name and polarity from net name.
-    Returns (base_name, is_positive) or None if not a diff pair.
-    """
-    if not net_name:
-        return None
-
-    # Try _P/_N suffix (most common for LVDS)
-    if net_name.endswith('_P'):
-        return (net_name[:-2], True)
-    if net_name.endswith('_N'):
-        return (net_name[:-2], False)
-
-    # Try P/N suffix without underscore
-    if net_name.endswith('P') and len(net_name) > 1:
-        if net_name[-2] in '0123456789_':
-            return (net_name[:-1], True)
-    if net_name.endswith('N') and len(net_name) > 1:
-        if net_name[-2] in '0123456789_':
-            return (net_name[:-1], False)
-
-    # Try +/- suffix
-    if net_name.endswith('+'):
-        return (net_name[:-1], True)
-    if net_name.endswith('-'):
-        return (net_name[:-1], False)
-
-    return None
 
 
 def find_all_diff_pairs_in_pcb(pcb_file: str) -> Set[str]:

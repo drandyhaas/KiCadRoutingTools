@@ -23,6 +23,7 @@ import fnmatch
 
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from kicad_writer import add_tracks_and_vias_to_pcb
+from routing_utils import extract_diff_pair_base
 
 
 @dataclass
@@ -82,44 +83,6 @@ class FanoutRoute:
     @property
     def net_id(self) -> int:
         return self.pad.net_id
-
-
-def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
-    """
-    Extract differential pair base name and polarity from net name.
-
-    Looks for common differential pair naming conventions:
-    - name_P / name_N
-    - nameP / nameN
-    - name+ / name-
-
-    Returns (base_name, is_positive) or None if not a diff pair.
-    """
-    if not net_name:
-        return None
-
-    # Try _P/_N suffix (most common for LVDS)
-    if net_name.endswith('_P'):
-        return (net_name[:-2], True)
-    if net_name.endswith('_N'):
-        return (net_name[:-2], False)
-
-    # Try P/N suffix without underscore
-    if net_name.endswith('P') and len(net_name) > 1:
-        # Check it's not just ending in P as part of name
-        if net_name[-2] in '0123456789_':
-            return (net_name[:-1], True)
-    if net_name.endswith('N') and len(net_name) > 1:
-        if net_name[-2] in '0123456789_':
-            return (net_name[:-1], False)
-
-    # Try +/- suffix
-    if net_name.endswith('+'):
-        return (net_name[:-1], True)
-    if net_name.endswith('-'):
-        return (net_name[:-1], False)
-
-    return None
 
 
 def find_differential_pairs(footprint: Footprint,
