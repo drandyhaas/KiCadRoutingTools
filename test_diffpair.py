@@ -217,7 +217,7 @@ Examples:
     router_group.add_argument('--stub-proximity-cost', type=float,
                               help='Cost penalty near stubs in mm equivalent (default: 0.2)')
     router_group.add_argument('--bga-proximity-radius', type=float,
-                              help='Radius around BGA edges to penalize in mm (default: 10.0)')
+                              help='Radius around BGA edges to penalize in mm (default: 7.0)')
     router_group.add_argument('--bga-proximity-cost', type=float,
                               help='Cost penalty near BGA edges in mm equivalent (default: 0.2)')
     router_group.add_argument('--track-proximity-distance', type=float,

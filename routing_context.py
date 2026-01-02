@@ -273,3 +273,54 @@ def record_single_ended_success(
     # Compute and cache track proximity costs
     track_proximity_cache[net_id] = compute_track_proximity_for_net(
         pcb_data, net_id, config, layer_map)
+
+
+def restore_ripped_net(
+    pcb_data,
+    ripped_saved,
+    ripped_ids: List[int],
+    was_in_results: bool,
+    routed_net_ids: List[int],
+    remaining_net_ids: List[int],
+    routed_results: Dict,
+    results: List[Dict],
+    config,
+    track_proximity_cache: Optional[Dict] = None,
+    layer_map: Optional[Dict] = None
+):
+    """
+    Restore a previously ripped net back to routed state.
+
+    Args:
+        pcb_data: PCB data structure
+        ripped_saved: The saved routing result to restore
+        ripped_ids: List of net IDs that were ripped (e.g., [p_net_id, n_net_id] for diff pair)
+        was_in_results: Whether the result was in the results list before ripping
+        routed_net_ids: List of routed net IDs (modified in place)
+        remaining_net_ids: List of remaining net IDs (modified in place)
+        routed_results: Dict of routed results (modified in place)
+        results: List of routing results (modified in place)
+        config: Routing configuration
+        track_proximity_cache: Optional cache of track proximity costs
+        layer_map: Optional layer name to index mapping
+    """
+    if not ripped_saved:
+        return
+
+    add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+
+    for rid in ripped_ids:
+        if rid not in routed_net_ids:
+            routed_net_ids.append(rid)
+        if rid in remaining_net_ids:
+            remaining_net_ids.remove(rid)
+        routed_results[rid] = ripped_saved
+
+    if was_in_results:
+        results.append(ripped_saved)
+
+    # Restore track proximity cache
+    if track_proximity_cache is not None and layer_map is not None:
+        for rid in ripped_ids:
+            track_proximity_cache[rid] = compute_track_proximity_for_net(
+                pcb_data, rid, config, layer_map)

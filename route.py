@@ -45,13 +45,14 @@ from obstacle_map import (
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import (
     build_single_ended_obstacles, build_diff_pair_obstacles,
-    record_single_ended_success, record_diff_pair_success
+    record_single_ended_success, record_diff_pair_success,
+    restore_ripped_net
 )
 import re
 
@@ -1650,20 +1651,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 if probe_ripped_items:
                     print(f"    Restoring {len(probe_ripped_items)} previously ripped net(s)")
                     for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                        if ripped_saved:
-                            add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
-                            for rid in ripped_ids_item:
-                                if rid not in routed_net_ids:
-                                    routed_net_ids.append(rid)
-                                if rid in remaining_net_ids:
-                                    remaining_net_ids.remove(rid)
-                                routed_results[rid] = ripped_saved
-                            if ripped_was_in_results:
-                                results.append(ripped_saved)
-                            # Restore track proximity cache
-                            if track_proximity_cache is not None and layer_map is not None:
-                                for rid in ripped_ids_item:
-                                    track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
+                        restore_ripped_net(
+                            pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
+                            routed_net_ids, remaining_net_ids, routed_results, results,
+                            config, track_proximity_cache, layer_map
+                        )
                     probe_ripped_items.clear()
                 # Convert to failed result so normal failure handling takes over
                 result = {
@@ -1721,20 +1713,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Route failed completely - restore ALL ripped nets and exit loop
                 print(f"    Probe rip-up didn't help, restoring {len(probe_ripped_items)} net(s)")
                 for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                    if ripped_saved:
-                        add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
-                        for rid in ripped_ids_item:
-                            if rid not in routed_net_ids:
-                                routed_net_ids.append(rid)
-                            if rid in remaining_net_ids:
-                                remaining_net_ids.remove(rid)
-                            routed_results[rid] = ripped_saved
-                        if ripped_was_in_results:
-                            results.append(ripped_saved)
-                        # Restore track proximity cache
-                        if track_proximity_cache is not None and layer_map is not None:
-                            for rid in ripped_ids_item:
-                                track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
+                    restore_ripped_net(
+                        pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
+                        routed_net_ids, remaining_net_ids, routed_results, results,
+                        config, track_proximity_cache, layer_map
+                    )
                 probe_ripped_items.clear()
                 break
 
@@ -1742,20 +1725,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if result and result.get('probe_blocked'):
             print(f"  Probe blocked after {probe_ripup_attempts} rip-up attempts, restoring {len(probe_ripped_items)} net(s), trying full route...")
             for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
-                if ripped_saved:
-                    add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
-                    for rid in ripped_ids_item:
-                        if rid not in routed_net_ids:
-                            routed_net_ids.append(rid)
-                        if rid in remaining_net_ids:
-                            remaining_net_ids.remove(rid)
-                        routed_results[rid] = ripped_saved
-                    if ripped_was_in_results:
-                        results.append(ripped_saved)
-                    # Restore track proximity cache
-                    if track_proximity_cache is not None and layer_map is not None:
-                        for rid in ripped_ids_item:
-                            track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
+                restore_ripped_net(
+                    pcb_data, ripped_saved, ripped_ids_item, ripped_was_in_results,
+                    routed_net_ids, remaining_net_ids, routed_results, results,
+                    config, track_proximity_cache, layer_map
+                )
             result = {
                 'failed': True,
                 'iterations': result.get('iterations', 0),
@@ -1845,14 +1819,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                     # Filter to only rippable blockers (those in routed_results)
                     # and deduplicate by diff pair (P and N count as one)
-                    rippable_blockers = []
-                    seen_canonical_ids = set()
-                    for b in blockers:
-                        if b.net_id in routed_results:
-                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
-                            if canonical not in seen_canonical_ids:
-                                seen_canonical_ids.add(canonical)
-                                rippable_blockers.append(b)
+                    rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
+                        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                    )
 
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     # Keep nets ripped between N levels to avoid redundant restore/re-rip
@@ -2256,14 +2225,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
                     # Filter to only rippable blockers (those in routed_results)
                     # and deduplicate by diff pair (P and N count as one)
-                    rippable_blockers = []
-                    seen_canonical_ids = set()
-                    for b in blockers:
-                        if b.net_id in routed_results:
-                            canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
-                            if canonical not in seen_canonical_ids:
-                                seen_canonical_ids.add(canonical)
-                                rippable_blockers.append(b)
+                    rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
+                        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                    )
 
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     ripped_items = []
@@ -2520,14 +2484,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         print_blocking_analysis(blockers)
 
                         # Filter to only rippable blockers
-                        rippable_blockers = []
-                        seen_canonical_ids = set()
-                        for b in blockers:
-                            if b.net_id in routed_results:
-                                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
-                                if canonical not in seen_canonical_ids:
-                                    seen_canonical_ids.add(canonical)
-                                    rippable_blockers.append(b)
+                        rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
+                            blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                        )
                         ripped_canonical_ids = set()  # Track which canonicals have been ripped
                         last_retry_blocked_cells = blocked_cells  # Start with initial failure's blocked cells
 
@@ -2771,14 +2730,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         print_blocking_analysis(blockers)
 
                         # Filter to only rippable blockers and deduplicate by diff pair
-                        rippable_blockers = []
-                        seen_canonical_ids = set()
-                        for b in blockers:
-                            if b.net_id in routed_results:
-                                canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
-                                if canonical not in seen_canonical_ids:
-                                    seen_canonical_ids.add(canonical)
-                                    rippable_blockers.append(b)
+                        rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
+                            blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                        )
                         current_canonical = ripped_pair.p_net_id
 
                         if blockers and not rippable_blockers:
@@ -3381,8 +3335,8 @@ Differential pair routing:
                         help="Cost penalty near stubs in mm equivalent (default: 0.2)")
 
     # BGA proximity penalty
-    parser.add_argument("--bga-proximity-radius", type=float, default=10.0,
-                        help="Radius around BGA edges to penalize routing in mm (default: 10.0)")
+    parser.add_argument("--bga-proximity-radius", type=float, default=7.0,
+                        help="Radius around BGA edges to penalize routing in mm (default: 7.0)")
     parser.add_argument("--bga-proximity-cost", type=float, default=0.2,
                         help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 

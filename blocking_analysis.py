@@ -323,6 +323,36 @@ def print_blocking_analysis(
         print(f"{prefix}  ... and {len(blockers) - max_display} more nets ({remaining} cells)")
 
 
+def filter_rippable_blockers(
+    blockers: List[BlockerInfo],
+    routed_results: Dict,
+    diff_pair_by_net_id: Dict,
+    get_canonical_net_id_func
+) -> Tuple[List[BlockerInfo], Set[int]]:
+    """
+    Filter blockers to only those that can be ripped (in routed_results),
+    deduplicating by diff pair (P and N count as one).
+
+    Args:
+        blockers: List of BlockerInfo from analyze_frontier_blocking
+        routed_results: Dict of net_id -> result for routed nets
+        diff_pair_by_net_id: Dict mapping net_id -> (pair_name, pair)
+        get_canonical_net_id_func: Function to get canonical net ID
+
+    Returns:
+        Tuple of (rippable_blockers, seen_canonical_ids)
+    """
+    rippable_blockers = []
+    seen_canonical_ids = set()
+    for b in blockers:
+        if b.net_id in routed_results:
+            canonical = get_canonical_net_id_func(b.net_id, diff_pair_by_net_id)
+            if canonical not in seen_canonical_ids:
+                seen_canonical_ids.add(canonical)
+                rippable_blockers.append(b)
+    return rippable_blockers, seen_canonical_ids
+
+
 if __name__ == "__main__":
     print("Blocking analysis module")
     print("Use analyze_frontier_blocking() with data from route_with_frontier()")
