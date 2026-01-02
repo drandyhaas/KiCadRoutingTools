@@ -1646,6 +1646,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
             if not rippable_blockers:
                 print(f"  Probe {probe_direction} blocked at {blocked_at} but no rippable blockers found")
+                # Restore any nets that were ripped in previous attempts
+                if probe_ripped_items:
+                    print(f"    Restoring {len(probe_ripped_items)} previously ripped net(s)")
+                    for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in reversed(probe_ripped_items):
+                        if ripped_saved:
+                            add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                            for rid in ripped_ids_item:
+                                if rid not in routed_net_ids:
+                                    routed_net_ids.append(rid)
+                                if rid in remaining_net_ids:
+                                    remaining_net_ids.remove(rid)
+                                routed_results[rid] = ripped_saved
+                            if ripped_was_in_results:
+                                results.append(ripped_saved)
+                            # Restore track proximity cache
+                            if track_proximity_cache is not None and layer_map is not None:
+                                for rid in ripped_ids_item:
+                                    track_proximity_cache[rid] = compute_track_proximity_for_net(pcb_data, rid, config, layer_map)
+                    probe_ripped_items.clear()
                 # Convert to failed result so normal failure handling takes over
                 result = {
                     'failed': True,
