@@ -45,6 +45,8 @@ from obstacle_map import (
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis
+from rip_up_reroute import rip_up_net, restore_net
+from polarity_swap import apply_polarity_swap, get_canonical_net_id
 import re
 
 # ANSI color codes for terminal output
@@ -110,92 +112,6 @@ def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float
     return None
 
 
-def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: list,
-                        pair_name: str = None, already_swapped: set = None) -> bool:
-    """
-    Apply polarity swap for a diff pair route result.
-
-    When a diff pair route requires P/N polarity swap at the target, this function:
-    1. Swaps net IDs of stub segments at the target positions
-    2. Swaps net IDs of vias at the target positions
-    3. Queues pad swaps for later application to the output file
-
-    If pair_name and already_swapped are provided, skips the swap if this pair
-    was already swapped (e.g., before rip-up and reroute).
-
-    Returns True if swap was applied, False if not needed or failed.
-    """
-    if not result.get('polarity_fixed') or not result.get('swap_target_pads'):
-        return False
-
-    # Skip if this pair was already polarity-swapped (prevents double-swap on reroute)
-    if pair_name and already_swapped is not None:
-        if pair_name in already_swapped:
-            print(f"  Polarity swap already applied for {pair_name}, skipping")
-            return False
-        already_swapped.add(pair_name)
-
-    swap_info = result['swap_target_pads']
-    p_pos = swap_info['p_pos']
-    n_pos = swap_info['n_pos']
-    p_net_id = swap_info['p_net_id']
-    n_net_id = swap_info['n_net_id']
-
-    # Find segments connected to each stub position and swap their net IDs
-    p_stub_positions = find_connected_segment_positions(pcb_data, p_pos[0], p_pos[1], p_net_id)
-    n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
-
-    for seg in pcb_data.segments:
-        seg_start = pos_key(seg.start_x, seg.start_y)
-        seg_end = pos_key(seg.end_x, seg.end_y)
-        if seg.net_id == p_net_id and (seg_start in p_stub_positions or seg_end in p_stub_positions):
-            seg.net_id = n_net_id
-        elif seg.net_id == n_net_id and (seg_start in n_stub_positions or seg_end in n_stub_positions):
-            seg.net_id = p_net_id
-
-    # Also swap via net IDs at stub positions
-    for via in pcb_data.vias:
-        via_pos = pos_key(via.x, via.y)
-        if via.net_id == p_net_id and via_pos in p_stub_positions:
-            via.net_id = n_net_id
-        elif via.net_id == n_net_id and via_pos in n_stub_positions:
-            via.net_id = p_net_id
-
-    # Find the target pads for swap
-    pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_pos[0], p_pos[1])
-    pad_n = find_pad_nearest_to_position(pcb_data, n_net_id, n_pos[0], n_pos[1])
-
-    if pad_p and pad_n:
-        pad_swaps.append({
-            'pad_p': pad_p,
-            'pad_n': pad_n,
-            'p_net_id': p_net_id,
-            'n_net_id': n_net_id,
-            'p_stub_positions': p_stub_positions,
-            'n_stub_positions': n_stub_positions,
-        })
-        print(f"  Polarity fixed: will swap nets of {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
-        return True
-    else:
-        print(f"  WARNING: Could not find target pads to swap for polarity fix")
-        if not pad_p:
-            print(f"    Missing P pad (net {p_net_id}) near {p_pos}")
-        if not pad_n:
-            print(f"    Missing N pad (net {n_net_id}) near {n_pos}")
-        return False
-
-
-def get_canonical_net_id(net_id: int, diff_pair_by_net_id: dict) -> int:
-    """Get canonical net ID for loop prevention tracking.
-
-    For diff pairs, returns P net_id. For single nets, returns net_id as-is.
-    """
-    if net_id in diff_pair_by_net_id:
-        _, pair = diff_pair_by_net_id[net_id]
-        return pair.p_net_id
-    return net_id
-
-
 def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
                                               config, extra_clearance: float):
     """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
@@ -217,126 +133,6 @@ def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int,
         obstacles, pcb_data, p_net_id, n_net_id, config,
         exclude_endpoints=stub_endpoints, extra_clearance=extra_clearance
     )
-
-
-def rip_up_net(net_id: int, pcb_data, routed_net_ids: list, routed_net_paths: dict,
-               routed_results: dict, diff_pair_by_net_id: dict, remaining_net_ids: list,
-               results: list, config, track_proximity_cache: dict = None) -> tuple:
-    """Rip up a routed net (or diff pair), removing it from pcb_data and tracking structures.
-
-    Returns:
-        tuple: (saved_result, ripped_net_ids, was_in_results) for later restoration
-               saved_result: the result dict that was removed
-               ripped_net_ids: list of net IDs that were ripped (1 for single, 2 for diff pair)
-               was_in_results: True if the result was in the results list
-    """
-    if net_id not in routed_results:
-        return None, [], False
-
-    saved_result = routed_results[net_id]
-    ripped_net_ids = []
-    was_in_results = saved_result in results
-
-    # Remove from pcb_data
-    remove_route_from_pcb_data(pcb_data, saved_result)
-
-    # Remove from results list if present
-    if was_in_results:
-        results.remove(saved_result)
-
-    # Update tracking structures
-    if net_id in diff_pair_by_net_id:
-        # It's a diff pair - remove both P and N
-        _, ripped_pair = diff_pair_by_net_id[net_id]
-        ripped_net_ids = [ripped_pair.p_net_id, ripped_pair.n_net_id]
-
-        if ripped_pair.p_net_id in routed_net_ids:
-            routed_net_ids.remove(ripped_pair.p_net_id)
-        if ripped_pair.n_net_id in routed_net_ids:
-            routed_net_ids.remove(ripped_pair.n_net_id)
-        routed_net_paths.pop(ripped_pair.p_net_id, None)
-        routed_net_paths.pop(ripped_pair.n_net_id, None)
-        routed_results.pop(ripped_pair.p_net_id, None)
-        routed_results.pop(ripped_pair.n_net_id, None)
-        # Remove from track proximity cache
-        if track_proximity_cache is not None:
-            track_proximity_cache.pop(ripped_pair.p_net_id, None)
-            track_proximity_cache.pop(ripped_pair.n_net_id, None)
-        # Add back to remaining so stubs are treated as obstacles
-        if ripped_pair.p_net_id not in remaining_net_ids:
-            remaining_net_ids.append(ripped_pair.p_net_id)
-        if ripped_pair.n_net_id not in remaining_net_ids:
-            remaining_net_ids.append(ripped_pair.n_net_id)
-    else:
-        # Single-ended net
-        ripped_net_ids = [net_id]
-
-        if net_id in routed_net_ids:
-            routed_net_ids.remove(net_id)
-        routed_net_paths.pop(net_id, None)
-        routed_results.pop(net_id, None)
-        # Remove from track proximity cache
-        if track_proximity_cache is not None:
-            track_proximity_cache.pop(net_id, None)
-        # Add back to remaining so stubs are treated as obstacles
-        if net_id not in remaining_net_ids:
-            remaining_net_ids.append(net_id)
-
-    return saved_result, ripped_net_ids, was_in_results
-
-
-def restore_net(net_id: int, saved_result: dict, ripped_net_ids: list, was_in_results: bool,
-                pcb_data, routed_net_ids: list, routed_net_paths: dict,
-                routed_results: dict, diff_pair_by_net_id: dict, remaining_net_ids: list,
-                results: list, config, track_proximity_cache: dict = None, layer_map: dict = None):
-    """Restore a previously ripped net to pcb_data and tracking structures."""
-
-    if saved_result is None:
-        return
-
-    # Add back to pcb_data
-    add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
-
-    # Add back to results list if it was there
-    if was_in_results:
-        results.append(saved_result)
-
-    # Restore tracking structures
-    if net_id in diff_pair_by_net_id:
-        # It's a diff pair
-        _, ripped_pair = diff_pair_by_net_id[net_id]
-
-        if ripped_pair.p_net_id not in routed_net_ids:
-            routed_net_ids.append(ripped_pair.p_net_id)
-        if ripped_pair.n_net_id not in routed_net_ids:
-            routed_net_ids.append(ripped_pair.n_net_id)
-        # Remove from remaining_net_ids since they're back to routed
-        if ripped_pair.p_net_id in remaining_net_ids:
-            remaining_net_ids.remove(ripped_pair.p_net_id)
-        if ripped_pair.n_net_id in remaining_net_ids:
-            remaining_net_ids.remove(ripped_pair.n_net_id)
-        if saved_result.get('p_path'):
-            routed_net_paths[ripped_pair.p_net_id] = saved_result['p_path']
-        if saved_result.get('n_path'):
-            routed_net_paths[ripped_pair.n_net_id] = saved_result['n_path']
-        routed_results[ripped_pair.p_net_id] = saved_result
-        routed_results[ripped_pair.n_net_id] = saved_result
-        # Restore track proximity cache
-        if track_proximity_cache is not None and layer_map is not None:
-            track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
-            track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
-    else:
-        # Single-ended net
-        if net_id not in routed_net_ids:
-            routed_net_ids.append(net_id)
-        if net_id in remaining_net_ids:
-            remaining_net_ids.remove(net_id)
-        if saved_result.get('path'):
-            routed_net_paths[net_id] = saved_result['path']
-        routed_results[net_id] = saved_result
-        # Restore track proximity cache
-        if track_proximity_cache is not None and layer_map is not None:
-            track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
 
 
 def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
