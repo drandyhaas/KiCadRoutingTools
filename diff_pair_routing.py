@@ -422,6 +422,158 @@ def _calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_
     return 0.0, 0.0
 
 
+def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs):
+    """Create GND vias at layer changes in the centerline path.
+
+    Args:
+        simplified_path: List of (gx, gy, layer_idx) grid points
+        coord: GridCoord for conversions
+        config: GridRouteConfig
+        layer_names: List of layer names
+        spacing_mm: P/N offset from centerline
+        gnd_net_id: Net ID for GND vias
+        gnd_via_dirs: List of directions (+1=ahead, -1=behind) from Rust router
+
+    Returns:
+        List of Via objects for GND connections
+    """
+    gnd_vias = []
+    if gnd_net_id is None or len(simplified_path) < 2:
+        return gnd_vias
+
+    # Calculate GND via perpendicular offset: track edge + clearance + via radius
+    gnd_via_perp_mm = spacing_mm + config.track_width/2 + config.clearance + config.via_size/2
+    via_via_dist_mm = config.via_size + config.clearance
+
+    # Track which layer change we're processing to get direction from gnd_via_dirs
+    via_idx = 0
+
+    # Find layer changes in centerline path
+    for i in range(len(simplified_path) - 1):
+        gx1, gy1, layer1 = simplified_path[i]
+        gx2, gy2, layer2 = simplified_path[i + 1]
+
+        if layer1 != layer2:
+            # Layer change - calculate centerline position and direction
+            cx, cy = coord.to_float(gx1, gy1)
+
+            # Get heading direction (from via to next point)
+            next_cx, next_cy = coord.to_float(gx2, gy2)
+            dx = next_cx - cx
+            dy = next_cy - cy
+            length = math.sqrt(dx*dx + dy*dy)
+            if length > 0.001:
+                dx /= length
+                dy /= length
+            else:
+                # Fallback: use direction from previous point
+                if i > 0:
+                    prev_gx, prev_gy, _ = simplified_path[i - 1]
+                    prev_cx, prev_cy = coord.to_float(prev_gx, prev_gy)
+                    dx = cx - prev_cx
+                    dy = cy - prev_cy
+                    length = math.sqrt(dx*dx + dy*dy)
+                    if length > 0.001:
+                        dx /= length
+                        dy /= length
+                    else:
+                        dx, dy = 1.0, 0.0
+                else:
+                    dx, dy = 1.0, 0.0
+
+            # Perpendicular direction: rotate 90° -> (-dy, dx)
+            perp_x = -dy
+            perp_y = dx
+
+            # Get GND via direction from Rust router (1=ahead, -1=behind)
+            gnd_dir = gnd_via_dirs[via_idx] if via_idx < len(gnd_via_dirs) else 1
+            via_idx += 1
+
+            # GND via positions: perpendicular offset + along-heading offset
+            gnd_p_x = cx + perp_x * gnd_via_perp_mm + dx * via_via_dist_mm * gnd_dir
+            gnd_p_y = cy + perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
+            gnd_n_x = cx - perp_x * gnd_via_perp_mm + dx * via_via_dist_mm * gnd_dir
+            gnd_n_y = cy - perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
+
+            # Create GND vias (free=True prevents KiCad auto-assigning net)
+            gnd_vias.append(Via(
+                x=gnd_p_x, y=gnd_p_y,
+                size=config.via_size,
+                drill=config.via_drill,
+                layers=[layer_names[layer1], layer_names[layer2]],
+                net_id=gnd_net_id,
+                free=True
+            ))
+            gnd_vias.append(Via(
+                x=gnd_n_x, y=gnd_n_y,
+                size=config.via_size,
+                drill=config.via_drill,
+                layers=[layer_names[layer1], layer_names[layer2]],
+                net_id=gnd_net_id,
+                free=True
+            ))
+
+    return gnd_vias
+
+
+def _make_route_data(pose_path, p_src_x, p_src_y, n_src_x, n_src_y,
+                     p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
+                     src_dir_x, src_dir_y, tgt_dir_x, tgt_dir_y,
+                     src_actual_dir, tgt_actual_dir,
+                     center_src_x, center_src_y, center_tgt_x, center_tgt_y,
+                     via_spacing, src_angle, tgt_angle, gnd_via_dirs=None):
+    """Build route_data dictionary with all routing result info."""
+    return {
+        'pose_path': pose_path,
+        'p_src_x': p_src_x, 'p_src_y': p_src_y,
+        'n_src_x': n_src_x, 'n_src_y': n_src_y,
+        'p_tgt_x': p_tgt_x, 'p_tgt_y': p_tgt_y,
+        'n_tgt_x': n_tgt_x, 'n_tgt_y': n_tgt_y,
+        'src_dir_x': src_dir_x, 'src_dir_y': src_dir_y,
+        'tgt_dir_x': tgt_dir_x, 'tgt_dir_y': tgt_dir_y,
+        'src_actual_dir_x': src_actual_dir[0], 'src_actual_dir_y': src_actual_dir[1],
+        'tgt_actual_dir_x': tgt_actual_dir[0], 'tgt_actual_dir_y': tgt_actual_dir[1],
+        'center_src_x': center_src_x, 'center_src_y': center_src_y,
+        'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
+        'via_spacing': via_spacing,
+        'best_src_angle': src_angle, 'best_tgt_angle': tgt_angle,
+        'gnd_via_dirs': gnd_via_dirs if gnd_via_dirs is not None else [],
+    }
+
+
+def _generate_debug_arrows(center_src_x, center_src_y, src_dir_x, src_dir_y,
+                           center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y):
+    """Generate stub direction arrows for debug visualization (User.4 layer).
+
+    Returns list of ((start_x, start_y), (end_x, end_y)) line segments.
+    """
+    arrows = []
+    arrow_length = 1.0  # mm
+    head_length = 0.2  # mm
+    head_angle = 0.5  # radians (~30 degrees)
+
+    for mid_x, mid_y, dir_x, dir_y in [
+        (center_src_x, center_src_y, src_dir_x, src_dir_y),
+        (center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y)
+    ]:
+        # Arrow shaft
+        tip_x = mid_x + dir_x * arrow_length
+        tip_y = mid_y + dir_y * arrow_length
+        arrows.append(((mid_x, mid_y), (tip_x, tip_y)))
+
+        # Arrowhead lines (two lines from tip, angled back)
+        cos_a = math.cos(head_angle)
+        sin_a = math.sin(head_angle)
+        for sign in [1, -1]:
+            rot_x = dir_x * cos_a - sign * dir_y * sin_a
+            rot_y = sign * dir_x * sin_a + dir_y * cos_a
+            head_end_x = tip_x - rot_x * head_length
+            head_end_y = tip_y - rot_y * head_length
+            arrows.append(((tip_x, tip_y), (head_end_x, head_end_y)))
+
+    return arrows
+
+
 def _float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
                             src_stub_dir, tgt_stub_dir, src_extension, tgt_extension,
                             config, layer_names):
@@ -1128,24 +1280,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         src_combos = src_candidates[:1]
         tgt_combos = tgt_candidates[:1]
 
-    # Helper to build route_data dict
+    # Helper to build route_data dict (wraps module-level function with closure vars)
     def make_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle, gnd_via_dirs=None):
-        return {
-            'pose_path': pose_path,
-            'p_src_x': p_src_x, 'p_src_y': p_src_y,
-            'n_src_x': n_src_x, 'n_src_y': n_src_y,
-            'p_tgt_x': p_tgt_x, 'p_tgt_y': p_tgt_y,
-            'n_tgt_x': n_tgt_x, 'n_tgt_y': n_tgt_y,
-            'src_dir_x': src_dir_x, 'src_dir_y': src_dir_y,
-            'tgt_dir_x': tgt_dir_x, 'tgt_dir_y': tgt_dir_y,
-            'src_actual_dir_x': src_actual_dir[0], 'src_actual_dir_y': src_actual_dir[1],
-            'tgt_actual_dir_x': tgt_actual_dir[0], 'tgt_actual_dir_y': tgt_actual_dir[1],
-            'center_src_x': center_src_x, 'center_src_y': center_src_y,
-            'center_tgt_x': center_tgt_x, 'center_tgt_y': center_tgt_y,
-            'via_spacing': via_spacing,
-            'best_src_angle': src_angle, 'best_tgt_angle': tgt_angle,
-            'gnd_via_dirs': gnd_via_dirs if gnd_via_dirs is not None else [],
-        }
+        return _make_route_data(
+            pose_path, p_src_x, p_src_y, n_src_x, n_src_y,
+            p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
+            src_dir_x, src_dir_y, tgt_dir_x, tgt_dir_y,
+            src_actual_dir, tgt_actual_dir,
+            center_src_x, center_src_y, center_tgt_x, center_tgt_y,
+            via_spacing, src_angle, tgt_angle, gnd_via_dirs
+        )
 
     # Helper to setup and run a single route attempt
     def try_route(src_cand, tgt_cand, is_probe_attempt=False):
@@ -1727,83 +1871,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     debug_connector_lines.extend(n_conn_lines)
 
     # Create GND vias at layer changes if enabled
-    gnd_vias_created = 0
-    if gnd_net_id is not None and len(simplified_path) >= 2:
-        # Calculate GND via perpendicular offset: track edge + clearance + via radius
-        gnd_via_perp_mm = spacing_mm + config.track_width/2 + config.clearance + config.via_size/2
-        via_via_dist_mm = config.via_size + config.clearance
-
-        # Track which layer change we're processing to get direction from gnd_via_dirs
-        via_idx = 0
-
-        # Find layer changes in centerline path
-        for i in range(len(simplified_path) - 1):
-            gx1, gy1, layer1 = simplified_path[i]
-            gx2, gy2, layer2 = simplified_path[i + 1]
-
-            if layer1 != layer2:
-                # Layer change - calculate centerline position and direction
-                cx, cy = coord.to_float(gx1, gy1)
-
-                # Get heading direction (from via to next point)
-                next_cx, next_cy = coord.to_float(gx2, gy2)
-                dx = next_cx - cx
-                dy = next_cy - cy
-                length = math.sqrt(dx*dx + dy*dy)
-                if length > 0.001:
-                    dx /= length
-                    dy /= length
-                else:
-                    # Fallback: use direction from previous point
-                    if i > 0:
-                        prev_gx, prev_gy, _ = simplified_path[i - 1]
-                        prev_cx, prev_cy = coord.to_float(prev_gx, prev_gy)
-                        dx = cx - prev_cx
-                        dy = cy - prev_cy
-                        length = math.sqrt(dx*dx + dy*dy)
-                        if length > 0.001:
-                            dx /= length
-                            dy /= length
-                        else:
-                            dx, dy = 1.0, 0.0
-                    else:
-                        dx, dy = 1.0, 0.0
-
-                # Perpendicular direction: rotate 90° -> (-dy, dx)
-                perp_x = -dy
-                perp_y = dx
-
-                # Get GND via direction from Rust router (1=ahead, -1=behind)
-                # Default to ahead if no direction info available
-                gnd_dir = gnd_via_dirs[via_idx] if via_idx < len(gnd_via_dirs) else 1
-                via_idx += 1
-
-                # GND via positions: perpendicular offset + along-heading offset
-                # Direction: +1 = ahead (+heading), -1 = behind (-heading)
-                gnd_p_x = cx + perp_x * gnd_via_perp_mm + dx * via_via_dist_mm * gnd_dir
-                gnd_p_y = cy + perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
-                gnd_n_x = cx - perp_x * gnd_via_perp_mm + dx * via_via_dist_mm * gnd_dir
-                gnd_n_y = cy - perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
-
-                # Create GND vias (same layers as signal vias)
-                # Use free=True to prevent KiCad from auto-assigning net based on overlapping tracks
-                new_vias.append(Via(
-                    x=gnd_p_x, y=gnd_p_y,
-                    size=config.via_size,
-                    drill=config.via_drill,
-                    layers=[layer_names[layer1], layer_names[layer2]],
-                    net_id=gnd_net_id,
-                    free=True
-                ))
-                new_vias.append(Via(
-                    x=gnd_n_x, y=gnd_n_y,
-                    size=config.via_size,
-                    drill=config.via_drill,
-                    layers=[layer_names[layer1], layer_names[layer2]],
-                    net_id=gnd_net_id,
-                    free=True
-                ))
-                gnd_vias_created += 2
+    gnd_vias = _create_gnd_vias(
+        simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs
+    )
+    new_vias.extend(gnd_vias)
 
     # Convert float paths back to grid format for return value
     p_path = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
@@ -1812,34 +1883,12 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
               for x, y, layer in n_float_path]
 
     # Build stub direction arrows for debug visualization (User.4)
-    # Each arrow is 1mm shaft + arrowhead pointing in stub direction from midpoint
     debug_stub_arrows = []
     if config.debug_lines:
-        arrow_length = 1.0  # mm
-        head_length = 0.2  # mm
-        head_angle = 0.5  # radians (~30 degrees)
-
-        for mid_x, mid_y, dir_x, dir_y in [
-            (center_src_x, center_src_y, src_dir_x, src_dir_y),
-            (center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y)
-        ]:
-            # Arrow shaft
-            tip_x = mid_x + dir_x * arrow_length
-            tip_y = mid_y + dir_y * arrow_length
-            debug_stub_arrows.append(((mid_x, mid_y), (tip_x, tip_y)))
-
-            # Arrowhead lines (two lines from tip, angled back)
-            cos_a = math.cos(head_angle)
-            sin_a = math.sin(head_angle)
-            # Rotate direction by +/- head_angle and reverse
-            for sign in [1, -1]:
-                # Rotate (dir_x, dir_y) by sign * head_angle
-                rot_x = dir_x * cos_a - sign * dir_y * sin_a
-                rot_y = sign * dir_x * sin_a + dir_y * cos_a
-                # Point back from tip
-                head_end_x = tip_x - rot_x * head_length
-                head_end_y = tip_y - rot_y * head_length
-                debug_stub_arrows.append(((tip_x, tip_y), (head_end_x, head_end_y)))
+        debug_stub_arrows = _generate_debug_arrows(
+            center_src_x, center_src_y, src_dir_x, src_dir_y,
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y
+        )
 
     # Build result with polarity fix info
     result = {
