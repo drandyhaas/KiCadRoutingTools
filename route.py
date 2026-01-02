@@ -50,6 +50,10 @@ from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_upfront import optimize_diff_pair_layers_upfront, optimize_single_ended_layers_upfront
 from output_writer import write_routed_output
+from routing_context import (
+    build_diff_pair_obstacles, build_single_ended_obstacles,
+    record_diff_pair_success, record_single_ended_success
+)
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 import re
 
@@ -573,49 +577,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         start_time = time.time()
 
-        # Clone diff pair base obstacles (with extra clearance for centerline routing)
-        obstacles = diff_pair_base_obstacles.clone()
-
-        # Add previously routed nets' segments/vias/pads as obstacles (with extra clearance)
-        for routed_id in routed_net_ids:
-            add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-            add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-            add_net_pads_as_obstacles(obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
-
-        # Add GND vias as obstacles (they were placed with previous diff pair routes)
-        if gnd_net_id is not None:
-            add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
-
-        # Add other unrouted nets' stubs, vias, and pads as obstacles (excluding both P and N)
-        other_unrouted = [nid for nid in remaining_net_ids
-                         if nid != pair.p_net_id and nid != pair.n_net_id]
-        for other_net_id in other_unrouted:
-            add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-            add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-            add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
-
-        # Add stub proximity costs for ALL unrouted nets in PCB (not just current batch)
-        stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
-                                   if nid != pair.p_net_id and nid != pair.n_net_id
-                                   and nid not in routed_net_ids]
-        unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-        if unrouted_stubs:
-            add_stub_proximity_costs(obstacles, unrouted_stubs, config)
-        # Add track proximity costs for previously routed tracks (same layer only)
-        merge_track_proximity_costs(obstacles, track_proximity_cache)
-
-        # Add cross-layer track data for vertical alignment attraction
-        # This includes previously routed tracks (newly routed segments are in pcb_data.segments)
-        add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
-                                exclude_net_ids={pair.p_net_id, pair.n_net_id})
-
-        # Add same-net via clearance for both P and N
-        add_same_net_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
-        add_same_net_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
-
-        # Add the diff pair's own stub segments as obstacles to prevent the centerline
-        # from routing through them. Exclude the stub endpoints where we need to connect.
-        add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
+        # Build complete obstacle map for diff pair routing
+        obstacles, unrouted_stubs = build_diff_pair_obstacles(
+            diff_pair_base_obstacles, pcb_data, config,
+            routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+            pair.p_net_id, pair.n_net_id, gnd_net_id,
+            track_proximity_cache, layer_map, diff_pair_extra_clearance,
+            add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair
+        )
 
         # Get source/target coordinates for blocking analysis (center of P/N endpoints)
         from diff_pair_routing import get_diff_pair_endpoints
@@ -786,27 +755,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Do this BEFORE add_route_to_pcb_data so segment processing sees correct net IDs
             apply_polarity_swap(pcb_data, result, pad_swaps, pair_name, polarity_swapped_pairs)
 
-            add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-
-            if pair.p_net_id in remaining_net_ids:
-                remaining_net_ids.remove(pair.p_net_id)
-            if pair.n_net_id in remaining_net_ids:
-                remaining_net_ids.remove(pair.n_net_id)
-            routed_net_ids.append(pair.p_net_id)
-            routed_net_ids.append(pair.n_net_id)
-            # Compute and cache track proximity costs for the newly routed nets
-            track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
-            track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
-            # Track paths for blocking analysis
-            if result.get('p_path'):
-                routed_net_paths[pair.p_net_id] = result['p_path']
-            if result.get('n_path'):
-                routed_net_paths[pair.n_net_id] = result['n_path']
-            # Track result for rip-up
-            routed_results[pair.p_net_id] = result
-            routed_results[pair.n_net_id] = result  # Both P and N share the same result
-            diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
-            diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+            record_diff_pair_success(
+                pcb_data, result, pair, pair_name, config,
+                remaining_net_ids, routed_net_ids, routed_net_paths,
+                routed_results, diff_pair_by_net_id, track_proximity_cache, layer_map
+            )
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
