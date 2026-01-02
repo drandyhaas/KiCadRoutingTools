@@ -27,7 +27,7 @@ from kicad_writer import (
 )
 
 # Import from refactored modules
-from routing_config import GridRouteConfig, GridCoord, DiffPair
+from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from routing_utils import (
     find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints,
     compute_mps_net_ordering, add_route_to_pcb_data, remove_route_from_pcb_data,
@@ -658,7 +658,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     config = GridRouteConfig(**config_kwargs)
 
     # Find differential pairs if patterns provided
-    diff_pairs: Dict[str, DiffPair] = {}
+    diff_pairs: Dict[str, DiffPairNet] = {}
     diff_pair_net_ids = set()  # Net IDs that are part of differential pairs
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(pcb_data, diff_pair_patterns)

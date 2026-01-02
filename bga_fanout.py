@@ -26,8 +26,8 @@ from kicad_writer import add_tracks_and_vias_to_pcb
 
 
 @dataclass
-class DiffPair:
-    """A differential pair of pads (P and N)."""
+class DiffPairPads:
+    """A differential pair of pads (P and N) - tracks pad objects."""
     base_name: str  # Common name without _P/_N suffix
     p_pad: Optional[Pad] = None
     n_pad: Optional[Pad] = None
@@ -123,7 +123,7 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
 
 
 def find_differential_pairs(footprint: Footprint,
-                           diff_pair_patterns: List[str]) -> Dict[str, DiffPair]:
+                           diff_pair_patterns: List[str]) -> Dict[str, DiffPairPads]:
     """
     Find all differential pairs in a footprint matching the given patterns.
 
@@ -132,9 +132,9 @@ def find_differential_pairs(footprint: Footprint,
         diff_pair_patterns: Glob patterns for nets to treat as diff pairs
 
     Returns:
-        Dict mapping base_name to DiffPair
+        Dict mapping base_name to DiffPairPads
     """
-    pairs: Dict[str, DiffPair] = {}
+    pairs: Dict[str, DiffPairPads] = {}
 
     for pad in footprint.pads:
         if not pad.net_name or pad.net_id == 0:
@@ -154,7 +154,7 @@ def find_differential_pairs(footprint: Footprint,
         base_name, is_p = result
 
         if base_name not in pairs:
-            pairs[base_name] = DiffPair(base_name=base_name)
+            pairs[base_name] = DiffPairPads(base_name=base_name)
 
         if is_p:
             pairs[base_name].p_pad = pad
@@ -967,7 +967,7 @@ def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
         return options[0]
 
 
-def assign_pair_escapes(diff_pairs: Dict[str, DiffPair],
+def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
                         grid: BGAGrid,
                         channels: List[Channel],
                         layers: List[str],
@@ -988,7 +988,7 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPair],
     5. If rebalance=True, try to balance if one direction is overpopulated
 
     Args:
-        diff_pairs: Dictionary of pair_id -> DiffPair
+        diff_pairs: Dictionary of pair_id -> DiffPairPads
         grid: BGA grid info
         channels: Available channels
         layers: Available routing layers
@@ -1071,7 +1071,7 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPair],
 
     secondary_orientation = 'vertical' if primary_orientation == 'horizontal' else 'horizontal'
 
-    def get_exit_key(pair: DiffPair, channel: Channel, escape_dir: str) -> Tuple[str, float]:
+    def get_exit_key(pair: DiffPairPads, channel: Channel, escape_dir: str) -> Tuple[str, float]:
         """Get the exit position key for a pair assignment.
 
         Returns (direction_and_axis, position) where direction_and_axis encodes
@@ -1100,7 +1100,7 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPair],
             else:
                 return (f'{escape_dir}_v', round(channel.position, 1))
 
-    def can_assign(pair: DiffPair, channel: Channel, escape_dir: str) -> Tuple[bool, Optional[str]]:
+    def can_assign(pair: DiffPairPads, channel: Channel, escape_dir: str) -> Tuple[bool, Optional[str]]:
         """Check if a pair can be assigned without overlap. Returns (can_assign, best_layer)."""
         if channel is None:
             return False, None
@@ -1126,7 +1126,7 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPair],
 
         return False, None
 
-    def do_assign(pair_id: str, pair: DiffPair, channel: Channel, escape_dir: str, layer: str):
+    def do_assign(pair_id: str, pair: DiffPairPads, channel: Channel, escape_dir: str, layer: str):
         """Record an assignment."""
         assignments[pair_id] = (channel, escape_dir)
         pos_key, pos = get_exit_key(pair, channel, escape_dir)
@@ -2277,7 +2277,7 @@ def generate_bga_fanout(footprint: Footprint,
             print(f"  Found {len(pre_occupied_exits)} occupied exit positions")
 
     # Find differential pairs if patterns specified
-    diff_pairs: Dict[str, DiffPair] = {}
+    diff_pairs: Dict[str, DiffPairPads] = {}
     pair_escape_assignments: Dict[str, Tuple[Optional[Channel], str]] = {}
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(footprint, diff_pair_patterns)

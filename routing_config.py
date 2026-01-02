@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class DiffPair:
-    """Represents a differential pair with P and N nets."""
+class DiffPairNet:
+    """Represents a differential pair with P and N nets (tracks net IDs)."""
     base_name: str  # Common name without _P/_N suffix
     p_net_id: Optional[int] = None
     n_net_id: Optional[int] = None

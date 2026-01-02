@@ -8,14 +8,14 @@ as well as restoring them when needed (e.g., when a rip-up retry fails).
 from typing import Dict, List, Optional, Tuple
 
 from kicad_parser import PCBData
-from routing_config import GridRouteConfig, DiffPair
+from routing_config import GridRouteConfig, DiffPairNet
 from routing_utils import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import compute_track_proximity_for_net
 
 
 def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
                routed_net_paths: Dict[int, List], routed_results: Dict[int, dict],
-               diff_pair_by_net_id: Dict[int, Tuple[str, DiffPair]],
+               diff_pair_by_net_id: Dict[int, Tuple[str, DiffPairNet]],
                remaining_net_ids: List[int], results: List[dict],
                config: GridRouteConfig,
                track_proximity_cache: Dict[int, dict] = None) -> Tuple[Optional[dict], List[int], bool]:
@@ -97,7 +97,7 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
 def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 was_in_results: bool, pcb_data: PCBData, routed_net_ids: List[int],
                 routed_net_paths: Dict[int, List], routed_results: Dict[int, dict],
-                diff_pair_by_net_id: Dict[int, Tuple[str, DiffPair]],
+                diff_pair_by_net_id: Dict[int, Tuple[str, DiffPairNet]],
                 remaining_net_ids: List[int], results: List[dict],
                 config: GridRouteConfig,
                 track_proximity_cache: Dict[int, dict] = None,

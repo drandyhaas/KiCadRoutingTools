@@ -9,7 +9,7 @@ import fnmatch
 from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import PCBData, Segment, Via, Pad
-from routing_config import GridRouteConfig, GridCoord, DiffPair
+from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from chip_boundary import (
     build_chip_list, identify_chip_for_point, compute_far_side,
     compute_boundary_position, crossings_from_boundary_order
@@ -69,7 +69,7 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     return None
 
 
-def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str, DiffPair]:
+def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str, DiffPairNet]:
     """
     Find all differential pairs in the PCB matching the given glob patterns.
 
@@ -80,7 +80,7 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
     Returns:
         Dict mapping base_name to DiffPair with complete P/N pairs
     """
-    pairs: Dict[str, DiffPair] = {}
+    pairs: Dict[str, DiffPairNet] = {}
 
     # Collect all net names from pcb_data
     for net_id, net in pcb_data.nets.items():
@@ -101,7 +101,7 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
         base_name, is_p = result
 
         if base_name not in pairs:
-            pairs[base_name] = DiffPair(base_name=base_name)
+            pairs[base_name] = DiffPairNet(base_name=base_name)
 
         if is_p:
             pairs[base_name].p_net_id = net_id

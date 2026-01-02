@@ -20,7 +20,7 @@ except ImportError:
     HAS_SCIPY = False
 
 from kicad_parser import PCBData, Pad
-from routing_config import DiffPair, GridRouteConfig
+from routing_config import DiffPairNet, GridRouteConfig
 from routing_utils import (
     find_connected_segment_positions, find_connected_segments, pos_key,
     compute_routing_aware_distance, find_containing_or_nearest_bga_zone
@@ -664,10 +664,10 @@ def find_pad_in_positions(pads: List[Pad], positions: Set[Tuple[float, float]],
 
 
 def ensure_consistent_target_component(
-    pair_data: List[Tuple[str, 'DiffPair', List, List]],
+    pair_data: List[Tuple[str, 'DiffPairNet', List, List]],
     pcb_data: PCBData,
     quiet: bool = False
-) -> List[Tuple[str, 'DiffPair', List, List]]:
+) -> List[Tuple[str, 'DiffPairNet', List, List]]:
     """
     Ensure all source/target endpoints are consistently ordered by component.
 
@@ -733,10 +733,10 @@ def ensure_consistent_target_component(
 def apply_single_swap(
     pcb_data: PCBData,
     p1_name: str,
-    p1_pair: DiffPair,
+    p1_pair: DiffPairNet,
     p1_targets: List,
     p2_name: str,
-    p2_pair: DiffPair,
+    p2_pair: DiffPairNet,
     p2_targets: List,
     target_swaps: Dict[str, str],
     target_swap_info: List[Dict],
@@ -751,10 +751,10 @@ def apply_single_swap(
     Args:
         pcb_data: PCB data to modify in place
         p1_name: Name of first diff pair
-        p1_pair: DiffPair object for first pair
+        p1_pair: DiffPairNet object for first pair
         p1_targets: Target endpoints for first pair
         p2_name: Name of second diff pair
-        p2_pair: DiffPair object for second pair
+        p2_pair: DiffPairNet object for second pair
         p2_targets: Target endpoints for second pair
         target_swaps: Dict to update with swap mapping
         target_swap_info: List to append swap details for output file
@@ -1304,9 +1304,9 @@ def apply_single_ended_target_swaps(
 
 def apply_target_swaps(
     pcb_data: PCBData,
-    swappable_pairs: List[Tuple[str, DiffPair]],
+    swappable_pairs: List[Tuple[str, DiffPairNet]],
     config: GridRouteConfig,
-    get_endpoints_func: Callable[[DiffPair], Tuple[List, List, Optional[str]]],
+    get_endpoints_func: Callable[[DiffPairNet], Tuple[List, List, Optional[str]]],
     use_boundary_ordering: bool = True
 ) -> Tuple[Dict[str, str], List[Dict]]:
     """
@@ -1317,9 +1317,9 @@ def apply_target_swaps(
 
     Args:
         pcb_data: PCB data to modify in place
-        swappable_pairs: List of (pair_name, DiffPair) that can have targets swapped
+        swappable_pairs: List of (pair_name, DiffPairNet) that can have targets swapped
         config: Routing configuration
-        get_endpoints_func: Function to get endpoints for a DiffPair
+        get_endpoints_func: Function to get endpoints for a DiffPairNet
                            Returns (sources, targets, error_string)
         use_boundary_ordering: If True, use chip boundary ordering for crossing detection
 
@@ -1335,7 +1335,7 @@ def apply_target_swaps(
         return target_swaps, target_swap_info
 
     # Gather endpoint data for all swappable pairs
-    pair_data: List[Tuple[str, DiffPair, List, List]] = []
+    pair_data: List[Tuple[str, DiffPairNet, List, List]] = []
     for pair_name, pair in swappable_pairs:
         sources, targets, error = get_endpoints_func(pair)
         if error or not sources or not targets:
@@ -1411,16 +1411,16 @@ def apply_target_swaps(
 
 def generate_debug_boundary_labels(
     pcb_data: PCBData,
-    swappable_pairs: List[Tuple[str, DiffPair]],
-    get_endpoints_func: Callable[[DiffPair], Tuple[List, List, Optional[str]]]
+    swappable_pairs: List[Tuple[str, DiffPairNet]],
+    get_endpoints_func: Callable[[DiffPairNet], Tuple[List, List, Optional[str]]]
 ) -> List[dict]:
     """
     Generate debug labels showing boundary position ordering for visualization.
 
     Args:
         pcb_data: PCB data for chip detection
-        swappable_pairs: List of (pair_name, DiffPair) to label
-        get_endpoints_func: Function to get endpoints for a DiffPair
+        swappable_pairs: List of (pair_name, DiffPairNet) to label
+        get_endpoints_func: Function to get endpoints for a DiffPairNet
 
     Returns:
         List of label dicts with 'text', 'x', 'y', 'layer' keys
@@ -1428,7 +1428,7 @@ def generate_debug_boundary_labels(
     labels = []
 
     # Gather endpoints (same as apply_target_swaps)
-    pair_data: List[Tuple[str, DiffPair, List, List]] = []
+    pair_data: List[Tuple[str, DiffPairNet, List, List]] = []
     for pair_name, pair in swappable_pairs:
         sources, targets, error = get_endpoints_func(pair)
         if error or not sources or not targets:

@@ -8,7 +8,7 @@ the routing algorithm determines that a swap is needed to achieve a valid route.
 from typing import Dict, List, Optional, Set, Tuple
 
 from kicad_parser import PCBData, Pad
-from routing_config import DiffPair
+from routing_config import DiffPairNet
 from routing_utils import find_pad_nearest_to_position, find_connected_segment_positions, pos_key
 
 
@@ -95,7 +95,7 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],
         return False
 
 
-def get_canonical_net_id(net_id: int, diff_pair_by_net_id: Dict[int, Tuple[str, DiffPair]]) -> int:
+def get_canonical_net_id(net_id: int, diff_pair_by_net_id: Dict[int, Tuple[str, DiffPairNet]]) -> int:
     """Get canonical net ID for loop prevention tracking.
 
     For diff pairs, returns P net_id. For single nets, returns net_id as-is.

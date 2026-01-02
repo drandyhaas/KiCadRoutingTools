@@ -9,7 +9,7 @@ import random
 from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
-from routing_config import GridRouteConfig, GridCoord, DiffPair
+from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from routing_utils import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints
 )
@@ -321,7 +321,7 @@ def create_parallel_path_float(centerline_path, coord, sign, spacing_mm=0.1, sta
     return result
 
 
-def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPair,
+def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
                                      config: GridRouteConfig) -> Optional[dict]:
     """
     Compute connector region parameters for a differential pair.
@@ -976,7 +976,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     return None, total_iterations, blocked, None
 
 
-def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPair,
+def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap,
                                     base_obstacles: GridObstacleMap = None,
