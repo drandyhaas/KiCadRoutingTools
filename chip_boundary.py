@@ -23,15 +23,20 @@ class ChipBoundary:
     bounds: Tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
 
 
-def build_chip_list(pcb_data: PCBData) -> List[ChipBoundary]:
+def build_chip_list(pcb_data: PCBData, min_pads: int = 4) -> List[ChipBoundary]:
     """
     Build list of chips with their boundaries from PCB data.
 
-    Currently extracts all footprints with computed bounding boxes from their pads.
+    Extracts footprints with computed bounding boxes from their pads.
+    Only includes footprints with at least min_pads pads (filters out passives).
+
+    Args:
+        pcb_data: PCB data
+        min_pads: Minimum number of pads to be considered a chip (default: 4)
     """
     chips = []
     for ref, footprint in pcb_data.footprints.items():
-        if not footprint.pads:
+        if not footprint.pads or len(footprint.pads) < min_pads:
             continue
 
         # Compute bounding box from pad positions

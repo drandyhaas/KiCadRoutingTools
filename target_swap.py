@@ -1516,124 +1516,213 @@ def generate_debug_boundary_labels(
 
 def generate_single_ended_debug_labels(
     pcb_data: PCBData,
-    swappable_nets: List[Tuple[str, int]],
-    get_endpoints_func: Callable[[int], Tuple[List, List, Optional[str]]]
+    net_list: List[Tuple[str, int]],
+    get_endpoints_func: Callable[[int], Tuple[List, List, Optional[str]]],
+    use_mps_ordering: bool = False
 ) -> List[dict]:
     """
-    Generate debug labels showing boundary position ordering for single-ended nets.
+    Generate debug labels showing stub positions for single-ended nets.
+
+    When use_mps_ordering=True, shows MPS boundary ordering numbers (S1, S2, T1, T2)
+    projected to chip boundaries.
+
+    Otherwise places simple labels at stub positions (S:name, T:name).
 
     Args:
         pcb_data: PCB data for chip detection
-        swappable_nets: List of (net_name, net_id) to label
+        net_list: List of (net_name, net_id) to label
         get_endpoints_func: Function to get endpoints for a net_id
+        use_mps_ordering: If True, use MPS boundary ordering for label numbers
 
     Returns:
         List of label dicts with 'text', 'x', 'y', 'layer' keys
     """
     labels = []
 
-    # Gather endpoints (same as apply_single_ended_target_swaps)
+    # Gather endpoints
     net_data: List[Tuple[str, int, List, List]] = []
-    for net_name, net_id in swappable_nets:
+    for net_name, net_id in net_list:
         sources, targets, error = get_endpoints_func(net_id)
         if error or not sources or not targets:
             continue
         net_data.append((net_name, net_id, sources, targets))
 
-    if len(net_data) < 2:
+    if not net_data:
         return labels
 
-    # Normalize source/target to ensure consistent component ordering
-    # (same normalization as apply_single_ended_target_swaps uses)
-    net_data = ensure_consistent_single_ended_target_component(net_data, pcb_data, quiet=True)
+    # Helper to extract short name from net name (e.g., "Net-(U1B-D0)" -> "D0")
+    def short_name(name: str) -> str:
+        if "Net-(" in name and "-" in name:
+            parts = name.split("-")
+            if parts:
+                return parts[-1].rstrip(")")
+        return name
 
-    # Extract centroids from normalized data
-    source_centroids = []
-    target_centroids = []
-    net_names = []
-    net_ids = []
+    # Helper to find pad position closest to a stub tip
+    def find_pad_position(stub_x: float, stub_y: float, net_id: int) -> Tuple[float, float]:
+        """Find the pad position closest to the stub tip."""
+        pads = pcb_data.pads_by_net.get(net_id, [])
+        best_dist = float('inf')
+        best_pos = (stub_x, stub_y)  # fallback to stub position
+        for pad in pads:
+            dist = abs(pad.global_x - stub_x) + abs(pad.global_y - stub_y)
+            if dist < best_dist:
+                best_dist = dist
+                best_pos = (pad.global_x, pad.global_y)
+        return best_pos
+
+    if use_mps_ordering:
+        # Normalize source/target to ensure consistent component ordering
+        net_data = ensure_consistent_single_ended_target_component(net_data, pcb_data, quiet=True)
+
+        # Build chip list
+        chips = build_chip_list(pcb_data)
+
+        # Classify nets by their chip pairs
+        # Group nets that connect the same two chips for MPS ordering
+        chip_pair_nets: Dict[Tuple[str, str], List[Tuple[str, int, List, List, Tuple, Tuple]]] = {}
+        simple_nets: List[Tuple[str, int, List, List]] = []
+
+        for net_name, net_id, sources, targets in net_data:
+            src = sources[0]
+            tgt = targets[0]
+            stub_src = get_single_source_centroid(src)
+            stub_tgt = get_single_target_centroid(tgt)
+            # Use pad positions for chip identification
+            pad_src = find_pad_position(stub_src[0], stub_src[1], net_id)
+            pad_tgt = find_pad_position(stub_tgt[0], stub_tgt[1], net_id)
+
+            src_chip = identify_chip_for_point(pad_src, chips)
+            tgt_chip = identify_chip_for_point(pad_tgt, chips)
+
+            if src_chip and tgt_chip and src_chip != tgt_chip:
+                # Net connects two different chips - use MPS ordering
+                key = (src_chip.reference, tgt_chip.reference)
+                if key not in chip_pair_nets:
+                    chip_pair_nets[key] = []
+                chip_pair_nets[key].append((net_name, net_id, sources, targets, pad_src, pad_tgt))
+            else:
+                # Net doesn't connect two chips - use simple labels
+                simple_nets.append((net_name, net_id, sources, targets))
+
+        # Generate MPS ordering labels for each chip pair group
+        for (src_ref, tgt_ref), nets_in_group in chip_pair_nets.items():
+            # Find the actual chip objects
+            src_chip = next((c for c in chips if c.reference == src_ref), None)
+            tgt_chip = next((c for c in chips if c.reference == tgt_ref), None)
+
+            if not src_chip or not tgt_chip:
+                # Shouldn't happen, but fall back to simple labels
+                for net_name, net_id, sources, targets, _, _ in nets_in_group:
+                    simple_nets.append((net_name, net_id, sources, targets))
+                continue
+
+            src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
+
+            # Extract data for this group
+            source_centroids = [pad_src for _, _, _, _, pad_src, _ in nets_in_group]
+            target_centroids = [pad_tgt for _, _, _, _, _, pad_tgt in nets_in_group]
+            net_ids = [net_id for _, net_id, _, _, _, _ in nets_in_group]
+
+            # Precompute stub exit edges
+            src_exit_edges = [get_stub_exit_edge(pcb_data, nid, src_chip.bounds) for nid in net_ids]
+            tgt_exit_edges = [get_stub_exit_edge(pcb_data, nid, tgt_chip.bounds) for nid in net_ids]
+
+            # Generate source labels with MPS ordering
+            src_positions = []
+            for i, centroid in enumerate(source_centroids):
+                pos = compute_boundary_position(
+                    src_chip, centroid, src_far, clockwise=True,
+                    exit_edge=src_exit_edges[i]
+                )
+                src_positions.append((pos, centroid, src_exit_edges[i]))
+
+            src_sorted = sorted(range(len(src_positions)), key=lambda i: src_positions[i][0])
+            for order_num, idx in enumerate(src_sorted, start=1):
+                pos, centroid, exit_edge = src_positions[idx]
+                if exit_edge:
+                    projected = project_to_edge(centroid, src_chip.bounds, exit_edge)
+                    edge = exit_edge
+                else:
+                    from chip_boundary import _project_to_boundary
+                    projected, edge = _project_to_boundary(centroid, src_chip.bounds)
+                angle = 90 if edge in ('top', 'bottom') else 0
+                labels.append({
+                    'text': f"S{order_num}",
+                    'x': projected[0],
+                    'y': projected[1],
+                    'layer': "User.6",
+                    'angle': angle
+                })
+
+            # Generate target labels with MPS ordering
+            tgt_positions = []
+            for i, centroid in enumerate(target_centroids):
+                pos = compute_boundary_position(
+                    tgt_chip, centroid, tgt_far, clockwise=False,
+                    exit_edge=tgt_exit_edges[i]
+                )
+                tgt_positions.append((pos, centroid, tgt_exit_edges[i]))
+
+            tgt_sorted = sorted(range(len(tgt_positions)), key=lambda i: tgt_positions[i][0])
+            for order_num, idx in enumerate(tgt_sorted, start=1):
+                pos, centroid, exit_edge = tgt_positions[idx]
+                if exit_edge:
+                    projected = project_to_edge(centroid, tgt_chip.bounds, exit_edge)
+                    edge = exit_edge
+                else:
+                    from chip_boundary import _project_to_boundary
+                    projected, edge = _project_to_boundary(centroid, tgt_chip.bounds)
+                angle = 90 if edge in ('top', 'bottom') else 0
+                labels.append({
+                    'text': f"T{order_num}",
+                    'x': projected[0],
+                    'y': projected[1],
+                    'layer': "User.6",
+                    'angle': angle
+                })
+
+        # Add simple labels for nets that don't connect two chips
+        for net_name, net_id, sources, targets in simple_nets:
+            src = sources[0]
+            tgt = targets[0]
+            labels.append({
+                'text': f"S:{short_name(net_name)}",
+                'x': src[3],
+                'y': src[4],
+                'layer': "User.6",
+                'angle': 0
+            })
+            labels.append({
+                'text': f"T:{short_name(net_name)}",
+                'x': tgt[3],
+                'y': tgt[4],
+                'layer': "User.6",
+                'angle': 0
+            })
+
+        return labels
+
+    # Simple labels at stub positions (when use_mps_ordering=False)
     for net_name, net_id, sources, targets in net_data:
         src = sources[0]
         tgt = targets[0]
-        source_centroids.append(get_single_source_centroid(src))
-        target_centroids.append(get_single_target_centroid(tgt))
-        net_names.append(net_name)
-        net_ids.append(net_id)
-
-    if len(source_centroids) < 2:
-        return labels
-
-    # Build chip list and identify chips
-    chips = build_chip_list(pcb_data)
-
-    # Find the two main chips (source and target)
-    src_chip = identify_chip_for_point(source_centroids[0], chips)
-    tgt_chip = identify_chip_for_point(target_centroids[0], chips)
-
-    if not src_chip or not tgt_chip or src_chip == tgt_chip:
-        return labels
-
-    src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
-
-    # Precompute stub exit edges for all nets
-    src_exit_edges = [get_stub_exit_edge(pcb_data, nid, src_chip.bounds) for nid in net_ids]
-    tgt_exit_edges = [get_stub_exit_edge(pcb_data, nid, tgt_chip.bounds) for nid in net_ids]
-
-    # Generate labels for source positions (numbered by order)
-    src_positions = []
-    for i, centroid in enumerate(source_centroids):
-        # Use stub exit edge for accurate boundary position ordering
-        pos = compute_boundary_position(
-            src_chip, centroid, src_far, clockwise=True,
-            exit_edge=src_exit_edges[i]
-        )
-        src_positions.append((pos, centroid, net_names[i], net_ids[i], src_exit_edges[i]))
-
-    # Sort and number
-    src_sorted = sorted(src_positions, key=lambda x: x[0])
-    for order_num, (pos, centroid, name, net_id, exit_edge) in enumerate(src_sorted, start=1):
-        # Use precomputed exit edge for label placement
-        if exit_edge:
-            projected = project_to_edge(centroid, src_chip.bounds, exit_edge)
-            edge = exit_edge
-        else:
-            from chip_boundary import _project_to_boundary
-            projected, edge = _project_to_boundary(centroid, src_chip.bounds)
-        angle = 90 if edge in ('top', 'bottom') else 0
+        # Format: (gx, gy, layer_idx, orig_x, orig_y)
         labels.append({
-            'text': f"S{order_num}",
-            'x': projected[0],
-            'y': projected[1],
+            'text': f"S:{short_name(net_name)}",
+            'x': src[3],
+            'y': src[4],
             'layer': "User.6",
-            'angle': angle
+            'angle': 0
         })
-
-    # Generate labels for target positions (counter-clockwise, opposite of source)
-    tgt_positions = []
-    for i, centroid in enumerate(target_centroids):
-        # Use stub exit edge for accurate boundary position ordering
-        pos = compute_boundary_position(
-            tgt_chip, centroid, tgt_far, clockwise=False,
-            exit_edge=tgt_exit_edges[i]
-        )
-        tgt_positions.append((pos, centroid, net_names[i], net_ids[i], tgt_exit_edges[i]))
-
-    tgt_sorted = sorted(tgt_positions, key=lambda x: x[0])
-    for order_num, (pos, centroid, name, net_id, exit_edge) in enumerate(tgt_sorted, start=1):
-        # Use precomputed exit edge for label placement
-        if exit_edge:
-            projected = project_to_edge(centroid, tgt_chip.bounds, exit_edge)
-            edge = exit_edge
-        else:
-            from chip_boundary import _project_to_boundary
-            projected, edge = _project_to_boundary(centroid, tgt_chip.bounds)
-        angle = 90 if edge in ('top', 'bottom') else 0
         labels.append({
-            'text': f"T{order_num}",
-            'x': projected[0],
-            'y': projected[1],
+            'text': f"T:{short_name(net_name)}",
+            'x': tgt[3],
+            'y': tgt[4],
             'layer': "User.6",
-            'angle': angle
+            'angle': 0
         })
 
     return labels
+
+

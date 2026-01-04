@@ -343,15 +343,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 use_boundary_ordering=mps_unroll
             )
 
-            # Generate debug labels for single-ended nets if requested
-            if debug_lines and mps_unroll:
-                from target_swap import generate_single_ended_debug_labels
-                se_labels = generate_single_ended_debug_labels(
-                    pcb_data, swappable_se_nets,
-                    lambda net_id: get_net_endpoints(pcb_data, net_id, config)
-                )
-                boundary_debug_labels.extend(se_labels)
-
     # Generate boundary debug labels for all diff pairs if not already generated from swappable pairs
     if debug_lines and mps_unroll and not boundary_debug_labels and diff_pair_ids_to_route_set:
         from target_swap import generate_debug_boundary_labels
@@ -459,6 +450,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             single_ended_nets.append((net_name, net_id))
 
     total_routes = len(single_ended_nets) + len(diff_pair_ids_to_route)
+
+    # Generate stub position labels for single-ended nets (when debug_lines enabled)
+    if debug_lines and single_ended_nets:
+        from target_swap import generate_single_ended_debug_labels
+        from routing_utils import get_net_endpoints
+        stub_labels = generate_single_ended_debug_labels(
+            pcb_data, single_ended_nets,
+            lambda net_id: get_net_endpoints(pcb_data, net_id, config),
+            use_mps_ordering=mps_unroll
+        )
+        if stub_labels:
+            print(f"Generated {len(stub_labels)} stub position labels for single-ended nets")
+            boundary_debug_labels.extend(stub_labels)
 
     results = []
     pad_swaps = []  # List of (pad1, pad2) tuples for nets that need swapping

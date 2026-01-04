@@ -52,9 +52,6 @@ Thumbs.db
 /fanout_output.kicad_pcb
 /test_batch_diffpair.kicad_pcb
 /test_diffpair.kicad_pcb
-/fanout_output1.kicad_pcb
-/fanout_output2.kicad_pcb
-/fanout_output3.kicad_pcb
-/fanout_output4.kicad_pcb
+/fanout_output*.kicad_pcb
 /~*.kicad_pcb.lck
 /test_diffpair_ram.kicad_pcb
