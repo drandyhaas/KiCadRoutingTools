@@ -302,7 +302,7 @@ def compute_boundary_position(
     else:
         edge_info = [('left', True), ('bottom', True), ('right', False), ('top', False)]
 
-    # Compute distance along perimeter from start to projected point
+    # Compute distance along perimeter from start of far side to projected point
     distance = 0.0
 
     for current_edge, forward in edge_info:
@@ -354,6 +354,14 @@ def compute_boundary_position(
                 break
             else:
                 distance += edge_length
+
+    # Shift so that position 0 is at the MIDDLE of the far side edge
+    # This makes numbering radiate outward from the center of the far side
+    far_side_length = height if far_side in ('left', 'right') else width
+    middle_offset = far_side_length / 2.0
+    distance = distance - middle_offset
+    if distance < 0:
+        distance += perimeter  # Wrap around
 
     return distance / perimeter
 
