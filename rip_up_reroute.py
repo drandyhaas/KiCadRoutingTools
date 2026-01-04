@@ -126,8 +126,8 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
     # Add back to pcb_data
     add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
 
-    # Add back to results list if it was there
-    if was_in_results:
+    # Add back to results list if it was there (and not already present)
+    if was_in_results and saved_result not in results:
         results.append(saved_result)
 
     # Restore tracking structures

@@ -379,11 +379,26 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                     return True, rip_result, all_vias, all_mods
                                 else:
                                     # Failed to reroute ripped nets - restore them
+                                    # But first, we need to undo any partial successes
+                                    # (nets that were rerouted before a subsequent one failed)
                                     for ripped_blocker, ripped_saved, ripped_ids, ripped_was_in_results in ripped_items:
                                         if ripped_saved:
+                                            # Check if this net was already successfully rerouted
+                                            # (it would have its new result in routed_results, not the old one)
+                                            already_rerouted = (ripped_ids[0] in routed_results and
+                                                              routed_results[ripped_ids[0]] != ripped_saved)
+                                            if already_rerouted:
+                                                # Remove the new route that was added during partial success
+                                                new_result = routed_results[ripped_ids[0]]
+                                                remove_route_from_pcb_data(pcb_data, new_result)
+                                                if new_result in results:
+                                                    results.remove(new_result)
+                                            # Now restore the old route
                                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
                                             if ripped_was_in_results and results is not None:
-                                                results.append(ripped_saved)
+                                                # Only append if not already in results (prevent duplicates)
+                                                if ripped_saved not in results:
+                                                    results.append(ripped_saved)
                                             for rid in ripped_ids:
                                                 if rid not in routed_net_ids:
                                                     routed_net_ids.append(rid)
@@ -400,7 +415,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                     for ripped_blocker, ripped_saved, ripped_ids, ripped_was_in_results in ripped_items:
                         if ripped_saved and ripped_ids[0] not in routed_net_ids:
                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
-                            if ripped_was_in_results and results is not None:
+                            if ripped_was_in_results and results is not None and ripped_saved not in results:
                                 results.append(ripped_saved)
                             for rid in ripped_ids:
                                 if rid not in routed_net_ids:

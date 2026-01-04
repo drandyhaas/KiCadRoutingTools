@@ -316,7 +316,7 @@ def restore_ripped_net(
             remaining_net_ids.remove(rid)
         routed_results[rid] = ripped_saved
 
-    if was_in_results:
+    if was_in_results and ripped_saved not in results:
         results.append(ripped_saved)
 
     # Restore track proximity cache
