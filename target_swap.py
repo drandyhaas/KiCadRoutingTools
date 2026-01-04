@@ -324,6 +324,9 @@ def build_cost_matrix(
     # Get BGA exclusion zones for routing-aware distance
     bga_zones = getattr(pcb_data, 'bga_exclusion_zones', [])
 
+    # Infinity cost to prevent invalid swaps
+    INVALID_SWAP_COST = float('inf')
+
     for i in range(n):
         src_c = source_centroids[i]
         src_layer = source_layers[i]
@@ -331,6 +334,34 @@ def build_cost_matrix(
         for j in range(n):
             tgt_c = target_centroids[j]
             tgt_layer = target_layers[j]
+
+            # Prevent swaps between nets whose sources or targets are on different chips
+            # Swapping is only valid when both nets connect the same pair of chips
+            if use_boundary_ordering and i != j:
+                src_i_chip = source_chips[i]
+                src_j_chip = source_chips[j]
+                tgt_i_chip = target_chips[i]
+                tgt_j_chip = target_chips[j]
+
+                # If both sources are on detected chips, they must match
+                if src_i_chip and src_j_chip and src_i_chip != src_j_chip:
+                    cost_matrix[i][j] = INVALID_SWAP_COST
+                    continue
+
+                # If both targets are on detected chips, they must match
+                if tgt_i_chip and tgt_j_chip and tgt_i_chip != tgt_j_chip:
+                    cost_matrix[i][j] = INVALID_SWAP_COST
+                    continue
+
+                # If one target is on a chip and the other is not, they're on different components
+                if (tgt_i_chip is None) != (tgt_j_chip is None):
+                    cost_matrix[i][j] = INVALID_SWAP_COST
+                    continue
+
+                # If one source is on a chip and the other is not, they're on different components
+                if (src_i_chip is None) != (src_j_chip is None):
+                    cost_matrix[i][j] = INVALID_SWAP_COST
+                    continue
 
             # Distance cost (routing-aware if BGA zones present)
             if bga_zones:
@@ -578,6 +609,29 @@ def compute_optimal_assignment(
 
             for i in range(n):
                 for j in range(i + 1, n):
+                    # Only allow swaps between nets on the same chip pair
+                    # After previous swaps, net i's target is at current_assignment[i],
+                    # and net j's target is at current_assignment[j]
+                    # Sources don't change, so we check source_chips[i] == source_chips[j]
+                    # For targets, check target_chips[current_assignment[i]] == target_chips[current_assignment[j]]
+                    src_i_chip = source_chips[i]
+                    src_j_chip = source_chips[j]
+                    tgt_i_chip = target_chips[current_assignment[i]]
+                    tgt_j_chip = target_chips[current_assignment[j]]
+
+                    # Skip if sources are on different chips (both detected and different)
+                    if src_i_chip and src_j_chip and src_i_chip != src_j_chip:
+                        continue
+                    # Skip if one source is detected and the other is not
+                    if (src_i_chip is None) != (src_j_chip is None):
+                        continue
+                    # Skip if current targets are on different chips (both detected and different)
+                    if tgt_i_chip and tgt_j_chip and tgt_i_chip != tgt_j_chip:
+                        continue
+                    # Skip if one target is detected and the other is not
+                    if (tgt_i_chip is None) != (tgt_j_chip is None):
+                        continue
+
                     # Try swapping i and j's target assignments
                     test_assignment = current_assignment[:]
                     test_assignment[i], test_assignment[j] = test_assignment[j], test_assignment[i]
