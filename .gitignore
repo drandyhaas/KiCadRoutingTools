@@ -55,3 +55,4 @@ Thumbs.db
 /fanout_output*.kicad_pcb
 /~*.kicad_pcb.lck
 /test_diffpair_ram.kicad_pcb
+/routed_output_*.pcb
