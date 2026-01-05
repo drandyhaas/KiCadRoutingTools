@@ -51,10 +51,15 @@ def get_bump_segments(
     px: float, py: float,
     direction: int,
     amplitude: float,
-    chamfer: float = 0.1
+    chamfer: float = 0.1,
+    is_first_bump: bool = True
 ) -> List[Tuple[float, float, float, float]]:
     """
     Calculate the segments that would form a meander bump.
+
+    Args:
+        is_first_bump: If True, includes entry chamfer. If False, bump connects
+                       directly from previous bump (no entry chamfer needed).
 
     Returns list of (x1, y1, x2, y2) tuples for each segment.
     """
@@ -65,40 +70,39 @@ def get_bump_segments(
     segments = []
     x, y = cx, cy
 
-    # 1. Entry 45° chamfer
-    nx = x + ux * chamfer + px * chamfer * direction
-    ny = y + uy * chamfer + py * chamfer * direction
-    segments.append((x, y, nx, ny))
-    x, y = nx, ny
+    # Entry 45° chamfer (only for first bump)
+    if is_first_bump:
+        nx = x + ux * chamfer + px * chamfer * direction
+        ny = y + uy * chamfer + py * chamfer * direction
+        segments.append((x, y, nx, ny))
+        x, y = nx, ny
 
-    # 2. Riser up
+    # Riser away from centerline
     nx = x + px * riser_height * direction
     ny = y + py * riser_height * direction
     segments.append((x, y, nx, ny))
     x, y = nx, ny
 
-    # 3. Top chamfer 1
+    # Top chamfer 1
     nx = x + ux * chamfer + px * chamfer * direction
     ny = y + uy * chamfer + py * chamfer * direction
     segments.append((x, y, nx, ny))
     x, y = nx, ny
 
-    # 4. Top chamfer 2
+    # Top chamfer 2
     nx = x + ux * chamfer - px * chamfer * direction
     ny = y + uy * chamfer - py * chamfer * direction
     segments.append((x, y, nx, ny))
     x, y = nx, ny
 
-    # 5. Riser down
+    # Riser back toward centerline
     nx = x - px * riser_height * direction
     ny = y - py * riser_height * direction
     segments.append((x, y, nx, ny))
     x, y = nx, ny
 
-    # 6. Exit chamfer
-    nx = x + ux * chamfer - px * chamfer * direction
-    ny = y + uy * chamfer - py * chamfer * direction
-    segments.append((x, y, nx, ny))
+    # No exit chamfer - next bump connects directly
+    # (Exit chamfer is only added at the very end of all meanders)
 
     return segments
 
@@ -115,7 +119,8 @@ def get_safe_amplitude_at_point(
     net_id: int,
     config: GridRouteConfig,
     extra_segments: List[Segment] = None,
-    extra_vias: List = None
+    extra_vias: List = None,
+    is_first_bump: bool = True
 ) -> float:
     """
     Find the maximum safe amplitude for a meander bump at a specific point.
@@ -164,9 +169,12 @@ def get_safe_amplitude_at_point(
             test_amplitudes.append(amp)
     test_amplitudes.append(min_amplitude)
 
+    # Debug: count segments on same layer
+    same_layer_count = sum(1 for s in all_segments if s.layer == layer and s.net_id != net_id)
+
     for test_amp in test_amplitudes:
         # Generate bump segments for this amplitude
-        bump_segs = get_bump_segments(cx, cy, ux, uy, px, py, direction, test_amp, chamfer)
+        bump_segs = get_bump_segments(cx, cy, ux, uy, px, py, direction, test_amp, chamfer, is_first_bump)
 
         conflict_found = False
 
@@ -522,16 +530,17 @@ def generate_trombone_meander(
         bump_amplitude = amplitude
 
         # If we have clearance checking, find safe amplitude at this position
+        is_first = (bump_count == 0)
         if pcb_data is not None and config is not None:
             safe_amp = get_safe_amplitude_at_point(
                 cx, cy, ux, uy, px, py, direction, amplitude, min_amplitude,
-                segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias
+                segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
                 safe_amp_other = get_safe_amplitude_at_point(
                     cx, cy, ux, uy, px, py, -direction, amplitude, min_amplitude,
-                    segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias
+                    segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first
                 )
                 if safe_amp_other >= min_amplitude:
                     direction = -direction
@@ -556,22 +565,43 @@ def generate_trombone_meander(
             riser_height = 0.1
             bump_amplitude = riser_height + 2 * chamfer
 
+        # Calculate extra length added by this bump
+        # With entry/exit chamfers: 4 chamfers + 2 risers
+        # Without inter-bump chamfers: 2 top chamfers + 2 risers (for middle bumps)
         chamfer_diag = chamfer * math.sqrt(2)
-        bump_path_length = 4 * chamfer_diag + 2 * riser_height
-        extra_this_bump = bump_path_length - bump_width
+
+        # First bump includes entry chamfer, subsequent bumps don't
+        has_entry_chamfer = (bump_count == 0)
+
+        if has_entry_chamfer:
+            # Full bump with entry chamfer
+            bump_path_length = 3 * chamfer_diag + 2 * riser_height  # entry + 2 top chamfers + risers
+        else:
+            # No entry chamfer - connect directly from previous bump's end
+            bump_path_length = 2 * chamfer_diag + 2 * riser_height  # just 2 top chamfers + risers
+
+        # Horizontal distance consumed (for checking if we have room)
+        if has_entry_chamfer:
+            this_bump_width = 3 * chamfer  # entry chamfer + 2 top chamfers
+        else:
+            this_bump_width = 2 * chamfer  # just 2 top chamfers
+
+        extra_this_bump = bump_path_length - this_bump_width
 
         # Generate this bump
-        # 1. 45° chamfer going up-and-forward
-        nx = cx + ux * chamfer + px * chamfer * direction
-        ny = cy + uy * chamfer + py * chamfer * direction
-        new_segments.append(Segment(
-            start_x=cx, start_y=cy,
-            end_x=nx, end_y=ny,
-            width=segment.width, layer=segment.layer, net_id=segment.net_id
-        ))
-        cx, cy = nx, ny
 
-        # 2. Vertical riser going up
+        # Entry chamfer (only for first bump)
+        if has_entry_chamfer:
+            nx = cx + ux * chamfer + px * chamfer * direction
+            ny = cy + uy * chamfer + py * chamfer * direction
+            new_segments.append(Segment(
+                start_x=cx, start_y=cy,
+                end_x=nx, end_y=ny,
+                width=segment.width, layer=segment.layer, net_id=segment.net_id
+            ))
+            cx, cy = nx, ny
+
+        # Riser going away from centerline
         nx = cx + px * riser_height * direction
         ny = cy + py * riser_height * direction
         new_segments.append(Segment(
@@ -581,7 +611,7 @@ def generate_trombone_meander(
         ))
         cx, cy = nx, ny
 
-        # 3. 45° chamfer at top (U-turn: up-and-forward to down-and-forward)
+        # Top 45° chamfer 1 (continuing away from centerline + forward)
         nx = cx + ux * chamfer + px * chamfer * direction
         ny = cy + uy * chamfer + py * chamfer * direction
         new_segments.append(Segment(
@@ -591,7 +621,7 @@ def generate_trombone_meander(
         ))
         cx, cy = nx, ny
 
-        # 4. 45° chamfer continuing the U-turn (now going down)
+        # Top 45° chamfer 2 (now returning toward centerline + forward)
         nx = cx + ux * chamfer - px * chamfer * direction
         ny = cy + uy * chamfer - py * chamfer * direction
         new_segments.append(Segment(
@@ -601,7 +631,7 @@ def generate_trombone_meander(
         ))
         cx, cy = nx, ny
 
-        # 5. Vertical riser going down
+        # Riser going back toward centerline
         nx = cx - px * riser_height * direction
         ny = cy - py * riser_height * direction
         new_segments.append(Segment(
@@ -611,15 +641,8 @@ def generate_trombone_meander(
         ))
         cx, cy = nx, ny
 
-        # 6. 45° chamfer returning to centerline
-        nx = cx + ux * chamfer - px * chamfer * direction
-        ny = cy + uy * chamfer - py * chamfer * direction
-        new_segments.append(Segment(
-            start_x=cx, start_y=cy,
-            end_x=nx, end_y=ny,
-            width=segment.width, layer=segment.layer, net_id=segment.net_id
-        ))
-        cx, cy = nx, ny
+        # No exit chamfer - the next bump connects directly here
+        # (Exit chamfer will be added after the loop for the last bump)
 
         # Track progress
         total_extra_added += extra_this_bump
@@ -627,6 +650,18 @@ def generate_trombone_meander(
 
         # Alternate direction for next bump
         direction *= -1
+
+    # Add exit chamfer for the last bump (direction was just flipped, so flip back)
+    if bump_count > 0:
+        last_direction = -direction  # Undo the flip to get last bump's direction
+        nx = cx + ux * chamfer - px * chamfer * last_direction
+        ny = cy + uy * chamfer - py * chamfer * last_direction
+        new_segments.append(Segment(
+            start_x=cx, start_y=cy,
+            end_x=nx, end_y=ny,
+            width=segment.width, layer=segment.layer, net_id=segment.net_id
+        ))
+        cx, cy = nx, ny
 
     # Straight lead-out to segment end
     # Calculate remaining distance to end
