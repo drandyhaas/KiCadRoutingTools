@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.8.1**
+**Current Version: 0.8.2**
 
 ## Features
 
@@ -11,6 +11,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - Via cost and layer transitions
 - BGA exclusion zone with allowed cell overrides
 - Stub proximity costs to avoid blocking unrouted nets
+- **Turn cost penalty** for direction changes - encourages straighter paths with fewer wiggles
 - **Cross-layer track attraction** for vertical alignment - attracts routes to stack on top of tracks on other layers
 - **Pose-based routing with Dubins heuristic** for differential pair centerlines (orientation-aware A*)
 - **Rectangular pad obstacle blocking** with proper rotation handling
@@ -157,8 +158,13 @@ Methods:
 ### GridRouter
 
 ```python
-router = GridRouter(via_cost: int, h_weight: float)
+router = GridRouter(via_cost: int, h_weight: float, turn_cost: int = 1000)
 ```
+
+Parameters:
+- `via_cost`: Cost for layer transitions (scaled by 1000)
+- `h_weight`: Heuristic weight (>1 for faster but less optimal routes)
+- `turn_cost`: Cost for direction changes (encourages straighter paths, default 1000)
 
 Methods:
 - `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0)` - Find path from any source to any target
@@ -230,10 +236,11 @@ src/
 - **DubinsCalculator**: Computes shortest Dubins path length (LSL, RSR, LSR, RSL, RLR, LRL)
 - **State keys**: Packed into u64 for fast hashing (20 bits x, 20 bits y, 8 bits layer)
 - **Hash function**: Uses rustc-hash (FxHash) for faster integer hashing than default SipHash
-- **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000)
+- **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
 
+- **0.8.2**: Added `turn_cost` parameter to GridRouter - penalizes direction changes to encourage straighter paths with fewer wiggles. Default is 1000 (same as ORTHO_COST). Configurable via `--turn-cost` CLI option.
 - **0.8.1**: Added cross-layer track attraction for vertical alignment. New `vertical_attraction_radius` and `vertical_attraction_bonus` parameters to PoseRouter. New GridObstacleMap methods: `add_cross_layer_track()`, `get_cross_layer_attraction()`, `clear_cross_layer_tracks()`. Attracts routes to stack on top of tracks on other layers, consolidating routing corridors and leaving more room for through-hole vias.
 - **0.8.0**: Added `via_proximity_cost` parameter to PoseRouter - allows vias near stubs with cost penalty instead of blocking (default: 10, set to 0 for old blocking behavior). Improved turn radius enforcement: minimum turn radius is now enforced for ALL route steps (not just near vias), ensuring smooth paths throughout. `straight_after_via` is based on `min_radius_grid + 1` instead of hardcoded 2 steps, preventing DRC violations where P/N tracks turn too sharply after vias. Added `route_pose_with_frontier()` method that returns blocked cells on failure for blocking analysis.
 - **0.7.0**: Added `PoseRouter` with Dubins path heuristic for orientation-aware differential pair centerline routing. State space expanded to (x, y, θ, layer) where θ is one of 8 directions (45° increments). Dubins path length used as heuristic for better routing with prescribed start/end orientations.

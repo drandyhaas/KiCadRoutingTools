@@ -62,7 +62,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
 
     # Determine direction order
     if config.direction_order == "random":
@@ -223,7 +223,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
 
     # Determine direction order
     if config.direction_order == "random":

@@ -34,6 +34,7 @@ class GridRouteConfig:
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # Quick probe per direction to detect stuck routes
     heuristic_weight: float = 1.9
+    turn_cost: int = 1000  # Penalty for direction changes (encourages straighter paths)
     # BGA exclusion zones (auto-detected from PCB) - vias blocked inside these areas
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
     stub_proximity_radius: float = 2.0  # mm - radius around stubs to penalize

@@ -43,6 +43,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--max-iterations` | 200000 | A* iteration limit per route |
 | `--max-probe-iterations` | 5000 | Quick probe per direction to detect stuck routes |
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
+| `--turn-cost` | 1000 | Penalty for direction changes (encourages straighter paths) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
@@ -138,6 +139,7 @@ class GridRouteConfig:
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
     heuristic_weight: float = 1.9
+    turn_cost: int = 1000         # penalty for direction changes (straighter paths)
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
     max_setback_angle: float = 45.0  # degrees
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)

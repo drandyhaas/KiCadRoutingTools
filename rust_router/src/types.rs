@@ -17,6 +17,7 @@ pub const DIRECTIONS: [(i32, i32); 8] = [
 
 pub const ORTHO_COST: i32 = 1000;
 pub const DIAG_COST: i32 = 1414; // sqrt(2) * 1000
+pub const DEFAULT_TURN_COST: i32 = 1000;  // Default penalty for changing direction (encourages straighter paths)
 
 /// Pack (gx, gy) into a single u64 for fast hashing
 #[inline]

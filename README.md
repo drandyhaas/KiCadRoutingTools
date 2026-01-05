@@ -22,6 +22,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
+- **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
 
 ## Quick Start
 
@@ -173,6 +174,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --max-iterations 200000      # A* iteration limit
 --max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
 --heuristic-weight 1.9       # A* greediness (>1 = faster)
+--turn-cost 1000             # Penalty for direction changes (straighter paths)
 --max-ripup 3                # Max blockers to rip up at once (1-N progressive)
 --max-setback-angle 45       # Max angle for setback search (degrees)
 --routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)

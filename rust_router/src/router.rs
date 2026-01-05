@@ -5,20 +5,26 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
 
 use crate::obstacle_map::GridObstacleMap;
-use crate::types::{GridState, OpenEntry, BlockedCellTracker, DIRECTIONS, ORTHO_COST, DIAG_COST};
+use crate::types::{GridState, OpenEntry, BlockedCellTracker, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
 /// Grid A* Router
 #[pyclass]
 pub struct GridRouter {
     via_cost: i32,
     h_weight: f32,
+    turn_cost: i32,
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    pub fn new(via_cost: i32, h_weight: f32) -> Self {
-        Self { via_cost, h_weight }
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>) -> Self {
+        Self {
+            via_cost,
+            h_weight,
+            turn_cost: turn_cost.unwrap_or(DEFAULT_TURN_COST),
+        }
     }
 
     /// Route from multiple source points to multiple target points.
@@ -224,6 +230,19 @@ impl GridRouter {
             // Get steps from source for direction constraint
             let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(i32::MAX);
 
+            // Get previous direction (parent -> current) for turn cost calculation
+            let prev_direction: Option<(i32, i32)> = parents.get(&current_key).map(|&parent_key| {
+                let (px, py, _) = Self::unpack_key(parent_key);
+                let pdx = current.gx - px;
+                let pdy = current.gy - py;
+                // Normalize to unit direction (handle multi-step moves like vias)
+                if pdx == 0 && pdy == 0 {
+                    (0, 0) // Via (same position), no direction
+                } else {
+                    (pdx.signum(), pdy.signum())
+                }
+            });
+
             // Expand neighbors - 8 directions
             for (dx, dy) in DIRECTIONS {
                 // If we have a required exact direction (just came through via), only allow that direction
@@ -268,9 +287,16 @@ impl GridRouter {
                 }
 
                 let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                // Add turn cost if direction changes (encourages straighter paths)
+                let turn_cost = match prev_direction {
+                    Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
+                        if dx != pdx || dy != pdy { self.turn_cost } else { 0 }
+                    }
+                    _ => 0, // No previous direction (source node or via)
+                };
                 let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
                     + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
-                let new_g = g + move_cost + proximity_cost;
+                let new_g = g + move_cost + turn_cost + proximity_cost;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
@@ -530,6 +556,14 @@ impl GridRouter {
 
             let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(i32::MAX);
 
+            // Get previous direction (parent -> current) for turn cost calculation
+            let prev_direction: Option<(i32, i32)> = parents.get(&current_key).map(|&parent_key| {
+                let (px, py, _) = Self::unpack_key(parent_key);
+                let pdx = current.gx - px;
+                let pdy = current.gy - py;
+                if pdx == 0 && pdy == 0 { (0, 0) } else { (pdx.signum(), pdy.signum()) }
+            });
+
             for (dx, dy) in DIRECTIONS {
                 if let Some((req_dx, req_dy)) = required_direction {
                     if dx != req_dx || dy != req_dy { continue; }
@@ -561,9 +595,15 @@ impl GridRouter {
                 if closed.contains(&neighbor_key) { continue; }
 
                 let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                let turn_cost = match prev_direction {
+                    Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
+                        if dx != pdx || dy != pdy { self.turn_cost } else { 0 }
+                    }
+                    _ => 0,
+                };
                 let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
                     + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
-                let new_g = g + move_cost + proximity_cost;
+                let new_g = g + move_cost + turn_cost + proximity_cost;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
