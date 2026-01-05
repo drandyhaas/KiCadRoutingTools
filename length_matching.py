@@ -214,14 +214,17 @@ def get_safe_amplitude_at_point(
                 if other_seg.layer != layer:
                     continue
 
-                # Quick distance check
+                # Quick distance check - account for segment lengths
                 seg_center_x = (other_seg.start_x + other_seg.end_x) / 2
                 seg_center_y = (other_seg.start_y + other_seg.end_y) / 2
+                seg_half_len = math.sqrt((other_seg.end_x - other_seg.start_x)**2 +
+                                         (other_seg.end_y - other_seg.start_y)**2) / 2
                 bump_center_x = (bx1 + bx2) / 2
                 bump_center_y = (by1 + by2) / 2
                 rough_dist = math.sqrt((bump_center_x - seg_center_x)**2 + (bump_center_y - seg_center_y)**2)
 
-                if rough_dist > test_amp + 3:
+                # Skip only if clearly too far (accounting for segment length and meander amplitude)
+                if rough_dist > test_amp + seg_half_len + required_clearance + 1.0:
                     continue
 
                 # Check segment-to-segment distance
