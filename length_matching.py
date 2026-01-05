@@ -952,9 +952,10 @@ def apply_length_matching_to_group(
 
         print(f"    {net_name}: {current_length:.2f}mm -> adding {delta:.2f}mm")
 
-        # Get net_id from segments if available
+        # Get net_id and stub_length from result
         net_id = None
         original_segments = result['new_segments']
+        stub_length = result.get('stub_length', 0.0)  # Stub length for pad-to-pad calculation
         if original_segments:
             net_id = original_segments[0].net_id
 
@@ -968,7 +969,7 @@ def apply_length_matching_to_group(
             extra_segments=already_processed_segments,
             extra_vias=already_processed_vias
         )
-        new_length = calculate_route_length(new_segments)
+        new_length = calculate_route_length(new_segments) + stub_length
 
         # Step 2: If we undershot, add more bumps until we overshoot
         max_bump_iterations = 20
@@ -987,7 +988,7 @@ def apply_length_matching_to_group(
                 min_bumps=bump_count
             )
             prev_length = new_length
-            new_length = calculate_route_length(new_segments)
+            new_length = calculate_route_length(new_segments) + stub_length
 
             # If we couldn't add more bumps (no room), stop
             if actual_bumps < bump_count or new_length <= prev_length:
@@ -1023,7 +1024,7 @@ def apply_length_matching_to_group(
                 min_bumps=bump_count,
                 amplitude_override=scaled_amplitude
             )
-            new_length = calculate_route_length(new_segments)
+            new_length = calculate_route_length(new_segments) + stub_length
 
         if scaled_amplitude < config.meander_amplitude:
             print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps, amplitude={scaled_amplitude:.3f})")

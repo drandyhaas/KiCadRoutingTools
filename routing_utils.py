@@ -54,6 +54,28 @@ def calculate_route_length(segments: List[Segment], vias: List[Via] = None) -> f
     return total
 
 
+def calculate_stub_length(pcb_data, net_id: int) -> float:
+    """
+    Calculate the total length of existing stub segments for a net.
+
+    Stubs are the pre-existing track segments that connect from pads to the
+    routing endpoints. For accurate length matching, we need to include these
+    in the total pad-to-pad length.
+
+    Args:
+        pcb_data: PCB data containing existing segments
+        net_id: Net ID to calculate stub length for
+
+    Returns:
+        Total stub length in mm
+    """
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    total = 0.0
+    for seg in net_segments:
+        total += segment_length(seg)
+    return total
+
+
 def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
     """Check if a pad is on the outer row/column of any BGA zone.
 

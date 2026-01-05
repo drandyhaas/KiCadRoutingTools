@@ -15,7 +15,7 @@ from obstacle_map import (
     add_cross_layer_tracks, compute_track_proximity_for_net, add_net_obstacles_with_vis,
     VisualizationData
 )
-from routing_utils import get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints, calculate_route_length
+from routing_utils import get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints, calculate_route_length, calculate_stub_length
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -123,6 +123,9 @@ def route_single_ended_nets(
                 all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
             )
 
+        # Calculate stub length BEFORE routing (stubs are existing segments for this net)
+        stub_length = calculate_stub_length(pcb_data, net_id)
+
         # Route the net using the prepared obstacles
         if visualize:
             # Get source/target grid coords for visualization
@@ -158,9 +161,11 @@ def route_single_ended_nets(
         total_time += elapsed
 
         if result and not result.get('failed'):
-            route_length = calculate_route_length(result['new_segments'])
-            result['route_length'] = route_length  # Store for length matching
-            print(f"  SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, {result['iterations']} iterations, length={route_length:.2f}mm ({elapsed:.2f}s)")
+            routed_length = calculate_route_length(result['new_segments'])
+            total_length = routed_length + stub_length  # Include stubs for pad-to-pad length
+            result['route_length'] = total_length  # Store for length matching
+            result['stub_length'] = stub_length  # Store stub length separately
+            print(f"  SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, {result['iterations']} iterations, length={total_length:.2f}mm (stubs={stub_length:.2f}mm) ({elapsed:.2f}s)")
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
