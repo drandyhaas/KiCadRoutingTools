@@ -33,9 +33,33 @@ def point_to_segment_distance(px: float, py: float,
     return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
 
 
+def segments_intersect(seg1_x1: float, seg1_y1: float, seg1_x2: float, seg1_y2: float,
+                       seg2_x1: float, seg2_y1: float, seg2_x2: float, seg2_y2: float) -> bool:
+    """Check if two line segments intersect (cross each other)."""
+    # Using cross product method
+    def ccw(ax, ay, bx, by, cx, cy):
+        """Check if three points are in counter-clockwise order."""
+        return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
+
+    # Segments intersect if they straddle each other
+    a1x, a1y = seg1_x1, seg1_y1
+    a2x, a2y = seg1_x2, seg1_y2
+    b1x, b1y = seg2_x1, seg2_y1
+    b2x, b2y = seg2_x2, seg2_y2
+
+    # Check if segment 1 straddles segment 2's line and vice versa
+    return (ccw(a1x, a1y, b1x, b1y, b2x, b2y) != ccw(a2x, a2y, b1x, b1y, b2x, b2y) and
+            ccw(a1x, a1y, a2x, a2y, b1x, b1y) != ccw(a1x, a1y, a2x, a2y, b2x, b2y))
+
+
 def segment_to_segment_distance(seg1_x1: float, seg1_y1: float, seg1_x2: float, seg1_y2: float,
                                  seg2_x1: float, seg2_y1: float, seg2_x2: float, seg2_y2: float) -> float:
     """Calculate minimum distance between two line segments."""
+    # First check if segments intersect - if so, distance is 0
+    if segments_intersect(seg1_x1, seg1_y1, seg1_x2, seg1_y2,
+                          seg2_x1, seg2_y1, seg2_x2, seg2_y2):
+        return 0.0
+
     # Check distance from each endpoint to the other segment
     d1 = point_to_segment_distance(seg1_x1, seg1_y1, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
     d2 = point_to_segment_distance(seg1_x2, seg1_y2, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
@@ -142,8 +166,12 @@ def get_safe_amplitude_at_point(
     Returns:
         Safe amplitude, or 0 if no safe amplitude found
     """
-    required_clearance = config.track_width + config.clearance
-    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance
+    # Add margin to account for segment merging/optimization when writing output
+    # The routing uses grid-snapped segments, but output merges them into longer
+    # segments that may have slightly different coordinates (up to half a grid step)
+    meander_clearance_margin = config.grid_step / 2
+    required_clearance = config.track_width + config.clearance + meander_clearance_margin
+    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin
     chamfer = 0.1
 
     max_safe = max_amplitude
@@ -168,9 +196,6 @@ def get_safe_amplitude_at_point(
         if amp >= min_amplitude:
             test_amplitudes.append(amp)
     test_amplitudes.append(min_amplitude)
-
-    # Debug: count segments on same layer
-    same_layer_count = sum(1 for s in all_segments if s.layer == layer and s.net_id != net_id)
 
     for test_amp in test_amplitudes:
         # Generate bump segments for this amplitude
@@ -229,6 +254,7 @@ def get_safe_amplitude_at_point(
         if not conflict_found:
             return test_amp
 
+    # All amplitudes had conflicts
     return 0
 
 
@@ -883,11 +909,19 @@ def apply_length_matching_to_group(
 
     print(f"  Length matching group: {len(group_results)} nets, target={target_length:.2f}mm")
 
-    # Collect already-processed segments and vias to check against
-    # This prevents meanders from different nets overlapping
+    # Pre-collect ALL original segments and vias from ALL nets in the group
+    # This ensures every net's meander checks against every other net's routing
     # Start with segments/vias from previously processed groups (cross-group clearance)
     already_processed_segments: List[Segment] = list(prev_group_segments) if prev_group_segments else []
     already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
+
+    # Add all original segments/vias from ALL nets in this group BEFORE any meander processing
+    for net_name, result in group_results.items():
+        if result.get('new_segments'):
+            already_processed_segments.extend(result['new_segments'])
+        if result.get('new_vias'):
+            already_processed_vias.extend(result['new_vias'])
+
 
     # Apply meanders to shorter routes
     for net_name, result in group_results.items():
@@ -896,11 +930,6 @@ def apply_length_matching_to_group(
 
         if delta <= config.length_match_tolerance:
             print(f"    {net_name}: {current_length:.2f}mm (OK, within tolerance)")
-            # Still add this net's segments and vias to the already-processed lists
-            if result.get('new_segments'):
-                already_processed_segments.extend(result['new_segments'])
-            if result.get('new_vias'):
-                already_processed_vias.extend(result['new_vias'])
             continue
 
         print(f"    {net_name}: {current_length:.2f}mm -> adding {delta:.2f}mm")
