@@ -687,11 +687,12 @@ def generate_trombone_meander(
         # Alternate direction for next bump
         direction *= -1
 
-    # Add exit chamfer for the last bump (direction was just flipped, so flip back)
+    # Add exit chamfer to return to centerline
+    # After any number of bumps, we're at +chamfer above centerline due to the
+    # first bump's entry chamfer. Always move -chamfer perpendicular to return.
     if bump_count > 0:
-        last_direction = -direction  # Undo the flip to get last bump's direction
-        nx = cx + ux * chamfer - px * chamfer * last_direction
-        ny = cy + uy * chamfer - py * chamfer * last_direction
+        nx = cx + ux * chamfer - px * chamfer
+        ny = cy + uy * chamfer - py * chamfer
         new_segments.append(Segment(
             start_x=cx, start_y=cy,
             end_x=nx, end_y=ny,
