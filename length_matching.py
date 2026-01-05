@@ -447,8 +447,9 @@ def generate_trombone_meander(
     pcb_data: PCBData = None,
     config: GridRouteConfig = None,
     extra_segments: List[Segment] = None,
-    extra_vias: List = None
-) -> List[Segment]:
+    extra_vias: List = None,
+    min_bumps: int = 0
+) -> Tuple[List[Segment], int]:
     """
     Generate trombone-style meander segments to replace a straight segment.
 
@@ -476,12 +477,13 @@ def generate_trombone_meander(
         config: Routing configuration for clearance checking (optional)
         extra_segments: Additional segments to check against (e.g., from other nets already processed)
         extra_vias: Additional vias to check against (e.g., from other nets already processed)
+        min_bumps: Minimum number of bumps to generate (0 = use extra_length to determine)
 
     Returns:
-        List of segments forming the meander
+        Tuple of (segments, bump_count) - the meander segments and number of bumps added
     """
-    if extra_length <= 0:
-        return [segment]
+    if extra_length <= 0 and min_bumps <= 0:
+        return [segment], 0
 
     # Calculate segment direction
     dx = segment.end_x - segment.start_x
@@ -508,7 +510,7 @@ def generate_trombone_meander(
     # Estimate number of bumps we can fit
     max_bumps = int(seg_len * 0.9 / bump_width)
     if max_bumps < 1:
-        return [segment]
+        return [segment], 0
 
     # Calculate how much extra length we need per bump on average
     target_extra_per_bump = extra_length / max_bumps
@@ -546,7 +548,15 @@ def generate_trombone_meander(
         cx, cy = end_x, end_y
 
     # Keep adding bumps until we've added enough length or run out of space
-    while total_extra_added < extra_length:
+    # If min_bumps > 0: generate exactly min_bumps (for amplitude scaling - don't let extra_length add more)
+    # If min_bumps == 0: use extra_length to determine bump count
+    def should_continue():
+        if min_bumps > 0:
+            return bump_count < min_bumps
+        else:
+            return total_extra_added < extra_length
+
+    while should_continue():
         # Check if we have room for another bump
         dist_to_end = math.sqrt((segment.end_x - cx)**2 + (segment.end_y - cy)**2)
         if dist_to_end < bump_width + margin:
@@ -702,7 +712,7 @@ def generate_trombone_meander(
             width=segment.width, layer=segment.layer, net_id=segment.net_id
         ))
 
-    return new_segments
+    return new_segments, bump_count
 
 
 def find_all_straight_runs(segments: List[Segment], min_length: float = 1.0) -> List[Tuple[int, int, float]]:
@@ -747,8 +757,10 @@ def apply_meanders_to_route(
     pcb_data: PCBData = None,
     net_id: int = None,
     extra_segments: List[Segment] = None,
-    extra_vias: List = None
-) -> List[Segment]:
+    extra_vias: List = None,
+    min_bumps: int = 0,
+    amplitude_override: float = None
+) -> Tuple[List[Segment], int]:
     """
     Apply meanders to a route to add extra length.
 
@@ -760,23 +772,27 @@ def apply_meanders_to_route(
         net_id: Net ID of this route (optional, for clearance checking)
         extra_segments: Additional segments to check against (e.g., from already-processed nets)
         extra_vias: Additional vias to check against (e.g., from already-processed nets)
+        min_bumps: Minimum number of bumps to generate
+        amplitude_override: Override amplitude (for scaling down to hit target length)
 
     Returns:
-        Modified segment list with meanders
+        Tuple of (modified segment list, bump_count)
     """
     if extra_length <= 0 or not segments:
-        return segments
+        return segments, 0
+
+    # Use override amplitude if provided
+    amplitude = amplitude_override if amplitude_override is not None else config.meander_amplitude
 
     # Find all straight runs, sorted by length
-    min_length = config.meander_amplitude * 2  # Reduced minimum for more options
+    min_length = amplitude * 2  # Reduced minimum for more options
     runs = find_all_straight_runs(segments, min_length=min_length)
 
     if not runs:
         print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
-        return segments
+        return segments, 0
 
     # Try each straight run until we find one that works
-    amplitude = config.meander_amplitude
     min_amplitude = 0.3  # Minimum useful amplitude
 
     for start_idx, end_idx, run_length in runs:
@@ -804,25 +820,24 @@ def apply_meanders_to_route(
                 continue
 
         # Generate meanders - per-bump clearance checking will adjust amplitudes
-        print(f"    Inserting meanders at segments {start_idx}-{end_idx} (run={run_length:.2f}mm)")
-
-        meander_segs = generate_trombone_meander(
+        meander_segs, bump_count = generate_trombone_meander(
             merged_seg,
             extra_length,
-            amplitude,  # Pass full amplitude - per-bump checking will reduce as needed
+            amplitude,
             config.track_width,
             pcb_data=pcb_data,
             config=config,
             extra_segments=extra_segments,
-            extra_vias=extra_vias
+            extra_vias=extra_vias,
+            min_bumps=min_bumps
         )
 
         # Replace original segment run with meanders
         new_segments = segments[:start_idx] + meander_segs + segments[end_idx + 1:]
-        return new_segments
+        return new_segments, bump_count
 
     print(f"    Warning: No straight run with clearance found for meanders")
-    return segments
+    return segments, 0
 
 
 def _old_apply_meanders_to_route(
@@ -924,6 +939,8 @@ def apply_length_matching_to_group(
 
 
     # Apply meanders to shorter routes
+    from routing_utils import calculate_route_length
+
     for net_name, result in group_results.items():
         current_length = result['route_length']
         delta = target_length - current_length
@@ -936,12 +953,13 @@ def apply_length_matching_to_group(
 
         # Get net_id from segments if available
         net_id = None
-        if result.get('new_segments'):
-            net_id = result['new_segments'][0].net_id
+        original_segments = result['new_segments']
+        if original_segments:
+            net_id = original_segments[0].net_id
 
-        # Apply meanders with clearance checking, including already-processed segments and vias
-        new_segments = apply_meanders_to_route(
-            result['new_segments'],
+        # Step 1: Generate initial meanders
+        new_segments, bump_count = apply_meanders_to_route(
+            original_segments,
             delta,
             config,
             pcb_data=pcb_data,
@@ -949,13 +967,71 @@ def apply_length_matching_to_group(
             extra_segments=already_processed_segments,
             extra_vias=already_processed_vias
         )
+        new_length = calculate_route_length(new_segments)
+
+        # Step 2: If we undershot, add more bumps until we overshoot
+        max_bump_iterations = 20
+        iteration = 0
+        while new_length < target_length - config.length_match_tolerance and iteration < max_bump_iterations:
+            iteration += 1
+            bump_count += 1
+            new_segments, actual_bumps = apply_meanders_to_route(
+                original_segments,
+                delta,
+                config,
+                pcb_data=pcb_data,
+                net_id=net_id,
+                extra_segments=already_processed_segments,
+                extra_vias=already_processed_vias,
+                min_bumps=bump_count
+            )
+            prev_length = new_length
+            new_length = calculate_route_length(new_segments)
+
+            # If we couldn't add more bumps (no room), stop
+            if actual_bumps < bump_count or new_length <= prev_length:
+                print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
+                break
+
+        # Step 3: If we overshot, iteratively scale down amplitude to hit target
+        scaled_amplitude = config.meander_amplitude
+        for scale_iter in range(5):  # Max 5 scaling iterations
+            actual_extra = new_length - current_length
+            if abs(new_length - target_length) <= config.length_match_tolerance:
+                break  # Within tolerance
+            if actual_extra <= 0 or bump_count == 0:
+                break  # Can't scale
+
+            # Scale factor to reduce amplitude
+            scale = delta / actual_extra
+            scaled_amplitude = scaled_amplitude * scale
+
+            # Clamp to reasonable minimum
+            if scaled_amplitude < 0.2:
+                scaled_amplitude = 0.2
+
+            # Regenerate with scaled amplitude but same bump count
+            new_segments, _ = apply_meanders_to_route(
+                original_segments,
+                delta,
+                config,
+                pcb_data=pcb_data,
+                net_id=net_id,
+                extra_segments=already_processed_segments,
+                extra_vias=already_processed_vias,
+                min_bumps=bump_count,
+                amplitude_override=scaled_amplitude
+            )
+            new_length = calculate_route_length(new_segments)
+
+        if scaled_amplitude < config.meander_amplitude:
+            print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps, amplitude={scaled_amplitude:.3f})")
+        else:
+            print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps)")
 
         # Update result
         result['new_segments'] = new_segments
-        # Recalculate length
-        from routing_utils import calculate_route_length
-        result['route_length'] = calculate_route_length(new_segments)
-        print(f"    {net_name}: new length = {result['route_length']:.2f}mm")
+        result['route_length'] = new_length
 
         # Add this net's segments and vias to the already-processed lists
         already_processed_segments.extend(new_segments)
