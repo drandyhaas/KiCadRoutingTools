@@ -1545,7 +1545,8 @@ def assign_layers_smart(routes: List[FanoutRoute],
                         available_layers: List[str],
                         track_width: float,
                         clearance: float,
-                        diff_pair_spacing: float = 0.0) -> None:
+                        diff_pair_spacing: float = 0.0,
+                        existing_tracks: List[Dict] = None) -> None:
     """
     Assign layers to routes to avoid all collisions.
 
@@ -1555,8 +1556,11 @@ def assign_layers_smart(routes: List[FanoutRoute],
     - Inner pads grouped by channel AND escape direction
     - Routes with overlapping channel segments must use different layers
     - Cross-escape routes (vertical exit) must NOT conflict with edge routes on same layer
+    - Avoid collisions with existing tracks from the PCB
     """
     min_spacing = track_width + clearance
+    if existing_tracks is None:
+        existing_tracks = []
 
     # For diff pairs, we need to consider pair spacing when checking collisions
     # Two traces from the same pair use 2*track_width + diff_pair_spacing
@@ -1695,6 +1699,36 @@ def assign_layers_smart(routes: List[FanoutRoute],
                                     conflict = True
                                 if conflict:
                                     break
+
+                # Check against existing tracks from the PCB on this layer
+                if not conflict and existing_tracks:
+                    # Build approximate segments for this route
+                    route_segs = [
+                        (route.pad_pos, route.stub_end),
+                        (route.stub_end, route.exit_pos)
+                    ]
+                    # Also add channel_point segments if present (for half-edge routes)
+                    if route.channel_point:
+                        route_segs.append((route.stub_end, route.channel_point))
+                        route_segs.append((route.channel_point, route.exit_pos))
+                    if route.jog_extension:
+                        route_segs.append((route.stub_end, route.jog_extension))
+                        route_segs.append((route.jog_extension, route.exit_pos))
+
+                    for existing in existing_tracks:
+                        if existing['layer'] != layer:
+                            continue
+                        # Skip if same net (e.g., connecting to existing stub)
+                        if existing.get('net_id') == route.net_id:
+                            continue
+                        for seg_start, seg_end in route_segs:
+                            if check_segment_collision(seg_start, seg_end,
+                                                       existing['start'], existing['end'],
+                                                       min_spacing):
+                                conflict = True
+                                break
+                        if conflict:
+                            break
 
                 if not conflict:
                     route.layer = layer
@@ -2805,8 +2839,23 @@ def generate_bga_fanout(footprint: Footprint,
     if not routes:
         return [], [], []
 
-    # Smart layer assignment (keeps diff pairs together)
-    assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap)
+    # Convert existing PCB segments to track format for collision checking
+    # These are read-only - we check against them but don't modify them
+    existing_tracks = []
+    if check_for_previous:
+        for seg in pcb_data.segments:
+            existing_tracks.append({
+                'start': (seg.start_x, seg.start_y),
+                'end': (seg.end_x, seg.end_y),
+                'width': seg.width,
+                'layer': seg.layer,
+                'net_id': seg.net_id,
+                'pair_id': None,  # Existing tracks don't have pair_id
+                'is_existing': True  # Mark as existing so we don't try to modify it
+            })
+
+    # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
+    assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks)
 
     # Calculate jog length = distance from BGA edge to first pad row/col
     # This is half the pitch (since edge is pitch/2 from first pad)
@@ -2892,21 +2941,6 @@ def generate_bga_fanout(footprint: Footprint,
     tracks = []
     edge_count = 0
     inner_count = 0
-
-    # Convert existing PCB segments to track format for collision checking
-    # These are read-only - we check against them but don't modify them
-    existing_tracks = []
-    if check_for_previous:
-        for seg in pcb_data.segments:
-            existing_tracks.append({
-                'start': (seg.start_x, seg.start_y),
-                'end': (seg.end_x, seg.end_y),
-                'width': seg.width,
-                'layer': seg.layer,
-                'net_id': seg.net_id,
-                'pair_id': None,  # Existing tracks don't have pair_id
-                'is_existing': True  # Mark as existing so we don't try to modify it
-            })
 
     for route in routes:
         if route.is_edge:
@@ -3307,9 +3341,8 @@ def generate_bga_fanout(footprint: Footprint,
                             return True
 
             # Check against existing tracks on target layer
-            for existing in existing_tracks:
-                if existing['layer'] != target_layer:
-                    continue
+            existing_on_layer = [e for e in existing_tracks if e['layer'] == target_layer]
+            for existing in existing_on_layer:
                 for seg_start, seg_end in all_route_segs:
                     if check_segment_collision(seg_start, seg_end,
                                                existing['start'], existing['end'],
@@ -3329,6 +3362,49 @@ def generate_bga_fanout(footprint: Footprint,
                         return True
 
             return False
+
+        def move_connected_tracks(seed_positions, net_ids, old_layer, new_layer):
+            """Walk connected tracks from seed positions and move them to new_layer.
+
+            Uses flood-fill approach: start from pad positions, find connected tracks,
+            add their other endpoints to the frontier, repeat until no more found.
+            """
+            # Use rounded positions for matching
+            def round_pos(pos):
+                return (round(pos[0], 2), round(pos[1], 2))
+
+            frontier = set(round_pos(p) for p in seed_positions)
+            visited_positions = set()
+            tracks_to_move = []
+
+            while frontier:
+                current_pos = frontier.pop()
+                if current_pos in visited_positions:
+                    continue
+                visited_positions.add(current_pos)
+
+                # Find all tracks on old_layer that connect to current_pos
+                for track in tracks:
+                    if track.get('net_id') not in net_ids:
+                        continue
+                    if track['layer'] != old_layer:
+                        continue
+
+                    ts = round_pos(track['start'])
+                    te = round_pos(track['end'])
+
+                    if ts == current_pos:
+                        if track not in tracks_to_move:
+                            tracks_to_move.append(track)
+                        frontier.add(te)
+                    elif te == current_pos:
+                        if track not in tracks_to_move:
+                            tracks_to_move.append(track)
+                        frontier.add(ts)
+
+            # Move all found tracks
+            for track in tracks_to_move:
+                track['layer'] = new_layer
 
         for iteration in range(max_rebalance_iterations):
             # Count routes per layer
@@ -3411,15 +3487,16 @@ def generate_bga_fanout(footprint: Footprint,
                         continue
 
                     # Check for conflicts on this target layer
-                    if not check_conflicts_on_layer(pair_routes, all_route_segs, all_net_ids, try_layer):
+                    if check_conflicts_on_layer(pair_routes, all_route_segs, all_net_ids, try_layer):
+                        continue  # Conflict found, try next layer
+                    else:
                         # No conflict - move to this layer
                         old_layer = pair_routes[0].layer
                         for r in pair_routes:
                             r.layer = try_layer
-                        # Update tracks for these routes
-                        for track in tracks:
-                            if track.get('net_id') in all_net_ids and track['layer'] == old_layer:
-                                track['layer'] = try_layer
+                        # Walk connected tracks from pad positions and move them
+                        seed_positions = [r.pad_pos for r in pair_routes]
+                        move_connected_tracks(seed_positions, all_net_ids, old_layer, try_layer)
                         moved_one = True
                         # Advance the cycle for next move
                         target_layer_idx = (target_layer_idx + 1) % len(all_layers)
@@ -3515,9 +3592,9 @@ def generate_bga_fanout(footprint: Footprint,
                             old_layer = pair_routes[0].layer
                             for r in pair_routes:
                                 r.layer = try_layer
-                            for track in tracks:
-                                if track.get('net_id') in all_net_ids and track['layer'] == old_layer:
-                                    track['layer'] = try_layer
+                            # Walk connected tracks from pad positions and move them
+                            seed_positions = [r.pad_pos for r in pair_routes]
+                            move_connected_tracks(seed_positions, all_net_ids, old_layer, try_layer)
                             moved_one = True
                             break
 
