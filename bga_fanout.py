@@ -2322,6 +2322,25 @@ def generate_bga_fanout(footprint: Footprint,
     # Each trace is offset from channel center by this amount
     half_pair_spacing = (track_width + diff_pair_gap) / 2
 
+    # Check if channels are wide enough for both tracks of a diff pair
+    # If not, route P and N in adjacent channels instead of same channel with offsets
+    # The track at offset from channel center must maintain clearance from adjacent pads
+    # Get typical pad size from footprint
+    pad_sizes = [max(p.size_x, p.size_y) for p in footprint.pads if p.size_x > 0 and p.size_y > 0]
+    pad_diameter = max(pad_sizes) if pad_sizes else 0.3  # default to 0.3mm if not found
+    pad_radius = pad_diameter / 2
+
+    # Calculate maximum allowed track offset from channel center
+    # Channel is midway between pad rows, so distance to nearest pad center = pitch/2
+    # For track to clear pad: track_center_offset + track_width/2 + clearance <= pitch/2 - pad_radius
+    max_offset_h = grid.pitch_y / 2 - pad_radius - track_width / 2 - clearance
+    max_offset_v = grid.pitch_x / 2 - pad_radius - track_width / 2 - clearance
+
+    use_adjacent_channels = (half_pair_spacing > max_offset_h or half_pair_spacing > max_offset_v)
+    if use_adjacent_channels:
+        min_max_offset = min(max_offset_h, max_offset_v)
+        print(f"  Using adjacent-channel routing for diff pairs (half_pair_spacing {half_pair_spacing:.3f}mm > max_offset {min_max_offset:.3f}mm)")
+
     # Build routes - process differential pairs together
     routes: List[FanoutRoute] = []
     processed_pairs: Set[str] = set()
@@ -2380,6 +2399,90 @@ def generate_bga_fanout(footprint: Footprint,
                 elif not pads_horizontal and escape_dir in ['left', 'right']:
                     is_cross_escape = True
 
+            # For adjacent-channel mode: find two channels, one on each side of the pads
+            p_channel = channel
+            n_channel = channel
+            if use_adjacent_channels and channel and not is_cross_escape and not is_edge:
+                # Find two adjacent channels for the diff pair - one above, one below the pads
+                if channel.orientation == 'horizontal':
+                    # Horizontal pads escaping left/right - use channels on OPPOSITE sides of pads
+                    # One track goes UP to channel above, other goes DOWN to channel below
+                    h_channels = [c for c in channels if c.orientation == 'horizontal']
+                    h_channels_sorted = sorted(h_channels, key=lambda c: c.position)
+                    pad_y = (p_pad.global_y + n_pad.global_y) / 2
+
+                    # Find channels above and below the pads
+                    channels_above = [c for c in h_channels_sorted if c.position < pad_y]
+                    channels_below = [c for c in h_channels_sorted if c.position > pad_y]
+
+                    if channels_above and channels_below:
+                        # Use closest channel above for one pad, closest below for the other
+                        ch_above = channels_above[-1]  # closest above
+                        ch_below = channels_below[0]   # closest below
+                        # P/t goes to channel below, N/c goes to channel above
+                        p_channel = ch_below
+                        n_channel = ch_above
+                    elif channels_above:
+                        # Only channels above - use two adjacent ones
+                        ch_above = channels_above[-1]
+                        idx = h_channels_sorted.index(ch_above)
+                        if idx > 0:
+                            p_channel = h_channels_sorted[idx - 1]
+                            n_channel = ch_above
+                        else:
+                            p_channel = channel
+                            n_channel = channel
+                    elif channels_below:
+                        # Only channels below - use two adjacent ones
+                        ch_below = channels_below[0]
+                        idx = h_channels_sorted.index(ch_below)
+                        if idx < len(h_channels_sorted) - 1:
+                            p_channel = ch_below
+                            n_channel = h_channels_sorted[idx + 1]
+                        else:
+                            p_channel = channel
+                            n_channel = channel
+                    else:
+                        p_channel = channel
+                        n_channel = channel
+                else:
+                    # Vertical pads escaping up/down - use channels on OPPOSITE sides of pads
+                    v_channels = [c for c in channels if c.orientation == 'vertical']
+                    v_channels_sorted = sorted(v_channels, key=lambda c: c.position)
+                    pad_x = (p_pad.global_x + n_pad.global_x) / 2
+
+                    # Find channels left and right of the pads
+                    channels_left = [c for c in v_channels_sorted if c.position < pad_x]
+                    channels_right = [c for c in v_channels_sorted if c.position > pad_x]
+
+                    if channels_left and channels_right:
+                        ch_left = channels_left[-1]   # closest left
+                        ch_right = channels_right[0]  # closest right
+                        # P/t goes right, N/c goes left (consistent with horizontal)
+                        p_channel = ch_right
+                        n_channel = ch_left
+                    elif channels_left:
+                        ch_left = channels_left[-1]
+                        idx = v_channels_sorted.index(ch_left)
+                        if idx > 0:
+                            p_channel = v_channels_sorted[idx - 1]
+                            n_channel = ch_left
+                        else:
+                            p_channel = channel
+                            n_channel = channel
+                    elif channels_right:
+                        ch_right = channels_right[0]
+                        idx = v_channels_sorted.index(ch_right)
+                        if idx < len(v_channels_sorted) - 1:
+                            p_channel = ch_right
+                            n_channel = v_channels_sorted[idx + 1]
+                        else:
+                            p_channel = channel
+                            n_channel = channel
+                    else:
+                        p_channel = channel
+                        n_channel = channel
+
             # Determine which pad is "positive" offset and which is "negative"
             # For horizontal channel (left/right escape): offset is in Y direction
             # For vertical channel (up/down escape): offset is in X direction
@@ -2387,7 +2490,14 @@ def generate_bga_fanout(footprint: Footprint,
             # Key insight: To avoid crossing, the pad that is FURTHER from the channel
             # should get the offset that brings it CLOSER to the channel center,
             # while the pad CLOSER to the channel gets offset AWAY from channel center.
-            if channel and channel.orientation == 'horizontal' and not is_cross_escape:
+            #
+            # When using adjacent channels (p_channel != n_channel), each track is centered
+            # in its own channel, so offsets are 0.
+            if p_channel != n_channel:
+                # Adjacent channel mode - each track centered in its own channel
+                p_offset = 0
+                n_offset = 0
+            elif channel and channel.orientation == 'horizontal' and not is_cross_escape:
                 # Horizontal channel - pads are horizontally adjacent, escaping left/right
                 # Traces will be offset in Y (one above, one below channel center)
                 # Rule: pad closer to escape edge goes to inner side (closer to pads),
@@ -2462,7 +2572,8 @@ def generate_bga_fanout(footprint: Footprint,
                 actual_escape_dir = escape_dir
 
             # Create routes for both P and N
-            for pad_info, offset, is_p_route in [(p_pad, p_offset, True), (n_pad, n_offset, False)]:
+            # In adjacent-channel mode, p_channel and n_channel are different
+            for pad_info, offset, is_p_route, route_ch in [(p_pad, p_offset, True, p_channel), (n_pad, n_offset, False, n_channel)]:
                 if is_half_edge:
                     # Half-edge pair: one pad on edge, one inner
                     # Edge pad: goes straight out to BGA edge
@@ -2721,49 +2832,123 @@ def generate_bga_fanout(footprint: Footprint,
                         else:  # left
                             exit_pos = (grid.min_x - exit_margin, stub_end[1])
                     else:
-                        # Pads are vertically adjacent
-                        # They need to converge to pair spacing using 45° stubs
-
+                        # Pads are vertically adjacent, escaping horizontally (cross-escape)
                         # Determine which pad is on the top vs bottom (smaller Y = top in KiCad)
                         p_is_top = p_pad.global_y < n_pad.global_y
 
-                        # Target Y for converged pair - top pad goes to top target, bottom to bottom
-                        if (is_p_route and p_is_top) or (not is_p_route and not p_is_top):
-                            # This pad is on top, target is above center
-                            target_y = center_y - half_pair_spacing
+                        if use_adjacent_channels and escape_dir in ['left', 'right']:
+                            # Adjacent-channel mode for cross-escape: use two ADJACENT channels
+                            # Find the channel between the two pads, then use it and the next one
+                            # on the escape side (both tracks go same direction, different adjacent channels)
+                            h_channels = [c for c in channels if c.orientation == 'horizontal']
+                            h_channels_sorted = sorted(h_channels, key=lambda c: c.position)
+
+                            # Find the channel between the two pads (between their Y positions)
+                            top_pad_y = min(p_pad.global_y, n_pad.global_y)
+                            bot_pad_y = max(p_pad.global_y, n_pad.global_y)
+                            channels_between = [c for c in h_channels_sorted
+                                               if top_pad_y < c.position < bot_pad_y]
+
+                            if channels_between:
+                                # Use the channel between pads and one adjacent to it
+                                between_ch = channels_between[0]
+                                between_idx = h_channels_sorted.index(between_ch)
+
+                                # Get adjacent channel (prefer toward escape edge, i.e., away from BGA center)
+                                # For left escape, prefer channels with smaller Y (toward top edge)
+                                # For right escape, same logic applies (escape is horizontal)
+                                if between_idx > 0:
+                                    adjacent_ch = h_channels_sorted[between_idx - 1]
+                                elif between_idx < len(h_channels_sorted) - 1:
+                                    adjacent_ch = h_channels_sorted[between_idx + 1]
+                                else:
+                                    adjacent_ch = between_ch  # fallback
+
+                                # Assign: top pad to upper channel, bottom pad to lower channel
+                                if adjacent_ch.position < between_ch.position:
+                                    # adjacent is above between
+                                    upper_ch, lower_ch = adjacent_ch, between_ch
+                                else:
+                                    upper_ch, lower_ch = between_ch, adjacent_ch
+
+                                if p_is_top:
+                                    p_target_ch = upper_ch
+                                    n_target_ch = lower_ch
+                                else:
+                                    p_target_ch = lower_ch
+                                    n_target_ch = upper_ch
+                            else:
+                                # No channel between pads - use channels above and below
+                                channels_above = [c for c in h_channels_sorted if c.position < top_pad_y]
+                                channels_below = [c for c in h_channels_sorted if c.position > bot_pad_y]
+                                p_target_ch = channels_above[-1] if channels_above and p_is_top else (channels_below[0] if channels_below else None)
+                                n_target_ch = channels_below[0] if channels_below and not p_is_top else (channels_above[-1] if channels_above else None)
+
+                            if is_p_route and p_target_ch:
+                                target_y = p_target_ch.position
+                                route_ch = p_target_ch
+                            elif not is_p_route and n_target_ch:
+                                target_y = n_target_ch.position
+                                route_ch = n_target_ch
+                            else:
+                                # Fallback to convergence if no separate channel available
+                                target_y = center_y - half_pair_spacing if (is_p_route and p_is_top) or (not is_p_route and not p_is_top) else center_y + half_pair_spacing
+                                route_ch = route_ch if 'route_ch' in dir() else channel
+
+                            # Route to target channel via 45° stub
+                            dy_needed = target_y - pad_info.global_y
+                            if escape_dir == 'right':
+                                stub_end_x = pad_info.global_x + abs(dy_needed)
+                            else:  # left
+                                stub_end_x = pad_info.global_x - abs(dy_needed)
+                            stub_end_y = target_y
+                            stub_end = (stub_end_x, stub_end_y)
+
+                            # Exit continues horizontally to BGA edge
+                            if escape_dir == 'right':
+                                exit_pos = (grid.max_x + exit_margin, stub_end[1])
+                            else:  # left
+                                exit_pos = (grid.min_x - exit_margin, stub_end[1])
                         else:
-                            # This pad is on bottom, target is below center
-                            target_y = center_y + half_pair_spacing
+                            # Original convergence logic
+                            # Target Y for converged pair - top pad goes to top target, bottom to bottom
+                            if (is_p_route and p_is_top) or (not is_p_route and not p_is_top):
+                                # This pad is on top, target is above center
+                                target_y = center_y - half_pair_spacing
+                            else:
+                                # This pad is on bottom, target is below center
+                                target_y = center_y + half_pair_spacing
 
-                        # Distance each trace needs to move in Y (towards center)
-                        dy_needed = target_y - pad_info.global_y
+                            # Distance each trace needs to move in Y (towards center)
+                            dy_needed = target_y - pad_info.global_y
 
-                        # At 45°, dx = dy (in absolute terms)
-                        if escape_dir == 'right':
-                            stub_end_x = pad_info.global_x + abs(dy_needed)
-                            stub_end_y = target_y
-                        elif escape_dir == 'left':
-                            stub_end_x = pad_info.global_x - abs(dy_needed)
-                            stub_end_y = target_y
-                        else:
-                            stub_end_x = pad_info.global_x
-                            stub_end_y = target_y
+                            # At 45°, dx = dy (in absolute terms)
+                            if escape_dir == 'right':
+                                stub_end_x = pad_info.global_x + abs(dy_needed)
+                                stub_end_y = target_y
+                            elif escape_dir == 'left':
+                                stub_end_x = pad_info.global_x - abs(dy_needed)
+                                stub_end_y = target_y
+                            else:
+                                stub_end_x = pad_info.global_x
+                                stub_end_y = target_y
 
-                        stub_end = (stub_end_x, stub_end_y)
+                            stub_end = (stub_end_x, stub_end_y)
 
-                        if escape_dir == 'right':
-                            exit_pos = (grid.max_x + exit_margin, stub_end[1])
-                        elif escape_dir == 'left':
-                            exit_pos = (grid.min_x - exit_margin, stub_end[1])
-                        elif escape_dir == 'down':
-                            exit_pos = (stub_end[0], grid.max_y + exit_margin)
-                        else:  # up
-                            exit_pos = (stub_end[0], grid.min_y - exit_margin)
+                            if escape_dir == 'right':
+                                exit_pos = (grid.max_x + exit_margin, stub_end[1])
+                            elif escape_dir == 'left':
+                                exit_pos = (grid.min_x - exit_margin, stub_end[1])
+                            elif escape_dir == 'down':
+                                exit_pos = (stub_end[0], grid.max_y + exit_margin)
+                            else:  # up
+                                exit_pos = (stub_end[0], grid.min_y - exit_margin)
                 else:
                     # Inner pads with aligned escape: 45° stub to channel with offset, then channel to exit
+                    # In adjacent-channel mode, route_ch is the pad-specific channel
                     stub_end = create_45_stub(pad_info.global_x, pad_info.global_y,
-                                             channel, escape_dir, offset)
-                    exit_pos = calculate_exit_point(stub_end, channel, escape_dir,
+                                             route_ch, escape_dir, offset)
+                    exit_pos = calculate_exit_point(stub_end, route_ch, escape_dir,
                                                    grid, exit_margin, offset)
 
                 # Use pre-assigned layer if available, otherwise default to layers[0]
@@ -2774,7 +2959,7 @@ def generate_bga_fanout(footprint: Footprint,
                     pad_pos=(pad_info.global_x, pad_info.global_y),
                     stub_end=stub_end,
                     exit_pos=exit_pos,
-                    channel=channel,
+                    channel=route_ch,
                     escape_dir=escape_dir,
                     is_edge=is_edge,
                     layer=assigned_layer,
