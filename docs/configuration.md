@@ -126,9 +126,11 @@ Groups nets by byte lane: DQ0-7 + DQS0, DQ8-15 + DQS1, etc.
 
 **How it works:**
 - Routes all nets first, then adds meanders to shorter routes
+- Calculates pad-to-pad length including existing stub segments
 - Finds longest straight segment for meander insertion
-- Per-bump clearance checking reduces amplitude to avoid conflicts
-- Pre-collects all segments in group to check cross-net clearance
+- Iteratively adds meander bumps until length exceeds target, then scales down amplitude to hit exact target
+- Per-bump clearance checking reduces amplitude to avoid conflicts with other traces
+- Uses 45° chamfered corners for smooth trombone patterns
 
 ### Visualization Options
 
@@ -208,6 +210,11 @@ class GridRouteConfig:
     gnd_via_enabled: bool = True         # place GND vias near signal vias
     target_swap_crossing_penalty: float = 1000.0  # penalty for crossing assignments
     crossing_layer_check: bool = True    # only count crossings on same layer
+
+    # Length matching
+    length_match_groups: List[List[str]] = []  # groups of net patterns to match
+    length_match_tolerance: float = 0.1        # mm - acceptable length variance
+    meander_amplitude: float = 1.0             # mm - height of meander perpendicular to trace
 
     # Debug
     debug_lines: bool = False

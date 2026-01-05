@@ -27,6 +27,7 @@ KiCadRoutingTools/
 ├── rip_up_reroute.py          # Rip-up and reroute logic
 ├── blocking_analysis.py       # Analyze blocking nets
 ├── target_swap.py             # Target assignment optimization
+├── length_matching.py         # Trombone meander length matching
 │
 ├── kicad_parser.py            # KiCad file parsing
 ├── kicad_writer.py            # KiCad S-expression output
@@ -67,6 +68,7 @@ KiCadRoutingTools/
 | `rip_up_reroute.py` | Rips up blocking routes and adds them to reroute queue |
 | `blocking_analysis.py` | Identifies which previously-routed nets are blocking |
 | `target_swap.py` | Hungarian algorithm for optimal source-to-target assignment |
+| `length_matching.py` | Adds trombone meanders to match route lengths within groups |
 
 ## Grid Coordinate System
 
