@@ -31,6 +31,29 @@ def pos_key(x: float, y: float) -> Tuple[float, float]:
     return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS))
 
 
+def segment_length(seg: Segment) -> float:
+    """Calculate the length of a single segment."""
+    return math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+
+
+def calculate_route_length(segments: List[Segment], vias: List[Via] = None) -> float:
+    """
+    Calculate the total length of a routed path.
+
+    Args:
+        segments: List of Segment objects making up the route
+        vias: Optional list of Via objects (via contribution to length is minimal
+              and typically ignored for DDR4 length matching)
+
+    Returns:
+        Total route length in mm (sum of all segment lengths)
+    """
+    total = 0.0
+    for seg in segments:
+        total += segment_length(seg)
+    return total
+
+
 def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
     """Check if a pad is on the outer row/column of any BGA zone.
 

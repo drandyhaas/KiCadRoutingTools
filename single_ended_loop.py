@@ -15,7 +15,7 @@ from obstacle_map import (
     add_cross_layer_tracks, compute_track_proximity_for_net, add_net_obstacles_with_vis,
     VisualizationData
 )
-from routing_utils import get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints
+from routing_utils import get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints, calculate_route_length
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -158,7 +158,9 @@ def route_single_ended_nets(
         total_time += elapsed
 
         if result and not result.get('failed'):
-            print(f"  SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, {result['iterations']} iterations ({elapsed:.2f}s)")
+            route_length = calculate_route_length(result['new_segments'])
+            result['route_length'] = route_length  # Store for length matching
+            print(f"  SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, {result['iterations']} iterations, length={route_length:.2f}mm ({elapsed:.2f}s)")
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
@@ -351,7 +353,9 @@ def route_single_ended_nets(
                         retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles)
 
                         if retry_result and not retry_result.get('failed'):
-                            print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
+                            route_length = calculate_route_length(retry_result['new_segments'])
+                            retry_result['route_length'] = route_length
+                            print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias, length={route_length:.2f}mm")
                             results.append(retry_result)
                             successful += 1
                             total_iterations += retry_result['iterations']

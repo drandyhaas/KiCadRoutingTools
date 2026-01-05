@@ -59,6 +59,9 @@ from routing_state import RoutingState, create_routing_state
 from diff_pair_loop import route_diff_pairs
 from single_ended_loop import route_single_ended_nets
 from reroute_loop import run_reroute_loop
+from length_matching import (
+    apply_length_matching_to_group, find_nets_matching_patterns, auto_group_ddr4_nets
+)
 import re
 
 # ANSI color codes for terminal output
@@ -129,6 +132,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 gnd_via_enabled: bool = True,
                 vertical_attraction_radius: float = 1.0,
                 vertical_attraction_cost: float = 0.1,
+                length_match_groups: Optional[List[List[str]]] = None,
+                length_match_tolerance: float = 0.1,
+                meander_amplitude: float = 1.0,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -225,6 +231,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         gnd_via_enabled=gnd_via_enabled,
         vertical_attraction_radius=vertical_attraction_radius,
         vertical_attraction_cost=vertical_attraction_cost,
+        length_match_groups=length_match_groups,
+        length_match_tolerance=length_match_tolerance,
+        meander_amplitude=meander_amplitude,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -630,6 +639,40 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     total_time += rq_time
     total_iterations += rq_iterations
 
+    # Apply length matching if configured
+    if length_match_groups:
+        print("\n" + "=" * 60)
+        print("Length matching")
+        print("=" * 60)
+
+        # Build net_name -> result mapping
+        net_name_to_result = {}
+        for net_id, result in routed_results.items():
+            if net_id in pcb_data.nets:
+                net_name = pcb_data.nets[net_id].name
+                net_name_to_result[net_name] = result
+
+        all_routed_names = list(net_name_to_result.keys())
+
+        for group in length_match_groups:
+            # Handle "auto" for DDR4 grouping
+            if len(group) == 1 and group[0].lower() == 'auto':
+                auto_groups = auto_group_ddr4_nets(all_routed_names)
+                for auto_group in auto_groups:
+                    if len(auto_group) >= 2:
+                        net_name_to_result = apply_length_matching_to_group(
+                            net_name_to_result, auto_group, config
+                        )
+            else:
+                # Find nets matching the patterns in this group
+                matching_nets = find_nets_matching_patterns(all_routed_names, group)
+                if len(matching_nets) >= 2:
+                    print(f"\nLength match group: {group}")
+                    print(f"  Matched nets: {matching_nets}")
+                    net_name_to_result = apply_length_matching_to_group(
+                        net_name_to_result, matching_nets, config
+                    )
+
     # Notify visualization callback that all routing is complete
     if visualize:
         vis_callback.on_routing_complete(successful, failed, total_iterations)
@@ -1019,6 +1062,14 @@ Differential pair routing:
     parser.add_argument("--mps-reverse-rounds", action="store_true",
                         help="Reverse MPS round order: route most-conflicting groups first instead of least-conflicting")
 
+    # Length matching options
+    parser.add_argument("--length-match-group", action="append", nargs="+", dest="length_match_groups",
+                        help="Net patterns to length-match as a group (can be repeated). Use 'auto' for DDR4 auto-grouping")
+    parser.add_argument("--length-match-tolerance", type=float, default=0.1,
+                        help="Acceptable length variance within group in mm (default: 0.1)")
+    parser.add_argument("--meander-amplitude", type=float, default=1.0,
+                        help="Height of meander perpendicular to trace in mm (default: 1.0)")
+
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
@@ -1121,4 +1172,7 @@ Differential pair routing:
                 gnd_via_enabled=not args.no_gnd_vias,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
+                length_match_groups=args.length_match_groups,
+                length_match_tolerance=args.length_match_tolerance,
+                meander_amplitude=args.meander_amplitude,
                 vis_callback=vis_callback)

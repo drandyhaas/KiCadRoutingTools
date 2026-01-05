@@ -10,7 +10,7 @@ from typing import List, Tuple
 
 from routing_state import RoutingState
 from obstacle_map import compute_track_proximity_for_net
-from routing_utils import add_route_to_pcb_data, get_net_endpoints
+from routing_utils import add_route_to_pcb_data, get_net_endpoints, calculate_route_length
 from single_ended_routing import route_net_with_obstacles
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
@@ -106,7 +106,9 @@ def run_reroute_loop(
             total_time += elapsed
 
             if result and not result.get('failed'):
-                print(f"  REROUTE SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias ({elapsed:.2f}s)")
+                route_length = calculate_route_length(result['new_segments'])
+                result['route_length'] = route_length
+                print(f"  REROUTE SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, length={route_length:.2f}mm ({elapsed:.2f}s)")
                 results.append(result)
                 successful += 1
                 total_iterations += result['iterations']
@@ -249,7 +251,9 @@ def run_reroute_loop(
                             retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles)
 
                             if retry_result and not retry_result.get('failed'):
-                                print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
+                                route_length = calculate_route_length(retry_result['new_segments'])
+                                retry_result['route_length'] = route_length
+                                print(f"  REROUTE RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias, length={route_length:.2f}mm")
                                 results.append(retry_result)
                                 successful += 1
                                 total_iterations += retry_result['iterations']

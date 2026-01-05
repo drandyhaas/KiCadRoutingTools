@@ -64,6 +64,10 @@ class GridRouteConfig:
     # Vertical alignment attraction - encourages tracks on different layers to stack
     vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
     vertical_attraction_cost: float = 0.1  # mm equivalent bonus for aligned positions
+    # Length matching for DDR4 signals
+    length_match_groups: List[List[str]] = field(default_factory=list)  # Groups of net patterns to match
+    length_match_tolerance: float = 0.1  # mm - acceptable length variance within group
+    meander_amplitude: float = 1.0  # mm - height of meander perpendicular to trace
 
 
 class GridCoord:
