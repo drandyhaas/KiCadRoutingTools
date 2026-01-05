@@ -166,11 +166,29 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     - name_P / name_N
     - nameP / nameN
     - name+ / name-
+    - name_t / name_c (true/complement, common for DDR)
+    - name_t_X / name_c_X (true/complement with suffix, e.g., DQS0_t_A)
 
     Returns (base_name, is_positive) or None if not a diff pair.
     """
+    import re
+
     if not net_name:
         return None
+
+    # Try _t_X/_c_X pattern (DDR style with channel suffix, e.g., DQS0_t_A / DQS0_c_A)
+    # Match _t_ or _c_ followed by any suffix
+    tc_match = re.match(r'^(.+)_([tc])_(.+)$', net_name)
+    if tc_match:
+        base = tc_match.group(1) + '_X_' + tc_match.group(3)  # Keep suffix in base for pairing
+        is_positive = tc_match.group(2) == 't'
+        return (base, is_positive)
+
+    # Try _t/_c suffix (DDR style, e.g., CK_t / CK_c)
+    if net_name.endswith('_t'):
+        return (net_name[:-2], True)
+    if net_name.endswith('_c'):
+        return (net_name[:-2], False)
 
     # Try _P/_N suffix (most common for LVDS)
     if net_name.endswith('_P'):
