@@ -102,6 +102,34 @@ These options control stub layer switching, which moves stubs to different layer
 - For **solo switches**, a single stub moves when it doesn't conflict with other stubs
 - Multiple swap options are tried: src/src, tgt/tgt, src/tgt, tgt/src
 
+### Length Matching Options
+
+Length matching adds trombone-style meanders to match route lengths within groups. Useful for DDR4 DQ/DQS signals.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--length-match-group` | - | Group of nets to length match. Use `auto` for DDR4 auto-grouping, or specify patterns |
+| `--length-match-tolerance` | 0.1 | Acceptable length variance within group (mm) |
+| `--meander-amplitude` | 1.0 | Height of meanders perpendicular to trace (mm) |
+
+**Auto-grouping for DDR4:**
+```bash
+--length-match-group auto
+```
+Groups nets by byte lane: DQ0-7 + DQS0, DQ8-15 + DQS1, etc.
+
+**Manual grouping:**
+```bash
+--length-match-group "Net-(*DQ[0-7]*)" "Net-(*DQS0*)"
+--length-match-group "Net-(*DQ[8-9]*)" "Net-(*DQ1[0-5]*)" "Net-(*DQS1*)"
+```
+
+**How it works:**
+- Routes all nets first, then adds meanders to shorter routes
+- Finds longest straight segment for meander insertion
+- Per-bump clearance checking reduces amplitude to avoid conflicts
+- Pre-collects all segments in group to check cross-net clearance
+
 ### Visualization Options
 
 | Option | Default | Description |

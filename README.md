@@ -23,6 +23,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
+- **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces
 
 ## Quick Start
 
@@ -92,6 +93,7 @@ KiCadRoutingTools/
 ├── target_swap.py            # Target assignment optimization
 ├── rip_up_reroute.py         # Rip-up and reroute logic
 ├── blocking_analysis.py      # Analyze blocking nets
+├── length_matching.py        # Length matching with trombone meanders
 │
 ├── kicad_parser.py           # KiCad .kicad_pcb file parser
 ├── kicad_writer.py           # KiCad S-expression generator
@@ -148,6 +150,7 @@ KiCadRoutingTools/
 | `target_swap.py` | Hungarian algorithm for optimal target assignment |
 | `rip_up_reroute.py` | Rip-up blocking routes and retry |
 | `blocking_analysis.py` | Analyze which nets are blocking |
+| `length_matching.py` | Length matching with trombone-style meanders |
 
 ## Performance
 
@@ -213,6 +216,12 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
 --no-crossing-layer-check  # Count crossings regardless of layer (default: same-layer only)
 --mps-reverse-rounds     # Route most-conflicting MPS groups first (instead of least)
 
+# Length matching (for DDR4 DQ/DQS signals)
+--length-match-group auto       # Auto-group DDR4 nets by byte lane (DQ0-7+DQS0, DQ8-15+DQS1, etc)
+--length-match-group "pattern1" "pattern2"  # Manual grouping by net patterns
+--length-match-tolerance 0.1    # Acceptable length variance within group (mm)
+--meander-amplitude 1.0         # Height of meanders perpendicular to trace (mm)
+
 # Debug
 --verbose               # Print detailed diagnostic output
 --debug-lines           # Output debug geometry on User layers
@@ -230,7 +239,6 @@ See [Configuration](docs/configuration.md) for complete option reference.
 
 - Requires existing stub tracks to identify connection points
 - Grid-based (0.1mm default) - may miss very tight fits
-- No length matching
 - No push-and-shove (routes around obstacles, doesn't move them)
 
 ## License
