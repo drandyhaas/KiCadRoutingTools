@@ -534,6 +534,7 @@ def generate_trombone_meander(
 
     # Generate meander bumps
     direction = 1  # Alternates: 1 = up (positive perpendicular), -1 = down
+    first_bump_direction = None  # Track direction of first bump for exit chamfer
     bump_count = 0
 
     # Leave some margin at start and end
@@ -631,6 +632,7 @@ def generate_trombone_meander(
 
         # Entry chamfer (only for first bump)
         if has_entry_chamfer:
+            first_bump_direction = direction  # Record direction for exit chamfer
             nx = cx + ux * chamfer + px * chamfer * direction
             ny = cy + uy * chamfer + py * chamfer * direction
             new_segments.append(Segment(
@@ -691,11 +693,12 @@ def generate_trombone_meander(
         direction *= -1
 
     # Add exit chamfer to return to centerline
-    # After any number of bumps, we're at +chamfer above centerline due to the
-    # first bump's entry chamfer. Always move -chamfer perpendicular to return.
-    if bump_count > 0:
-        nx = cx + ux * chamfer - px * chamfer
-        ny = cy + uy * chamfer - py * chamfer
+    # After any number of bumps, we're at ±chamfer from centerline depending on
+    # which direction the first bump went. Move opposite to first_bump_direction.
+    if bump_count > 0 and first_bump_direction is not None:
+        # Exit chamfer moves opposite to first bump's entry direction
+        nx = cx + ux * chamfer - px * chamfer * first_bump_direction
+        ny = cy + uy * chamfer - py * chamfer * first_bump_direction
         new_segments.append(Segment(
             start_x=cx, start_y=cy,
             end_x=nx, end_y=ny,
