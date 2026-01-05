@@ -563,6 +563,25 @@ def try_reroute_single_ended(route: 'FanoutRoute',
     return None
 
 
+def get_distance_to_escape_edge(route: 'FanoutRoute', grid: BGAGrid) -> float:
+    """
+    Calculate how far the route's pad is from the escape edge.
+    Larger value = farther from edge = should be jogged.
+    """
+    pad_x, pad_y = route.pad_pos
+    escape_dir = route.escape_dir
+
+    if escape_dir == 'right':
+        return grid.max_x - pad_x  # farther from right edge = larger distance
+    elif escape_dir == 'left':
+        return pad_x - grid.min_x  # farther from left edge = larger distance
+    elif escape_dir == 'down':
+        return grid.max_y - pad_y  # farther from bottom edge = larger distance
+    elif escape_dir == 'up':
+        return pad_y - grid.min_y  # farther from top edge = larger distance
+    return 0.0
+
+
 def get_farther_channel(route: 'FanoutRoute', channels: List[Channel],
                         grid: BGAGrid) -> Optional[Channel]:
     """
@@ -1779,6 +1798,38 @@ def check_segment_collision(seg1_start: Tuple[float, float], seg1_end: Tuple[flo
             if dist < clearance:
                 return True
 
+    # Check for general segment intersection (handles diagonal crossings)
+    # Using cross product method to detect intersection
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    d1 = cross(seg2_start, seg2_end, seg1_start)
+    d2 = cross(seg2_start, seg2_end, seg1_end)
+    d3 = cross(seg1_start, seg1_end, seg2_start)
+    d4 = cross(seg1_start, seg1_end, seg2_end)
+
+    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
+       ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
+        return True
+
+    # Also check point-to-segment distance for near-misses with clearance
+    def point_to_segment_dist(px, py, x1, y1, x2, y2):
+        dx, dy = x2 - x1, y2 - y1
+        if dx == 0 and dy == 0:
+            return math.sqrt((px - x1)**2 + (py - y1)**2)
+        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+        proj_x, proj_y = x1 + t * dx, y1 + t * dy
+        return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+
+    # Check distance from each endpoint of seg1 to seg2
+    for p in [seg1_start, seg1_end]:
+        if point_to_segment_dist(p[0], p[1], seg2_start[0], seg2_start[1], seg2_end[0], seg2_end[1]) < clearance:
+            return True
+    # Check distance from each endpoint of seg2 to seg1
+    for p in [seg2_start, seg2_end]:
+        if point_to_segment_dist(p[0], p[1], seg1_start[0], seg1_start[1], seg1_end[0], seg1_end[1]) < clearance:
+            return True
+
     return False
 
 
@@ -2103,78 +2154,99 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         elif alt_channels and other_route.channel in alt_channels:
                             conflicting_routes.append(other_route)
 
-                    # Try to move each conflicting route to a jogged path
+                    # Try to move the route that is FARTHER from escape edge to a jogged path
+                    # The route closer to the edge should keep the normal channel
+                    route_dist = get_distance_to_escape_edge(route, grid)
+
                     for conflicting in conflicting_routes:
-                        farther_ch = get_farther_channel(conflicting, channels, grid)
+                        conflicting_dist = get_distance_to_escape_edge(conflicting, grid)
+
+                        # Decide which route to jog based on distance to escape edge
+                        if route_dist > conflicting_dist:
+                            # route is farther from edge - jog route instead of conflicting
+                            to_jog = route
+                            to_keep = conflicting
+                        else:
+                            # conflicting is farther from edge - jog conflicting
+                            to_jog = conflicting
+                            to_keep = route
+
+                        farther_ch = get_farther_channel(to_jog, channels, grid)
                         if farther_ch is None:
                             continue
 
                         result = try_jogged_route(
-                            conflicting, farther_ch, grid, exit_margin,
+                            to_jog, farther_ch, grid, exit_margin,
                             tracks, existing_tracks, available_layers,
                             track_width, clearance
                         )
                         if result:
-                            new_conflicting_route, new_layer, new_conflicting_tracks = result
-                            conflicting_net_name = net_names.get(conflicting.net_id, f"net_{conflicting.net_id}")
+                            new_jogged_route, new_layer, new_jogged_tracks = result
+                            jogged_net_name = net_names.get(to_jog.net_id, f"net_{to_jog.net_id}")
 
-                            # Remove old tracks for the conflicting route
+                            # Remove old tracks for the route being jogged
                             old_track_indices = [i for i, t in enumerate(tracks)
-                                                if t.get('net_id') == conflicting.net_id]
+                                                if t.get('net_id') == to_jog.net_id]
                             for idx in sorted(old_track_indices, reverse=True):
                                 tracks.pop(idx)
 
                             # Update route in routes list
-                            conflicting_idx = routes.index(conflicting)
-                            routes[conflicting_idx] = new_conflicting_route
+                            jog_idx = routes.index(to_jog)
+                            routes[jog_idx] = new_jogged_route
 
                             # Add new tracks for the jogged route
-                            tracks.extend(new_conflicting_tracks)
+                            tracks.extend(new_jogged_tracks)
 
-                            print(f"    Moved {conflicting_net_name} to jogged path on {new_layer}")
+                            print(f"    Moved {jogged_net_name} to jogged path on {new_layer}")
 
-                            # Now retry routing the original failed net
-                            # First try the original channel (now freed up)
-                            retry_result = try_reroute_single_ended(
-                                route, route.channel, grid, exit_margin,
-                                tracks, existing_tracks, available_layers,
-                                track_width, clearance
-                            )
-                            if retry_result:
-                                new_route, new_layer = retry_result
-
-                                # Remove old tracks for this net
-                                old_track_indices = [i for i, t in enumerate(tracks)
-                                                    if t.get('net_id') == net_id and not t.get('pair_id')]
-                                for idx in sorted(old_track_indices, reverse=True):
-                                    tracks.pop(idx)
-
-                                # Update route in routes list
-                                route_idx = routes.index(route)
-                                routes[route_idx] = new_route
-
-                                # Add new tracks
-                                tracks.append({
-                                    'start': new_route.pad_pos,
-                                    'end': new_route.stub_end,
-                                    'width': track_width,
-                                    'layer': new_layer,
-                                    'net_id': net_id,
-                                    'pair_id': None
-                                })
-                                tracks.append({
-                                    'start': new_route.stub_end,
-                                    'end': new_route.exit_pos,
-                                    'width': track_width,
-                                    'layer': new_layer,
-                                    'net_id': net_id,
-                                    'pair_id': None
-                                })
-
+                            if to_jog is route:
+                                # We jogged the original failing route - it's now resolved
                                 rerouted += 1
                                 resolved = True
-                                print(f"    Rerouted {identifier} after freeing channel on {new_layer}")
                                 break
+                            else:
+                                # We jogged the conflicting route - now retry the original route
+                                # First try the original channel (now freed up)
+                                retry_result = try_reroute_single_ended(
+                                    route, route.channel, grid, exit_margin,
+                                    tracks, existing_tracks, available_layers,
+                                    track_width, clearance
+                                )
+                                if retry_result:
+                                    new_route, retry_layer = retry_result
+
+                                    # Remove old tracks for this net
+                                    old_track_indices = [i for i, t in enumerate(tracks)
+                                                        if t.get('net_id') == net_id and not t.get('pair_id')]
+                                    for idx in sorted(old_track_indices, reverse=True):
+                                        tracks.pop(idx)
+
+                                    # Update route in routes list
+                                    route_idx = routes.index(route)
+                                    routes[route_idx] = new_route
+
+                                    # Add new tracks
+                                    tracks.append({
+                                        'start': new_route.pad_pos,
+                                        'end': new_route.stub_end,
+                                        'width': track_width,
+                                        'layer': retry_layer,
+                                        'net_id': net_id,
+                                        'pair_id': None
+                                    })
+                                    tracks.append({
+                                        'start': new_route.stub_end,
+                                        'end': new_route.exit_pos,
+                                        'width': track_width,
+                                        'layer': retry_layer,
+                                        'net_id': net_id,
+                                        'pair_id': None
+                                    })
+
+                                    rerouted += 1
+                                    resolved = True
+                                    print(f"    Rerouted {identifier} after freeing channel on {retry_layer}")
+                                    break
 
                 # If STILL not resolved, remove the route and report failure
                 if not resolved and route is not None:
@@ -2324,17 +2396,15 @@ def generate_bga_fanout(footprint: Footprint,
 
     # Check if channels are wide enough for both tracks of a diff pair
     # If not, route P and N in adjacent channels instead of same channel with offsets
-    # The track at offset from channel center must maintain clearance from adjacent pads
-    # Get typical pad size from footprint
-    pad_sizes = [max(p.size_x, p.size_y) for p in footprint.pads if p.size_x > 0 and p.size_y > 0]
-    pad_diameter = max(pad_sizes) if pad_sizes else 0.3  # default to 0.3mm if not found
-    pad_radius = pad_diameter / 2
+    # The track at offset from channel center must maintain clearance from adjacent vias
+    # For inner layers, use via size (not pad size) since that's the actual constraint
+    via_radius = via_size / 2
 
     # Calculate maximum allowed track offset from channel center
-    # Channel is midway between pad rows, so distance to nearest pad center = pitch/2
-    # For track to clear pad: track_center_offset + track_width/2 + clearance <= pitch/2 - pad_radius
-    max_offset_h = grid.pitch_y / 2 - pad_radius - track_width / 2 - clearance
-    max_offset_v = grid.pitch_x / 2 - pad_radius - track_width / 2 - clearance
+    # Channel is midway between via rows, so distance to nearest via center = pitch/2
+    # For track to clear via: track_center_offset + track_width/2 + clearance <= pitch/2 - via_radius
+    max_offset_h = grid.pitch_y / 2 - via_radius - track_width / 2 - clearance
+    max_offset_v = grid.pitch_x / 2 - via_radius - track_width / 2 - clearance
 
     use_adjacent_channels = (half_pair_spacing > max_offset_h or half_pair_spacing > max_offset_v)
     if use_adjacent_channels:
@@ -2854,29 +2924,47 @@ def generate_bga_fanout(footprint: Footprint,
                                 between_ch = channels_between[0]
                                 between_idx = h_channels_sorted.index(between_ch)
 
-                                # Get adjacent channel (prefer toward escape edge, i.e., away from BGA center)
-                                # For left escape, prefer channels with smaller Y (toward top edge)
-                                # For right escape, same logic applies (escape is horizontal)
-                                if between_idx > 0:
-                                    adjacent_ch = h_channels_sorted[between_idx - 1]
-                                elif between_idx < len(h_channels_sorted) - 1:
-                                    adjacent_ch = h_channels_sorted[between_idx + 1]
-                                else:
-                                    adjacent_ch = between_ch  # fallback
+                                # Determine which pad is closer to the escape edge
+                                if escape_dir == 'left':
+                                    p_closer_to_edge = p_pad.global_x < n_pad.global_x
+                                else:  # right
+                                    p_closer_to_edge = p_pad.global_x > n_pad.global_x
 
-                                # Assign: top pad to upper channel, bottom pad to lower channel
-                                if adjacent_ch.position < between_ch.position:
-                                    # adjacent is above between
-                                    upper_ch, lower_ch = adjacent_ch, between_ch
+                                # Pad closer to edge uses between_ch (normal routing)
+                                # Pad farther from edge jogs to adjacent_ch
+                                # Choose adjacent_ch on the side of the farther pad
+                                if p_closer_to_edge:
+                                    # P uses between, N jogs to adjacent
+                                    # N is farther, so pick adjacent on N's side (above if N is top, below if N is bottom)
+                                    n_is_top = n_pad.global_y < p_pad.global_y
+                                    if n_is_top and between_idx > 0:
+                                        adjacent_ch = h_channels_sorted[between_idx - 1]
+                                    elif not n_is_top and between_idx < len(h_channels_sorted) - 1:
+                                        adjacent_ch = h_channels_sorted[between_idx + 1]
+                                    elif between_idx > 0:
+                                        adjacent_ch = h_channels_sorted[between_idx - 1]
+                                    elif between_idx < len(h_channels_sorted) - 1:
+                                        adjacent_ch = h_channels_sorted[between_idx + 1]
+                                    else:
+                                        adjacent_ch = between_ch
+                                    p_target_ch = between_ch
+                                    n_target_ch = adjacent_ch
                                 else:
-                                    upper_ch, lower_ch = between_ch, adjacent_ch
-
-                                if p_is_top:
-                                    p_target_ch = upper_ch
-                                    n_target_ch = lower_ch
-                                else:
-                                    p_target_ch = lower_ch
-                                    n_target_ch = upper_ch
+                                    # N uses between, P jogs to adjacent
+                                    # P is farther, so pick adjacent on P's side
+                                    p_is_top_here = p_pad.global_y < n_pad.global_y
+                                    if p_is_top_here and between_idx > 0:
+                                        adjacent_ch = h_channels_sorted[between_idx - 1]
+                                    elif not p_is_top_here and between_idx < len(h_channels_sorted) - 1:
+                                        adjacent_ch = h_channels_sorted[between_idx + 1]
+                                    elif between_idx > 0:
+                                        adjacent_ch = h_channels_sorted[between_idx - 1]
+                                    elif between_idx < len(h_channels_sorted) - 1:
+                                        adjacent_ch = h_channels_sorted[between_idx + 1]
+                                    else:
+                                        adjacent_ch = between_ch
+                                    p_target_ch = adjacent_ch
+                                    n_target_ch = between_ch
                             else:
                                 # No channel between pads - use channels above and below
                                 channels_above = [c for c in h_channels_sorted if c.position < top_pad_y]
