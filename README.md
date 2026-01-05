@@ -65,6 +65,7 @@ python check_connected.py output.kicad_pcb --nets "*DATA*"
 | [Differential Pairs](docs/differential-pairs.md) | P/N pairing, polarity swaps, via handling |
 | [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
 | [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher |
+| [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 
@@ -102,7 +103,12 @@ KiCadRoutingTools/
 │
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
-├── bga_fanout.py             # BGA differential pair fanout generator
+├── bga_fanout.py             # BGA fanout CLI wrapper
+├── bga_fanout/               # BGA fanout package
+│   ├── __init__.py           # Main fanout logic
+│   ├── types.py              # Track, RoutingConfig dataclasses
+│   ├── collision.py          # Collision detection utilities
+│   └── constants.py          # Configuration constants
 ├── qfn_fanout.py             # QFN/QFP fanout generator
 ├── switch_to_layer.py        # Move net segments to a different layer
 ├── list_nets.py              # List nets on a component
