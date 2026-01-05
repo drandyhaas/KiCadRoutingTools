@@ -172,9 +172,9 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     Args:
         clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
     """
-    # Check if they share a layer
-    via_layers = set(via.layers) if via.layers else {'F.Cu', 'B.Cu'}
-    if seg.layer not in via_layers:
+    # Standard through-hole vias go through ALL copper layers, not just the ones listed
+    # Only skip non-copper layers
+    if not seg.layer.endswith('.Cu'):
         return False, 0.0
 
     required_dist = via.size / 2 + seg.width / 2 + clearance

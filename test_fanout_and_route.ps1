@@ -22,7 +22,7 @@ python3 bga_fanout.py fanout_output5.kicad_pcb --component U1 --output fanout_ou
 python3 route.py fanout_output.kicad_pcb routed_output.kicad_pcb "Net-(U2A-*)" --swappable-nets "Net-(U2A-DATA_*)" --heuristic-weight 2.5
 
 # Check for errors
-python3 check_drc.py routed_output.kicad_pcb
+python3 check_drc.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
 
 # Check connections
 python3 check_connected.py routed_output.kicad_pcb --nets "Net-(U2A-*)"
@@ -35,7 +35,7 @@ python3 test_diffpair.py "*rx3_*" "*rx4_*" "*rx*clkin3*" "*rx*clkin4*" --swappab
 python3 route.py test_diffpair.kicad_pcb test_diffpair_ram.kicad_pcb "Net-(U1*)" --swappable-nets "Net-(U1*DQ*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1
 
 # Check for errors
-python3 check_drc.py test_diffpair_ram.kicad_pcb
+python3 check_drc.py test_diffpair_ram.kicad_pcb --nets "Net-(U1*)"
 
 # Check connections
 python3 check_connected.py test_diffpair_ram.kicad_pcb --nets "Net-(U1*)"

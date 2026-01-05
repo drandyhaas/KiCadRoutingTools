@@ -654,6 +654,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         all_routed_names = list(net_name_to_result.keys())
 
+        # Track all segments/vias from previously processed groups
+        # so that subsequent groups can check clearance against them
+        all_processed_segments = []
+        all_processed_vias = []
+
         for group in length_match_groups:
             # Handle "auto" for DDR4 grouping
             if len(group) == 1 and group[0].lower() == 'auto':
@@ -661,8 +666,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for auto_group in auto_groups:
                     if len(auto_group) >= 2:
                         net_name_to_result = apply_length_matching_to_group(
-                            net_name_to_result, auto_group, config
+                            net_name_to_result, auto_group, config, pcb_data,
+                            all_processed_segments, all_processed_vias
                         )
+                        # Collect segments/vias from this group for subsequent groups
+                        for net_name in auto_group:
+                            if net_name in net_name_to_result:
+                                result = net_name_to_result[net_name]
+                                if result.get('new_segments'):
+                                    all_processed_segments.extend(result['new_segments'])
+                                if result.get('new_vias'):
+                                    all_processed_vias.extend(result['new_vias'])
             else:
                 # Find nets matching the patterns in this group
                 matching_nets = find_nets_matching_patterns(all_routed_names, group)
@@ -670,8 +684,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print(f"\nLength match group: {group}")
                     print(f"  Matched nets: {matching_nets}")
                     net_name_to_result = apply_length_matching_to_group(
-                        net_name_to_result, matching_nets, config
+                        net_name_to_result, matching_nets, config, pcb_data,
+                        all_processed_segments, all_processed_vias
                     )
+                    # Collect segments/vias from this group for subsequent groups
+                    for net_name in matching_nets:
+                        if net_name in net_name_to_result:
+                            result = net_name_to_result[net_name]
+                            if result.get('new_segments'):
+                                all_processed_segments.extend(result['new_segments'])
+                            if result.get('new_vias'):
+                                all_processed_vias.extend(result['new_vias'])
 
     # Notify visualization callback that all routing is complete
     if visualize:

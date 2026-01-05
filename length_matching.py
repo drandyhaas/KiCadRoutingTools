@@ -9,9 +9,273 @@ import math
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
-from kicad_parser import Segment
+from kicad_parser import Segment, PCBData
 from routing_config import GridRouteConfig
 from routing_utils import segment_length
+
+
+def point_to_segment_distance(px: float, py: float,
+                               x1: float, y1: float, x2: float, y2: float) -> float:
+    """Calculate minimum distance from point (px, py) to segment (x1,y1)-(x2,y2)."""
+    dx = x2 - x1
+    dy = y2 - y1
+    length_sq = dx * dx + dy * dy
+
+    if length_sq < 1e-10:
+        # Segment is a point
+        return math.sqrt((px - x1)**2 + (py - y1)**2)
+
+    # Project point onto line, clamped to segment
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+
+    return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+
+
+def segment_to_segment_distance(seg1_x1: float, seg1_y1: float, seg1_x2: float, seg1_y2: float,
+                                 seg2_x1: float, seg2_y1: float, seg2_x2: float, seg2_y2: float) -> float:
+    """Calculate minimum distance between two line segments."""
+    # Check distance from each endpoint to the other segment
+    d1 = point_to_segment_distance(seg1_x1, seg1_y1, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
+    d2 = point_to_segment_distance(seg1_x2, seg1_y2, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
+    d3 = point_to_segment_distance(seg2_x1, seg2_y1, seg1_x1, seg1_y1, seg1_x2, seg1_y2)
+    d4 = point_to_segment_distance(seg2_x2, seg2_y2, seg1_x1, seg1_y1, seg1_x2, seg1_y2)
+
+    return min(d1, d2, d3, d4)
+
+
+def get_bump_segments(
+    cx: float, cy: float,
+    ux: float, uy: float,
+    px: float, py: float,
+    direction: int,
+    amplitude: float,
+    chamfer: float = 0.1
+) -> List[Tuple[float, float, float, float]]:
+    """
+    Calculate the segments that would form a meander bump.
+
+    Returns list of (x1, y1, x2, y2) tuples for each segment.
+    """
+    riser_height = amplitude - 2 * chamfer
+    if riser_height < 0.1:
+        riser_height = 0.1
+
+    segments = []
+    x, y = cx, cy
+
+    # 1. Entry 45° chamfer
+    nx = x + ux * chamfer + px * chamfer * direction
+    ny = y + uy * chamfer + py * chamfer * direction
+    segments.append((x, y, nx, ny))
+    x, y = nx, ny
+
+    # 2. Riser up
+    nx = x + px * riser_height * direction
+    ny = y + py * riser_height * direction
+    segments.append((x, y, nx, ny))
+    x, y = nx, ny
+
+    # 3. Top chamfer 1
+    nx = x + ux * chamfer + px * chamfer * direction
+    ny = y + uy * chamfer + py * chamfer * direction
+    segments.append((x, y, nx, ny))
+    x, y = nx, ny
+
+    # 4. Top chamfer 2
+    nx = x + ux * chamfer - px * chamfer * direction
+    ny = y + uy * chamfer - py * chamfer * direction
+    segments.append((x, y, nx, ny))
+    x, y = nx, ny
+
+    # 5. Riser down
+    nx = x - px * riser_height * direction
+    ny = y - py * riser_height * direction
+    segments.append((x, y, nx, ny))
+    x, y = nx, ny
+
+    # 6. Exit chamfer
+    nx = x + ux * chamfer - px * chamfer * direction
+    ny = y + uy * chamfer - py * chamfer * direction
+    segments.append((x, y, nx, ny))
+
+    return segments
+
+
+def get_safe_amplitude_at_point(
+    cx: float, cy: float,
+    ux: float, uy: float,
+    px: float, py: float,
+    direction: int,
+    max_amplitude: float,
+    min_amplitude: float,
+    layer: str,
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    extra_segments: List[Segment] = None,
+    extra_vias: List = None
+) -> float:
+    """
+    Find the maximum safe amplitude for a meander bump at a specific point.
+
+    Args:
+        cx, cy: Center point of the bump on the trace
+        ux, uy: Unit vector along the trace direction
+        px, py: Perpendicular unit vector
+        direction: 1 for positive perpendicular, -1 for negative
+        max_amplitude: Maximum amplitude to try
+        min_amplitude: Minimum useful amplitude
+        layer: Layer of the trace
+        pcb_data: PCB data with all segments and vias
+        net_id: Net ID of the route (to exclude self)
+        config: Routing configuration
+        extra_segments: Additional segments to check against (e.g., from other nets in same length-match pass)
+        extra_vias: Additional vias to check against (e.g., from other nets in same length-match pass)
+
+    Returns:
+        Safe amplitude, or 0 if no safe amplitude found
+    """
+    required_clearance = config.track_width + config.clearance
+    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance
+    chamfer = 0.1
+
+    max_safe = max_amplitude
+
+    # Combine pcb_data segments with extra_segments
+    all_segments = list(pcb_data.segments)
+    if extra_segments:
+        all_segments.extend(extra_segments)
+
+    # Combine pcb_data vias with extra_vias
+    all_vias = list(pcb_data.vias)
+    if extra_vias:
+        all_vias.extend(extra_vias)
+
+    # Binary search for safe amplitude
+    # Start with max_amplitude and reduce if there are conflicts
+    test_amplitudes = [max_amplitude]
+    # Add intermediate values for binary search
+    amp = max_amplitude
+    while amp > min_amplitude:
+        amp *= 0.7
+        if amp >= min_amplitude:
+            test_amplitudes.append(amp)
+    test_amplitudes.append(min_amplitude)
+
+    for test_amp in test_amplitudes:
+        # Generate bump segments for this amplitude
+        bump_segs = get_bump_segments(cx, cy, ux, uy, px, py, direction, test_amp, chamfer)
+
+        conflict_found = False
+
+        # Check each bump segment against other segments on the same layer
+        for bx1, by1, bx2, by2 in bump_segs:
+            if conflict_found:
+                break
+
+            for other_seg in all_segments:
+                if other_seg.net_id == net_id:
+                    continue
+                if other_seg.layer != layer:
+                    continue
+
+                # Quick distance check
+                seg_center_x = (other_seg.start_x + other_seg.end_x) / 2
+                seg_center_y = (other_seg.start_y + other_seg.end_y) / 2
+                bump_center_x = (bx1 + bx2) / 2
+                bump_center_y = (by1 + by2) / 2
+                rough_dist = math.sqrt((bump_center_x - seg_center_x)**2 + (bump_center_y - seg_center_y)**2)
+
+                if rough_dist > test_amp + 3:
+                    continue
+
+                # Check segment-to-segment distance
+                dist = segment_to_segment_distance(
+                    bx1, by1, bx2, by2,
+                    other_seg.start_x, other_seg.start_y, other_seg.end_x, other_seg.end_y
+                )
+
+                if dist < required_clearance:
+                    conflict_found = True
+                    break
+
+        # Check bump segments against vias
+        if not conflict_found:
+            for bx1, by1, bx2, by2 in bump_segs:
+                if conflict_found:
+                    break
+
+                for via in all_vias:
+                    if via.net_id == net_id:
+                        continue
+
+                    # Distance from via center to bump segment
+                    dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
+
+                    if dist < via_clearance:
+                        conflict_found = True
+                        break
+
+        if not conflict_found:
+            return test_amp
+
+    return 0
+
+
+def check_meander_clearance(
+    segment: Segment,
+    amplitude: float,
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig
+) -> bool:
+    """
+    Check if a meander at this segment would have clearance from other traces/vias.
+    This is a quick check - detailed per-bump checking is done during generation.
+
+    Args:
+        segment: The segment where meander would be placed
+        amplitude: Height of meander perpendicular to trace
+        pcb_data: PCB data with all segments and vias
+        net_id: Net ID of the route being meandered (to exclude self)
+        config: Routing configuration
+
+    Returns:
+        True if meander area appears clear, False if obviously blocked
+    """
+    # Calculate segment direction and perpendicular
+    dx = segment.end_x - segment.start_x
+    dy = segment.end_y - segment.start_y
+    seg_len = math.sqrt(dx * dx + dy * dy)
+
+    if seg_len < 0.001:
+        return False
+
+    ux = dx / seg_len
+    uy = dy / seg_len
+    px = -uy
+    py = ux
+
+    margin = config.track_width / 2 + config.clearance * 1.5
+
+    # Quick check: is there ANY space for meanders?
+    # Sample a few points along the segment
+    for t in [0.25, 0.5, 0.75]:
+        cx = segment.start_x + ux * seg_len * t
+        cy = segment.start_y + uy * seg_len * t
+
+        # Check both directions
+        amp_pos = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, 1, amplitude, 0.3,
+                                               segment.layer, pcb_data, net_id, config)
+        amp_neg = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, -1, amplitude, 0.3,
+                                               segment.layer, pcb_data, net_id, config)
+
+        if amp_pos >= 0.3 or amp_neg >= 0.3:
+            return True  # At least some meanders possible
+
+    return False
 
 
 def segments_are_colinear(seg1: Segment, seg2: Segment, tolerance: float = 0.01) -> bool:
@@ -145,7 +409,11 @@ def generate_trombone_meander(
     segment: Segment,
     extra_length: float,
     amplitude: float,
-    track_width: float
+    track_width: float,
+    pcb_data: PCBData = None,
+    config: GridRouteConfig = None,
+    extra_segments: List[Segment] = None,
+    extra_vias: List = None
 ) -> List[Segment]:
     """
     Generate trombone-style meander segments to replace a straight segment.
@@ -168,8 +436,12 @@ def generate_trombone_meander(
     Args:
         segment: Original segment to replace
         extra_length: Additional length to add (mm)
-        amplitude: Height of meander perpendicular to trace (mm)
+        amplitude: Maximum height of meander perpendicular to trace (mm)
         track_width: Track width for new segments (mm)
+        pcb_data: PCB data for per-bump clearance checking (optional)
+        config: Routing configuration for clearance checking (optional)
+        extra_segments: Additional segments to check against (e.g., from other nets already processed)
+        extra_vias: Additional vias to check against (e.g., from other nets already processed)
 
     Returns:
         List of segments forming the meander
@@ -194,57 +466,39 @@ def generate_trombone_meander(
 
     # 45° chamfer size - use a small chamfer for smooth corners
     chamfer = 0.1  # mm - small 45° chamfer at corners
-
-    # Each meander bump geometry (simple U-shape):
-    # - 45° chamfer going up (covers chamfer in both directions)
-    # - Vertical riser up
-    # - 45° chamfer at top turning back
-    # - Vertical riser down
-    # - 45° chamfer returning to centerline
-
-    riser_height = amplitude - 2 * chamfer  # vertical portion (subtract chamfers at both ends)
-    if riser_height < 0.1:
-        riser_height = 0.1
-
-    chamfer_diag = chamfer * math.sqrt(2)  # diagonal length of 45° chamfer
-
-    # Each bump path length:
-    # - 4 chamfers = 4 * chamfer_diag
-    # - 2 risers = 2 * riser_height
-    bump_path_length = 4 * chamfer_diag + 2 * riser_height
+    min_amplitude = 0.3  # mm - minimum useful amplitude
 
     # Horizontal distance consumed by one bump (just the chamfers' horizontal components)
     bump_width = 4 * chamfer
 
-    # Extra length per bump = path length - horizontal distance
-    extra_per_bump = bump_path_length - bump_width
-
-    if extra_per_bump <= 0:
+    # Estimate number of bumps we can fit
+    max_bumps = int(seg_len * 0.9 / bump_width)
+    if max_bumps < 1:
         return [segment]
 
-    # Number of bumps needed
-    num_bumps = max(1, int(math.ceil(extra_length / extra_per_bump)))
+    # Calculate how much extra length we need per bump on average
+    target_extra_per_bump = extra_length / max_bumps
 
-    # Total horizontal space needed (bumps directly adjacent, no spacing)
-    total_width = num_bumps * bump_width
-
-    # Check if segment is long enough
-    if total_width > seg_len * 0.9:
-        max_bumps = int(seg_len * 0.9 / bump_width)
-        if max_bumps < 1:
-            return [segment]
-        num_bumps = max_bumps
-        total_width = num_bumps * bump_width
-
-    # Center the meanders in the segment
-    margin = (seg_len - total_width) / 2
+    # Each bump adds approximately 2 * (amplitude - 2*chamfer) extra length
+    # So target_amplitude = target_extra_per_bump / 2 + 2*chamfer
+    # But we cap at the configured amplitude
 
     # Build segment list
     new_segments = []
 
-    # Current position
+    # Current position - start at segment start
     cx = segment.start_x
     cy = segment.start_y
+
+    # Track how much extra length we've added
+    total_extra_added = 0.0
+
+    # Generate meander bumps
+    direction = 1  # Alternates: 1 = up (positive perpendicular), -1 = down
+    bump_count = 0
+
+    # Leave some margin at start and end
+    margin = bump_width
 
     # Straight lead-in
     if margin > 0.01:
@@ -257,10 +511,56 @@ def generate_trombone_meander(
         ))
         cx, cy = end_x, end_y
 
-    # Generate meander bumps
-    direction = 1  # Alternates: 1 = up (positive perpendicular), -1 = down
+    # Keep adding bumps until we've added enough length or run out of space
+    while total_extra_added < extra_length:
+        # Check if we have room for another bump
+        dist_to_end = math.sqrt((segment.end_x - cx)**2 + (segment.end_y - cy)**2)
+        if dist_to_end < bump_width + margin:
+            break
 
-    for bump in range(num_bumps):
+        # Determine amplitude for this bump
+        bump_amplitude = amplitude
+
+        # If we have clearance checking, find safe amplitude at this position
+        if pcb_data is not None and config is not None:
+            safe_amp = get_safe_amplitude_at_point(
+                cx, cy, ux, uy, px, py, direction, amplitude, min_amplitude,
+                segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias
+            )
+            if safe_amp < min_amplitude:
+                # Try the other direction
+                safe_amp_other = get_safe_amplitude_at_point(
+                    cx, cy, ux, uy, px, py, -direction, amplitude, min_amplitude,
+                    segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias
+                )
+                if safe_amp_other >= min_amplitude:
+                    direction = -direction
+                    safe_amp = safe_amp_other
+                else:
+                    # No room for a bump here, skip forward with a straight segment
+                    skip_dist = 0.2
+                    new_x = cx + ux * skip_dist
+                    new_y = cy + uy * skip_dist
+                    new_segments.append(Segment(
+                        start_x=cx, start_y=cy,
+                        end_x=new_x, end_y=new_y,
+                        width=segment.width, layer=segment.layer, net_id=segment.net_id
+                    ))
+                    cx, cy = new_x, new_y
+                    continue
+
+            bump_amplitude = min(amplitude, safe_amp)
+
+        riser_height = bump_amplitude - 2 * chamfer
+        if riser_height < 0.1:
+            riser_height = 0.1
+            bump_amplitude = riser_height + 2 * chamfer
+
+        chamfer_diag = chamfer * math.sqrt(2)
+        bump_path_length = 4 * chamfer_diag + 2 * riser_height
+        extra_this_bump = bump_path_length - bump_width
+
+        # Generate this bump
         # 1. 45° chamfer going up-and-forward
         nx = cx + ux * chamfer + px * chamfer * direction
         ny = cy + uy * chamfer + py * chamfer * direction
@@ -321,7 +621,12 @@ def generate_trombone_meander(
         ))
         cx, cy = nx, ny
 
-        # No spacing between bumps - they connect directly
+        # Track progress
+        total_extra_added += extra_this_bump
+        bump_count += 1
+
+        # Alternate direction for next bump
+        direction *= -1
 
     # Straight lead-out to segment end
     # Calculate remaining distance to end
@@ -339,10 +644,49 @@ def generate_trombone_meander(
     return new_segments
 
 
+def find_all_straight_runs(segments: List[Segment], min_length: float = 1.0) -> List[Tuple[int, int, float]]:
+    """
+    Find all straight runs of colinear segments, sorted by length descending.
+
+    Args:
+        segments: List of route segments
+        min_length: Minimum run length to consider (mm)
+
+    Returns:
+        List of (start_idx, end_idx, length) tuples, sorted by length descending
+    """
+    if not segments:
+        return []
+
+    runs = []
+    i = 0
+    while i < len(segments):
+        run_start = i
+        run_length = segment_length(segments[i])
+
+        j = i + 1
+        while j < len(segments) and segments_are_colinear(segments[j-1], segments[j]):
+            run_length += segment_length(segments[j])
+            j += 1
+
+        if run_length >= min_length:
+            runs.append((run_start, j - 1, run_length))
+
+        i = j
+
+    # Sort by length descending
+    runs.sort(key=lambda x: x[2], reverse=True)
+    return runs
+
+
 def apply_meanders_to_route(
     segments: List[Segment],
     extra_length: float,
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    pcb_data: PCBData = None,
+    net_id: int = None,
+    extra_segments: List[Segment] = None,
+    extra_vias: List = None
 ) -> List[Segment]:
     """
     Apply meanders to a route to add extra length.
@@ -351,6 +695,10 @@ def apply_meanders_to_route(
         segments: Original route segments
         extra_length: Length to add (mm)
         config: Routing configuration
+        pcb_data: PCB data for clearance checking (optional)
+        net_id: Net ID of this route (optional, for clearance checking)
+        extra_segments: Additional segments to check against (e.g., from already-processed nets)
+        extra_vias: Additional vias to check against (e.g., from already-processed nets)
 
     Returns:
         Modified segment list with meanders
@@ -358,7 +706,73 @@ def apply_meanders_to_route(
     if extra_length <= 0 or not segments:
         return segments
 
-    # Find longest straight run (colinear segments) for meander insertion
+    # Find all straight runs, sorted by length
+    min_length = config.meander_amplitude * 2  # Reduced minimum for more options
+    runs = find_all_straight_runs(segments, min_length=min_length)
+
+    if not runs:
+        print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
+        return segments
+
+    # Try each straight run until we find one that works
+    amplitude = config.meander_amplitude
+    min_amplitude = 0.3  # Minimum useful amplitude
+
+    for start_idx, end_idx, run_length in runs:
+        # Check if this run is long enough for meanders
+        if run_length < amplitude * 2:
+            continue
+
+        # Create a merged segment from the run
+        first_seg = segments[start_idx]
+        last_seg = segments[end_idx]
+        merged_seg = Segment(
+            start_x=first_seg.start_x,
+            start_y=first_seg.start_y,
+            end_x=last_seg.end_x,
+            end_y=last_seg.end_y,
+            width=first_seg.width,
+            layer=first_seg.layer,
+            net_id=first_seg.net_id
+        )
+
+        # Quick check if there's ANY space for meanders at this location
+        if pcb_data is not None and net_id is not None:
+            if not check_meander_clearance(merged_seg, amplitude, pcb_data, net_id, config):
+                # No space at all - try next run
+                continue
+
+        # Generate meanders - per-bump clearance checking will adjust amplitudes
+        print(f"    Inserting meanders at segments {start_idx}-{end_idx} (run={run_length:.2f}mm)")
+
+        meander_segs = generate_trombone_meander(
+            merged_seg,
+            extra_length,
+            amplitude,  # Pass full amplitude - per-bump checking will reduce as needed
+            config.track_width,
+            pcb_data=pcb_data,
+            config=config,
+            extra_segments=extra_segments,
+            extra_vias=extra_vias
+        )
+
+        # Replace original segment run with meanders
+        new_segments = segments[:start_idx] + meander_segs + segments[end_idx + 1:]
+        return new_segments
+
+    print(f"    Warning: No straight run with clearance found for meanders")
+    return segments
+
+
+def _old_apply_meanders_to_route(
+    segments: List[Segment],
+    extra_length: float,
+    config: GridRouteConfig
+) -> List[Segment]:
+    """Old version without clearance checking - kept for reference."""
+    if extra_length <= 0 or not segments:
+        return segments
+
     min_length = config.meander_amplitude * 4
     run = find_longest_straight_run(segments, min_length=min_length)
 
@@ -368,7 +782,6 @@ def apply_meanders_to_route(
 
     start_idx, end_idx, run_length = run
 
-    # Create a merged segment from the run
     first_seg = segments[start_idx]
     last_seg = segments[end_idx]
     merged_seg = Segment(
@@ -383,7 +796,6 @@ def apply_meanders_to_route(
 
     print(f"    Inserting meanders at segments {start_idx}-{end_idx} (straight run={run_length:.2f}mm)")
 
-    # Generate meander segments
     meander_segs = generate_trombone_meander(
         merged_seg,
         extra_length,
@@ -400,7 +812,10 @@ def apply_meanders_to_route(
 def apply_length_matching_to_group(
     net_results: Dict[str, dict],
     net_names: List[str],
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    pcb_data: PCBData = None,
+    prev_group_segments: List[Segment] = None,
+    prev_group_vias: List = None
 ) -> Dict[str, dict]:
     """
     Apply length matching to a group of nets.
@@ -409,6 +824,9 @@ def apply_length_matching_to_group(
         net_results: Dict mapping net name to routing result
         net_names: Net names in this matching group
         config: Routing configuration
+        pcb_data: PCB data for clearance checking (optional)
+        prev_group_segments: Segments from previously processed groups (for cross-group clearance)
+        prev_group_vias: Vias from previously processed groups (for cross-group clearance)
 
     Returns:
         Modified net_results with meanders added
@@ -430,6 +848,12 @@ def apply_length_matching_to_group(
 
     print(f"  Length matching group: {len(group_results)} nets, target={target_length:.2f}mm")
 
+    # Collect already-processed segments and vias to check against
+    # This prevents meanders from different nets overlapping
+    # Start with segments/vias from previously processed groups (cross-group clearance)
+    already_processed_segments: List[Segment] = list(prev_group_segments) if prev_group_segments else []
+    already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
+
     # Apply meanders to shorter routes
     for net_name, result in group_results.items():
         current_length = result['route_length']
@@ -437,15 +861,29 @@ def apply_length_matching_to_group(
 
         if delta <= config.length_match_tolerance:
             print(f"    {net_name}: {current_length:.2f}mm (OK, within tolerance)")
+            # Still add this net's segments and vias to the already-processed lists
+            if result.get('new_segments'):
+                already_processed_segments.extend(result['new_segments'])
+            if result.get('new_vias'):
+                already_processed_vias.extend(result['new_vias'])
             continue
 
         print(f"    {net_name}: {current_length:.2f}mm -> adding {delta:.2f}mm")
 
-        # Apply meanders
+        # Get net_id from segments if available
+        net_id = None
+        if result.get('new_segments'):
+            net_id = result['new_segments'][0].net_id
+
+        # Apply meanders with clearance checking, including already-processed segments and vias
         new_segments = apply_meanders_to_route(
             result['new_segments'],
             delta,
-            config
+            config,
+            pcb_data=pcb_data,
+            net_id=net_id,
+            extra_segments=already_processed_segments,
+            extra_vias=already_processed_vias
         )
 
         # Update result
@@ -454,6 +892,11 @@ def apply_length_matching_to_group(
         from routing_utils import calculate_route_length
         result['route_length'] = calculate_route_length(new_segments)
         print(f"    {net_name}: new length = {result['route_length']:.2f}mm")
+
+        # Add this net's segments and vias to the already-processed lists
+        already_processed_segments.extend(new_segments)
+        if result.get('new_vias'):
+            already_processed_vias.extend(result['new_vias'])
 
     return net_results
 
