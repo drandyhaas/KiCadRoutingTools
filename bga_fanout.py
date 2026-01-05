@@ -956,6 +956,8 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
                         primary_orientation: str = 'horizontal',
                         track_width: float = 0.1,
                         clearance: float = 0.1,
+                        diff_pair_gap: float = 0.1,
+                        via_size: float = 0.3,
                         rebalance: bool = False,
                         pre_occupied: Dict[Tuple[str, str, float], str] = None,
                         force_escape_direction: bool = False) -> Dict[str, Tuple[Optional[Channel], str]]:
@@ -1002,6 +1004,21 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
 
     pair_spacing = track_width * 2 + clearance  # Minimum spacing between diff pairs
     edge_layer = layers[0]  # Edge pairs go on top layer (F.Cu)
+
+    # Calculate which directions require adjacent-channel routing
+    # half_pair_spacing is the offset from channel center for each track
+    half_pair_spacing = (track_width + diff_pair_gap) / 2
+    via_radius = via_size / 2
+
+    # max_offset is the maximum track offset that fits between vias
+    # For horizontal escape (left/right), tracks are in horizontal channels, constrained by pitch_y
+    # For vertical escape (up/down), tracks are in vertical channels, constrained by pitch_x
+    max_offset_h = grid.pitch_y / 2 - via_radius - track_width / 2 - clearance
+    max_offset_v = grid.pitch_x / 2 - via_radius - track_width / 2 - clearance
+
+    # Determine if each direction needs adjacent channels
+    horizontal_needs_adjacent = half_pair_spacing > max_offset_h
+    vertical_needs_adjacent = half_pair_spacing > max_offset_v
 
     # Collect pair info with distances
     pair_info = []
@@ -1140,7 +1157,17 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
     # Sort by primary distance (closest to primary edge first)
     pair_info_with_primary.sort(key=lambda x: x[4])
 
-    # First pass: assign as many as possible to primary direction
+    # Check if we should prefer secondary direction for diff pairs
+    # If primary needs adjacent channels but secondary doesn't, prefer secondary
+    primary_needs_adjacent = horizontal_needs_adjacent if primary_orientation == 'horizontal' else vertical_needs_adjacent
+    secondary_needs_adjacent = vertical_needs_adjacent if primary_orientation == 'horizontal' else horizontal_needs_adjacent
+    prefer_secondary_for_fit = (primary_needs_adjacent and not secondary_needs_adjacent and not force_escape_direction)
+
+    if prefer_secondary_for_fit:
+        print(f"  Note: Primary direction ({primary_orientation}) requires adjacent-channel routing, "
+              f"but secondary ({secondary_orientation}) can fit both tracks - preferring secondary where possible")
+
+    # First pass: assign as many as possible to preferred direction
     unassigned = []
     for pair_id, pair, cx, cy, primary_dist, secondary_dist in pair_info_with_primary:
         # Get all escape options including alternate channels
@@ -1150,8 +1177,23 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
             grid, channels, include_alternate_channels=True
         )
 
-        # Filter to primary orientation options
         primary_dirs = ['up', 'down'] if primary_orientation == 'vertical' else ['left', 'right']
+        secondary_dirs = ['up', 'down'] if secondary_orientation == 'vertical' else ['left', 'right']
+
+        # If preferring secondary for fit, try secondary first
+        if prefer_secondary_for_fit:
+            secondary_options = [(ch, d) for ch, d in all_options if d in secondary_dirs]
+            assigned = False
+            for channel, escape_dir in secondary_options:
+                can_do, layer = can_assign(pair, channel, escape_dir)
+                if can_do:
+                    do_assign(pair_id, pair, channel, escape_dir, layer)
+                    assigned = True
+                    break
+            if assigned:
+                continue  # Successfully assigned to secondary, skip to next pair
+
+        # Try primary orientation options
         primary_options = [(ch, d) for ch, d in all_options if d in primary_dirs]
 
         # Try each option in order until one succeeds
@@ -2377,6 +2419,8 @@ def generate_bga_fanout(footprint: Footprint,
             primary_orientation=primary_escape,
             track_width=track_width,
             clearance=clearance,
+            diff_pair_gap=diff_pair_gap,
+            via_size=via_size,
             rebalance=rebalance_escape,
             pre_occupied=pre_occupied_exits,
             force_escape_direction=force_escape_direction
@@ -2406,10 +2450,18 @@ def generate_bga_fanout(footprint: Footprint,
     max_offset_h = grid.pitch_y / 2 - via_radius - track_width / 2 - clearance
     max_offset_v = grid.pitch_x / 2 - via_radius - track_width / 2 - clearance
 
-    use_adjacent_channels = (half_pair_spacing > max_offset_h or half_pair_spacing > max_offset_v)
-    if use_adjacent_channels:
-        min_max_offset = min(max_offset_h, max_offset_v)
-        print(f"  Using adjacent-channel routing for diff pairs (half_pair_spacing {half_pair_spacing:.3f}mm > max_offset {min_max_offset:.3f}mm)")
+    # Determine per-direction whether adjacent channels are needed
+    # For horizontal escape (left/right): tracks in horizontal channels, constrained by pitch_y
+    # For vertical escape (up/down): tracks in vertical channels, constrained by pitch_x
+    use_adjacent_channels_h = half_pair_spacing > max_offset_h
+    use_adjacent_channels_v = half_pair_spacing > max_offset_v
+
+    if use_adjacent_channels_h and use_adjacent_channels_v:
+        print(f"  Using adjacent-channel routing for diff pairs in both directions")
+    elif use_adjacent_channels_h:
+        print(f"  Using adjacent-channel routing for horizontal escape (half_pair_spacing {half_pair_spacing:.3f}mm > max_offset_h {max_offset_h:.3f}mm)")
+    elif use_adjacent_channels_v:
+        print(f"  Using adjacent-channel routing for vertical escape (half_pair_spacing {half_pair_spacing:.3f}mm > max_offset_v {max_offset_v:.3f}mm)")
 
     # Build routes - process differential pairs together
     routes: List[FanoutRoute] = []
@@ -2470,9 +2522,12 @@ def generate_bga_fanout(footprint: Footprint,
                     is_cross_escape = True
 
             # For adjacent-channel mode: find two channels, one on each side of the pads
+            # Check per-direction whether adjacent channels are needed
             p_channel = channel
             n_channel = channel
-            if use_adjacent_channels and channel and not is_cross_escape and not is_edge:
+            needs_adjacent = ((escape_dir in ['left', 'right'] and use_adjacent_channels_h) or
+                              (escape_dir in ['up', 'down'] and use_adjacent_channels_v))
+            if needs_adjacent and channel and not is_cross_escape and not is_edge:
                 # Find two adjacent channels for the diff pair - one above, one below the pads
                 if channel.orientation == 'horizontal':
                     # Horizontal pads escaping left/right - use channels on OPPOSITE sides of pads
@@ -2906,7 +2961,7 @@ def generate_bga_fanout(footprint: Footprint,
                         # Determine which pad is on the top vs bottom (smaller Y = top in KiCad)
                         p_is_top = p_pad.global_y < n_pad.global_y
 
-                        if use_adjacent_channels and escape_dir in ['left', 'right']:
+                        if use_adjacent_channels_h and escape_dir in ['left', 'right']:
                             # Adjacent-channel mode for cross-escape: use two ADJACENT channels
                             # Find the channel between the two pads, then use it and the next one
                             # on the escape side (both tracks go same direction, different adjacent channels)
