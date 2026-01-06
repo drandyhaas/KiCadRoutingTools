@@ -1786,12 +1786,26 @@ def apply_meanders_to_diff_pair(
         n_routed_length = calculate_route_length(n_segs, n_vias_new, pcb_data)
         avg_routed_length = (p_routed_length + n_routed_length) / 2
 
+        # Get individual stub lengths (for accurate P/N total lengths)
+        p_stub_length = result.get('p_stub_length', result.get('stub_length', 0.0))
+        n_stub_length = result.get('n_stub_length', result.get('stub_length', 0.0))
+        avg_stub_length = (p_stub_length + n_stub_length) / 2
+
         # Update result
         modified_result = dict(result)
         modified_result['new_segments'] = new_segments
         modified_result['new_vias'] = new_vias
+        modified_result['p_routed_length'] = p_routed_length
+        modified_result['n_routed_length'] = n_routed_length
         modified_result['centerline_length'] = avg_routed_length  # Use actual routed length
-        modified_result['route_length'] = avg_routed_length + result.get('stub_length', 0.0)
+        # Use max(P,N) total for route_length when intra-match is enabled (since it will equalize)
+        # Otherwise use average for consistent comparison
+        if config.diff_pair_intra_match:
+            p_total = p_routed_length + p_stub_length
+            n_total = n_routed_length + n_stub_length
+            modified_result['route_length'] = max(p_total, n_total)
+        else:
+            modified_result['route_length'] = avg_routed_length + avg_stub_length
         modified_result['simplified_path'] = new_centerline_float
         modified_result['centerline_path_grid'] = new_centerline_grid
 

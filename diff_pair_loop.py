@@ -291,12 +291,13 @@ def route_diff_pairs(
             result['n_stub_length'] = n_stub_length
             result['p_routed_length'] = p_routed_length
             result['n_routed_length'] = n_routed_length
-            # For inter-pair matching: use max(P,N) if intra-pair will equalize them, else use average
+            # For inter-pair matching: use max(P,N) total if intra-pair will equalize them, else use average
             if config.diff_pair_intra_match:
-                route_length_base = max(p_routed_length, n_routed_length)
+                p_total = p_routed_length + p_stub_length
+                n_total = n_routed_length + n_stub_length
+                result['route_length'] = max(p_total, n_total)
             else:
-                route_length_base = centerline_length
-            result['route_length'] = route_length_base + avg_stub_length
+                result['route_length'] = centerline_length + avg_stub_length
 
             print(f"  SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, {result['iterations']} iterations ({elapsed:.2f}s)")
             print(f"    Centerline length: {centerline_length:.3f}mm, stub length: {avg_stub_length:.3f}mm, total: {result['route_length']:.3f}mm")
@@ -518,7 +519,13 @@ def route_diff_pairs(
                             retry_result['n_stub_length'] = n_stub_length
                             retry_result['p_routed_length'] = p_routed_length
                             retry_result['n_routed_length'] = n_routed_length
-                            retry_result['route_length'] = centerline_length + avg_stub_length
+                            # For inter-pair matching: use max(P,N) total if intra-pair will equalize them
+                            if config.diff_pair_intra_match:
+                                p_total = p_routed_length + p_stub_length
+                                n_total = n_routed_length + n_stub_length
+                                retry_result['route_length'] = max(p_total, n_total)
+                            else:
+                                retry_result['route_length'] = centerline_length + avg_stub_length
 
                             print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
                             print(f"    Centerline length: {centerline_length:.3f}mm, total: {retry_result['route_length']:.3f}mm")
@@ -626,7 +633,13 @@ def route_diff_pairs(
                         swap_result['n_stub_length'] = n_stub_length
                         swap_result['p_routed_length'] = p_routed_length
                         swap_result['n_routed_length'] = n_routed_length
-                        swap_result['route_length'] = centerline_length + avg_stub_length
+                        # For inter-pair matching: use max(P,N) total if intra-pair will equalize them
+                        if config.diff_pair_intra_match:
+                            p_total = p_routed_length + p_stub_length
+                            n_total = n_routed_length + n_stub_length
+                            swap_result['route_length'] = max(p_total, n_total)
+                        else:
+                            swap_result['route_length'] = centerline_length + avg_stub_length
 
                         print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
                         print(f"    Centerline length: {centerline_length:.3f}mm, total: {swap_result['route_length']:.3f}mm")
