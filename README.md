@@ -104,13 +104,19 @@ KiCadRoutingTools/
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
 ├── bga_fanout.py             # BGA fanout CLI wrapper
-├── bga_fanout/               # BGA fanout package
-│   ├── __init__.py           # Main fanout logic (3107 lines)
-│   ├── types.py              # Track, RoutingConfig, BGAGrid, FanoutRoute
-│   ├── collision.py          # Collision detection utilities
-│   ├── constants.py          # Configuration constants
+├── bga_fanout/               # BGA fanout package (4324 lines total)
+│   ├── __init__.py           # Main fanout logic and public API (1300 lines)
+│   ├── types.py              # Track, BGAGrid, FanoutRoute, Channel, DiffPairPads
+│   ├── escape.py             # Escape channel finding and assignment
+│   ├── reroute.py            # Collision resolution and rerouting
+│   ├── layer_balance.py      # Layer rebalancing for even distribution
 │   ├── layer_assignment.py   # Layer assignment for collision avoidance
-│   └── layer_balance.py      # Layer rebalancing for even distribution
+│   ├── tracks.py             # Track generation and collision detection
+│   ├── geometry.py           # 45° stub and jog calculations
+│   ├── collision.py          # Low-level collision detection utilities
+│   ├── grid.py               # BGA grid analysis
+│   ├── diff_pair.py          # Differential pair detection
+│   └── constants.py          # Configuration constants
 ├── qfn_fanout.py             # QFN/QFP fanout generator
 ├── switch_to_layer.py        # Move net segments to a different layer
 ├── list_nets.py              # List nets on a component

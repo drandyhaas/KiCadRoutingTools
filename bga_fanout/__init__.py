@@ -15,8 +15,6 @@ Key features:
 """
 
 import math
-import re
-from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Set
 from collections import defaultdict
 import fnmatch
@@ -27,33 +25,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from kicad_writer import add_tracks_and_vias_to_pcb
-from routing_utils import extract_diff_pair_base
 from bga_fanout.types import (
     create_track,
-    RoutingConfig,
     Channel,
     BGAGrid,
     DiffPairPads,
     FanoutRoute,
 )
-from bga_fanout.collision import (
-    check_segment_collision,
-    find_colliding_pairs,
-    get_track_identifier,
-    tracks_match_identifier,
-    find_collision_partners,
-)
-from bga_fanout.constants import (
-    POSITION_TOLERANCE,
-    EDGE_PAD_TOLERANCE,
-    FANOUT_DETECTION_TOLERANCE,
-)
 from bga_fanout.layer_balance import rebalance_layers
-from bga_fanout.layer_assignment import (
-    segments_overlap_on_channel,
-    assign_layers_smart,
-    try_reassign_layer,
-)
+from bga_fanout.layer_assignment import assign_layers_smart
 from bga_fanout.grid import (
     analyze_bga_grid,
     calculate_channels,
@@ -66,118 +46,28 @@ from bga_fanout.geometry import (
 )
 from bga_fanout.escape import (
     find_escape_channel,
-    get_pair_escape_options,
-    get_alternate_channels_for_pad,
     find_diff_pair_escape,
     assign_pair_escapes,
 )
-from bga_fanout.reroute import (
-    try_reroute_single_ended,
-    get_distance_to_escape_edge,
-    get_farther_channel,
-    try_jogged_route,
-    find_existing_fanouts,
-    resolve_collisions,
+from bga_fanout.reroute import find_existing_fanouts, resolve_collisions
+from bga_fanout.diff_pair import find_differential_pairs
+from bga_fanout.tracks import (
+    detect_collisions,
+    convert_segments_to_tracks,
+    generate_tracks_from_routes,
 )
 
 
-def find_differential_pairs(footprint: Footprint,
-                           diff_pair_patterns: List[str]) -> Dict[str, DiffPairPads]:
-    """
-    Find all differential pairs in a footprint matching the given patterns.
-
-    Args:
-        footprint: The footprint to search
-        diff_pair_patterns: Glob patterns for nets to treat as diff pairs
-
-    Returns:
-        Dict mapping base_name to DiffPairPads
-    """
-    pairs: Dict[str, DiffPairPads] = {}
-
-    for pad in footprint.pads:
-        if not pad.net_name or pad.net_id == 0:
-            continue
-
-        # Check if this net matches any diff pair pattern
-        matched = any(fnmatch.fnmatch(pad.net_name, pattern)
-                     for pattern in diff_pair_patterns)
-        if not matched:
-            continue
-
-        # Try to extract diff pair info
-        result = extract_diff_pair_base(pad.net_name)
-        if result is None:
-            continue
-
-        base_name, is_p = result
-
-        if base_name not in pairs:
-            pairs[base_name] = DiffPairPads(base_name=base_name)
-
-        if is_p:
-            pairs[base_name].p_pad = pad
-        else:
-            pairs[base_name].n_pad = pad
-
-    # Filter to only complete pairs
-    complete_pairs = {k: v for k, v in pairs.items() if v.is_complete}
-
-    return complete_pairs
-
-
-def detect_collisions(
-    tracks: List[Dict],
-    existing_tracks: List[Dict],
-    min_spacing: float,
-    max_pairs: int = 5
-) -> Tuple[int, List[Tuple[Dict, Dict]]]:
-    """
-    Detect collisions between tracks.
-
-    Args:
-        tracks: New tracks to check
-        existing_tracks: Existing tracks to check against
-        min_spacing: Minimum required spacing between tracks
-        max_pairs: Maximum number of collision pairs to return
-
-    Returns:
-        Tuple of (collision_count, list of collision pairs)
-    """
-    collision_count = 0
-    collision_pairs = []
-
-    for i, t1 in enumerate(tracks):
-        # Check against other new tracks
-        for j, t2 in enumerate(tracks[i+1:], i+1):
-            if t1['layer'] != t2['layer']:
-                continue
-            if t1['net_id'] == t2['net_id']:
-                continue
-            # Skip collision check for tracks from the same differential pair
-            if t1.get('pair_id') and t1.get('pair_id') == t2.get('pair_id'):
-                continue
-            if check_segment_collision(t1['start'], t1['end'],
-                                       t2['start'], t2['end'],
-                                       min_spacing):
-                collision_count += 1
-                if len(collision_pairs) < max_pairs:
-                    collision_pairs.append((t1, t2))
-
-        # Also check against existing tracks
-        for t2 in existing_tracks:
-            if t1['layer'] != t2['layer']:
-                continue
-            if t1['net_id'] == t2['net_id']:
-                continue
-            if check_segment_collision(t1['start'], t1['end'],
-                                       t2['start'], t2['end'],
-                                       min_spacing):
-                collision_count += 1
-                if len(collision_pairs) < max_pairs:
-                    collision_pairs.append((t1, t2))
-
-    return collision_count, collision_pairs
+# Public API
+__all__ = [
+    'generate_bga_fanout',
+    'main',
+    # Types re-exported for external use
+    'BGAGrid',
+    'Channel',
+    'FanoutRoute',
+    'DiffPairPads',
+]
 
 
 def calculate_jog_ends_for_routes(
@@ -266,129 +156,82 @@ def calculate_jog_ends_for_routes(
         route.jog_extension = extension
 
 
-def generate_tracks_from_routes(
-    routes: List[FanoutRoute],
-    track_width: float,
-    top_layer: str,
-) -> Tuple[List[Dict], int, int]:
-    """
-    Generate track segments from routes.
+def print_route_statistics(routes: List[FanoutRoute]) -> None:
+    """Print statistics about the generated routes."""
+    print(f"  Found {len(routes)} pads to fanout")
+    paired_count = sum(1 for r in routes if r.pair_id is not None)
+    print(f"    {paired_count} are part of differential pairs")
 
-    Converts FanoutRoute objects into track dictionaries ready for output.
+    # Print escape direction distribution
+    escape_counts = defaultdict(int)
+    for r in routes:
+        escape_counts[r.escape_dir] += 1
+    print(f"  Escape direction distribution:")
+    for direction in ['left', 'right', 'up', 'down']:
+        if escape_counts[direction] > 0:
+            print(f"    {direction}: {escape_counts[direction]}")
+
+    # Print all net names being fanned out
+    net_names = sorted(set(r.pad.net_name for r in routes if r.pad.net_name))
+    print(f"  Nets being fanned out:")
+    for name in net_names:
+        print(f"    {name}")
+
+
+def create_single_ended_route(
+    pad: Pad,
+    grid: BGAGrid,
+    channels: List[Channel],
+    layers: List[str],
+    exit_margin: float,
+    force_orientation: Optional[str] = None
+) -> FanoutRoute:
+    """
+    Create a route for a single-ended (non-differential) signal.
 
     Args:
-        routes: List of FanoutRoute objects
-        track_width: Width of tracks
-        top_layer: Name of the top layer (for reporting)
+        pad: The pad to route
+        grid: BGA grid parameters
+        channels: Available routing channels
+        layers: Available routing layers
+        exit_margin: Distance past BGA boundary
+        force_orientation: If set, force 'horizontal' or 'vertical' escape
 
     Returns:
-        Tuple of (tracks, edge_count, inner_count)
+        FanoutRoute for this pad
     """
-    tracks = []
-    edge_count = 0
-    inner_count = 0
+    channel, escape_dir = find_escape_channel(
+        pad.global_x, pad.global_y, grid, channels,
+        force_orientation=force_orientation
+    )
+    is_edge = channel is None
 
-    for route in routes:
-        if route.is_edge:
-            # Edge pad: Check if stub_end differs from pad_pos (differential pair convergence)
-            if route.pair_id and (abs(route.stub_end[0] - route.pad_pos[0]) > POSITION_TOLERANCE or
-                                   abs(route.stub_end[1] - route.pad_pos[1]) > POSITION_TOLERANCE):
-                # Differential edge pair: 45° stub to converge, then straight to exit
-                # 45° stub: pad -> stub_end (convergence point)
-                tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-                # Straight segment: stub_end -> exit
-                tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-            else:
-                # Single-ended edge pad: direct segment to exit
-                tracks.append(create_track(route.pad_pos, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-            # Add jog segment(s)
-            if route.jog_end:
-                if route.jog_extension:
-                    # Outside track of diff pair: extension segment first
-                    tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Then the 45° jog from extension point
-                    tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Inside track or single-ended: direct 45° jog
-                    tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-            edge_count += 1
-        else:
-            # Inner pad: 45° stub + channel segment + jog
-            # For half-edge pairs: pad -> channel_point -> stub_end -> exit
+    if is_edge:
+        if escape_dir == 'right':
+            exit_pos = (grid.max_x + exit_margin, pad.global_y)
+        elif escape_dir == 'left':
+            exit_pos = (grid.min_x - exit_margin, pad.global_y)
+        elif escape_dir == 'down':
+            exit_pos = (pad.global_x, grid.max_y + exit_margin)
+        else:  # up
+            exit_pos = (pad.global_x, grid.min_y - exit_margin)
+        stub_end = exit_pos
+    else:
+        stub_end = create_45_stub(pad.global_x, pad.global_y, channel, escape_dir)
+        exit_pos = calculate_exit_point(stub_end, channel, escape_dir, grid, exit_margin)
 
-            if route.channel_point:
-                # Half-edge inner pad: tent shape with channel segment
-                # Path: pad -> channel_point -> channel_point2 -> stub_end -> exit
-                #
-                # First 45°: pad -> channel_point (entry to channel)
-                tracks.append(create_track(route.pad_pos, route.channel_point, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-                # Straight segment in channel: channel_point -> channel_point2 (1 pitch)
-                if route.channel_point2:
-                    tracks.append(create_track(route.channel_point, route.channel_point2, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Second 45°: channel_point2 -> stub_end (exit from channel)
-                    tracks.append(create_track(route.channel_point2, route.stub_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Fallback if no channel_point2 (shouldn't happen)
-                    tracks.append(create_track(route.channel_point, route.stub_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                # Straight segment: stub_end -> exit
-                tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-            else:
-                # Normal inner pad: single 45° stub to channel, then straight to exit
-                # Skip zero-length stubs
-                dx = abs(route.stub_end[0] - route.pad_pos[0])
-                dy = abs(route.stub_end[1] - route.pad_pos[1])
-                if dx < POSITION_TOLERANCE and dy < POSITION_TOLERANCE:
-                    inner_count += 1
-                    continue
-
-                # 45-degree stub: pad -> stub_end
-                tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-
-                if route.pre_channel_jog:
-                    # Jogged route: stub_end -> jog_point -> exit
-                    # Jog segment: stub_end -> pre_channel_jog
-                    tracks.append(create_track(route.stub_end, route.pre_channel_jog, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Channel segment: pre_channel_jog -> exit
-                    tracks.append(create_track(route.pre_channel_jog, route.exit_pos, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Normal route: stub_end -> exit
-                    tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-
-            # Jog segment(s): exit -> jog_end
-            if route.jog_end:
-                if route.jog_extension:
-                    # Outside track of diff pair: extension segment first
-                    tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Then the 45° jog from extension point
-                    tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Inside track or single-ended: direct 45° jog
-                    tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-            inner_count += 1
-
-    print(f"  Generated {len(tracks)} track segments")
-    print(f"    Edge pads: {edge_count} (direct H/V on {top_layer})")
-    print(f"    Inner pads: {inner_count} (45° stub + channel)")
-
-    return tracks, edge_count, inner_count
+    return FanoutRoute(
+        pad=pad,
+        pad_pos=(pad.global_x, pad.global_y),
+        stub_end=stub_end,
+        exit_pos=exit_pos,
+        channel=channel,
+        escape_dir=escape_dir,
+        is_edge=is_edge,
+        layer=layers[0],
+        pair_id=None,
+        is_p=True
+    )
 
 
 def manage_vias(
@@ -1273,69 +1116,18 @@ def generate_bga_fanout(footprint: Footprint,
         else:
             # Single-ended signal (not part of a pair)
             force_orient = primary_escape if force_escape_direction else None
-            channel, escape_dir = find_escape_channel(pad.global_x, pad.global_y, grid, channels,
-                                                       force_orientation=force_orient)
-            is_edge = channel is None
-
-            if is_edge:
-                if escape_dir == 'right':
-                    exit_pos = (grid.max_x + exit_margin, pad.global_y)
-                elif escape_dir == 'left':
-                    exit_pos = (grid.min_x - exit_margin, pad.global_y)
-                elif escape_dir == 'down':
-                    exit_pos = (pad.global_x, grid.max_y + exit_margin)
-                else:  # up
-                    exit_pos = (pad.global_x, grid.min_y - exit_margin)
-                stub_end = exit_pos
-            else:
-                stub_end = create_45_stub(pad.global_x, pad.global_y, channel, escape_dir)
-                exit_pos = calculate_exit_point(stub_end, channel, escape_dir, grid, exit_margin)
-
-            route = FanoutRoute(
-                pad=pad,
-                pad_pos=(pad.global_x, pad.global_y),
-                stub_end=stub_end,
-                exit_pos=exit_pos,
-                channel=channel,
-                escape_dir=escape_dir,
-                is_edge=is_edge,
-                layer=layers[0],
-                pair_id=None,
-                is_p=True
+            route = create_single_ended_route(
+                pad, grid, channels, layers, exit_margin, force_orient
             )
             routes.append(route)
 
-    print(f"  Found {len(routes)} pads to fanout")
-    paired_count = sum(1 for r in routes if r.pair_id is not None)
-    print(f"    {paired_count} are part of differential pairs")
-
-    # Print escape direction distribution
-    escape_counts = defaultdict(int)
-    for r in routes:
-        escape_counts[r.escape_dir] += 1
-    print(f"  Escape direction distribution:")
-    for direction in ['left', 'right', 'up', 'down']:
-        if escape_counts[direction] > 0:
-            print(f"    {direction}: {escape_counts[direction]}")
-
-    # Print all net names being fanned out
-    net_names = sorted(set(r.pad.net_name for r in routes if r.pad.net_name))
-    print(f"  Nets being fanned out:")
-    for name in net_names:
-        print(f"    {name}")
+    print_route_statistics(routes)
 
     if not routes:
         return [], [], []
 
     # Convert existing PCB segments to track format for collision checking
-    # These are read-only - we check against them but don't modify them
-    existing_tracks = []
-    if check_for_previous:
-        for seg in pcb_data.segments:
-            existing_tracks.append(create_track(
-                (seg.start_x, seg.start_y), (seg.end_x, seg.end_y),
-                seg.width, seg.layer, seg.net_id, is_existing=True
-            ))
+    existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
 
     # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
     assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks)
@@ -1353,41 +1145,7 @@ def generate_bga_fanout(footprint: Footprint,
 
     # Validate no collisions
     min_spacing = track_width + clearance
-    collision_count = 0
-    collision_pairs = []
-
-    # Combine new tracks with existing tracks for collision checking
-    all_tracks_for_checking = tracks + existing_tracks
-
-    for i, t1 in enumerate(tracks):
-        # Check against other new tracks
-        for j, t2 in enumerate(tracks[i+1:], i+1):
-            if t1['layer'] != t2['layer']:
-                continue
-            if t1['net_id'] == t2['net_id']:
-                continue
-            # Skip collision check for tracks from the same differential pair
-            if t1.get('pair_id') and t1.get('pair_id') == t2.get('pair_id'):
-                continue
-            if check_segment_collision(t1['start'], t1['end'],
-                                       t2['start'], t2['end'],
-                                       min_spacing):
-                collision_count += 1
-                if len(collision_pairs) < 5:
-                    collision_pairs.append((t1, t2))
-
-        # Also check against existing tracks
-        for t2 in existing_tracks:
-            if t1['layer'] != t2['layer']:
-                continue
-            if t1['net_id'] == t2['net_id']:
-                continue
-            if check_segment_collision(t1['start'], t1['end'],
-                                       t2['start'], t2['end'],
-                                       min_spacing):
-                collision_count += 1
-                if len(collision_pairs) < 5:
-                    collision_pairs.append((t1, t2))
+    collision_count, collision_pairs = detect_collisions(tracks, existing_tracks, min_spacing)
 
     if collision_count > 0:
         print(f"  INFO: {collision_count} potential collisions detected (will attempt to resolve)")
@@ -1411,29 +1169,7 @@ def generate_bga_fanout(footprint: Footprint,
 
         if reassigned > 0:
             # Recount collisions after resolution
-            new_collision_count = 0
-            for i, t1 in enumerate(tracks):
-                for j, t2 in enumerate(tracks[i+1:], i+1):
-                    if t1['layer'] != t2['layer']:
-                        continue
-                    if t1['net_id'] == t2['net_id']:
-                        continue
-                    if t1.get('pair_id') and t1.get('pair_id') == t2.get('pair_id'):
-                        continue
-                    if check_segment_collision(t1['start'], t1['end'],
-                                               t2['start'], t2['end'],
-                                               min_spacing):
-                        new_collision_count += 1
-                # Also recheck against existing tracks
-                for t2 in existing_tracks:
-                    if t1['layer'] != t2['layer']:
-                        continue
-                    if t1['net_id'] == t2['net_id']:
-                        continue
-                    if check_segment_collision(t1['start'], t1['end'],
-                                               t2['start'], t2['end'],
-                                               min_spacing):
-                        new_collision_count += 1
+            new_collision_count, _ = detect_collisions(tracks, existing_tracks, min_spacing, max_pairs=0)
             print(f"  After resolution: {new_collision_count} collisions remaining")
             collisions_remaining = new_collision_count
     else:

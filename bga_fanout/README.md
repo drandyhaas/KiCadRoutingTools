@@ -51,24 +51,32 @@ python bga_fanout.py input.kicad_pcb --component U3 --output output.kicad_pcb \
 
 ```
 bga_fanout/
-├── __init__.py          # Main fanout logic and entry points (3107 lines)
-├── types.py             # Data types: Track, RoutingConfig, BGAGrid, FanoutRoute (159 lines)
-├── collision.py         # Collision detection utilities (144 lines)
-├── constants.py         # Configuration constants (26 lines)
+├── __init__.py          # Main fanout logic and public API (1300 lines)
+├── types.py             # Data types: Track, BGAGrid, FanoutRoute, etc. (159 lines)
+├── escape.py            # Escape channel finding and assignment (780 lines)
+├── reroute.py           # Collision resolution and rerouting (667 lines)
+├── layer_balance.py     # Layer rebalancing for even distribution (360 lines)
 ├── layer_assignment.py  # Layer assignment for collision avoidance (350 lines)
-└── layer_balance.py     # Layer rebalancing for even distribution (360 lines)
+├── tracks.py            # Track generation and collision detection (210 lines)
+├── geometry.py          # 45° stub and jog calculations (166 lines)
+├── collision.py         # Low-level collision detection utilities (144 lines)
+├── grid.py              # BGA grid analysis (105 lines)
+├── diff_pair.py         # Differential pair detection (57 lines)
+└── constants.py         # Configuration constants (26 lines)
 ```
 
 ### Key Components
 
 - **`generate_bga_fanout()`** - Main function that generates fanout tracks
 - **`generate_tracks_from_routes()`** - Converts FanoutRoute objects to track dictionaries
+- **`find_differential_pairs()`** - Finds P/N pairs in a footprint
 - **`assign_layers_smart()`** - Assigns routes to layers avoiding collisions
 - **`rebalance_layers()`** - Rebalances routes across layers for even distribution
+- **`detect_collisions()`** - Detects track spacing violations
+- **`resolve_collisions()`** - Attempts to fix collisions via rerouting
 - **`BGAGrid`** - Analyzes BGA pad grid geometry
 - **`FanoutRoute`** - Represents a single pad's fanout route
-- **`RoutingConfig`** - Configuration parameters for routing
-- **`check_segment_collision()`** - Detects track collisions
+- **`Channel`** - Routing channel between pad rows/columns
 
 ## Algorithm
 
