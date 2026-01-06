@@ -142,6 +142,53 @@ This can sometimes improve results when:
 - Early routing of difficult nets allows easier nets to route around them
 - You want to fail fast on impossible routes
 
+### MPS Layer Swap
+
+When MPS detects crossing conflicts (nets placed in Round 2+), the `--mps-layer-swap` flag enables automatic layer swaps to eliminate same-layer crossings:
+
+```bash
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-layer-swap
+```
+
+#### How It Works
+
+1. **Detect conflicts**: After initial MPS ordering, identify Round 2+ units that conflict with Round 1 units on shared layers
+
+2. **Try Round 2 unit swap**: Attempt to move the Round 2 unit's stubs (source, target, or both) to a different layer where there's no overlap with the Round 1 unit
+
+3. **Try Round 1 unit swap**: If the Round 2 unit can't be moved (all alternative layers have existing routes), try moving the Round 1 conflicting unit instead
+
+4. **Validate swaps**: Each swap candidate is validated using the same validation as upfront layer swaps (no overlaps with existing routes, setback clearance)
+
+5. **Re-run MPS**: After successful swaps, MPS ordering is re-run to verify the conflict is resolved
+
+#### Example
+
+```
+Before MPS layer swap:
+  MPS Round 1: 4 units (DQS0_A, DQS0_B, DQS1_B, CK_A)
+  MPS Round 2: 1 unit (DQS1_A) - crosses DQS0_A on In2.Cu
+  1 crossing conflict
+
+After MPS layer swap:
+  DQS0_A moved from In2.Cu → In1.Cu (both source and target)
+
+  MPS Round 1: 5 units (all nets!)
+  0 crossing conflicts
+```
+
+#### When to Use
+
+- **Dense BGA routing**: When multiple diff pairs must cross between chips
+- **Same-layer conflicts**: When nets end up on the same layer due to fanout assignment
+- **Multi-round MPS results**: If MPS ordering shows more than 1 round, layer swaps may help
+
+#### Limitations
+
+- Requires available alternative layers (swaps fail if all layers have existing routes)
+- Adds vias when swapping layers (2 vias per stub moved)
+- Only helps when `--crossing-layer-check` is enabled (default) - routes on different layers don't count as crossing
+
 ### Routing-Aware Distance Calculation
 
 When ordering routes within each MPS round, shorter routes are prioritized. The distance is calculated using a BGA-aware algorithm:

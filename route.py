@@ -365,8 +365,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
+    all_stubs_by_layer = {}
+    stub_endpoints_by_layer = {}
     if enable_layer_switch and diff_pair_ids_to_route_set:
-        total_layer_swaps, _, _ = apply_diff_pair_layer_swaps(
+        total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias
         )
@@ -386,11 +388,58 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Use Maximum Planar Subset algorithm to minimize crossing conflicts
         print(f"\nUsing MPS ordering strategy...")
         all_net_ids = [nid for _, nid in net_ids]
-        ordered_ids = compute_mps_net_ordering(pcb_data, all_net_ids, diff_pairs=diff_pairs,
-                                               use_boundary_ordering=mps_unroll,
-                                               bga_exclusion_zones=bga_exclusion_zones,
-                                               reverse_rounds=args.mps_reverse_rounds,
-                                               crossing_layer_check=crossing_layer_check)
+
+        # If MPS layer swap is enabled, get extended info for conflict analysis
+        if args.mps_layer_swap and enable_layer_switch:
+            from mps_layer_swap import try_mps_aware_layer_swaps
+
+            mps_result = compute_mps_net_ordering(
+                pcb_data, all_net_ids, diff_pairs=diff_pairs,
+                use_boundary_ordering=mps_unroll,
+                bga_exclusion_zones=bga_exclusion_zones,
+                reverse_rounds=args.mps_reverse_rounds,
+                crossing_layer_check=crossing_layer_check,
+                return_extended_info=True
+            )
+
+            if mps_result.num_rounds > 1:
+                print(f"\nMPS detected {mps_result.num_rounds} rounds - attempting layer swaps to reduce crossings...")
+
+                swap_result = try_mps_aware_layer_swaps(
+                    pcb_data, config, mps_result, diff_pairs,
+                    available_layers=config.layers,
+                    can_swap_to_top_layer=can_swap_to_top_layer,
+                    all_segment_modifications=all_segment_modifications,
+                    all_swap_vias=all_swap_vias,
+                    all_stubs_by_layer=all_stubs_by_layer,
+                    stub_endpoints_by_layer=stub_endpoints_by_layer,
+                    verbose=args.verbose
+                )
+
+                if swap_result.swaps_applied > 0:
+                    total_layer_swaps += swap_result.swaps_applied
+                    # Re-run MPS ordering with updated layer assignments
+                    print("Re-running MPS ordering after layer swaps...")
+                    ordered_ids = compute_mps_net_ordering(
+                        pcb_data, all_net_ids, diff_pairs=diff_pairs,
+                        use_boundary_ordering=mps_unroll,
+                        bga_exclusion_zones=bga_exclusion_zones,
+                        reverse_rounds=args.mps_reverse_rounds,
+                        crossing_layer_check=crossing_layer_check
+                    )
+                else:
+                    ordered_ids = mps_result.ordered_ids
+            else:
+                ordered_ids = mps_result.ordered_ids
+        else:
+            ordered_ids = compute_mps_net_ordering(
+                pcb_data, all_net_ids, diff_pairs=diff_pairs,
+                use_boundary_ordering=mps_unroll,
+                bga_exclusion_zones=bga_exclusion_zones,
+                reverse_rounds=args.mps_reverse_rounds,
+                crossing_layer_check=crossing_layer_check
+            )
+
         # Rebuild net_ids in the new order
         id_to_name = {nid: name for name, nid in net_ids}
         net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
@@ -1084,6 +1133,8 @@ Differential pair routing:
                         help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
     parser.add_argument("--mps-reverse-rounds", action="store_true",
                         help="Reverse MPS round order: route most-conflicting groups first instead of least-conflicting")
+    parser.add_argument("--mps-layer-swap", action="store_true",
+                        help="Enable MPS-aware layer swaps to reduce crossing conflicts by moving Round 2+ nets to different layers")
 
     # Length matching options
     parser.add_argument("--length-match-group", action="append", nargs="+", dest="length_match_groups",

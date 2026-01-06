@@ -15,6 +15,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations. Validates that stub endpoints won't be too close to other stubs on the destination layer.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
 - **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance), inside-out (BGA), or original order
+- **MPS layer swap** - When MPS detects crossing conflicts (nets in Round 2+), attempts layer swaps to eliminate same-layer crossings. Tries swapping both the conflicting Round 2 unit and Round 1 unit. Re-runs MPS after swaps to verify conflict resolution
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
 - **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
@@ -93,6 +94,7 @@ KiCadRoutingTools/
 ├── layer_swap_optimization.py # Layer swap cost optimization
 ├── layer_swap_fallback.py    # Fallback layer swap on failure
 ├── stub_layer_switching.py   # Stub layer swap utilities
+├── mps_layer_swap.py         # MPS-aware layer swap for crossing conflicts
 ├── polarity_swap.py          # P/N polarity swap handling
 ├── target_swap.py            # Target assignment optimization
 ├── rip_up_reroute.py         # Rip-up and reroute logic
@@ -171,6 +173,7 @@ KiCadRoutingTools/
 | `layer_swap_optimization.py` | Layer swap cost/benefit analysis |
 | `layer_swap_fallback.py` | Try layer swap when route fails |
 | `stub_layer_switching.py` | Low-level stub layer swap utilities |
+| `mps_layer_swap.py` | MPS-aware layer swap for crossing conflicts |
 | `polarity_swap.py` | P/N polarity swap for differential pairs |
 | `target_swap.py` | Hungarian algorithm for optimal target assignment |
 | `rip_up_reroute.py` | Rip-up blocking routes and retry |
@@ -240,6 +243,7 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*"
 --crossing-penalty 1000  # Penalty for crossing assignments (default: 1000)
 --no-crossing-layer-check  # Count crossings regardless of layer (default: same-layer only)
 --mps-reverse-rounds     # Route most-conflicting MPS groups first (instead of least)
+--mps-layer-swap         # Try layer swaps to resolve MPS crossing conflicts
 
 # Length matching (for DDR4 DQ/DQS signals)
 --length-match-group auto       # Auto-group DDR4 nets by byte lane (DQ0-7+DQS0, DQ8-15+DQS1, etc)

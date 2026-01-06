@@ -6,7 +6,8 @@ Includes connectivity analysis, endpoint finding, MPS ordering, and segment clea
 
 import math
 import fnmatch
-from typing import List, Optional, Tuple, Dict, Set
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Dict, Set, Union
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
@@ -14,6 +15,18 @@ from chip_boundary import (
     build_chip_list, identify_chip_for_point, compute_far_side,
     compute_boundary_position, crossings_from_boundary_order
 )
+
+
+@dataclass
+class MPSResult:
+    """Extended result from MPS net ordering with conflict and layer information."""
+    ordered_ids: List[int]                                    # Ordered net IDs
+    conflicts: Dict[int, Set[int]]                            # unit_id -> set of conflicting unit_ids
+    unit_layers: Dict[int, Tuple[Set[str], Set[str]]]         # unit_id -> (src_layers, tgt_layers)
+    unit_to_nets: Dict[int, List[int]]                        # unit_id -> [net_ids]
+    unit_names: Dict[int, str]                                # unit_id -> display name
+    round_assignments: Dict[int, int]                         # unit_id -> round_number (1-indexed)
+    num_rounds: int
 
 
 # Position rounding precision for coordinate comparisons
@@ -1155,7 +1168,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               use_boundary_ordering: bool = True,
                               bga_exclusion_zones: List[Tuple[float, float, float, float]] = None,
                               reverse_rounds: bool = False,
-                              crossing_layer_check: bool = True) -> List[int]:
+                              crossing_layer_check: bool = True,
+                              return_extended_info: bool = False) -> Union[List[int], MPSResult]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 
@@ -1183,9 +1197,12 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         use_boundary_ordering: If True, use chip boundary unrolling for crossing detection.
                               This respects the physical constraint that routes can't go
                               through BGA chips. Default is False (use angular projection).
+        return_extended_info: If True, return MPSResult with conflict and layer info
+                             instead of just ordered IDs. Used for MPS-aware layer swaps.
 
     Returns:
-        Ordered list of net IDs, with least-conflicting nets first
+        If return_extended_info=False: Ordered list of net IDs, with least-conflicting nets first
+        If return_extended_info=True: MPSResult with full conflict/layer/round info
     """
     # Build mapping from net_id to unit_id (for grouping diff pair P/N nets)
     # unit_id is the canonical ID for the routing unit
@@ -1439,6 +1456,7 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
     # Step 5: Greedy ordering - repeatedly pick unit with fewest active conflicts
     # Secondary: pick shorter routes first (easier routes done first, leaving space for longer ones)
     all_rounds = []  # List of (round_winners, round_num) tuples
+    round_assignments = {}  # unit_id -> round_number (1-indexed, before any reversal)
     remaining = set(unit_list)
     round_num = 0
 
@@ -1460,6 +1478,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             # This unit wins this round
             round_winners.append(best_unit)
             round_remaining.discard(best_unit)
+            # Track which round this unit was assigned to (before reversal)
+            round_assignments[best_unit] = round_num
 
             # All its conflicting neighbors in round_remaining become losers
             for loser in conflicts[best_unit] & round_remaining:
@@ -1499,6 +1519,16 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         print(f"MPS: {len(nets_without_endpoints)} nets without valid endpoints appended at end")
         ordered.extend(nets_without_endpoints)
 
+    if return_extended_info:
+        return MPSResult(
+            ordered_ids=ordered,
+            conflicts=conflicts,
+            unit_layers=unit_layers,
+            unit_to_nets=unit_to_nets,
+            unit_names=unit_names,
+            round_assignments=round_assignments,
+            num_rounds=round_num
+        )
     return ordered
 
 
