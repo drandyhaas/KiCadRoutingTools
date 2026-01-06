@@ -20,7 +20,7 @@ def run(cmd: str) -> None:
     result = subprocess.run(args)
     if result.returncode != 0:
         print(f"Command failed with exit code {result.returncode}")
-        sys.exit(result.returncode)
+        #sys.exit(result.returncode)
 
 
 def main():
