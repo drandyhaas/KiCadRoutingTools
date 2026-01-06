@@ -2031,6 +2031,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         'src_stub_dir': src_stub_dir_tuple,
         'tgt_stub_dir': tgt_stub_dir_tuple,
         'layer_names': layer_names,
+        # GND via data for regeneration after length matching
+        'gnd_net_id': gnd_net_id,
+        'gnd_via_dirs': gnd_via_dirs,
     }
 
     # If polarity was fixed, include info about which target pads need net swaps

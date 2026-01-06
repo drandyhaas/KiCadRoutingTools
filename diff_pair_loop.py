@@ -15,7 +15,7 @@ from obstacle_map import (
     add_same_net_via_clearance, add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
-from routing_utils import get_stub_endpoints, add_route_to_pcb_data
+from routing_utils import get_stub_endpoints, add_route_to_pcb_data, calculate_route_length, calculate_stub_length
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -268,17 +268,18 @@ def route_diff_pairs(
         total_time += elapsed
 
         if result and not result.get('failed'):
-            # Calculate centerline length for length matching
-            simplified_path = result.get('simplified_path', [])
-            centerline_length = 0.0
-            if len(simplified_path) >= 2:
-                for i in range(len(simplified_path) - 1):
-                    x1, y1, _ = simplified_path[i]
-                    x2, y2, _ = simplified_path[i + 1]
-                    centerline_length += ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
+            # Calculate actual routed length from segments (includes connectors and via barrels)
+            new_segments = result.get('new_segments', [])
+            new_vias = result.get('new_vias', [])
+            p_segments = [s for s in new_segments if s.net_id == pair.p_net_id]
+            n_segments = [s for s in new_segments if s.net_id == pair.n_net_id]
+            p_vias = [v for v in new_vias if v.net_id == pair.p_net_id]
+            n_vias = [v for v in new_vias if v.net_id == pair.n_net_id]
+            p_routed_length = calculate_route_length(p_segments, p_vias, pcb_data)
+            n_routed_length = calculate_route_length(n_segments, n_vias, pcb_data)
+            centerline_length = (p_routed_length + n_routed_length) / 2
 
             # Calculate stub lengths for pad-to-pad measurement
-            from routing_utils import calculate_stub_length
             p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
             n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
             avg_stub_length = (p_stub_length + n_stub_length) / 2
@@ -487,14 +488,16 @@ def route_diff_pairs(
                         retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
                         if retry_result and not retry_result.get('failed') and not retry_result.get('probe_blocked'):
-                            # Calculate centerline length for length matching
-                            simplified_path = retry_result.get('simplified_path', [])
-                            centerline_length = 0.0
-                            if len(simplified_path) >= 2:
-                                for i in range(len(simplified_path) - 1):
-                                    x1, y1, _ = simplified_path[i]
-                                    x2, y2, _ = simplified_path[i + 1]
-                                    centerline_length += ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
+                            # Calculate actual routed length from segments (includes connectors and via barrels)
+                            new_segments = retry_result.get('new_segments', [])
+                            new_vias = retry_result.get('new_vias', [])
+                            p_segments = [s for s in new_segments if s.net_id == pair.p_net_id]
+                            n_segments = [s for s in new_segments if s.net_id == pair.n_net_id]
+                            p_vias = [v for v in new_vias if v.net_id == pair.p_net_id]
+                            n_vias = [v for v in new_vias if v.net_id == pair.n_net_id]
+                            p_routed_length = calculate_route_length(p_segments, p_vias, pcb_data)
+                            n_routed_length = calculate_route_length(n_segments, n_vias, pcb_data)
+                            centerline_length = (p_routed_length + n_routed_length) / 2
 
                             p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
                             n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
@@ -589,14 +592,16 @@ def route_diff_pairs(
                         target_swaps, results=results)
 
                     if swap_success and swap_result:
-                        # Calculate centerline length for length matching
-                        simplified_path = swap_result.get('simplified_path', [])
-                        centerline_length = 0.0
-                        if len(simplified_path) >= 2:
-                            for i in range(len(simplified_path) - 1):
-                                x1, y1, _ = simplified_path[i]
-                                x2, y2, _ = simplified_path[i + 1]
-                                centerline_length += ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
+                        # Calculate actual routed length from segments (includes connectors and via barrels)
+                        new_segments = swap_result.get('new_segments', [])
+                        new_vias = swap_result.get('new_vias', [])
+                        p_segments = [s for s in new_segments if s.net_id == pair.p_net_id]
+                        n_segments = [s for s in new_segments if s.net_id == pair.n_net_id]
+                        p_vias = [v for v in new_vias if v.net_id == pair.p_net_id]
+                        n_vias = [v for v in new_vias if v.net_id == pair.n_net_id]
+                        p_routed_length = calculate_route_length(p_segments, p_vias, pcb_data)
+                        n_routed_length = calculate_route_length(n_segments, n_vias, pcb_data)
+                        centerline_length = (p_routed_length + n_routed_length) / 2
 
                         p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
                         n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)

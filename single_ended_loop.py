@@ -161,7 +161,7 @@ def route_single_ended_nets(
         total_time += elapsed
 
         if result and not result.get('failed'):
-            routed_length = calculate_route_length(result['new_segments'])
+            routed_length = calculate_route_length(result['new_segments'], result.get('new_vias', []), pcb_data)
             total_length = routed_length + stub_length  # Include stubs for pad-to-pad length
             result['route_length'] = total_length  # Store for length matching
             result['stub_length'] = stub_length  # Store stub length separately
@@ -358,7 +358,7 @@ def route_single_ended_nets(
                         retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles)
 
                         if retry_result and not retry_result.get('failed'):
-                            route_length = calculate_route_length(retry_result['new_segments'])
+                            route_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)
                             retry_result['route_length'] = route_length
                             print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias, length={route_length:.2f}mm")
                             results.append(retry_result)

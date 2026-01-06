@@ -82,11 +82,20 @@ class Net:
 
 
 @dataclass
+class StackupLayer:
+    """A layer in the board stackup."""
+    name: str
+    layer_type: str  # 'copper', 'dielectric', 'mask', etc.
+    thickness: float  # in mm
+
+
+@dataclass
 class BoardInfo:
     """Board-level information."""
     layers: Dict[int, str]  # layer_id -> layer_name
     copper_layers: List[str]
     board_bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, min_y, max_x, max_y
+    stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
 
 
 @dataclass
@@ -98,6 +107,41 @@ class PCBData:
     vias: List[Via]
     segments: List[Segment]
     pads_by_net: Dict[int, List[Pad]]
+
+    def get_via_barrel_length(self, layer1: str, layer2: str) -> float:
+        """Calculate the via barrel length between two copper layers.
+
+        Args:
+            layer1: First copper layer name (e.g., 'F.Cu', 'In2.Cu')
+            layer2: Second copper layer name
+
+        Returns:
+            Distance in mm through the board between the two layers
+        """
+        stackup = self.board_info.stackup
+        if not stackup:
+            return 0.0
+
+        # Find indices of the two layers in stackup
+        idx1 = idx2 = -1
+        for i, layer in enumerate(stackup):
+            if layer.name == layer1:
+                idx1 = i
+            elif layer.name == layer2:
+                idx2 = i
+
+        if idx1 < 0 or idx2 < 0:
+            return 0.0
+
+        # Sum thicknesses between the two layers (exclusive of the layers themselves)
+        start_idx = min(idx1, idx2)
+        end_idx = max(idx1, idx2)
+
+        total = 0.0
+        for i in range(start_idx, end_idx + 1):
+            total += stackup[i].thickness
+
+        return total
 
 
 def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
@@ -168,7 +212,50 @@ def extract_layers(content: str) -> BoardInfo:
     # Extract board bounds from Edge.Cuts
     bounds = extract_board_bounds(content)
 
-    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds)
+    # Extract stackup information
+    stackup = extract_stackup(content)
+
+    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds, stackup=stackup)
+
+
+def extract_stackup(content: str) -> List[StackupLayer]:
+    """Extract board stackup information for via barrel length calculation."""
+    stackup = []
+
+    # Find the stackup section
+    stackup_match = re.search(r'\(stackup\s+(.*?)\n\s*\(copper_finish', content, re.DOTALL)
+    if not stackup_match:
+        # Try alternate pattern without copper_finish
+        stackup_match = re.search(r'\(stackup\s+(.*?)\n\s*\)\s*\n', content, re.DOTALL)
+
+    if not stackup_match:
+        return stackup
+
+    stackup_text = stackup_match.group(1)
+
+    # Parse each layer in stackup
+    # Pattern matches: (layer "name" (type "typename") (thickness value) ...)
+    # We need to handle multi-line layer definitions
+    layer_blocks = re.findall(r'\(layer\s+"([^"]+)"(.*?)(?=\(layer\s+"|$)', stackup_text, re.DOTALL)
+
+    for layer_name, layer_content in layer_blocks:
+        # Extract type
+        type_match = re.search(r'\(type\s+"([^"]+)"\)', layer_content)
+        layer_type = type_match.group(1) if type_match else 'unknown'
+
+        # Extract thickness (in mm)
+        thickness_match = re.search(r'\(thickness\s+([\d.]+)\)', layer_content)
+        thickness = float(thickness_match.group(1)) if thickness_match else 0.0
+
+        # Only include copper and dielectric layers (skip mask, silk, paste)
+        if layer_type in ('copper', 'core', 'prepreg'):
+            stackup.append(StackupLayer(
+                name=layer_name,
+                layer_type=layer_type,
+                thickness=thickness
+            ))
+
+    return stackup
 
 
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:

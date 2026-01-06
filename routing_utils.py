@@ -36,21 +36,50 @@ def segment_length(seg: Segment) -> float:
     return math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
 
 
-def calculate_route_length(segments: List[Segment], vias: List[Via] = None) -> float:
+def calculate_route_length(segments: List[Segment], vias: List[Via] = None, pcb_data=None) -> float:
     """
     Calculate the total length of a routed path.
 
     Args:
         segments: List of Segment objects making up the route
-        vias: Optional list of Via objects (via contribution to length is minimal
-              and typically ignored for DDR4 length matching)
+        vias: Optional list of Via objects for via barrel length calculation
+        pcb_data: Optional PCBData with stackup info for via barrel lengths
 
     Returns:
-        Total route length in mm (sum of all segment lengths)
+        Total route length in mm (sum of all segment lengths + via barrel lengths)
     """
     total = 0.0
     for seg in segments:
         total += segment_length(seg)
+
+    # Add via barrel lengths if pcb_data with stackup is provided
+    if vias and pcb_data and hasattr(pcb_data, 'get_via_barrel_length'):
+        for via in vias:
+            if via.layers and len(via.layers) >= 2:
+                barrel_len = pcb_data.get_via_barrel_length(via.layers[0], via.layers[1])
+                total += barrel_len
+
+    return total
+
+
+def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
+    """
+    Calculate total via barrel length for a list of vias.
+
+    Args:
+        vias: List of Via objects
+        pcb_data: PCBData with stackup info
+
+    Returns:
+        Total via barrel length in mm
+    """
+    if not vias or not pcb_data or not hasattr(pcb_data, 'get_via_barrel_length'):
+        return 0.0
+
+    total = 0.0
+    for via in vias:
+        if via.layers and len(via.layers) >= 2:
+            total += pcb_data.get_via_barrel_length(via.layers[0], via.layers[1])
     return total
 
 

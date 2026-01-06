@@ -109,7 +109,7 @@ def run_reroute_loop(
             total_time += elapsed
 
             if result and not result.get('failed'):
-                routed_length = calculate_route_length(result['new_segments'])
+                routed_length = calculate_route_length(result['new_segments'], result.get('new_vias', []), pcb_data)
                 route_length = routed_length + stub_length
                 result['route_length'] = route_length
                 result['stub_length'] = stub_length
@@ -256,7 +256,7 @@ def run_reroute_loop(
                             retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles)
 
                             if retry_result and not retry_result.get('failed'):
-                                routed_length = calculate_route_length(retry_result['new_segments'])
+                                routed_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)
                                 route_length = routed_length + stub_length
                                 retry_result['route_length'] = route_length
                                 retry_result['stub_length'] = stub_length

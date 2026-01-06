@@ -1761,15 +1761,6 @@ def apply_meanders_to_diff_pair(
         print(f"    Warning: No suitable straight run in diff pair centerline for meanders")
         return result, 0
 
-    # Debug: show runs in multi-layer routes
-    if not is_single_layer:
-        print(f"    DEBUG: Multi-layer route with {len(runs)} straight runs:")
-        for i, (start_idx, end_idx, run_length) in enumerate(runs):
-            run_layer = centerline_grid[start_idx][2]
-            same_layer = all(centerline_grid[j][2] == run_layer for j in range(start_idx, end_idx + 1))
-            layer_name = layer_names[run_layer] if run_layer < len(layer_names) else f"layer_{run_layer}"
-            print(f"      Run {i}: idx {start_idx}-{end_idx}, length={run_length:.2f}mm, layer={layer_name}, same_layer={same_layer}")
-
     # Try each straight run
     for start_idx, end_idx, run_length in runs:
         if run_length < amplitude * 2:
@@ -1852,19 +1843,29 @@ def apply_meanders_to_diff_pair(
         new_centerline_grid = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
                                for x, y, layer in new_centerline_float]
 
-        # Calculate new centerline length
-        new_centerline_length = 0.0
-        for i in range(len(new_centerline_float) - 1):
-            x1, y1, _ = new_centerline_float[i]
-            x2, y2, _ = new_centerline_float[i + 1]
-            new_centerline_length += math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        # Recreate GND vias for multi-layer routes
+        if not is_single_layer and config.gnd_via_enabled:
+            from diff_pair_routing import _create_gnd_vias
+            gnd_net_id = result.get('gnd_net_id')
+            gnd_via_dirs = result.get('gnd_via_dirs', [])
+            gnd_vias = _create_gnd_vias(
+                new_centerline_grid, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs
+            )
+            new_vias.extend(gnd_vias)
+
+        # Calculate actual routed length from P segments (includes connectors and via barrels)
+        # This is more accurate than centerline length which misses connector segments
+        from routing_utils import calculate_route_length
+        p_routed_length = calculate_route_length(p_segs, p_vias_new, pcb_data)
+        n_routed_length = calculate_route_length(n_segs, n_vias_new, pcb_data)
+        avg_routed_length = (p_routed_length + n_routed_length) / 2
 
         # Update result
         modified_result = dict(result)
         modified_result['new_segments'] = new_segments
         modified_result['new_vias'] = new_vias
-        modified_result['centerline_length'] = new_centerline_length
-        modified_result['route_length'] = new_centerline_length + result.get('stub_length', 0.0)
+        modified_result['centerline_length'] = avg_routed_length  # Use actual routed length
+        modified_result['route_length'] = avg_routed_length + result.get('stub_length', 0.0)
         modified_result['simplified_path'] = new_centerline_float
         modified_result['centerline_path_grid'] = new_centerline_grid
 
