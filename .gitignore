@@ -22,18 +22,13 @@ wheels/
 
 # Rust build outputs
 rust_router/target/
-
-# Compiled Python modules
 *.pyd
-*.so
 
 # KiCad outputs (routed files, backups, project files)
-routed_*.kicad_pcb
-routed_*.kicad_pro
-*-bak
-*.kicad_prl
-*.kicad_pro
-fp-info-cache
+/output/test_diffpair*kicad_pcb
+/output/fanout_output*.kicad_pcb
+/output/~*.kicad_pcb.lck
+/output/routed_output*.kicad_pcb
 
 # Visualization outputs
 route_viz_*.png
@@ -49,10 +44,3 @@ route_viz_*.png
 .DS_Store
 Thumbs.db
 /.claude/settings.local.json
-/fanout_output.kicad_pcb
-/test_batch_diffpair.kicad_pcb
-/test_diffpair.kicad_pcb
-/fanout_output*.kicad_pcb
-/~*.kicad_pcb.lck
-/test_diffpair_ram.kicad_pcb
-/routed_output_*.pcb
