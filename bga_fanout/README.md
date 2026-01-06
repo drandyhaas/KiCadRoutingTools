@@ -15,17 +15,17 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 
 ```bash
 # Basic fanout
-python bga_fanout.py input.kicad_pcb --component U3 --output output.kicad_pcb
+python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb
 
 # With net filter
-python bga_fanout.py input.kicad_pcb --component U3 --output output.kicad_pcb --nets "*DATA*"
+python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # Differential pairs
-python bga_fanout.py input.kicad_pcb --component IC1 --output output.kicad_pcb \
+python bga_fanout.py kicad_files/input.kicad_pcb --component IC1 --output kicad_files/output.kicad_pcb \
     --nets "*lvds*" --diff-pairs "*lvds*" --primary-escape vertical
 
 # Specify layers
-python bga_fanout.py input.kicad_pcb --component U3 --output output.kicad_pcb \
+python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
     --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu
 ```
 

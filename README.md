@@ -37,23 +37,23 @@ python build_router.py
 
 ```bash
 # Route specific nets
-python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
 
 # Route with wildcard patterns
-python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)"
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-DATA_*)"
 
 # Route differential pairs
-python route.py input.kicad_pcb output.kicad_pcb "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
 ```
 
 ### 3. Verify Results
 
 ```bash
 # Check for DRC violations
-python check_drc.py output.kicad_pcb --clearance 0.1
+python check_drc.py kicad_files/output.kicad_pcb --clearance 0.1
 
 # Check connectivity
-python check_connected.py output.kicad_pcb --nets "*DATA*"
+python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 ```
 
 ## Documentation
@@ -183,7 +183,7 @@ KiCadRoutingTools/
 ## Common Options
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*" [OPTIONS]
 
 # Geometry
 --track-width 0.1       # Track width (mm)

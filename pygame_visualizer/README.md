@@ -32,13 +32,13 @@ Add `--visualize` to any batch router command:
 
 ```bash
 # Single net
-python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_0)" --visualize
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-DATA_0)" --visualize
 
 # Multiple nets with wildcards
-python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)" --visualize
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-DATA_*)" --visualize
 
 # Auto-advance through nets
-python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-*)" --visualize --auto
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-*)" --visualize --auto
 ```
 
 ## Command-Line Options

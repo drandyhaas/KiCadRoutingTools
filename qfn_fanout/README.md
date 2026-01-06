@@ -14,13 +14,13 @@ Creates escape routing for QFN (Quad Flat No-leads) and QFP (Quad Flat Package) 
 
 ```bash
 # Basic fanout
-python qfn_fanout.py input.kicad_pcb --component U1 --output output.kicad_pcb
+python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb
 
 # With net filter
-python qfn_fanout.py input.kicad_pcb --component U1 --output output.kicad_pcb --nets "*DATA*"
+python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # Specify layer and track width
-python qfn_fanout.py input.kicad_pcb --component U1 --output output.kicad_pcb \
+python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
     --layer F.Cu --width 0.15
 ```
 
