@@ -533,6 +533,90 @@ def get_stub_segments(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: flo
     return result
 
 
+def get_stub_vias(pcb_data: PCBData, net_id: int, stub_segments: List[Segment],
+                  tolerance: float = 0.05) -> List:
+    """
+    Get vias that are part of a stub (e.g., pad vias from layer switching).
+
+    Finds vias that are located at segment endpoints along the stub path.
+
+    Args:
+        pcb_data: PCB data containing vias
+        net_id: Net ID of the stub
+        stub_segments: List of segments forming the stub (from get_stub_segments)
+        tolerance: Distance tolerance for matching positions
+
+    Returns:
+        List of Via objects that are part of the stub
+    """
+    if not stub_segments:
+        return []
+
+    # Collect all unique positions along the stub segments only
+    # Don't add all pad positions - only positions actually on this stub path
+    positions = set()
+    for seg in stub_segments:
+        positions.add((seg.start_x, seg.start_y))
+        positions.add((seg.end_x, seg.end_y))
+
+    # Find vias at these positions
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    stub_vias = []
+    for via in net_vias:
+        for px, py in positions:
+            if abs(via.x - px) < tolerance and abs(via.y - py) < tolerance:
+                stub_vias.append(via)
+                break
+
+    return stub_vias
+
+
+def calculate_stub_via_barrel_length(stub_vias: List, stub_layer: str, pcb_data) -> float:
+    """
+    Calculate via barrel length for stub vias, using the stub layer as one endpoint.
+
+    The barrel length is from the stub's layer to the pad's layer (where the via
+    connects), not the via's full span.
+
+    Args:
+        stub_vias: List of Via objects in the stub
+        stub_layer: Layer the stub segments are on
+        pcb_data: PCBData with stackup info and pads
+
+    Returns:
+        Total via barrel length in mm
+    """
+    if not stub_vias or not pcb_data or not hasattr(pcb_data, 'get_via_barrel_length'):
+        return 0.0
+
+    total = 0.0
+    for via in stub_vias:
+        if not via.layers or len(via.layers) < 2:
+            continue
+
+        # Find pad at this via position to determine the other layer
+        pad_layer = None
+        net_pads = pcb_data.pads_by_net.get(via.net_id, [])
+        for pad in net_pads:
+            if abs(pad.global_x - via.x) < 0.05 and abs(pad.global_y - via.y) < 0.05:
+                # Find copper layer from pad's layers (filter out mask/paste layers)
+                for layer in pad.layers:
+                    if layer.endswith('.Cu'):
+                        pad_layer = layer
+                        break
+                break
+
+        if pad_layer and pad_layer != stub_layer:
+            # Calculate barrel from stub layer to pad layer
+            total += pcb_data.get_via_barrel_length(stub_layer, pad_layer)
+        elif stub_layer in via.layers:
+            # No pad found or same layer - use via's other layer
+            other_layer = via.layers[1] if via.layers[0] == stub_layer else via.layers[0]
+            total += pcb_data.get_via_barrel_length(stub_layer, other_layer)
+
+    return total
+
+
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """

@@ -12,7 +12,7 @@ from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from routing_utils import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints,
-    get_stub_segments, segment_length
+    get_stub_segments, get_stub_vias, segment_length, calculate_stub_via_barrel_length
 )
 from obstacle_map import check_line_clearance
 # Note: Layer switching is now done upfront in route.py, not during routing
@@ -2012,10 +2012,28 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     n_src_stub_segs = get_stub_segments(pcb_data, n_net_id, n_src_x, n_src_y, src_layer_name)
     n_tgt_stub_segs = get_stub_segments(pcb_data, n_net_id, n_tgt_x, n_tgt_y, tgt_layer_name)
 
-    p_src_stub_length = sum(segment_length(s) for s in p_src_stub_segs)
-    p_tgt_stub_length = sum(segment_length(s) for s in p_tgt_stub_segs)
-    n_src_stub_length = sum(segment_length(s) for s in n_src_stub_segs)
-    n_tgt_stub_length = sum(segment_length(s) for s in n_tgt_stub_segs)
+    # Get stub vias (e.g., pad vias from layer switching) and include their barrel length
+    p_src_stub_vias = get_stub_vias(pcb_data, p_net_id, p_src_stub_segs)
+    p_tgt_stub_vias = get_stub_vias(pcb_data, p_net_id, p_tgt_stub_segs)
+    n_src_stub_vias = get_stub_vias(pcb_data, n_net_id, n_src_stub_segs)
+    n_tgt_stub_vias = get_stub_vias(pcb_data, n_net_id, n_tgt_stub_segs)
+
+    p_src_via_len = calculate_stub_via_barrel_length(p_src_stub_vias, src_layer_name, pcb_data)
+    p_tgt_via_len = calculate_stub_via_barrel_length(p_tgt_stub_vias, tgt_layer_name, pcb_data)
+    n_src_via_len = calculate_stub_via_barrel_length(n_src_stub_vias, src_layer_name, pcb_data)
+    n_tgt_via_len = calculate_stub_via_barrel_length(n_tgt_stub_vias, tgt_layer_name, pcb_data)
+
+    p_src_stub_length = sum(segment_length(s) for s in p_src_stub_segs) + p_src_via_len
+    p_tgt_stub_length = sum(segment_length(s) for s in p_tgt_stub_segs) + p_tgt_via_len
+    n_src_stub_length = sum(segment_length(s) for s in n_src_stub_segs) + n_src_via_len
+    n_tgt_stub_length = sum(segment_length(s) for s in n_tgt_stub_segs) + n_tgt_via_len
+
+    if config.verbose:
+        print(f"  Stub via barrel lengths (stub_layer->pad):")
+        print(f"    P_src ({src_layer_name}): {len(p_src_stub_vias)} vias = {p_src_via_len:.3f}mm")
+        print(f"    P_tgt ({tgt_layer_name}): {len(p_tgt_stub_vias)} vias = {p_tgt_via_len:.3f}mm")
+        print(f"    N_src ({src_layer_name}): {len(n_src_stub_vias)} vias = {n_src_via_len:.3f}mm")
+        print(f"    N_tgt ({tgt_layer_name}): {len(n_tgt_stub_vias)} vias = {n_tgt_via_len:.3f}mm")
 
     # Build result with polarity fix info
     result = {
