@@ -25,10 +25,10 @@ rust_router/target/
 *.pyd
 
 # KiCad outputs (routed files, backups, project files)
-/output/test_diffpair*kicad_pcb
-/output/fanout_output*.kicad_pcb
-/output/~*.kicad_pcb.lck
-/output/routed_output*.kicad_pcb
+/kicad_files/test_diffpair*kicad_pcb
+/kicad_files/fanout_output*.kicad_pcb
+/kicad_files/~*.kicad_pcb.lck
+/kicad_files/routed_output*.kicad_pcb
 
 # Visualization outputs
 route_viz_*.png

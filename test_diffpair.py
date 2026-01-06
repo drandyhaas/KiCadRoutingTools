@@ -148,10 +148,10 @@ Examples:
                         help='Skip DRC checks after routing')
     parser.add_argument('--skip-connectivity', action='store_true',
                         help='Skip connectivity checks after routing')
-    parser.add_argument('--input', default='routed_output.kicad_pcb',
-                        help='Input PCB file (default: routed_output.kicad_pcb)')
-    parser.add_argument('--output', default='test_diffpair.kicad_pcb',
-                        help='Output PCB file (default: test_diffpair.kicad_pcb)')
+    parser.add_argument('--input', default='kicad_files/routed_output.kicad_pcb',
+                        help='Input PCB file (default: kicad_files/routed_output.kicad_pcb)')
+    parser.add_argument('--output', default='kicad_files/test_diffpair.kicad_pcb',
+                        help='Output PCB file (default: kicad_files/test_diffpair.kicad_pcb)')
 
     # Router options (pass-through to route.py)
     router_group = parser.add_argument_group('Router options (passed to route.py)')

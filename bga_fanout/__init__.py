@@ -1203,7 +1203,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Generate BGA fanout routing')
     parser.add_argument('pcb', help='Input PCB file')
-    parser.add_argument('--output', '-o', default='fanout_test.kicad_pcb',
+    parser.add_argument('--output', '-o', default='kicad_files/fanout_test.kicad_pcb',
                         help='Output PCB file')
     parser.add_argument('--component', '-c', default=None,
                         help='Component reference (auto-detected if not specified)')

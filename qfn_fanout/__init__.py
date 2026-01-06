@@ -201,7 +201,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Generate QFN/QFP fanout routing')
     parser.add_argument('pcb', help='Input PCB file')
-    parser.add_argument('--output', '-o', default='qfn_fanout_test.kicad_pcb',
+    parser.add_argument('--output', '-o', default='kicad_files/qfn_fanout_test.kicad_pcb',
                         help='Output PCB file')
     parser.add_argument('--component', '-c', default=None,
                         help='Component reference (auto-detected if not specified)')

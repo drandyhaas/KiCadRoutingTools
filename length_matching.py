@@ -1415,8 +1415,8 @@ def generate_centerline_meander(
     px = -uy  # Perpendicular
     py = ux
 
-    # Meander parameters
-    chamfer = 0.1
+    # Meander parameters - chamfer must be larger than P/N half-spacing to avoid crossings
+    chamfer = max(0.1, spacing_mm * 1.2)  # At least 20% more than P/N offset
     min_amplitude = 0.3
     bump_width = 6 * chamfer  # wide entry (2) + wide top chamfers (4)
 
