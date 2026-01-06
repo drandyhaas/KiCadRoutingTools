@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from kicad_parser import Segment, PCBData
 from routing_config import GridRouteConfig
-from routing_utils import segment_length
+from routing_utils import segment_length, calculate_route_length
 from geometry_utils import (
     point_to_segment_distance,
     segments_intersect,
@@ -93,7 +93,8 @@ def get_safe_amplitude_at_point(
     config: GridRouteConfig,
     extra_segments: List[Segment] = None,
     extra_vias: List = None,
-    is_first_bump: bool = True
+    is_first_bump: bool = True,
+    paired_net_id: int = None
 ) -> float:
     """
     Find the maximum safe amplitude for a meander bump at a specific point.
@@ -111,6 +112,7 @@ def get_safe_amplitude_at_point(
         config: Routing configuration
         extra_segments: Additional segments to check against (e.g., from other nets in same length-match pass)
         extra_vias: Additional vias to check against (e.g., from other nets in same length-match pass)
+        paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
 
     Returns:
         Safe amplitude, or 0 if no safe amplitude found
@@ -160,6 +162,14 @@ def get_safe_amplitude_at_point(
             for other_seg in all_segments:
                 if other_seg.net_id == net_id:
                     continue
+
+                # Use reduced clearance for paired net (prevent DRC violations)
+                # The paired track is close (diff_pair_gap), so meanders need to go away from it
+                # Use full DRC clearance to avoid violations
+                if other_seg.net_id == paired_net_id:
+                    check_clearance = config.track_width + config.clearance  # Full DRC clearance
+                else:
+                    check_clearance = required_clearance
                 if other_seg.layer != layer:
                     continue
 
@@ -182,7 +192,7 @@ def get_safe_amplitude_at_point(
                     other_seg.start_x, other_seg.start_y, other_seg.end_x, other_seg.end_y
                 )
 
-                if dist < required_clearance:
+                if dist < check_clearance:
                     conflict_found = True
                     break
 
@@ -215,7 +225,8 @@ def check_meander_clearance(
     amplitude: float,
     pcb_data: PCBData,
     net_id: int,
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    paired_net_id: int = None
 ) -> bool:
     """
     Check if a meander at this segment would have clearance from other traces/vias.
@@ -227,6 +238,7 @@ def check_meander_clearance(
         pcb_data: PCB data with all segments and vias
         net_id: Net ID of the route being meandered (to exclude self)
         config: Routing configuration
+        paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
 
     Returns:
         True if meander area appears clear, False if obviously blocked
@@ -254,9 +266,11 @@ def check_meander_clearance(
 
         # Check both directions
         amp_pos = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, 1, amplitude, 0.3,
-                                               segment.layer, pcb_data, net_id, config)
+                                               segment.layer, pcb_data, net_id, config,
+                                               paired_net_id=paired_net_id)
         amp_neg = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, -1, amplitude, 0.3,
-                                               segment.layer, pcb_data, net_id, config)
+                                               segment.layer, pcb_data, net_id, config,
+                                               paired_net_id=paired_net_id)
 
         if amp_pos >= 0.3 or amp_neg >= 0.3:
             return True  # At least some meanders possible
@@ -400,7 +414,8 @@ def generate_trombone_meander(
     config: GridRouteConfig = None,
     extra_segments: List[Segment] = None,
     extra_vias: List = None,
-    min_bumps: int = 0
+    min_bumps: int = 0,
+    paired_net_id: int = None
 ) -> Tuple[List[Segment], int]:
     """
     Generate trombone-style meander segments to replace a straight segment.
@@ -430,6 +445,7 @@ def generate_trombone_meander(
         extra_segments: Additional segments to check against (e.g., from other nets already processed)
         extra_vias: Additional vias to check against (e.g., from other nets already processed)
         min_bumps: Minimum number of bumps to generate (0 = use extra_length to determine)
+        paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
 
     Returns:
         Tuple of (segments, bump_count) - the meander segments and number of bumps added
@@ -523,13 +539,15 @@ def generate_trombone_meander(
         if pcb_data is not None and config is not None:
             safe_amp = get_safe_amplitude_at_point(
                 cx, cy, ux, uy, px, py, direction, amplitude, min_amplitude,
-                segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first
+                segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
+                paired_net_id=paired_net_id
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
                 safe_amp_other = get_safe_amplitude_at_point(
                     cx, cy, ux, uy, px, py, -direction, amplitude, min_amplitude,
-                    segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first
+                    segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
+                    paired_net_id=paired_net_id
                 )
                 if safe_amp_other >= min_amplitude:
                     direction = -direction
@@ -715,7 +733,8 @@ def apply_meanders_to_route(
     extra_segments: List[Segment] = None,
     extra_vias: List = None,
     min_bumps: int = 0,
-    amplitude_override: float = None
+    amplitude_override: float = None,
+    paired_net_id: int = None
 ) -> Tuple[List[Segment], int]:
     """
     Apply meanders to a route to add extra length.
@@ -730,6 +749,7 @@ def apply_meanders_to_route(
         extra_vias: Additional vias to check against (e.g., from already-processed nets)
         min_bumps: Minimum number of bumps to generate
         amplitude_override: Override amplitude (for scaling down to hit target length)
+        paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
 
     Returns:
         Tuple of (modified segment list, bump_count)
@@ -771,7 +791,8 @@ def apply_meanders_to_route(
 
         # Quick check if there's ANY space for meanders at this location
         if pcb_data is not None and net_id is not None:
-            if not check_meander_clearance(merged_seg, amplitude, pcb_data, net_id, config):
+            if not check_meander_clearance(merged_seg, amplitude, pcb_data, net_id, config,
+                                           paired_net_id=paired_net_id):
                 # No space at all - try next run
                 continue
 
@@ -785,7 +806,8 @@ def apply_meanders_to_route(
             config=config,
             extra_segments=extra_segments,
             extra_vias=extra_vias,
-            min_bumps=min_bumps
+            min_bumps=min_bumps,
+            paired_net_id=paired_net_id
         )
 
         # Replace original segment run with meanders
@@ -1868,3 +1890,171 @@ def _create_connector_segment(start_pos: Tuple[float, float],
         layer=layer_name,
         net_id=net_id
     )
+
+
+def apply_intra_pair_length_matching(
+    result: dict,
+    config: GridRouteConfig,
+    pcb_data: PCBData
+) -> dict:
+    """
+    Apply length matching within a differential pair by adding meanders to
+    the shorter track (P or N) to match the longer one.
+
+    Args:
+        result: Diff pair routing result containing new_segments, new_vias, etc.
+        config: Routing configuration with length_match_tolerance
+        pcb_data: PCB data for clearance checking
+
+    Returns:
+        Modified result dict with adjusted segments
+    """
+    if not result.get('new_segments'):
+        return result
+
+    # Get net IDs from result
+    p_net_id = result.get('p_net_id')
+    n_net_id = result.get('n_net_id')
+    if p_net_id is None or n_net_id is None:
+        return result
+
+    # Separate P and N segments and vias
+    all_segments = result['new_segments']
+    all_vias = result.get('new_vias', [])
+
+    p_segments = [s for s in all_segments if s.net_id == p_net_id]
+    n_segments = [s for s in all_segments if s.net_id == n_net_id]
+    p_vias = [v for v in all_vias if v.net_id == p_net_id]
+    n_vias = [v for v in all_vias if v.net_id == n_net_id]
+
+    # Calculate lengths
+    p_length = calculate_route_length(p_segments, p_vias, pcb_data)
+    n_length = calculate_route_length(n_segments, n_vias, pcb_data)
+
+    delta = abs(p_length - n_length)
+    if delta <= config.length_match_tolerance:
+        print(f"    P/N intra-pair: already matched (delta={delta:.3f}mm <= {config.length_match_tolerance}mm)")
+        return result
+
+    # Determine shorter track
+    if p_length < n_length:
+        shorter_segments = p_segments
+        shorter_net_id = p_net_id
+        shorter_vias = p_vias
+        longer_segments = n_segments
+        longer_net_id = n_net_id
+        shorter_label = "P"
+    else:
+        shorter_segments = n_segments
+        shorter_net_id = n_net_id
+        shorter_vias = n_vias
+        longer_segments = p_segments
+        longer_net_id = p_net_id
+        shorter_label = "N"
+
+    # Target length for shorter track = length of longer track
+    shorter_length = p_length if p_length < n_length else n_length
+    target_length = p_length if p_length > n_length else n_length
+
+    print(f"    P/N intra-pair: P={p_length:.3f}mm, N={n_length:.3f}mm, delta={delta:.3f}mm, adding meanders to {shorter_label}")
+
+    # Step 1: Generate initial meanders
+    # Pass paired_net_id to use reduced clearance for the paired track
+    # (allows meanders to be close but not crossing)
+    meandered_segments, bump_count = apply_meanders_to_route(
+        shorter_segments,
+        delta,
+        config,
+        pcb_data=pcb_data,
+        net_id=shorter_net_id,
+        extra_segments=longer_segments,
+        extra_vias=all_vias,
+        paired_net_id=longer_net_id
+    )
+
+    if bump_count == 0:
+        print(f"    P/N intra-pair: could not fit meanders")
+        return result
+
+    new_shorter_length = calculate_route_length(meandered_segments, shorter_vias, pcb_data)
+
+    # Keep track of best result (closest to target)
+    best_segments = meandered_segments
+    best_length = new_shorter_length
+    best_bump_count = bump_count
+
+    # Step 2: Scale amplitude to hit target length (iterate to refine)
+    # For a meander bump: extra_length ≈ 2 * (amplitude - 2*chamfer) per bump
+    # Rearranging: amplitude ≈ extra_length / (2 * bump_count) + 2*chamfer
+    chamfer = 0.1
+    for scale_iter in range(5):
+        new_delta = abs(new_shorter_length - target_length)
+        if new_delta <= config.length_match_tolerance:
+            break
+
+        # Calculate target amplitude based on needed extra length
+        actual_extra = new_shorter_length - shorter_length
+        if actual_extra < 0.001 or bump_count == 0:
+            break  # No meaningful extra was added
+
+        needed_extra = target_length - shorter_length
+        # Calculate amplitude that would give needed_extra with current bump_count
+        # extra = bump_count * 2 * (amplitude - 2*chamfer)
+        # amplitude = extra / (2 * bump_count) + 2*chamfer
+        target_amplitude = needed_extra / (2 * bump_count) + 2 * chamfer
+
+        if target_amplitude < 0.2:
+            # Amplitude too small, accept current result
+            break
+
+        # Regenerate with target amplitude
+        new_meandered_segments, new_bump_count = apply_meanders_to_route(
+            shorter_segments,
+            delta,
+            config,
+            pcb_data=pcb_data,
+            net_id=shorter_net_id,
+            extra_segments=longer_segments,
+            extra_vias=all_vias,
+            min_bumps=bump_count,  # Keep same bump count
+            amplitude_override=target_amplitude,
+            paired_net_id=longer_net_id
+        )
+
+        if new_bump_count == 0:
+            # Scaling failed, use best result so far
+            break
+
+        new_shorter_length = calculate_route_length(new_meandered_segments, shorter_vias, pcb_data)
+
+        # Update best if this is closer to target
+        if abs(new_shorter_length - target_length) < abs(best_length - target_length):
+            best_segments = new_meandered_segments
+            best_length = new_shorter_length
+            best_bump_count = new_bump_count
+            meandered_segments = new_meandered_segments
+            bump_count = new_bump_count
+        else:
+            # Not improving, stop
+            break
+
+    # Use best result
+    meandered_segments = best_segments
+    new_shorter_length = best_length
+    bump_count = best_bump_count
+
+    # Rebuild segment list with meandered shorter track
+    other_segments = [s for s in all_segments if s.net_id != shorter_net_id]
+    new_segments = other_segments + meandered_segments
+
+    # Update result
+    result['new_segments'] = new_segments
+    if shorter_net_id == p_net_id:
+        result['p_routed_length'] = new_shorter_length
+    else:
+        result['n_routed_length'] = new_shorter_length
+
+    new_delta = abs(result.get('p_routed_length', p_length) - result.get('n_routed_length', n_length))
+    print(f"    P/N intra-pair: {bump_count} bumps added, new {shorter_label}={new_shorter_length:.3f}mm, new delta={new_delta:.3f}mm")
+
+    return result

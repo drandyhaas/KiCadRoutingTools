@@ -287,7 +287,14 @@ def route_diff_pairs(
             # Store lengths for length matching
             result['centerline_length'] = centerline_length
             result['stub_length'] = avg_stub_length
-            result['route_length'] = centerline_length + avg_stub_length
+            result['p_routed_length'] = p_routed_length
+            result['n_routed_length'] = n_routed_length
+            # For inter-pair matching: use max(P,N) if intra-pair will equalize them, else use average
+            if config.diff_pair_intra_match:
+                route_length_base = max(p_routed_length, n_routed_length)
+            else:
+                route_length_base = centerline_length
+            result['route_length'] = route_length_base + avg_stub_length
 
             print(f"  SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, {result['iterations']} iterations ({elapsed:.2f}s)")
             print(f"    Centerline length: {centerline_length:.3f}mm, stub length: {avg_stub_length:.3f}mm, total: {result['route_length']:.3f}mm")

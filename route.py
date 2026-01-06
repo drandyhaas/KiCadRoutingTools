@@ -60,7 +60,8 @@ from diff_pair_loop import route_diff_pairs
 from single_ended_loop import route_single_ended_nets
 from reroute_loop import run_reroute_loop
 from length_matching import (
-    apply_length_matching_to_group, find_nets_matching_patterns, auto_group_ddr4_nets
+    apply_length_matching_to_group, find_nets_matching_patterns, auto_group_ddr4_nets,
+    apply_intra_pair_length_matching
 )
 import re
 
@@ -136,6 +137,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 length_match_tolerance: float = 0.1,
                 meander_amplitude: float = 1.0,
                 diff_chamfer_extra: float = 1.5,
+                diff_pair_intra_match: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -236,6 +238,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         length_match_tolerance=length_match_tolerance,
         meander_amplitude=meander_amplitude,
         diff_chamfer_extra=diff_chamfer_extra,
+        diff_pair_intra_match=diff_pair_intra_match,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -747,6 +750,29 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if result.get('new_vias'):
                                 all_processed_vias.extend(result['new_vias'])
 
+    # Apply intra-pair P/N length matching if configured
+    if config.diff_pair_intra_match:
+        print("\n" + "=" * 60)
+        print("Intra-pair P/N length matching")
+        print("=" * 60)
+
+        # Process each diff pair once (using p_net_id as key to avoid duplicates)
+        processed_pairs = set()
+        for net_id, result in routed_results.items():
+            if not result.get('is_diff_pair'):
+                continue
+            p_net_id = result.get('p_net_id')
+            if p_net_id is None or p_net_id in processed_pairs:
+                continue
+            processed_pairs.add(p_net_id)
+
+            # Get pair name for logging
+            pair_info = diff_pair_by_net_id.get(net_id)
+            pair_name = pair_info[0] if pair_info else f"net_{net_id}"
+
+            print(f"\n{pair_name}:")
+            apply_intra_pair_length_matching(result, config, pcb_data)
+
     # Notify visualization callback that all routing is complete
     if visualize:
         vis_callback.on_routing_complete(successful, failed, total_iterations)
@@ -1147,6 +1173,8 @@ Differential pair routing:
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
     parser.add_argument("--diff-chamfer-extra", type=float, default=1.5,
                         help="Chamfer multiplier for diff pair meanders (default: 1.5, >1 avoids P/N crossings)")
+    parser.add_argument("--diff-pair-intra-match", action="store_true",
+                        help="Enable intra-pair P/N length matching (add meanders to shorter track of each diff pair)")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -1254,4 +1282,5 @@ Differential pair routing:
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,
                 diff_chamfer_extra=args.diff_chamfer_extra,
+                diff_pair_intra_match=args.diff_pair_intra_match,
                 vis_callback=vis_callback)
