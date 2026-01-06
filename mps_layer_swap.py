@@ -123,45 +123,73 @@ def _find_alternative_layers(
     return alternatives
 
 
-def _would_eliminate_conflict(
-    unit_a_layers: Tuple[Set[str], Set[str]],
-    unit_b_layers: Tuple[Set[str], Set[str]],
-    swap_unit: str,  # 'a' or 'b'
+def _apply_hypothetical_swap(
+    unit_layers: Tuple[Set[str], Set[str]],
     swap_type: str,  # 'source', 'target', or 'both'
     from_layer: str,
     to_layer: str
-) -> bool:
+) -> Tuple[Set[str], Set[str]]:
+    """Apply a hypothetical swap and return the new layer sets."""
+    new_src = set(unit_layers[0])
+    new_tgt = set(unit_layers[1])
+
+    if swap_type in ('source', 'both'):
+        new_src.discard(from_layer)
+        new_src.add(to_layer)
+    if swap_type in ('target', 'both'):
+        new_tgt.discard(from_layer)
+        new_tgt.add(to_layer)
+
+    return (new_src, new_tgt)
+
+
+def _count_global_same_layer_conflicts(
+    all_unit_layers: Dict[int, Tuple[Set[str], Set[str]]],
+    conflicts: Dict[int, Set[int]]
+) -> int:
+    """Count total same-layer conflicts across all units."""
+    count = 0
+    seen = set()
+    for unit_a, conflicting in conflicts.items():
+        a_layers = all_unit_layers.get(unit_a, (set(), set()))
+        a_all = a_layers[0] | a_layers[1]
+        for unit_b in conflicting:
+            if (unit_b, unit_a) in seen:
+                continue
+            seen.add((unit_a, unit_b))
+            b_layers = all_unit_layers.get(unit_b, (set(), set()))
+            b_all = b_layers[0] | b_layers[1]
+            if a_all & b_all:  # Shared layer = same-layer conflict
+                count += 1
+    return count
+
+
+def _would_reduce_conflicts(
+    swap_unit_id: int,
+    swap_type: str,  # 'source', 'target', or 'both'
+    from_layer: str,
+    to_layer: str,
+    conflicts: Dict[int, Set[int]],
+    all_unit_layers: Dict[int, Tuple[Set[str], Set[str]]]
+) -> Tuple[bool, int, int]:
     """
-    Check if swapping a stub would eliminate the layer overlap between two units.
+    Check if swapping a unit would reduce GLOBAL same-layer conflicts.
 
-    Returns True if after the swap, the units would have no shared layers.
+    Returns (would_reduce, conflicts_before, conflicts_after)
     """
-    # Copy the layer sets
-    a_src = set(unit_a_layers[0])
-    a_tgt = set(unit_a_layers[1])
-    b_src = set(unit_b_layers[0])
-    b_tgt = set(unit_b_layers[1])
+    # Count global conflicts before
+    before_count = _count_global_same_layer_conflicts(all_unit_layers, conflicts)
 
-    # Apply the hypothetical swap
-    if swap_unit == 'a':
-        if swap_type in ('source', 'both'):
-            a_src.discard(from_layer)
-            a_src.add(to_layer)
-        if swap_type in ('target', 'both'):
-            a_tgt.discard(from_layer)
-            a_tgt.add(to_layer)
-    else:
-        if swap_type in ('source', 'both'):
-            b_src.discard(from_layer)
-            b_src.add(to_layer)
-        if swap_type in ('target', 'both'):
-            b_tgt.discard(from_layer)
-            b_tgt.add(to_layer)
+    # Apply hypothetical swap to a copy of unit_layers
+    test_layers = dict(all_unit_layers)
+    current_layers = test_layers.get(swap_unit_id, (set(), set()))
+    new_layers = _apply_hypothetical_swap(current_layers, swap_type, from_layer, to_layer)
+    test_layers[swap_unit_id] = new_layers
 
-    # Check if there's any layer overlap after the swap
-    a_all = a_src | a_tgt
-    b_all = b_src | b_tgt
-    return len(a_all & b_all) == 0
+    # Count global conflicts after
+    after_count = _count_global_same_layer_conflicts(test_layers, conflicts)
+
+    return (after_count < before_count, before_count, after_count)
 
 
 def try_mps_aware_layer_swaps(
@@ -188,7 +216,7 @@ def try_mps_aware_layer_swaps(
     Args:
         pcb_data: PCB data (modified in place)
         config: Routing configuration
-        mps_result: Extended MPS result with conflicts and layer info
+        mps_result: Extended MPS result with conflicts, layer info, and geometric_conflicts
         diff_pairs: Dict of all diff pairs
         available_layers: List of available layer names
         can_swap_to_top_layer: Whether F.Cu swaps are allowed
@@ -204,6 +232,11 @@ def try_mps_aware_layer_swaps(
     """
     swaps_applied = 0
     nets_swapped: Set[int] = set()
+
+    # Use geometric_conflicts (all crossings regardless of layer) for swap checking
+    # This is important because we need to detect NEW conflicts that might be
+    # created when swapping to a layer shared with geometrically-crossing units
+    all_conflicts = mps_result.geometric_conflicts if mps_result.geometric_conflicts else mps_result.conflicts
 
     # Only process if there are Round 2+ units (actual crossing conflicts)
     if mps_result.num_rounds <= 1:
@@ -263,6 +296,11 @@ def try_mps_aware_layer_swaps(
                     if made_progress:
                         break  # Already resolved this conflict
 
+                    # Skip if this unit has already been swapped
+                    swap_nets = mps_result.unit_to_nets.get(swap_unit_id, [swap_unit_id])
+                    if any(n in nets_swapped for n in swap_nets):
+                        continue
+
                     other_unit_layers = r1_layers if swap_unit_id == r2_unit else r2_layers
                     swap_which = 'a' if swap_unit_id == r2_unit else 'b'
 
@@ -316,17 +354,19 @@ def try_mps_aware_layer_swaps(
                         )
 
                         for target_layer in alt_layers:
-                            # Check if this swap would eliminate the layer overlap
-                            would_elim = _would_eliminate_conflict(
-                                r2_layers, r1_layers, swap_which, stub_type,
-                                current_layer, target_layer
+                            # Check if this swap would reduce GLOBAL same-layer conflicts
+                            # Use all_conflicts (geometric crossings) to catch new conflicts
+                            would_reduce, before, after = _would_reduce_conflicts(
+                                swap_unit_id, stub_type,
+                                current_layer, target_layer,
+                                all_conflicts, mps_result.unit_layers
                             )
-                            if not would_elim:
+                            if not would_reduce:
                                 if verbose:
-                                    print(f"      -> {target_layer}: would not eliminate conflict")
+                                    print(f"      -> {target_layer}: would not reduce global conflicts ({before} -> {after})")
                                 continue
                             if verbose:
-                                print(f"      -> {target_layer}: would eliminate conflict, validating...")
+                                print(f"      -> {target_layer}: would reduce global conflicts ({before} -> {after}), validating...")
 
                             # Validate the swap(s)
                             if stub_type == 'both':
@@ -432,6 +472,13 @@ def try_mps_aware_layer_swaps(
                             # Update tracking
                             nets_swapped.update(mps_result.unit_to_nets.get(swap_unit_id, [swap_unit_id]))
                             made_progress = True
+
+                            # Update the unit_layers for subsequent conflict checks
+                            old_layers = mps_result.unit_layers.get(swap_unit_id, (set(), set()))
+                            new_layers = _apply_hypothetical_swap(
+                                old_layers, stub_type, current_layer, target_layer
+                            )
+                            mps_result.unit_layers[swap_unit_id] = new_layers
 
                             # Update the stubs_by_layer cache (remove old, add new)
                             # This is a simplified update - full update would require re-collecting

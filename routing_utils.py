@@ -21,12 +21,13 @@ from chip_boundary import (
 class MPSResult:
     """Extended result from MPS net ordering with conflict and layer information."""
     ordered_ids: List[int]                                    # Ordered net IDs
-    conflicts: Dict[int, Set[int]]                            # unit_id -> set of conflicting unit_ids
+    conflicts: Dict[int, Set[int]]                            # unit_id -> set of conflicting unit_ids (layer-filtered)
     unit_layers: Dict[int, Tuple[Set[str], Set[str]]]         # unit_id -> (src_layers, tgt_layers)
     unit_to_nets: Dict[int, List[int]]                        # unit_id -> [net_ids]
     unit_names: Dict[int, str]                                # unit_id -> display name
     round_assignments: Dict[int, int]                         # unit_id -> round_number (1-indexed)
     num_rounds: int
+    geometric_conflicts: Dict[int, Set[int]] = None           # All crossings regardless of layer (for swap checking)
 
 
 # Position rounding precision for coordinate comparisons
@@ -1353,8 +1354,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         unit_layers[unit_id] = (src_layers, tgt_layers)
 
     # Step 4: Detect crossing conflicts
-    def units_cross(unit_a: int, unit_b: int) -> bool:
-        """Check if two units have crossing paths."""
+    def units_cross_geometric(unit_a: int, unit_b: int) -> bool:
+        """Check if two units have crossing paths (geometric only, ignores layers)."""
         info_a = unit_boundary_info.get(unit_a)
         info_b = unit_boundary_info.get(unit_b)
 
@@ -1365,49 +1366,39 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                 return False  # Different chip pairs, can't directly cross
 
             # Check boundary order inversion
-            if not crossings_from_boundary_order(info_a[0], info_a[1], info_b[0], info_b[1]):
-                return False
-
-            # Inversion detected, check if layers overlap (if enabled)
-            if crossing_layer_check:
-                a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
-                b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
-                a_all = a_src | a_tgt
-                b_all = b_src | b_tgt
-                if a_all and b_all and not (a_all & b_all):
-                    return False  # No layer overlap, no real conflict
-            return True
+            return crossings_from_boundary_order(info_a[0], info_a[1], info_b[0], info_b[1])
 
         # Use angular method (default or fallback)
         if unit_a in unit_angles and unit_b in unit_angles:
             a1, a2 = unit_angles[unit_a]
             b1, b2 = unit_angles[unit_b]
-            angles_cross = (a1 < b1 < a2 < b2) or (b1 < a1 < b2 < a2)
-            if not angles_cross:
-                return False
-
-            # Check layer overlap (if enabled)
-            if crossing_layer_check:
-                a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
-                b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
-                a_all = a_src | a_tgt
-                b_all = b_src | b_tgt
-                if a_all and b_all and not (a_all & b_all):
-                    return False
-
-            return True
+            return (a1 < b1 < a2 < b2) or (b1 < a1 < b2 < a2)
 
         return False
 
-    # Build conflict graph
+    def units_share_layer(unit_a: int, unit_b: int) -> bool:
+        """Check if two units share at least one layer."""
+        a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
+        b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
+        a_all = a_src | a_tgt
+        b_all = b_src | b_tgt
+        return bool(a_all and b_all and (a_all & b_all))
+
+    # Build conflict graphs - both geometric (all crossings) and layer-filtered
     unit_list = list(unit_endpoints.keys())
+    geometric_conflicts = {unit_id: set() for unit_id in unit_list}
     conflicts = {unit_id: set() for unit_id in unit_list}
 
     for i, unit_a in enumerate(unit_list):
         for unit_b in unit_list[i+1:]:
-            if units_cross(unit_a, unit_b):
-                conflicts[unit_a].add(unit_b)
-                conflicts[unit_b].add(unit_a)
+            if units_cross_geometric(unit_a, unit_b):
+                # Always add to geometric conflicts
+                geometric_conflicts[unit_a].add(unit_b)
+                geometric_conflicts[unit_b].add(unit_a)
+                # Only add to layer-filtered conflicts if they share a layer (or layer check disabled)
+                if not crossing_layer_check or units_share_layer(unit_a, unit_b):
+                    conflicts[unit_a].add(unit_b)
+                    conflicts[unit_b].add(unit_a)
 
     # Count total conflicts for reporting
     total_conflicts = sum(len(c) for c in conflicts.values()) // 2
@@ -1527,7 +1518,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             unit_to_nets=unit_to_nets,
             unit_names=unit_names,
             round_assignments=round_assignments,
-            num_rounds=round_num
+            num_rounds=round_num,
+            geometric_conflicts=geometric_conflicts
         )
     return ordered
 
