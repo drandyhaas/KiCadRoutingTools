@@ -1418,7 +1418,7 @@ def generate_centerline_meander(
     # Meander parameters
     chamfer = 0.1
     min_amplitude = 0.3
-    bump_width = 5 * chamfer  # entry chamfer + 2 wide top chamfers (2x forward each)
+    bump_width = 6 * chamfer  # wide entry (2) + wide top chamfers (4)
 
     # Account for full diff pair width in clearance
     # The meander bump needs clearance for both P and N tracks
@@ -1493,27 +1493,27 @@ def generate_centerline_meander(
             bump_amplitude = riser_height + 2 * chamfer
 
         # Calculate extra length for this bump
-        # Entry/exit chamfers are 45° (1:1), top chamfers are wider (2:1 ratio)
-        chamfer_diag_45 = chamfer * math.sqrt(2)  # 45° entry/exit chamfer
-        chamfer_diag_wide = chamfer * math.sqrt(5)  # wider top chamfer (2:1)
+        # All chamfers are wider (2:1 ratio) for P/N track spacing
+        chamfer_diag_wide = chamfer * math.sqrt(5)  # wider chamfer (2:1)
         has_entry_chamfer = (bump_count == 0)
 
         if has_entry_chamfer:
-            # entry chamfer + 2 wide top chamfers + risers
-            bump_path_length = chamfer_diag_45 + 2 * chamfer_diag_wide + 2 * riser_height
-            this_bump_width = chamfer + 4 * chamfer  # 1 + 2*2 chamfers forward
+            # wide entry chamfer + 2 wide top chamfers + risers
+            bump_path_length = 3 * chamfer_diag_wide + 2 * riser_height
+            this_bump_width = 2 * chamfer + 4 * chamfer  # entry (2) + top chamfers (4)
         else:
-            # 2 wide top chamfers + risers (no entry chamfer)
+            # 2 wide top chamfers + risers
             bump_path_length = 2 * chamfer_diag_wide + 2 * riser_height
-            this_bump_width = 4 * chamfer  # 2*2 chamfers forward
+            this_bump_width = 4 * chamfer  # top chamfers only
 
         extra_this_bump = bump_path_length - this_bump_width
 
         # Generate bump points
         if has_entry_chamfer:
             first_bump_direction = direction
-            cx += ux * chamfer + px * chamfer * direction
-            cy += uy * chamfer + py * chamfer * direction
+            # Entry chamfer - wider (2x forward) to give P/N tracks room
+            cx += ux * 2 * chamfer + px * chamfer * direction
+            cy += uy * 2 * chamfer + py * chamfer * direction
             new_path.append((cx, cy, layer))
 
         # Riser up
@@ -1521,12 +1521,12 @@ def generate_centerline_meander(
         cy += py * riser_height * direction
         new_path.append((cx, cy, layer))
 
-        # Top chamfer 1 - wider turn (2x forward) to give P/N tracks room
+        # Top chamfer 1 - wider (2x forward) for P/N track spacing
         cx += ux * 2 * chamfer + px * chamfer * direction
         cy += uy * 2 * chamfer + py * chamfer * direction
         new_path.append((cx, cy, layer))
 
-        # Top chamfer 2 - wider turn (2x forward) to give P/N tracks room
+        # Top chamfer 2 - wider (2x forward) for P/N track spacing
         cx += ux * 2 * chamfer - px * chamfer * direction
         cy += uy * 2 * chamfer - py * chamfer * direction
         new_path.append((cx, cy, layer))
@@ -1540,14 +1540,13 @@ def generate_centerline_meander(
         bump_count += 1
         direction *= -1
 
-    # Exit chamfer
+    # Exit chamfer - wider (2x forward) to match entry
     if bump_count > 0 and first_bump_direction is not None:
-        cx += ux * chamfer - px * chamfer * first_bump_direction
-        cy += uy * chamfer - py * chamfer * first_bump_direction
+        cx += ux * 2 * chamfer - px * chamfer * first_bump_direction
+        cy += uy * 2 * chamfer - py * chamfer * first_bump_direction
         new_path.append((cx, cy, layer))
 
-    # Lead-out to end: go perpendicular first to match end_pt level, then parallel
-    # This ensures P/N parallel paths maintain proper spacing through the connector
+    # Lead-out to end: use wider chamfer (2:1) to smoothly transition back to path
     if bump_count > 0:
         # Calculate perpendicular distance from current point to end_pt
         dx_to_end = end_pt[0] - cx
@@ -1556,12 +1555,13 @@ def generate_centerline_meander(
         # Project onto perpendicular direction
         perp_dist = dx_to_end * px + dy_to_end * py
 
-        # If we need to move perpendicular to reach end level, add intermediate point
+        # If we need to move perpendicular to reach end level, use wider chamfer
         if abs(perp_dist) > 0.01:
-            # Add point at same perpendicular level as end_pt
-            intermediate_x = cx + px * perp_dist
-            intermediate_y = cy + py * perp_dist
-            new_path.append((intermediate_x, intermediate_y, layer))
+            # Move forward by 2x the perpendicular distance (2:1 ratio)
+            chamfer_x = cx + ux * 2 * abs(perp_dist) + px * perp_dist
+            chamfer_y = cy + uy * 2 * abs(perp_dist) + py * perp_dist
+            new_path.append((chamfer_x, chamfer_y, layer))
+            cx, cy = chamfer_x, chamfer_y
 
     new_path.append((end_pt[0], end_pt[1], layer))
 
