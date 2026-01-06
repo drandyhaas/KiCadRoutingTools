@@ -43,8 +43,8 @@ def main():
     run('python3 bga_fanout.py kicad_files/fanout_output7.kicad_pcb --component U1 --output kicad_files/fanout_output.kicad_pcb --nets "*U1B*" --check-for-previous --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu')
 
     # Route the FTDI tracks
-    #run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb "Net-(U2A-DATA_11*)" --swappable-nets "Net-(U2A-DATA_*)"') # quick test
-    run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb "Net-(U2A-*)" --swappable-nets "Net-(U2A-DATA_*)" --mps-layer-swap')
+    run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb "Net-(U2A-DATA_11*)" --swappable-nets "Net-(U2A-DATA_*)"') # quick test
+    #run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb "Net-(U2A-*)" --swappable-nets "Net-(U2A-DATA_*)" --mps-layer-swap')
 
     # Check for errors
     run('python3 check_drc.py kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)"')
