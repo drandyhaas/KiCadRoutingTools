@@ -111,6 +111,7 @@ Length matching adds trombone-style meanders to match route lengths within group
 | `--length-match-group` | - | Group of nets to length match. Use `auto` for DDR4 auto-grouping, or specify patterns |
 | `--length-match-tolerance` | 0.1 | Acceptable length variance within group (mm) |
 | `--meander-amplitude` | 1.0 | Height of meanders perpendicular to trace (mm) |
+| `--diff-chamfer-extra` | 1.5 | Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings) |
 
 **Auto-grouping for DDR4:**
 ```bash
@@ -217,6 +218,7 @@ class GridRouteConfig:
     length_match_groups: List[List[str]] = []  # groups of net patterns to match
     length_match_tolerance: float = 0.1        # mm - acceptable length variance
     meander_amplitude: float = 1.0             # mm - height of meander perpendicular to trace
+    diff_chamfer_extra: float = 1.5            # chamfer multiplier for diff pair meanders
 
     # Debug
     debug_lines: bool = False

@@ -250,6 +250,7 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*"
 --length-match-group "pattern1" "pattern2"  # Manual grouping by net patterns
 --length-match-tolerance 0.1    # Acceptable length variance within group (mm)
 --meander-amplitude 1.0         # Height of meanders perpendicular to trace (mm)
+--diff-chamfer-extra 1.5        # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
 
 # Debug
 --verbose               # Print detailed diagnostic output

@@ -234,6 +234,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance,
         meander_amplitude=meander_amplitude,
+        diff_chamfer_extra=diff_chamfer_extra,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -1143,6 +1144,8 @@ Differential pair routing:
                         help="Acceptable length variance within group in mm (default: 0.1)")
     parser.add_argument("--meander-amplitude", type=float, default=1.0,
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
+    parser.add_argument("--diff-chamfer-extra", type=float, default=1.5,
+                        help="Chamfer multiplier for diff pair meanders (default: 1.5, >1 avoids P/N crossings)")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
