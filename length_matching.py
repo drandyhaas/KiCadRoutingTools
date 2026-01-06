@@ -1792,223 +1792,61 @@ def apply_meanders_to_diff_pair(
         if bump_count == 0:
             continue
 
-        # For multi-layer routes, extract only the meander layer section
-        from diff_pair_routing import create_parallel_path_from_float, _float_path_to_geometry, _calculate_parallel_extension
+        from diff_pair_routing import create_parallel_path_from_float, _float_path_to_geometry, _calculate_parallel_extension, _process_via_positions
 
+        # Unified path: always regenerate full P/N paths from modified centerline
+        p_float_path = create_parallel_path_from_float(
+            new_centerline_float, sign=p_sign, spacing_mm=spacing_mm,
+            start_dir=start_stub_dir, end_dir=end_stub_dir
+        )
+        n_float_path = create_parallel_path_from_float(
+            new_centerline_float, sign=n_sign, spacing_mm=spacing_mm,
+            start_dir=start_stub_dir, end_dir=end_stub_dir
+        )
+
+        # For multi-layer routes, process via positions to maintain P/N parallelism
         if not is_single_layer:
-            run_layer = centerline_grid[start_idx][2]
-            meander_layer_name = layer_names[run_layer] if run_layer < len(layer_names) else f"layer_{run_layer}"
-            original_segments = result.get('new_segments', [])
-            original_vias = result.get('new_vias', [])
-
-            # Find original P/N segments on the meander layer
-            original_layer_segs_p = [s for s in original_segments if s.layer == meander_layer_name and s.net_id == p_net_id]
-            original_layer_segs_n = [s for s in original_segments if s.layer == meander_layer_name and s.net_id == n_net_id]
-
-            if not original_layer_segs_p or not original_layer_segs_n:
-                continue
-
-            # Get the original straight run endpoints in float coords
-            run_start_float = coord.to_float(centerline_grid[start_idx][0], centerline_grid[start_idx][1])
-            run_end_float = coord.to_float(centerline_grid[end_idx][0], centerline_grid[end_idx][1])
-
-            # Extract only the meandered portion for this run (not all layer points)
-            # Find indices in new_centerline_float that match the run boundaries
-            def find_closest_idx(path, target_xy, tolerance=0.5):
-                """Find index of point closest to target within tolerance."""
-                best_idx = -1
-                best_dist = float('inf')
-                for i, p in enumerate(path):
-                    if p[2] != run_layer:
-                        continue
-                    dist = math.sqrt((p[0] - target_xy[0])**2 + (p[1] - target_xy[1])**2)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_idx = i
-                if best_dist <= tolerance:
-                    return best_idx
-                return -1
-
-            # Find the run portion in the new centerline
-            # Use larger tolerance since meander lead-in can shift endpoints
-            start_match_idx = find_closest_idx(new_centerline_float, run_start_float, tolerance=1.5)
-            end_match_idx = find_closest_idx(new_centerline_float, run_end_float, tolerance=1.5)
-
-            if start_match_idx < 0 or end_match_idx < 0 or start_match_idx >= end_match_idx:
-                # Debug: show why matching failed
-                print(f"      DEBUG: Boundary match failed for run {start_idx}-{end_idx}: match_start={start_match_idx}, match_end={end_match_idx}")
-                print(f"             run_start={run_start_float}, run_end={run_end_float}")
-                continue
-
-            # Extract just the run portion (with meanders)
-            meander_centerline = new_centerline_float[start_match_idx:end_match_idx + 1]
-
-            if len(meander_centerline) < 2:
-                continue
-
-            # Calculate P/N positions at run start/end using perpendicular offset
-            run_dx = run_end_float[0] - run_start_float[0]
-            run_dy = run_end_float[1] - run_start_float[1]
-            run_len = math.sqrt(run_dx*run_dx + run_dy*run_dy)
-            if run_len < 0.001:
-                continue
-            # Perpendicular direction (normalized)
-            perp_x = -run_dy / run_len
-            perp_y = run_dx / run_len
-
-            # Original P/N positions at run start and end
-            p_run_start = (run_start_float[0] + p_sign * spacing_mm * perp_x,
-                          run_start_float[1] + p_sign * spacing_mm * perp_y)
-            p_run_end = (run_end_float[0] + p_sign * spacing_mm * perp_x,
-                        run_end_float[1] + p_sign * spacing_mm * perp_y)
-            n_run_start = (run_start_float[0] + n_sign * spacing_mm * perp_x,
-                          run_start_float[1] + n_sign * spacing_mm * perp_y)
-            n_run_end = (run_end_float[0] + n_sign * spacing_mm * perp_x,
-                        run_end_float[1] + n_sign * spacing_mm * perp_y)
-
-            # Find which original segments to replace - those that connect to run endpoints
-            def find_segments_in_run(segs, run_start_pn, run_end_pn):
-                """Find segments that lie within the straight run section."""
-                to_replace = []
-                to_keep = []
-                tolerance = 0.1  # mm
-
-                for seg in segs:
-                    seg_start = (seg.start_x, seg.start_y)
-                    seg_end = (seg.end_x, seg.end_y)
-
-                    # Check if segment is colinear with run direction
-                    seg_dx = seg_end[0] - seg_start[0]
-                    seg_dy = seg_end[1] - seg_start[1]
-                    seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy)
-                    if seg_len < 0.001:
-                        to_keep.append(seg)
-                        continue
-
-                    # Check if segment direction matches run direction (or opposite)
-                    dot = (seg_dx * run_dx + seg_dy * run_dy) / (seg_len * run_len)
-                    if abs(abs(dot) - 1.0) > 0.01:
-                        # Not parallel to run direction
-                        to_keep.append(seg)
-                        continue
-
-                    # Check if segment is within the run region
-                    # Project segment endpoints onto run axis
-                    def project_onto_run(pt):
-                        return ((pt[0] - run_start_float[0]) * run_dx +
-                                (pt[1] - run_start_float[1]) * run_dy) / run_len
-
-                    proj_run_start = 0
-                    proj_run_end = run_len
-                    proj_seg_start = project_onto_run(seg_start)
-                    proj_seg_end = project_onto_run(seg_end)
-
-                    # Segment is in run if it overlaps with run region
-                    seg_min = min(proj_seg_start, proj_seg_end)
-                    seg_max = max(proj_seg_start, proj_seg_end)
-
-                    if seg_max < proj_run_start - tolerance or seg_min > proj_run_end + tolerance:
-                        # Segment is outside run region
-                        to_keep.append(seg)
-                    else:
-                        # Segment overlaps with run region - replace it
-                        to_replace.append(seg)
-
-                return to_replace, to_keep
-
-            p_to_replace, p_to_keep = find_segments_in_run(original_layer_segs_p, p_run_start, p_run_end)
-            n_to_replace, n_to_keep = find_segments_in_run(original_layer_segs_n, n_run_start, n_run_end)
-
-            if not p_to_replace or not n_to_replace:
-                continue
-
-            # Generate P/N paths for the meander section
-            p_meander_path = create_parallel_path_from_float(
-                meander_centerline, sign=p_sign, spacing_mm=spacing_mm,
-                start_dir=None, end_dir=None
-            )
-            n_meander_path = create_parallel_path_from_float(
-                meander_centerline, sign=n_sign, spacing_mm=spacing_mm,
-                start_dir=None, end_dir=None
+            simplified_path_grid = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
+                                    for x, y, layer in new_centerline_float]
+            p_float_path, n_float_path = _process_via_positions(
+                simplified_path_grid, p_float_path, n_float_path, coord, config,
+                p_sign, n_sign, spacing_mm
             )
 
-            # Adjust meander path endpoints to match original run endpoints
-            def adjust_path_to_run_endpoints(path, run_start_pn, run_end_pn):
-                if not path or len(path) < 2:
-                    return path
-                adjusted = list(path)
-                # Adjust start point
-                adjusted[0] = (run_start_pn[0], run_start_pn[1], path[0][2])
-                # Adjust end point
-                adjusted[-1] = (run_end_pn[0], run_end_pn[1], path[-1][2])
-                return adjusted
+        # Recalculate extensions for source and target connectors
+        p_src_route = p_float_path[0][:2] if p_float_path else p_start
+        n_src_route = n_float_path[0][:2] if n_float_path else n_start
+        src_p_ext, src_n_ext = _calculate_parallel_extension(
+            p_start, n_start, p_src_route, n_src_route,
+            src_stub_dir, p_sign
+        )
 
-            p_meander_path = adjust_path_to_run_endpoints(p_meander_path, p_run_start, p_run_end)
-            n_meander_path = adjust_path_to_run_endpoints(n_meander_path, n_run_start, n_run_end)
+        p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
+        n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
+        tgt_p_ext, tgt_n_ext = _calculate_parallel_extension(
+            p_end, n_end, p_tgt_route, n_tgt_route,
+            tgt_stub_dir, p_sign
+        )
 
-            # Build new segment list: keep non-meander layer segments + kept layer segments + new meander segments
-            non_layer_segments = [s for s in original_segments if s.layer != meander_layer_name]
+        # Convert paths to segments with proper connector handling
+        new_segments = []
+        new_vias = []
 
-            # Convert meander paths to segments
-            new_meander_segments = []
-            for path, net_id in [(p_meander_path, p_net_id), (n_meander_path, n_net_id)]:
-                for i in range(len(path) - 1):
-                    x1, y1, l1 = path[i]
-                    x2, y2, l2 = path[i + 1]
-                    if l1 == l2 and (abs(x2 - x1) > 0.001 or abs(y2 - y1) > 0.001):
-                        new_meander_segments.append(Segment(
-                            start_x=x1, start_y=y1, end_x=x2, end_y=y2,
-                            width=config.track_width, layer=meander_layer_name, net_id=net_id
-                        ))
+        p_segs, p_vias_new, _ = _float_path_to_geometry(
+            p_float_path, p_net_id, p_start, p_end, p_sign,
+            src_stub_dir, tgt_stub_dir, src_p_ext, tgt_p_ext,
+            config, layer_names
+        )
+        new_segments.extend(p_segs)
+        new_vias.extend(p_vias_new)
 
-            new_segments = non_layer_segments + p_to_keep + n_to_keep + new_meander_segments
-            new_vias = original_vias
-
-        else:
-            # Single-layer route: regenerate full P/N paths
-            p_float_path = create_parallel_path_from_float(
-                new_centerline_float, sign=p_sign, spacing_mm=spacing_mm,
-                start_dir=start_stub_dir, end_dir=end_stub_dir
-            )
-            n_float_path = create_parallel_path_from_float(
-                new_centerline_float, sign=n_sign, spacing_mm=spacing_mm,
-                start_dir=start_stub_dir, end_dir=end_stub_dir
-            )
-
-            # Recalculate extensions for source and target connectors
-            p_src_route = p_float_path[0][:2] if p_float_path else p_start
-            n_src_route = n_float_path[0][:2] if n_float_path else n_start
-            src_p_ext, src_n_ext = _calculate_parallel_extension(
-                p_start, n_start, p_src_route, n_src_route,
-                src_stub_dir, p_sign
-            )
-
-            p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
-            n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
-            tgt_p_ext, tgt_n_ext = _calculate_parallel_extension(
-                p_end, n_end, p_tgt_route, n_tgt_route,
-                tgt_stub_dir, p_sign
-            )
-
-            # Convert paths to segments with proper connector handling
-            new_segments = []
-            new_vias = []
-
-            p_segs, p_vias_new, _ = _float_path_to_geometry(
-                p_float_path, p_net_id, p_start, p_end, p_sign,
-                src_stub_dir, tgt_stub_dir, src_p_ext, tgt_p_ext,
-                config, layer_names
-            )
-            new_segments.extend(p_segs)
-            new_vias.extend(p_vias_new)
-
-            n_segs, n_vias_new, _ = _float_path_to_geometry(
-                n_float_path, n_net_id, n_start, n_end, n_sign,
-                src_stub_dir, tgt_stub_dir, src_n_ext, tgt_n_ext,
-                config, layer_names
-            )
-            new_segments.extend(n_segs)
-            new_vias.extend(n_vias_new)
+        n_segs, n_vias_new, _ = _float_path_to_geometry(
+            n_float_path, n_net_id, n_start, n_end, n_sign,
+            src_stub_dir, tgt_stub_dir, src_n_ext, tgt_n_ext,
+            config, layer_names
+        )
+        new_segments.extend(n_segs)
+        new_vias.extend(n_vias_new)
 
         # Also update the grid version for storage
         new_centerline_grid = [(coord.to_grid(x, y)[0], coord.to_grid(x, y)[1], layer)
