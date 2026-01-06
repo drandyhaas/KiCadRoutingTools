@@ -29,7 +29,7 @@ KiCadRoutingTools/
 ├── target_swap.py             # Target assignment optimization
 ├── length_matching.py         # Trombone meander length matching
 │
-├── kicad_parser.py            # KiCad file parsing
+├── kicad_parser.py            # KiCad file parsing (including stackup for via barrel length)
 ├── kicad_writer.py            # KiCad S-expression output
 ├── output_writer.py           # Route output and debug geometry
 └── rust_router/               # Rust A* implementation

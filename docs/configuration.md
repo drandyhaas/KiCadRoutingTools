@@ -126,11 +126,13 @@ Groups nets by byte lane: DQ0-7 + DQS0, DQ8-15 + DQS1, etc.
 
 **How it works:**
 - Routes all nets first, then adds meanders to shorter routes
-- Calculates pad-to-pad length including existing stub segments
+- Calculates pad-to-pad length including existing stub segments and via barrel lengths (parsed from board stackup)
+- Via barrel length matches KiCad's length calculation for accurate matching
 - Finds longest straight segment for meander insertion
 - Iteratively adds meander bumps until length exceeds target, then scales down amplitude to hit exact target
 - Per-bump clearance checking reduces amplitude to avoid conflicts with other traces
 - Uses 45° chamfered corners for smooth trombone patterns
+- Supports multi-layer routes: meanders are applied to same-layer sections, preserving via positions
 
 ### Visualization Options
 

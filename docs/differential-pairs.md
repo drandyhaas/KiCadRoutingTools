@@ -21,6 +21,7 @@ The router recognizes common differential pair naming conventions:
 | Convention | Example P | Example N |
 |------------|-----------|-----------|
 | `_P` / `_N` suffix | `LVDS_CLK_P` | `LVDS_CLK_N` |
+| `_t` / `_c` suffix | `DQS0_t_A` | `DQS0_c_A` |
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
 
@@ -345,9 +346,16 @@ python route.py input.kicad_pcb output.kicad_pcb "*rx*" \
 
 The crossing penalty (default 1000) heavily discourages crossing assignments, prioritizing non-crossing routes even if they're slightly longer.
 
+## Length Matching for Differential Pairs
+
+Differential pairs support length matching with trombone-style meanders. This works for both single-layer and multi-layer routes:
+
+- **Single-layer routes**: Meanders are added to straight sections of the centerline, then P/N paths are regenerated
+- **Multi-layer routes**: Meanders are applied to same-layer straight sections, preserving via positions. GND vias are regenerated after meander application
+- **Via barrel length**: Route length calculations include via barrel length (parsed from board stackup) for accurate length matching that matches KiCad's measurements
+
 ## Limitations
 
 1. **Polarity swap** - Enabled by default; use `--no-fix-polarity` to disable automatic target pad swapping
-2. **No length matching** - P and N paths may have slightly different lengths
-3. **Fixed spacing** - Spacing is constant along the route (no tapering)
-4. **Grid snapping** - Centerline endpoints snap to grid
+2. **Fixed spacing** - Spacing is constant along the route (no tapering)
+3. **Grid snapping** - Centerline endpoints snap to grid
