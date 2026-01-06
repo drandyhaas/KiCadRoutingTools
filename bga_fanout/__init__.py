@@ -54,6 +54,31 @@ from bga_fanout.layer_assignment import (
     assign_layers_smart,
     try_reassign_layer,
 )
+from bga_fanout.grid import (
+    analyze_bga_grid,
+    calculate_channels,
+    is_edge_pad,
+)
+from bga_fanout.geometry import (
+    create_45_stub,
+    calculate_exit_point,
+    calculate_jog_end,
+)
+from bga_fanout.escape import (
+    find_escape_channel,
+    get_pair_escape_options,
+    get_alternate_channels_for_pad,
+    find_diff_pair_escape,
+    assign_pair_escapes,
+)
+from bga_fanout.reroute import (
+    try_reroute_single_ended,
+    get_distance_to_escape_edge,
+    get_farther_channel,
+    try_jogged_route,
+    find_existing_fanouts,
+    resolve_collisions,
+)
 
 
 def find_differential_pairs(footprint: Footprint,
@@ -101,1660 +126,144 @@ def find_differential_pairs(footprint: Footprint,
     return complete_pairs
 
 
-def analyze_bga_grid(footprint: Footprint) -> Optional[BGAGrid]:
-    """Analyze a footprint to extract BGA grid parameters."""
-    pads = footprint.pads
-    if len(pads) < 4:
-        return None
-
-    x_positions = sorted(set(p.global_x for p in pads))
-    y_positions = sorted(set(p.global_y for p in pads))
-
-    if len(x_positions) < 2 or len(y_positions) < 2:
-        return None
-
-    x_diffs = [x_positions[i+1] - x_positions[i] for i in range(len(x_positions)-1)]
-    y_diffs = [y_positions[i+1] - y_positions[i] for i in range(len(y_positions)-1)]
-
-    def get_dominant_pitch(diffs):
-        if not diffs:
-            return None
-        rounded = [round(d, 2) for d in diffs]
-        counts = defaultdict(int)
-        for d in rounded:
-            counts[d] += 1
-        if not counts:
-            return None
-        dominant = max(counts.keys(), key=lambda k: counts[k])
-        if counts[dominant] < len(diffs) * 0.5:
-            return None
-        return dominant
-
-    pitch_x = get_dominant_pitch(x_diffs)
-    pitch_y = get_dominant_pitch(y_diffs)
-
-    if pitch_x is None or pitch_y is None:
-        return None
-
-    return BGAGrid(
-        pitch_x=pitch_x,
-        pitch_y=pitch_y,
-        rows=y_positions,
-        cols=x_positions,
-        center_x=(min(x_positions) + max(x_positions)) / 2,
-        center_y=(min(y_positions) + max(y_positions)) / 2,
-        min_x=min(x_positions) - pitch_x / 2,
-        max_x=max(x_positions) + pitch_x / 2,
-        min_y=min(y_positions) - pitch_y / 2,
-        max_y=max(y_positions) + pitch_y / 2
-    )
-
-
-def calculate_channels(grid: BGAGrid) -> List[Channel]:
-    """Calculate routing channels between ball rows and columns."""
-    channels = []
-    idx = 0
-
-    for i in range(len(grid.rows) - 1):
-        y_pos = (grid.rows[i] + grid.rows[i + 1]) / 2
-        channels.append(Channel(orientation='horizontal', position=y_pos, index=idx))
-        idx += 1
-
-    for i in range(len(grid.cols) - 1):
-        x_pos = (grid.cols[i] + grid.cols[i + 1]) / 2
-        channels.append(Channel(orientation='vertical', position=x_pos, index=idx))
-        idx += 1
-
-    return channels
-
-
-def is_edge_pad(pad_x: float, pad_y: float, grid: BGAGrid, tolerance: float = EDGE_PAD_TOLERANCE) -> Tuple[bool, str]:
+def detect_collisions(
+    tracks: List[Dict],
+    existing_tracks: List[Dict],
+    min_spacing: float,
+    max_pairs: int = 5
+) -> Tuple[int, List[Tuple[Dict, Dict]]]:
     """
-    Check if a pad is on the outer edge of the BGA.
-    Returns (is_edge, escape_direction).
-
-    Edge pads are on the outermost row or column and can escape directly
-    without needing a 45° stub.
-    """
-    on_left = abs(pad_x - grid.cols[0]) < tolerance
-    on_right = abs(pad_x - grid.cols[-1]) < tolerance
-    on_top = abs(pad_y - grid.rows[0]) < tolerance
-    on_bottom = abs(pad_y - grid.rows[-1]) < tolerance
-
-    # Determine escape direction based on which edge
-    if on_right:
-        return True, 'right'
-    elif on_left:
-        return True, 'left'
-    elif on_bottom:
-        return True, 'down'
-    elif on_top:
-        return True, 'up'
-
-    return False, ''
-
-
-def find_escape_channel(pad_x: float, pad_y: float,
-                        grid: BGAGrid,
-                        channels: List[Channel],
-                        force_orientation: str = None) -> Tuple[Optional[Channel], str]:
-    """
-    Find the best channel for a pad to escape through.
-    Returns (channel, direction). Channel is None for edge pads.
+    Detect collisions between tracks.
 
     Args:
-        pad_x, pad_y: Pad position
-        grid: BGA grid info
-        channels: Available routing channels
-        force_orientation: If set to 'horizontal' or 'vertical', only allow
-                          escapes in that orientation (left/right or up/down)
-    """
-    # Check if this is an edge pad first
-    is_edge, edge_dir = is_edge_pad(pad_x, pad_y, grid)
-    if is_edge:
-        return None, edge_dir
-
-    dist_left = pad_x - grid.min_x
-    dist_right = grid.max_x - pad_x
-    dist_up = pad_y - grid.min_y
-    dist_down = grid.max_y - pad_y
-
-    # Build list of (distance, direction, orientation) options
-    options = [
-        (dist_left, 'left', 'horizontal'),
-        (dist_right, 'right', 'horizontal'),
-        (dist_up, 'up', 'vertical'),
-        (dist_down, 'down', 'vertical'),
-    ]
-
-    # Filter to forced orientation if specified
-    if force_orientation:
-        options = [(d, dir, o) for d, dir, o in options if o == force_orientation]
-
-    # Sort by distance (closest first)
-    options.sort(key=lambda x: x[0])
-
-    # Pick the best option
-    for dist, escape_dir, orientation in options:
-        if orientation == 'horizontal':
-            h_channels = [c for c in channels if c.orientation == 'horizontal']
-            if h_channels:
-                best = min(h_channels, key=lambda c: abs(c.position - pad_y))
-                return best, escape_dir
-        else:  # vertical
-            v_channels = [c for c in channels if c.orientation == 'vertical']
-            if v_channels:
-                best = min(v_channels, key=lambda c: abs(c.position - pad_x))
-                return best, escape_dir
-
-    # Fallback: return closest edge direction even without channel
-    min_dist = min(dist_left, dist_right, dist_up, dist_down)
-    if min_dist == dist_right:
-        return None, 'right'
-    elif min_dist == dist_left:
-        return None, 'left'
-    elif min_dist == dist_down:
-        return None, 'down'
-    else:
-        return None, 'up'
-
-
-def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
-                             n_pad_x: float, n_pad_y: float,
-                             grid: BGAGrid,
-                             channels: List[Channel],
-                             include_alternate_channels: bool = False) -> List[Tuple[Optional[Channel], str]]:
-    """
-    Get all valid escape options for a differential pair, ordered by preference.
-
-    Returns list of (channel, direction) tuples, best options first.
-    Returns empty list for edge/half-edge pairs (they have fixed escape).
-
-    Args:
-        include_alternate_channels: If True, include neighboring channels as fallback options
-    """
-    center_x = (p_pad_x + n_pad_x) / 2
-    center_y = (p_pad_y + n_pad_y) / 2
-
-    # Check if this is an edge pair - no options, fixed escape
-    is_edge_p, _ = is_edge_pad(p_pad_x, p_pad_y, grid)
-    is_edge_n, _ = is_edge_pad(n_pad_x, n_pad_y, grid)
-    if is_edge_p or is_edge_n:
-        return []  # Edge pairs have fixed escape direction
-
-    # Calculate distances to each edge
-    dist_left = center_x - grid.min_x
-    dist_right = grid.max_x - center_x
-    dist_up = center_y - grid.min_y
-    dist_down = grid.max_y - center_y
-
-    min_pad_y = min(p_pad_y, n_pad_y)
-    max_pad_y = max(p_pad_y, n_pad_y)
-    min_pad_x = min(p_pad_x, n_pad_x)
-    max_pad_x = max(p_pad_x, n_pad_x)
-
-    options = []
-
-    # Horizontal escape options (left/right)
-    h_channels = [c for c in channels if c.orientation == 'horizontal']
-    channels_above = [c for c in h_channels if c.position < min_pad_y]
-    channels_below = [c for c in h_channels if c.position > max_pad_y]
-
-    # Best horizontal channel
-    if dist_up <= dist_down and channels_above:
-        h_channel = max(channels_above, key=lambda c: c.position)
-    elif channels_below:
-        h_channel = min(channels_below, key=lambda c: c.position)
-    elif channels_above:
-        h_channel = max(channels_above, key=lambda c: c.position)
-    else:
-        h_channel = min(h_channels, key=lambda c: abs(c.position - center_y)) if h_channels else None
-
-    if h_channel:
-        h_dir = 'left' if dist_left <= dist_right else 'right'
-        h_dist = min(dist_left, dist_right)
-        options.append((h_channel, h_dir, h_dist))
-
-    # Vertical escape options (up/down)
-    v_channels = [c for c in channels if c.orientation == 'vertical']
-    channels_left = [c for c in v_channels if c.position < min_pad_x]
-    channels_right = [c for c in v_channels if c.position > max_pad_x]
-
-    # Best vertical channel
-    if dist_left <= dist_right and channels_left:
-        v_channel = max(channels_left, key=lambda c: c.position)
-    elif channels_right:
-        v_channel = min(channels_right, key=lambda c: c.position)
-    elif channels_left:
-        v_channel = max(channels_left, key=lambda c: c.position)
-    else:
-        v_channel = min(v_channels, key=lambda c: abs(c.position - center_x)) if v_channels else None
-
-    if v_channel:
-        v_dir = 'up' if dist_up <= dist_down else 'down'
-        v_dist = min(dist_up, dist_down)
-        options.append((v_channel, v_dir, v_dist))
-
-    # Sort by distance (closest edge first)
-    options.sort(key=lambda x: x[2])
-
-    # Build result list
-    result = [(ch, d) for ch, d, _ in options]
-
-    # If requested, add alternate channels as fallback options
-    # IMPORTANT: Alternate channels must be in the OPPOSITE direction from track travel
-    # e.g., if tracks go RIGHT to reach channel, alternate must be to the LEFT of pads
-    # (so tracks can still reach it going right)
-    if include_alternate_channels:
-        # Add alternate vertical channels
-        if v_channel:
-            v_dir = 'up' if dist_up <= dist_down else 'down'
-            # If primary channel is to the right, tracks go right - alternate must be to LEFT
-            # If primary channel is to the left, tracks go left - alternate must be to RIGHT
-            if v_channel.position > center_x:
-                # Primary is right of pads - only consider channels to the LEFT as alternates
-                alt_candidates = [c for c in v_channels if c != v_channel and c.position < center_x]
-            else:
-                # Primary is left of pads - only consider channels to the RIGHT as alternates
-                alt_candidates = [c for c in v_channels if c != v_channel and c.position > center_x]
-            # Sort by closest to pads (furthest into the alternate direction)
-            if v_channel.position > center_x:
-                alt_candidates.sort(key=lambda c: c.position, reverse=True)  # Closest to pads from left
-            else:
-                alt_candidates.sort(key=lambda c: c.position)  # Closest to pads from right
-            for alt_ch in alt_candidates[:2]:  # Add up to 2 alternates
-                result.append((alt_ch, v_dir))
-
-        # Add alternate horizontal channels
-        if h_channel:
-            h_dir = 'left' if dist_left <= dist_right else 'right'
-            # If primary channel is above, tracks go up - alternate must be BELOW
-            # If primary channel is below, tracks go down - alternate must be ABOVE
-            if h_channel.position < center_y:
-                # Primary is above pads - only consider channels BELOW as alternates
-                alt_candidates = [c for c in h_channels if c != h_channel and c.position > center_y]
-            else:
-                # Primary is below pads - only consider channels ABOVE as alternates
-                alt_candidates = [c for c in h_channels if c != h_channel and c.position < center_y]
-            # Sort by closest to pads
-            if h_channel.position < center_y:
-                alt_candidates.sort(key=lambda c: c.position)  # Closest to pads from below
-            else:
-                alt_candidates.sort(key=lambda c: c.position, reverse=True)  # Closest to pads from above
-            for alt_ch in alt_candidates[:2]:  # Add up to 2 alternates
-                result.append((alt_ch, h_dir))
-
-    return result
-
-
-def get_alternate_channels_for_pad(pad_x: float, pad_y: float,
-                                    primary_channel: Channel,
-                                    escape_dir: str,
-                                    channels: List[Channel]) -> List[Channel]:
-    """
-    Get alternate channel for a single-ended signal.
-
-    Returns the ONE channel on the OPPOSITE side of the pad from the primary channel.
-    This means the 45° stub will go in the opposite direction.
-
-    For example:
-    - If escape_dir is 'right' and primary_channel is BELOW the pad (stub goes 45° down),
-      the alternate is the channel ABOVE the pad (stub goes 45° up instead).
-    - Only one alternate is returned (the closest channel on the opposite side).
-    """
-    if primary_channel is None:
-        return []
-
-    if primary_channel.orientation == 'horizontal':
-        # Horizontal channel used for left/right escape
-        # Get other horizontal channels on the OPPOSITE side of the pad
-        h_channels = [c for c in channels if c.orientation == 'horizontal' and c != primary_channel]
-
-        if primary_channel.position < pad_y:
-            # Primary is ABOVE pad (stub goes up to reach it)
-            # Alternate must be BELOW pad (stub goes down instead)
-            candidates = [c for c in h_channels if c.position > pad_y]
-            # Sort by closest to pad first (smallest Y greater than pad_y)
-            candidates.sort(key=lambda c: c.position)
-        else:
-            # Primary is BELOW pad (stub goes down to reach it)
-            # Alternate must be ABOVE pad (stub goes up instead)
-            candidates = [c for c in h_channels if c.position < pad_y]
-            # Sort by closest to pad first (largest Y less than pad_y)
-            candidates.sort(key=lambda c: c.position, reverse=True)
-
-        # Only return the ONE closest alternate on the opposite side
-        return candidates[:1]
-
-    else:  # vertical
-        # Vertical channel used for up/down escape
-        # Get other vertical channels on the OPPOSITE side of the pad
-        v_channels = [c for c in channels if c.orientation == 'vertical' and c != primary_channel]
-
-        if primary_channel.position < pad_x:
-            # Primary is LEFT of pad (stub goes left to reach it)
-            # Alternate must be RIGHT of pad (stub goes right instead)
-            candidates = [c for c in v_channels if c.position > pad_x]
-            # Sort by closest to pad first
-            candidates.sort(key=lambda c: c.position)
-        else:
-            # Primary is RIGHT of pad (stub goes right to reach it)
-            # Alternate must be LEFT of pad (stub goes left instead)
-            candidates = [c for c in v_channels if c.position < pad_x]
-            # Sort by closest to pad first
-            candidates.sort(key=lambda c: c.position, reverse=True)
-
-        # Only return the ONE closest alternate on the opposite side
-        return candidates[:1]
-
-
-def try_reroute_single_ended(route: 'FanoutRoute',
-                              alternate_channel: Channel,
-                              grid: BGAGrid,
-                              exit_margin: float,
-                              tracks: List[Dict],
-                              existing_tracks: List[Dict],
-                              available_layers: List[str],
-                              track_width: float,
-                              clearance: float) -> Optional[Tuple['FanoutRoute', str]]:
-    """
-    Try rerouting a single-ended signal through an alternate channel.
-
-    Args:
-        route: The current route to reroute
-        alternate_channel: The alternate channel to try
-        grid: BGA grid
-        exit_margin: Exit margin from BGA boundary
-        tracks: Current track list (to check for collisions)
-        existing_tracks: Existing tracks from PCB
-        available_layers: Available layers to try
-        track_width: Track width
-        clearance: Required clearance
+        tracks: New tracks to check
+        existing_tracks: Existing tracks to check against
+        min_spacing: Minimum required spacing between tracks
+        max_pairs: Maximum number of collision pairs to return
 
     Returns:
-        (new_route, layer) if successful, None if no collision-free option found
+        Tuple of (collision_count, list of collision pairs)
     """
-    min_spacing = track_width + clearance
-    pad_x, pad_y = route.pad_pos
+    collision_count = 0
+    collision_pairs = []
 
-    # Calculate new stub end and exit position with the alternate channel
-    new_stub_end = create_45_stub(pad_x, pad_y, alternate_channel, route.escape_dir)
-    new_exit_pos = calculate_exit_point(new_stub_end, alternate_channel, route.escape_dir, grid, exit_margin)
+    for i, t1 in enumerate(tracks):
+        # Check against other new tracks
+        for j, t2 in enumerate(tracks[i+1:], i+1):
+            if t1['layer'] != t2['layer']:
+                continue
+            if t1['net_id'] == t2['net_id']:
+                continue
+            # Skip collision check for tracks from the same differential pair
+            if t1.get('pair_id') and t1.get('pair_id') == t2.get('pair_id'):
+                continue
+            if check_segment_collision(t1['start'], t1['end'],
+                                       t2['start'], t2['end'],
+                                       min_spacing):
+                collision_count += 1
+                if len(collision_pairs) < max_pairs:
+                    collision_pairs.append((t1, t2))
 
-    # Create new track segments to check for collisions
-    new_segments = [
-        {'start': route.pad_pos, 'end': new_stub_end},
-        {'start': new_stub_end, 'end': new_exit_pos}
-    ]
+        # Also check against existing tracks
+        for t2 in existing_tracks:
+            if t1['layer'] != t2['layer']:
+                continue
+            if t1['net_id'] == t2['net_id']:
+                continue
+            if check_segment_collision(t1['start'], t1['end'],
+                                       t2['start'], t2['end'],
+                                       min_spacing):
+                collision_count += 1
+                if len(collision_pairs) < max_pairs:
+                    collision_pairs.append((t1, t2))
 
-    # Check if this is an inner route (should avoid F.Cu)
-    is_edge, _ = is_edge_pad(pad_x, pad_y, grid)
-    if is_edge:
-        candidate_layers = available_layers
-    else:
-        candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
-
-    # Get other tracks (excluding this route's current tracks)
-    other_new_tracks = [t for t in tracks if t.get('net_id') != route.net_id]
-    all_other_tracks = other_new_tracks + existing_tracks
-
-    # Try each layer
-    for layer in candidate_layers:
-        has_collision = False
-        for seg in new_segments:
-            for other in all_other_tracks:
-                if other['layer'] != layer:
-                    continue
-                if other.get('net_id') == route.net_id:
-                    continue
-                if check_segment_collision(seg['start'], seg['end'],
-                                            other['start'], other['end'],
-                                            min_spacing):
-                    has_collision = True
-                    break
-            if has_collision:
-                break
-
-        if not has_collision:
-            # Found a collision-free route
-            new_route = FanoutRoute(
-                pad=route.pad,
-                pad_pos=route.pad_pos,
-                stub_end=new_stub_end,
-                exit_pos=new_exit_pos,
-                channel=alternate_channel,
-                escape_dir=route.escape_dir,
-                is_edge=route.is_edge,
-                layer=layer,
-                pair_id=None,
-                is_p=None
-            )
-            return new_route, layer
-
-    return None
+    return collision_count, collision_pairs
 
 
-def get_distance_to_escape_edge(route: 'FanoutRoute', grid: BGAGrid) -> float:
+def calculate_jog_ends_for_routes(
+    routes: List[FanoutRoute],
+    layers: List[str],
+    jog_length: float,
+    track_width: float,
+    diff_pair_gap: float
+) -> None:
     """
-    Calculate how far the route's pad is from the escape edge.
-    Larger value = farther from edge = should be jogged.
-    """
-    pad_x, pad_y = route.pad_pos
-    escape_dir = route.escape_dir
+    Calculate jog_end positions for each route based on layer.
 
-    if escape_dir == 'right':
-        return grid.max_x - pad_x  # farther from right edge = larger distance
-    elif escape_dir == 'left':
-        return pad_x - grid.min_x  # farther from left edge = larger distance
-    elif escape_dir == 'down':
-        return grid.max_y - pad_y  # farther from bottom edge = larger distance
-    elif escape_dir == 'up':
-        return pad_y - grid.min_y  # farther from top edge = larger distance
-    return 0.0
+    For differential pairs, determines which track is on the outside of the bend
+    and extends it appropriately to maintain spacing through the 45° turn.
 
-
-def get_farther_channel(route: 'FanoutRoute', channels: List[Channel],
-                        grid: BGAGrid) -> Optional[Channel]:
-    """
-    Get a channel one unit farther from the escape edge than the current channel.
-
-    For a route escaping right with a horizontal channel at Y=105.0,
-    this returns the horizontal channel at Y=104.2 (one pitch closer to center,
-    i.e., farther from the right edge in terms of distance the track travels).
-    """
-    if route.channel is None:
-        return None
-
-    pitch = grid.pitch_y if route.channel.orientation == 'horizontal' else grid.pitch_x
-    pad_x, pad_y = route.pad_pos
-
-    if route.channel.orientation == 'horizontal':
-        # For left/right escape, find channel one pitch farther from edge
-        # "Farther from edge" means the route has to travel more vertically
-        same_orientation = [c for c in channels if c.orientation == 'horizontal' and c != route.channel]
-
-        if route.channel.position < pad_y:
-            # Current channel is above pad - farther means even more above (smaller Y)
-            candidates = [c for c in same_orientation if c.position < route.channel.position]
-            if candidates:
-                # Get closest to current channel (largest Y among those above)
-                return max(candidates, key=lambda c: c.position)
-        else:
-            # Current channel is below pad - farther means even more below (larger Y)
-            candidates = [c for c in same_orientation if c.position > route.channel.position]
-            if candidates:
-                # Get closest to current channel (smallest Y among those below)
-                return min(candidates, key=lambda c: c.position)
-    else:
-        # For up/down escape, find channel one pitch farther from edge
-        same_orientation = [c for c in channels if c.orientation == 'vertical' and c != route.channel]
-
-        if route.channel.position < pad_x:
-            # Current channel is left of pad - farther means even more left (smaller X)
-            candidates = [c for c in same_orientation if c.position < route.channel.position]
-            if candidates:
-                return max(candidates, key=lambda c: c.position)
-        else:
-            # Current channel is right of pad - farther means even more right (larger X)
-            candidates = [c for c in same_orientation if c.position > route.channel.position]
-            if candidates:
-                return min(candidates, key=lambda c: c.position)
-
-    return None
-
-
-def try_jogged_route(route: 'FanoutRoute',
-                     farther_channel: Channel,
-                     grid: BGAGrid,
-                     exit_margin: float,
-                     tracks: List[Dict],
-                     existing_tracks: List[Dict],
-                     available_layers: List[str],
-                     track_width: float,
-                     clearance: float,
-                     jog_length: float = None) -> Optional[Tuple['FanoutRoute', str, List[Dict]]]:
-    """
-    Try rerouting a signal through a farther channel using a jogged path.
-
-    The jogged path is: pad -> 45° stub -> vertical/horizontal jog -> farther channel -> exit -> jog_end
-
-    For example, for a right-escaping route with channel below the pad:
-    - 45° stub from pad to original channel position
-    - Vertical jog DOWN one pitch to the farther channel
-    - Horizontal along farther channel to exit
-    - 45° jog at exit
+    Modifies routes in-place, setting jog_end and jog_extension attributes.
 
     Args:
-        route: The current route to reroute
-        farther_channel: The channel one unit farther from the escape edge
-        grid: BGA grid
-        exit_margin: Exit margin from BGA boundary
-        tracks: Current track list (to check for collisions)
-        existing_tracks: Existing tracks from PCB
-        available_layers: Available layers to try
-        track_width: Track width
-        clearance: Required clearance
-        jog_length: Length of the 45° jog at exit (defaults to half pitch)
-
-    Returns:
-        (new_route, layer, new_tracks) if successful, None if no collision-free option found
-    """
-    min_spacing = track_width + clearance
-    pad_x, pad_y = route.pad_pos
-
-    if route.channel is None or farther_channel is None:
-        return None
-
-    # Default jog_length to half pitch
-    if jog_length is None:
-        jog_length = min(grid.pitch_x, grid.pitch_y) / 2
-
-    # Calculate the jogged path
-    # Step 1: 45° stub to original channel position (same as normal route)
-    stub_end = create_45_stub(pad_x, pad_y, route.channel, route.escape_dir)
-
-    # Step 2: Jog from stub_end to farther channel
-    if route.channel.orientation == 'horizontal':
-        # Jog is vertical (Y changes, X stays same)
-        jog_point = (stub_end[0], farther_channel.position)
-    else:
-        # Jog is horizontal (X changes, Y stays same)
-        jog_point = (farther_channel.position, stub_end[1])
-
-    # Step 3: Calculate exit position on farther channel
-    exit_pos = calculate_exit_point(jog_point, farther_channel, route.escape_dir, grid, exit_margin)
-
-    # Create track segments for collision checking
-    new_segments = [
-        {'start': route.pad_pos, 'end': stub_end},      # 45° stub
-        {'start': stub_end, 'end': jog_point},          # Vertical/horizontal jog
-        {'start': jog_point, 'end': exit_pos}           # Channel to exit
-    ]
-
-    # Check if this is an inner route (should avoid F.Cu)
-    is_edge, _ = is_edge_pad(pad_x, pad_y, grid)
-    if is_edge:
-        candidate_layers = available_layers
-    else:
-        candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
-
-    # Get other tracks (excluding this route's current tracks)
-    other_new_tracks = [t for t in tracks if t.get('net_id') != route.net_id]
-    all_other_tracks = other_new_tracks + existing_tracks
-
-    # Try each layer
-    for layer in candidate_layers:
-        has_collision = False
-        for seg in new_segments:
-            for other in all_other_tracks:
-                if other['layer'] != layer:
-                    continue
-                if other.get('net_id') == route.net_id:
-                    continue
-                if check_segment_collision(seg['start'], seg['end'],
-                                           other['start'], other['end'],
-                                           min_spacing):
-                    has_collision = True
-                    break
-            if has_collision:
-                break
-
-        if not has_collision:
-            # Calculate jog_end for the exit
-            jog_end, _ = calculate_jog_end(
-                exit_pos,
-                route.escape_dir,
-                layer,
-                available_layers,
-                jog_length,
-                is_diff_pair=route.pair_id is not None,
-                is_outside_track=False,
-                pair_spacing=0
-            )
-
-            # Found a collision-free route
-            new_route = FanoutRoute(
-                pad=route.pad,
-                pad_pos=route.pad_pos,
-                stub_end=stub_end,
-                exit_pos=exit_pos,
-                jog_end=jog_end,
-                pre_channel_jog=jog_point,
-                channel=farther_channel,
-                escape_dir=route.escape_dir,
-                is_edge=route.is_edge,
-                layer=layer,
-                pair_id=route.pair_id,
-                is_p=route.is_p
-            )
-
-            # Create track dicts for this route (including jog at exit)
-            new_tracks = [
-                create_track(route.pad_pos, stub_end, track_width, layer, route.net_id, route.pair_id),
-                create_track(stub_end, jog_point, track_width, layer, route.net_id, route.pair_id),
-                create_track(jog_point, exit_pos, track_width, layer, route.net_id, route.pair_id),
-                create_track(exit_pos, jog_end, track_width, layer, route.net_id, route.pair_id),
-            ]
-
-            return new_route, layer, new_tracks
-
-    return None
-
-
-def find_existing_fanouts(pcb_data: PCBData, footprint: Footprint,
-                          grid: BGAGrid, channels: List[Channel],
-                          tolerance: float = FANOUT_DETECTION_TOLERANCE) -> Tuple[Set[int], Dict[Tuple[str, str, float], str]]:
-    """
-    Find pads that already have fanout tracks and identify occupied channel positions.
-
-    A pad is considered to have an existing fanout if there's a segment that starts
-    or ends at the pad position.
-
-    Args:
-        pcb_data: Full PCB data with segments
-        footprint: The BGA footprint
-        grid: BGA grid structure
-        channels: List of routing channels
-        tolerance: Position matching tolerance in mm
-
-    Returns:
-        Tuple of:
-        - Set of net_ids that already have fanouts
-        - Dict of occupied exit positions: (layer, direction_axis, position) -> net_name
-    """
-    fanned_out_nets: Set[int] = set()
-    occupied_exits: Dict[Tuple[str, str, float], str] = {}
-
-    # Build a lookup of pad positions by net_id
-    pad_positions: Dict[int, Tuple[float, float]] = {}
-    net_names: Dict[int, str] = {}
-    for pad in footprint.pads:
-        if pad.net_id > 0:
-            pad_positions[pad.net_id] = (pad.global_x, pad.global_y)
-            net_names[pad.net_id] = pad.net_name
-
-    # Check each segment to see if it connects to a BGA pad
-    for segment in pcb_data.segments:
-        if segment.net_id not in pad_positions:
-            continue
-
-        pad_x, pad_y = pad_positions[segment.net_id]
-
-        # Check if segment starts or ends at the pad
-        starts_at_pad = (abs(segment.start_x - pad_x) < tolerance and
-                         abs(segment.start_y - pad_y) < tolerance)
-        ends_at_pad = (abs(segment.end_x - pad_x) < tolerance and
-                       abs(segment.end_y - pad_y) < tolerance)
-
-        if starts_at_pad or ends_at_pad:
-            fanned_out_nets.add(segment.net_id)
-
-            # Determine the exit direction and position from the segment
-            # The "other end" of the segment (not at pad) tells us the escape direction
-            if starts_at_pad:
-                other_x, other_y = segment.end_x, segment.end_y
-            else:
-                other_x, other_y = segment.start_x, segment.start_y
-
-            # Determine escape direction based on where the segment goes
-            dx = other_x - pad_x
-            dy = other_y - pad_y
-
-            # Find which channel/exit this segment uses
-            # For vertical escape (up/down), track X position
-            # For horizontal escape (left/right), track Y position
-            if abs(dy) > abs(dx):
-                # Primarily vertical movement
-                if dy < 0:
-                    direction = 'up'
-                else:
-                    direction = 'down'
-                # Find the vertical channel being used
-                for ch in channels:
-                    if ch.orientation == 'vertical':
-                        if abs(ch.position - other_x) < grid.pitch_x / 2:
-                            exit_key = (segment.layer, f'{direction}_v', round(ch.position, 1))
-                            occupied_exits[exit_key] = net_names.get(segment.net_id, f"net_{segment.net_id}")
-                            break
-            else:
-                # Primarily horizontal movement
-                if dx < 0:
-                    direction = 'left'
-                else:
-                    direction = 'right'
-                # Find the horizontal channel being used
-                for ch in channels:
-                    if ch.orientation == 'horizontal':
-                        if abs(ch.position - other_y) < grid.pitch_y / 2:
-                            exit_key = (segment.layer, f'{direction}_h', round(ch.position, 1))
-                            occupied_exits[exit_key] = net_names.get(segment.net_id, f"net_{segment.net_id}")
-                            break
-
-    return fanned_out_nets, occupied_exits
-
-
-def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
-                          n_pad_x: float, n_pad_y: float,
-                          grid: BGAGrid,
-                          channels: List[Channel],
-                          preferred_orientation: str = 'auto') -> Tuple[Optional[Channel], str]:
-    """
-    Find the best escape channel for a differential pair.
-
-    Args:
-        preferred_orientation: 'horizontal', 'vertical', or 'auto'
-            - 'horizontal': prefer left/right escape
-            - 'vertical': prefer up/down escape
-            - 'auto': choose based on closest edge
-
-    Returns (channel, direction). Channel is None for edge pads.
-    """
-    # Calculate pair center and orientation
-    center_x = (p_pad_x + n_pad_x) / 2
-    center_y = (p_pad_y + n_pad_y) / 2
-
-    # Check if this is an edge pair
-    is_edge_p, edge_dir_p = is_edge_pad(p_pad_x, p_pad_y, grid)
-    is_edge_n, edge_dir_n = is_edge_pad(n_pad_x, n_pad_y, grid)
-
-    if is_edge_p and is_edge_n:
-        # Both pads on edge - use the common edge direction
-        return None, edge_dir_p
-
-    # Check for "half-edge" pair: one pad on edge, one inner
-    if is_edge_p or is_edge_n:
-        edge_dir = edge_dir_p if is_edge_p else edge_dir_n
-        return None, f'half_edge_{edge_dir}'
-
-    # Get all escape options
-    options = get_pair_escape_options(p_pad_x, p_pad_y, n_pad_x, n_pad_y, grid, channels)
-
-    if not options:
-        # Fallback - shouldn't happen for inner pairs
-        return None, 'right'
-
-    if preferred_orientation == 'auto':
-        # Use first (best) option
-        return options[0]
-    elif preferred_orientation == 'horizontal':
-        # Prefer horizontal (left/right)
-        for ch, d in options:
-            if d in ['left', 'right']:
-                return ch, d
-        return options[0]  # Fallback
-    elif preferred_orientation == 'vertical':
-        # Prefer vertical (up/down)
-        for ch, d in options:
-            if d in ['up', 'down']:
-                return ch, d
-        return options[0]  # Fallback
-    else:
-        return options[0]
-
-
-def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
-                        grid: BGAGrid,
-                        channels: List[Channel],
-                        layers: List[str],
-                        primary_orientation: str = 'horizontal',
-                        track_width: float = 0.1,
-                        clearance: float = 0.1,
-                        diff_pair_gap: float = 0.1,
-                        via_size: float = 0.3,
-                        rebalance: bool = False,
-                        pre_occupied: Dict[Tuple[str, str, float], str] = None,
-                        force_escape_direction: bool = False) -> Dict[str, Tuple[Optional[Channel], str]]:
-    """
-    Assign escape directions to all differential pairs, avoiding overlaps.
-
-    Strategy:
-    1. Sort pairs by distance to nearest edge (closest first - they have fewer options)
-    2. Try primary orientation first for each pair
-    3. If channel/layer is occupied, try secondary orientation
-    4. Track channel occupancy per layer
-    5. If rebalance=True, try to balance if one direction is overpopulated
-
-    Args:
-        diff_pairs: Dictionary of pair_id -> DiffPairPads
-        grid: BGA grid info
-        channels: Available channels
+        routes: List of routes to process
         layers: Available routing layers
-        primary_orientation: 'horizontal' or 'vertical'
-        track_width: Track width for spacing calculation
-        clearance: Clearance for spacing calculation
-        rebalance: If True, rebalance directions to achieve even H/V mix
-        pre_occupied: Dict of already-occupied exit positions from existing fanouts
-        force_escape_direction: If True, only use primary orientation (no fallback)
-
-    Returns:
-        Dictionary of pair_id -> (channel, escape_direction)
+        jog_length: Length of the 45° jog at exit
+        track_width: Track width
+        diff_pair_gap: Gap between P and N traces
     """
-    # Track which exit positions are used per layer
-    # Key: (layer, exit_x or exit_y rounded to 0.1mm)
-    # For horizontal escape: track exit Y positions
-    # For vertical escape: track exit X positions
-    used_exits: Dict[Tuple[str, str, float], Set[str]] = defaultdict(set)  # (layer, 'h'/'v', pos) -> set of pair_ids
+    pair_spacing = track_width + diff_pair_gap  # Center-to-center spacing
 
-    pair_spacing = track_width * 2 + clearance  # Space needed for a diff pair
+    for route in routes:
+        is_outside = False
 
-    assignments: Dict[str, Tuple[Optional[Channel], str]] = {}
-
-    # Track occupied exit positions per layer
-    # Key: (layer, direction_axis, position) where position is the channel/exit coordinate
-    # Must be initialized BEFORE processing edge pairs so they get tracked
-    # Start with pre-occupied positions from existing fanouts
-    occupied: Dict[Tuple[str, str, float], str] = dict(pre_occupied) if pre_occupied else {}
-
-    pair_spacing = track_width * 2 + clearance  # Minimum spacing between diff pairs
-    edge_layer = layers[0]  # Edge pairs go on top layer (F.Cu)
-
-    # Calculate which directions require adjacent-channel routing
-    # half_pair_spacing is the offset from channel center for each track
-    half_pair_spacing = (track_width + diff_pair_gap) / 2
-    via_radius = via_size / 2
-
-    # max_offset is the maximum track offset that fits between vias
-    # For horizontal escape (left/right), tracks are in horizontal channels, constrained by pitch_y
-    # For vertical escape (up/down), tracks are in vertical channels, constrained by pitch_x
-    max_offset_h = grid.pitch_y / 2 - via_radius - track_width / 2 - clearance
-    max_offset_v = grid.pitch_x / 2 - via_radius - track_width / 2 - clearance
-
-    # Determine if each direction needs adjacent channels
-    horizontal_needs_adjacent = half_pair_spacing > max_offset_h
-    vertical_needs_adjacent = half_pair_spacing > max_offset_v
-
-    # Collect pair info with distances
-    pair_info = []
-    for pair_id, pair in diff_pairs.items():
-        if not pair.is_complete:
-            continue
-        p_pad = pair.p_pad
-        n_pad = pair.n_pad
-        center_x = (p_pad.global_x + n_pad.global_x) / 2
-        center_y = (p_pad.global_y + n_pad.global_y) / 2
-
-        # Check if edge pair
-        is_edge_p, edge_dir_p = is_edge_pad(p_pad.global_x, p_pad.global_y, grid)
-        is_edge_n, edge_dir_n = is_edge_pad(n_pad.global_x, n_pad.global_y, grid)
-
-        if is_edge_p and is_edge_n:
-            # Both on edge - fixed assignment on edge_layer
-            edge_dir = edge_dir_p
-            assignments[pair_id] = (None, edge_dir)
-            # Track occupancy - edge pairs exit at their center position
-            if edge_dir in ['left', 'right']:
-                # Horizontal exit - track Y position (center_y)
-                key = (edge_layer, f'{edge_dir}_h', round(center_y, 1))
+        if route.pair_id:
+            # Determine jog direction for this layer
+            try:
+                layer_idx = layers.index(route.layer)
+            except ValueError:
+                layer_idx = 0
+            num_layers = len(layers)
+            if num_layers <= 1:
+                jog_direction = -1  # left
             else:
-                # Vertical exit - track X position (center_x)
-                key = (edge_layer, f'{edge_dir}_v', round(center_x, 1))
-            occupied[key] = pair_id
-            continue
-        elif is_edge_p or is_edge_n:
-            # Half-edge - fixed assignment on edge_layer
-            edge_dir = edge_dir_p if is_edge_p else edge_dir_n
-            assignments[pair_id] = (None, f'half_edge_{edge_dir}')
-            # Track occupancy for half-edge pairs too
-            if edge_dir in ['left', 'right']:
-                key = (edge_layer, f'{edge_dir}_h', round(center_y, 1))
+                layer_factor = layer_idx / (num_layers - 1)
+                jog_direction = 2 * layer_factor - 1  # -1 = left, +1 = right
+
+            # Determine if this route is on the outside of the bend
+            if route.escape_dir in ['left', 'right']:
+                # Horizontal escape, jog is in Y direction
+                for other in routes:
+                    if other.pair_id == route.pair_id and other is not route:
+                        if route.escape_dir == 'right':
+                            if jog_direction < 0:  # Jog goes up (-Y)
+                                is_outside = route.exit_pos[1] > other.exit_pos[1]
+                            else:  # Jog goes down (+Y)
+                                is_outside = route.exit_pos[1] < other.exit_pos[1]
+                        else:  # left
+                            if jog_direction < 0:  # Jog goes down (+Y)
+                                is_outside = route.exit_pos[1] < other.exit_pos[1]
+                            else:  # Jog goes up (-Y)
+                                is_outside = route.exit_pos[1] > other.exit_pos[1]
+                        break
             else:
-                key = (edge_layer, f'{edge_dir}_v', round(center_x, 1))
-            occupied[key] = pair_id
-            continue
-
-        # Calculate distance to nearest edge
-        dist_left = center_x - grid.min_x
-        dist_right = grid.max_x - center_x
-        dist_up = center_y - grid.min_y
-        dist_down = grid.max_y - center_y
-        min_dist = min(dist_left, dist_right, dist_up, dist_down)
-
-        pair_info.append((pair_id, pair, min_dist, center_x, center_y))
-
-    secondary_orientation = 'vertical' if primary_orientation == 'horizontal' else 'horizontal'
-
-    def get_exit_key(pair: DiffPairPads, channel: Channel, escape_dir: str) -> Tuple[str, float]:
-        """Get the exit position key for a pair assignment.
-
-        Returns (direction_and_axis, position) where direction_and_axis encodes
-        both the escape direction and axis to prevent false conflicts.
-        E.g., 'up_v' vs 'down_v' are different even at same X position.
-        """
-        p_pad = pair.p_pad
-        n_pad = pair.n_pad
-        cx = (p_pad.global_x + n_pad.global_x) / 2
-        cy = (p_pad.global_y + n_pad.global_y) / 2
-
-        pads_horizontal = abs(p_pad.global_x - n_pad.global_x) > abs(p_pad.global_y - n_pad.global_y)
-        is_cross = (pads_horizontal and escape_dir in ['up', 'down']) or \
-                   (not pads_horizontal and escape_dir in ['left', 'right'])
-
-        if is_cross:
-            # Convergence - exits at pair center
-            if escape_dir in ['up', 'down']:
-                return (f'{escape_dir}_v', round(cx, 1))
-            else:
-                return (f'{escape_dir}_h', round(cy, 1))
-        else:
-            # Channel routing - exits at channel position
-            if escape_dir in ['left', 'right']:
-                return (f'{escape_dir}_h', round(channel.position, 1))
-            else:
-                return (f'{escape_dir}_v', round(channel.position, 1))
-
-    def can_assign(pair: DiffPairPads, channel: Channel, escape_dir: str) -> Tuple[bool, Optional[str]]:
-        """Check if a pair can be assigned without overlap. Returns (can_assign, best_layer)."""
-        if channel is None:
-            return False, None
-
-        pos_key, pos = get_exit_key(pair, channel, escape_dir)
-
-        # Inner pairs (using channels) should NOT use F.Cu (first layer) to avoid
-        # clearance violations with pads on the top layer. Only edge pairs use F.Cu.
-        inner_layers = layers[1:] if len(layers) > 1 else layers
-
-        # Check each layer for availability
-        for layer in inner_layers:
-            is_free = True
-            # Check this position and nearby positions for spacing
-            for delta in [-pair_spacing, -pair_spacing/2, 0, pair_spacing/2, pair_spacing]:
-                check_pos = round(pos + delta, 1)
-                key = (layer, pos_key, check_pos)
-                if key in occupied:
-                    is_free = False
-                    break
-            if is_free:
-                return True, layer
-
-        return False, None
-
-    def do_assign(pair_id: str, pair: DiffPairPads, channel: Channel, escape_dir: str, layer: str):
-        """Record an assignment."""
-        assignments[pair_id] = (channel, escape_dir)
-        pos_key, pos = get_exit_key(pair, channel, escape_dir)
-        key = (layer, pos_key, pos)
-        occupied[key] = pair_id
-
-    # Sort pairs by distance to primary exit edge (closest first - they must use primary)
-    # For horizontal primary: sort by distance to left/right edge
-    # For vertical primary: sort by distance to top/bottom edge
-    for pair_id, pair, min_dist, cx, cy in pair_info:
-        if primary_orientation == 'horizontal':
-            primary_dist = min(cx - grid.min_x, grid.max_x - cx)
-        else:
-            primary_dist = min(cy - grid.min_y, grid.max_y - cy)
-        # Store primary_dist for later use
-        pair_info_dict = {p[0]: (p[1], p[3], p[4], primary_dist) for p in pair_info}
-
-    # Rebuild pair_info with primary distance
-    pair_info_with_primary = []
-    for pair_id, pair, min_dist, cx, cy in pair_info:
-        if primary_orientation == 'horizontal':
-            primary_dist = min(cx - grid.min_x, grid.max_x - cx)
-            secondary_dist = min(cy - grid.min_y, grid.max_y - cy)
-        else:
-            primary_dist = min(cy - grid.min_y, grid.max_y - cy)
-            secondary_dist = min(cx - grid.min_x, grid.max_x - cx)
-        pair_info_with_primary.append((pair_id, pair, cx, cy, primary_dist, secondary_dist))
-
-    # Sort by primary distance (closest to primary edge first)
-    pair_info_with_primary.sort(key=lambda x: x[4])
-
-    # Check if we should prefer secondary direction for diff pairs
-    # If primary needs adjacent channels but secondary doesn't, prefer secondary
-    primary_needs_adjacent = horizontal_needs_adjacent if primary_orientation == 'horizontal' else vertical_needs_adjacent
-    secondary_needs_adjacent = vertical_needs_adjacent if primary_orientation == 'horizontal' else horizontal_needs_adjacent
-    prefer_secondary_for_fit = (primary_needs_adjacent and not secondary_needs_adjacent and not force_escape_direction)
-
-    if prefer_secondary_for_fit:
-        print(f"  Note: Primary direction ({primary_orientation}) requires adjacent-channel routing, "
-              f"but secondary ({secondary_orientation}) can fit both tracks - preferring secondary where possible")
-
-    # First pass: assign as many as possible to preferred direction
-    unassigned = []
-    for pair_id, pair, cx, cy, primary_dist, secondary_dist in pair_info_with_primary:
-        # Get all escape options including alternate channels
-        all_options = get_pair_escape_options(
-            pair.p_pad.global_x, pair.p_pad.global_y,
-            pair.n_pad.global_x, pair.n_pad.global_y,
-            grid, channels, include_alternate_channels=True
-        )
-
-        primary_dirs = ['up', 'down'] if primary_orientation == 'vertical' else ['left', 'right']
-        secondary_dirs = ['up', 'down'] if secondary_orientation == 'vertical' else ['left', 'right']
-
-        # If preferring secondary for fit, try secondary first
-        if prefer_secondary_for_fit:
-            secondary_options = [(ch, d) for ch, d in all_options if d in secondary_dirs]
-            assigned = False
-            for channel, escape_dir in secondary_options:
-                can_do, layer = can_assign(pair, channel, escape_dir)
-                if can_do:
-                    do_assign(pair_id, pair, channel, escape_dir, layer)
-                    assigned = True
-                    break
-            if assigned:
-                continue  # Successfully assigned to secondary, skip to next pair
-
-        # Try primary orientation options
-        primary_options = [(ch, d) for ch, d in all_options if d in primary_dirs]
-
-        # Try each option in order until one succeeds
-        assigned = False
-        for channel, escape_dir in primary_options:
-            can_do, layer = can_assign(pair, channel, escape_dir)
-            if can_do:
-                do_assign(pair_id, pair, channel, escape_dir, layer)
-                assigned = True
-                break
-
-        if not assigned:
-            unassigned.append((pair_id, pair, cx, cy, primary_dist, secondary_dist))
-
-    # Second pass: assign remaining to secondary direction (with alternate channels)
-    # Skip this pass if force_escape_direction is True
-    still_unassigned = []
-    if force_escape_direction:
-        # When forcing primary direction only, skip secondary and go directly to force assignment
-        still_unassigned = unassigned
-    else:
-        for pair_id, pair, cx, cy, primary_dist, secondary_dist in unassigned:
-            # Get all escape options including alternate channels
-            all_options = get_pair_escape_options(
-                pair.p_pad.global_x, pair.p_pad.global_y,
-                pair.n_pad.global_x, pair.n_pad.global_y,
-                grid, channels, include_alternate_channels=True
-            )
-
-            # Filter to secondary orientation options
-            secondary_dirs = ['up', 'down'] if secondary_orientation == 'vertical' else ['left', 'right']
-            secondary_options = [(ch, d) for ch, d in all_options if d in secondary_dirs]
-
-            # Try each option in order until one succeeds
-            assigned = False
-            for channel, escape_dir in secondary_options:
-                can_do, layer = can_assign(pair, channel, escape_dir)
-                if can_do:
-                    do_assign(pair_id, pair, channel, escape_dir, layer)
-                    assigned = True
-                    break
-
-            if not assigned:
-                still_unassigned.append((pair_id, pair, cx, cy, primary_dist, secondary_dist))
-
-    # Third pass: force assign remaining (collision unavoidable)
-    for pair_id, pair, cx, cy, primary_dist, secondary_dist in still_unassigned:
-        if force_escape_direction:
-            # When forcing direction, use primary orientation forced assignment
-            channel, escape_dir = find_diff_pair_escape(
-                pair.p_pad.global_x, pair.p_pad.global_y,
-                pair.n_pad.global_x, pair.n_pad.global_y,
-                grid, channels, primary_orientation
-            )
-            assignments[pair_id] = (channel, escape_dir)
-            print(f"    Warning: {pair_id} forced to {primary_orientation} (may have overlaps)")
-        else:
-            channel, escape_dir = find_diff_pair_escape(
-                pair.p_pad.global_x, pair.p_pad.global_y,
-                pair.n_pad.global_x, pair.n_pad.global_y,
-                grid, channels, 'auto'
-            )
-            assignments[pair_id] = (channel, escape_dir)
-            print(f"    Warning: {pair_id} forced assignment (may have overlaps)")
-
-    # Count direction distribution (excluding edge pairs which are fixed)
-    def count_directions():
-        dir_counts = defaultdict(int)
-        for pid, (ch, d) in assignments.items():
-            if d.startswith('half_edge_'):
-                continue  # Don't count edge pairs - they're fixed
-            if ch is None:
-                continue  # Don't count full edge pairs
-            dir_counts[d] += 1
-        h = dir_counts['left'] + dir_counts['right']
-        v = dir_counts['up'] + dir_counts['down']
-        return h, v, dir_counts
-
-    h_count, v_count, dir_counts = count_directions()
-    print(f"    Initial assignment: horizontal={h_count}, vertical={v_count}")
-
-    # Only rebalance if flag is set
-    if rebalance:
-        # Try to balance by switching pairs from overpopulated to underpopulated direction
-        # Priority: pairs farthest from primary exit edge, but closest to secondary exit edge
-        total_switched = 0
-        max_iterations = 50
-
-        for iteration in range(max_iterations):
-            h_count, v_count, _ = count_directions()
-
-            # Target: roughly equal split
-            total = h_count + v_count
-            if total == 0:
-                break
-
-            target_each = total // 2
-
-            # Determine which direction is overpopulated
-            if h_count > v_count + 1:
-                overpopulated = 'horizontal'
-                underpopulated = 'vertical'
-                excess = h_count - target_each
-            elif v_count > h_count + 1:
-                overpopulated = 'vertical'
-                underpopulated = 'horizontal'
-                excess = v_count - target_each
-            else:
-                break  # Already balanced
-
-            if excess <= 0:
-                break
-
-            # Find switchable pairs in overpopulated direction
-            # Score by: farthest from current (primary) exit, closest to alternative exit
-            switchable = []
-            for pair_id, pair, cx, cy, primary_dist, secondary_dist in pair_info_with_primary:
-                if pair_id not in assignments:
-                    continue
-                ch, d = assignments[pair_id]
-                if d.startswith('half_edge_'):
-                    continue
-                if ch is None:
-                    continue
-
-                current_is_horiz = d in ['left', 'right']
-                if (overpopulated == 'horizontal') == current_is_horiz:
-                    # Calculate distances for switching priority
-                    if overpopulated == 'horizontal':
-                        # Currently horizontal, would switch to vertical
-                        current_exit_dist = min(cx - grid.min_x, grid.max_x - cx)
-                        alt_exit_dist = min(cy - grid.min_y, grid.max_y - cy)
-                    else:
-                        # Currently vertical, would switch to horizontal
-                        current_exit_dist = min(cy - grid.min_y, grid.max_y - cy)
-                        alt_exit_dist = min(cx - grid.min_x, grid.max_x - cx)
-
-                    # Score: high current_exit_dist (far from current exit) + low alt_exit_dist (close to alt exit)
-                    # We want pairs that are far from primary exit but close to secondary exit
-                    switch_score = current_exit_dist - alt_exit_dist
-                    switchable.append((pair_id, pair, switch_score, alt_exit_dist, cx, cy))
-
-            if not switchable:
-                break
-
-            # Sort by switch_score descending (best candidates first)
-            # Best = farthest from current exit, closest to alternative exit
-            switchable.sort(key=lambda x: -x[2])
-
-            # Try to switch one pair at a time
-            switched_this_round = 0
-            for pair_id, pair, score, alt_dist, cx, cy in switchable:
-                if switched_this_round >= 1:  # Switch one at a time to recheck balance
-                    break
-
-                # Remove from occupied tracking
-                old_ch, old_d = assignments[pair_id]
-                if old_ch is not None:
-                    old_pos_key, old_pos = get_exit_key(pair, old_ch, old_d)
-                    # Find and remove from occupied
-                    for layer in layers:
-                        key = (layer, old_pos_key, old_pos)
-                        if key in occupied and occupied[key] == pair_id:
-                            del occupied[key]
-                            break
-
-                # Try to assign to underpopulated direction
-                channel, escape_dir = find_diff_pair_escape(
-                    pair.p_pad.global_x, pair.p_pad.global_y,
-                    pair.n_pad.global_x, pair.n_pad.global_y,
-                    grid, channels, underpopulated
-                )
-
-                can_do, layer = can_assign(pair, channel, escape_dir)
-                if can_do and channel is not None:
-                    do_assign(pair_id, pair, channel, escape_dir, layer)
-                    switched_this_round += 1
-                    total_switched += 1
-                else:
-                    # Can't switch, restore old assignment
-                    if old_ch is not None:
-                        # Re-add to occupied
-                        for layer in layers:
-                            key = (layer, old_pos_key, old_pos)
-                            if key not in occupied:
-                                occupied[key] = pair_id
-                                break
-
-            if switched_this_round == 0:
-                h_count, v_count, _ = count_directions()
-                print(f"    Balancing stopped: no switchable pairs found (h={h_count}, v={v_count})")
-                break
-
-        if total_switched > 0:
-            h_count, v_count, _ = count_directions()
-            print(f"    Balanced: switched {total_switched} pairs, now horizontal={h_count}, vertical={v_count}")
-
-    # Build layer assignments from occupied dict
-    # Reverse lookup: find which layer each pair was assigned to
-    pair_layers: Dict[str, str] = {}
-    for (layer, pos_key, pos), pid in occupied.items():
-        pair_layers[pid] = layer
-
-    # Edge pairs all go on edge_layer
-    for pair_id, (ch, d) in assignments.items():
-        if ch is None:  # Edge or half-edge pair
-            pair_layers[pair_id] = edge_layer
-
-    return assignments, pair_layers
-
-
-def create_45_stub(pad_x: float, pad_y: float,
-                   channel: Channel,
-                   escape_dir: str,
-                   channel_offset: float = 0.0) -> Tuple[float, float]:
-    """
-    Create 45-degree stub from pad to channel.
-
-    For differential pairs, the offset is applied AFTER calculating the 45° stub
-    based on the channel center. This ensures both P and N travel the same
-    horizontal/vertical distance before applying the parallel offset.
-
-    Args:
-        pad_x, pad_y: Pad position
-        channel: Target channel
-        escape_dir: Direction of escape
-        channel_offset: Offset from channel center (for diff pairs)
-
-    Returns:
-        End position of the 45° stub
-    """
-    if channel.orientation == 'horizontal':
-        # Target Y includes the offset
-        target_y = channel.position + channel_offset
-        # For true 45°, dx = |dy|
-        dy_to_target = target_y - pad_y
-        if escape_dir == 'right':
-            dx = abs(dy_to_target)
-        else:
-            dx = -abs(dy_to_target)
-
-        return (pad_x + dx, target_y)
-    else:
-        # Target X includes the offset
-        target_x = channel.position + channel_offset
-        # For true 45°, dy = |dx|
-        dx_to_target = target_x - pad_x
-        if escape_dir == 'down':
-            dy = abs(dx_to_target)
-        else:
-            dy = -abs(dx_to_target)
-
-        return (target_x, pad_y + dy)
-
-
-def calculate_exit_point(stub_end: Tuple[float, float],
-                         channel: Channel,
-                         escape_dir: str,
-                         grid: BGAGrid,
-                         margin: float = 0.5,
-                         channel_offset: float = 0.0) -> Tuple[float, float]:
-    """Calculate where the route exits the BGA boundary."""
-    if channel.orientation == 'horizontal':
-        exit_y = channel.position + channel_offset
-        if escape_dir == 'right':
-            return (grid.max_x + margin, exit_y)
-        else:
-            return (grid.min_x - margin, exit_y)
-    else:
-        exit_x = channel.position + channel_offset
-        if escape_dir == 'down':
-            return (exit_x, grid.max_y + margin)
-        else:
-            return (exit_x, grid.min_y - margin)
-
-
-def calculate_jog_end(exit_pos: Tuple[float, float],
-                      escape_dir: str,
-                      layer: str,
-                      layers: List[str],
-                      jog_length: float,
-                      is_diff_pair: bool = False,
-                      is_outside_track: bool = False,
-                      pair_spacing: float = 0.0) -> Tuple[Tuple[float, float], Optional[Tuple[float, float]]]:
-    """
-    Calculate the end position of the 45° jog at the exit.
-
-    For differential pairs, the outside track needs to extend further before
-    bending to maintain constant spacing through the 45° turn.
-
-    Jog direction depends on layer:
-    - Top layer (F.Cu): 45° to the left (from perspective walking towards BGA edge)
-    - Bottom layer (B.Cu): 45° to the right
-    - Middle layers: linear interpolation
-
-    Args:
-        exit_pos: Starting point of jog
-        escape_dir: Direction of escape ('left', 'right', 'up', 'down')
-        layer: Current layer
-        layers: List of all available layers
-        jog_length: Length of the jog (distance from BGA edge to first pad row/col)
-        is_diff_pair: Whether this is part of a differential pair
-        is_outside_track: Whether this is the outside track of the pair (needs extension)
-        pair_spacing: Spacing between P and N tracks
-
-    Returns:
-        (jog_end, extension_point) - extension_point is the intermediate point for outside tracks
-    """
-    # Calculate layer position: 0 = top (left jog), 1 = bottom (right jog)
-    try:
-        layer_idx = layers.index(layer)
-    except ValueError:
-        layer_idx = 0
-
-    num_layers = len(layers)
-    if num_layers <= 1:
-        layer_factor = 0.0  # Default to left jog
-    else:
-        layer_factor = layer_idx / (num_layers - 1)  # 0 to 1
-
-    # Jog angle: -1 = left, +1 = right (from perspective of walking towards edge)
-    # layer_factor 0 (top) -> -1 (left)
-    # layer_factor 1 (bottom) -> +1 (right)
-    jog_direction = 2 * layer_factor - 1  # Maps 0->-1, 1->+1
-
-    # Calculate jog components based on escape direction
-    # At 45°, both components equal jog_length / sqrt(2)
-    # Reduce by factor of 4 for a shorter angled segment at the end of each stub
-    diag = jog_length / math.sqrt(2) / 4
-
-    ex, ey = exit_pos
-    extension_point = None
-
-    # For differential pairs, outside track extends further before bending
-    # To maintain constant perpendicular spacing through a 45° turn:
-    # extension = pair_spacing * (sqrt(2) - 1) ≈ 0.414 * pair_spacing
-    if is_diff_pair and is_outside_track:
-        extension = pair_spacing * (math.sqrt(2) - 1)
-        if escape_dir == 'right':
-            extension_point = (ex + extension, ey)
-            ex = ex + extension
-        elif escape_dir == 'left':
-            extension_point = (ex - extension, ey)
-            ex = ex - extension
-        elif escape_dir == 'down':
-            extension_point = (ex, ey + extension)
-            ey = ey + extension
-        else:  # up
-            extension_point = (ex, ey - extension)
-            ey = ey - extension
-
-    if escape_dir == 'right':
-        # Walking right, left is up (-Y), right is down (+Y)
-        jog_end = (ex + diag, ey + jog_direction * diag)
-    elif escape_dir == 'left':
-        # Walking left, left is down (+Y), right is up (-Y)
-        jog_end = (ex - diag, ey - jog_direction * diag)
-    elif escape_dir == 'down':
-        # Walking down, left is right (+X), right is left (-X)
-        jog_end = (ex - jog_direction * diag, ey + diag)
-    else:  # up
-        # Walking up, left is left (-X), right is right (+X)
-        jog_end = (ex + jog_direction * diag, ey - diag)
-
-    return jog_end, extension_point
-
-
-def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
-                       available_layers: List[str], track_width: float,
-                       clearance: float, diff_pair_spacing: float,
-                       existing_tracks: List[Dict] = None,
-                       grid: BGAGrid = None,
-                       channels: List[Channel] = None,
-                       exit_margin: float = 0.5,
-                       net_names: Dict[int, str] = None) -> Tuple[int, List[str]]:
-    """Try to resolve collisions by reassigning layers for colliding pairs.
-
-    First tries layer reassignment. If that fails for single-ended signals,
-    tries routing through the ONE alternate channel on the opposite side of the pad.
-    If both options fail, the route is removed and reported as failed.
-
-    Args:
-        existing_tracks: Read-only list of existing tracks to check against but not modify
-        grid: BGA grid (needed for alternate channel routing)
-        channels: List of routing channels (needed for alternate channel routing)
-        exit_margin: Exit margin from BGA boundary
-        net_names: Dict mapping net_id to net name for error reporting
-
-    Returns:
-        Tuple of (number resolved, list of failed net names)
-    """
-    if existing_tracks is None:
-        existing_tracks = []
-    if net_names is None:
-        net_names = {}
-
-    min_spacing = track_width + clearance
-    # Include existing tracks in collision detection
-    all_tracks = tracks + existing_tracks
-    colliding_pairs = find_colliding_pairs(all_tracks, min_spacing)
-
-    if not colliding_pairs:
-        return 0, []
-
-    reassigned = 0
-    rerouted = 0
-    failed_nets: List[str] = []
-    # Track which pairs have been moved this round to avoid moving collision partners to same layer
-    moved_this_round: Dict[str, str] = {}
-
-    for identifier in sorted(colliding_pairs):
-        # Find collision partners to avoid their new layers
-        partners = find_collision_partners(identifier, all_tracks, min_spacing)
-        avoid_layers = set()
-        for partner in partners:
-            if partner in moved_this_round:
-                avoid_layers.add(moved_this_round[partner])
-
-        new_layer = try_reassign_layer(identifier, routes, tracks, available_layers,
-                                        track_width, clearance, diff_pair_spacing,
-                                        avoid_layers, existing_tracks)
-        if new_layer:
-            # Determine if this is a single-ended net or a diff pair
-            is_single_ended = identifier.startswith('net_')
-
-            if is_single_ended:
-                net_id = int(identifier[4:])
-                # Update routes for this single-ended net
-                for route in routes:
-                    if route.net_id == net_id and route.pair_id is None:
-                        route.layer = new_layer
-                # Update tracks for this single-ended net
-                for track in tracks:
-                    if track.get('net_id') == net_id and not track.get('pair_id'):
-                        track['layer'] = new_layer
-            else:
-                # Update routes for this diff pair
-                for route in routes:
-                    if route.pair_id == identifier:
-                        route.layer = new_layer
-                # Update tracks for this diff pair
-                for track in tracks:
-                    if track.get('pair_id') == identifier:
-                        track['layer'] = new_layer
-
-            moved_this_round[identifier] = new_layer
-            reassigned += 1
-            print(f"    Reassigned {identifier} to {new_layer}")
-        else:
-            # Layer reassignment failed - try alternate channel for single-ended signals
-            is_single_ended = identifier.startswith('net_')
-            resolved = False
-
-            if is_single_ended and grid is not None and channels is not None:
-                net_id = int(identifier[4:])
-                # Find the route for this net
-                route = None
-                for r in routes:
-                    if r.net_id == net_id and r.pair_id is None:
-                        route = r
+                # Vertical escape, jog is in X direction
+                for other in routes:
+                    if other.pair_id == route.pair_id and other is not route:
+                        if route.escape_dir == 'down':
+                            if jog_direction < 0:  # Jog goes right (+X)
+                                is_outside = route.exit_pos[0] < other.exit_pos[0]
+                            else:  # Jog goes left (-X)
+                                is_outside = route.exit_pos[0] > other.exit_pos[0]
+                        else:  # up
+                            if jog_direction < 0:  # Jog goes left (-X)
+                                is_outside = route.exit_pos[0] > other.exit_pos[0]
+                            else:  # Jog goes right (+X)
+                                is_outside = route.exit_pos[0] < other.exit_pos[0]
                         break
 
-                if route and route.channel is not None:
-                    # Get THE alternate channel (only one - on the opposite side)
-                    alt_channels = get_alternate_channels_for_pad(
-                        route.pad_pos[0], route.pad_pos[1],
-                        route.channel, route.escape_dir, channels
-                    )
-
-                    # Try the alternate channel (there's only one)
-                    for alt_channel in alt_channels:
-                        result = try_reroute_single_ended(
-                            route, alt_channel, grid, exit_margin,
-                            tracks, existing_tracks, available_layers,
-                            track_width, clearance
-                        )
-                        if result:
-                            new_route, new_layer = result
-
-                            # Remove old tracks for this net
-                            old_track_indices = [i for i, t in enumerate(tracks)
-                                                if t.get('net_id') == net_id and not t.get('pair_id')]
-                            for idx in sorted(old_track_indices, reverse=True):
-                                tracks.pop(idx)
-
-                            # Update route in routes list
-                            route_idx = routes.index(route)
-                            routes[route_idx] = new_route
-
-                            # Add new tracks
-                            tracks.append(create_track(new_route.pad_pos, new_route.stub_end,
-                                                       track_width, new_layer, net_id))
-                            tracks.append(create_track(new_route.stub_end, new_route.exit_pos,
-                                                       track_width, new_layer, net_id))
-
-                            rerouted += 1
-                            resolved = True
-                            print(f"    Rerouted {identifier} to alternate channel on {new_layer}")
-                            break
-
-                # If still not resolved, try to move a conflicting route to a jogged path
-                if not resolved and route is not None:
-                    # Find routes that conflict with this route's desired channel
-                    conflicting_routes = []
-                    for other_route in routes:
-                        if other_route.net_id == route.net_id:
-                            continue
-                        if other_route.channel is None:
-                            continue
-                        # Check if they use the same channel (or the alternate channel we tried)
-                        if other_route.channel == route.channel:
-                            conflicting_routes.append(other_route)
-                        elif alt_channels and other_route.channel in alt_channels:
-                            conflicting_routes.append(other_route)
-
-                    # Try to move the route that is FARTHER from escape edge to a jogged path
-                    # The route closer to the edge should keep the normal channel
-                    route_dist = get_distance_to_escape_edge(route, grid)
-
-                    for conflicting in conflicting_routes:
-                        conflicting_dist = get_distance_to_escape_edge(conflicting, grid)
-
-                        # Decide which route to jog based on distance to escape edge
-                        if route_dist > conflicting_dist:
-                            # route is farther from edge - jog route instead of conflicting
-                            to_jog = route
-                            to_keep = conflicting
-                        else:
-                            # conflicting is farther from edge - jog conflicting
-                            to_jog = conflicting
-                            to_keep = route
-
-                        farther_ch = get_farther_channel(to_jog, channels, grid)
-                        if farther_ch is None:
-                            continue
-
-                        result = try_jogged_route(
-                            to_jog, farther_ch, grid, exit_margin,
-                            tracks, existing_tracks, available_layers,
-                            track_width, clearance
-                        )
-                        if result:
-                            new_jogged_route, new_layer, new_jogged_tracks = result
-                            jogged_net_name = net_names.get(to_jog.net_id, f"net_{to_jog.net_id}")
-
-                            # Remove old tracks for the route being jogged
-                            old_track_indices = [i for i, t in enumerate(tracks)
-                                                if t.get('net_id') == to_jog.net_id]
-                            for idx in sorted(old_track_indices, reverse=True):
-                                tracks.pop(idx)
-
-                            # Update route in routes list
-                            jog_idx = routes.index(to_jog)
-                            routes[jog_idx] = new_jogged_route
-
-                            # Add new tracks for the jogged route
-                            tracks.extend(new_jogged_tracks)
-
-                            print(f"    Moved {jogged_net_name} to jogged path on {new_layer}")
-
-                            if to_jog is route:
-                                # We jogged the original failing route - it's now resolved
-                                rerouted += 1
-                                resolved = True
-                                break
-                            else:
-                                # We jogged the conflicting route - now retry the original route
-                                # First try the original channel (now freed up)
-                                retry_result = try_reroute_single_ended(
-                                    route, route.channel, grid, exit_margin,
-                                    tracks, existing_tracks, available_layers,
-                                    track_width, clearance
-                                )
-                                if retry_result:
-                                    new_route, retry_layer = retry_result
-
-                                    # Remove old tracks for this net
-                                    old_track_indices = [i for i, t in enumerate(tracks)
-                                                        if t.get('net_id') == net_id and not t.get('pair_id')]
-                                    for idx in sorted(old_track_indices, reverse=True):
-                                        tracks.pop(idx)
-
-                                    # Update route in routes list
-                                    route_idx = routes.index(route)
-                                    routes[route_idx] = new_route
-
-                                    # Add new tracks
-                                    tracks.append(create_track(new_route.pad_pos, new_route.stub_end,
-                                                               track_width, retry_layer, net_id))
-                                    tracks.append(create_track(new_route.stub_end, new_route.exit_pos,
-                                                               track_width, retry_layer, net_id))
-
-                                    rerouted += 1
-                                    resolved = True
-                                    print(f"    Rerouted {identifier} after freeing channel on {retry_layer}")
-                                    break
-
-                # If STILL not resolved, remove the route and report failure
-                if not resolved and route is not None:
-                    net_name = net_names.get(net_id, f"net_{net_id}")
-                    failed_nets.append(net_name)
-
-                    # Remove the failed route from routes list
-                    if route in routes:
-                        routes.remove(route)
-
-                    # Remove tracks for this net
-                    old_track_indices = [i for i, t in enumerate(tracks)
-                                        if t.get('net_id') == net_id and not t.get('pair_id')]
-                    for idx in sorted(old_track_indices, reverse=True):
-                        tracks.pop(idx)
-
-                    print(f"    FAILED: Could not route {net_name} - no collision-free path found")
-
-    if rerouted > 0:
-        print(f"  Rerouted {rerouted} signals to alternate channels")
-
-    return reassigned + rerouted, failed_nets
+        jog_end, extension = calculate_jog_end(
+            route.exit_pos,
+            route.escape_dir,
+            route.layer,
+            layers,
+            jog_length,
+            is_diff_pair=route.pair_id is not None,
+            is_outside_track=is_outside,
+            pair_spacing=pair_spacing
+        )
+        route.jog_end = jog_end
+        route.jog_extension = extension
 
 
 def generate_tracks_from_routes(
@@ -1880,6 +389,88 @@ def generate_tracks_from_routes(
     print(f"    Inner pads: {inner_count} (45° stub + channel)")
 
     return tracks, edge_count, inner_count
+
+
+def manage_vias(
+    routes: List[FanoutRoute],
+    pcb_data: 'PCBData',
+    top_layer: str,
+    via_size: float,
+    via_drill: float,
+    clearance: float,
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Manage vias for fanout routes.
+
+    Determines which vias need to be added (for routes on non-top layers)
+    and which can be removed (for routes on top layer).
+
+    Args:
+        routes: List of FanoutRoute objects
+        pcb_data: PCB data containing existing vias
+        top_layer: Name of the top layer (e.g., 'F.Cu')
+        via_size: Size of vias to add
+        via_drill: Drill size for vias
+        clearance: Minimum clearance between vias
+
+    Returns:
+        Tuple of (vias_to_add, vias_to_remove)
+    """
+    def find_nearby_via(x: float, y: float, net_id: int, max_dist: float):
+        """Find an existing via on the same net within max_dist of position."""
+        for via in pcb_data.vias:
+            if via.net_id != net_id:
+                continue
+            dist = math.sqrt((via.x - x)**2 + (via.y - y)**2)
+            if dist <= max_dist:
+                return via
+        return None
+
+    def would_overlap_existing_via(x: float, y: float, new_via_size: float) -> bool:
+        """Check if a new via at (x,y) would overlap within clearance of any existing via."""
+        for via in pcb_data.vias:
+            dist = math.sqrt((via.x - x)**2 + (via.y - y)**2)
+            min_dist = (via.size / 2) + (new_via_size / 2) + clearance
+            if dist < min_dist:
+                return True
+        return False
+
+    vias_to_add: List[Dict] = []
+    vias_to_remove: List[Dict] = []
+
+    # Check distance threshold: via is "at pad" if within via radius + small tolerance
+    via_proximity_threshold = via_size / 2 + 0.1
+
+    for route in routes:
+        pad_x, pad_y = route.pad_pos
+        existing_via = find_nearby_via(pad_x, pad_y, route.net_id, via_proximity_threshold)
+
+        if route.layer == top_layer:
+            # Routing on top layer - no via needed at pad
+            if existing_via:
+                vias_to_remove.append({
+                    'x': existing_via.x,
+                    'y': existing_via.y
+                })
+        else:
+            # Routing on inner/bottom layer - via needed
+            if not existing_via:
+                if not would_overlap_existing_via(pad_x, pad_y, via_size):
+                    vias_to_add.append({
+                        'x': pad_x,
+                        'y': pad_y,
+                        'size': via_size,
+                        'drill': via_drill,
+                        'layers': ['F.Cu', 'B.Cu'],
+                        'net_id': route.net_id
+                    })
+
+    if vias_to_add:
+        print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
+    if vias_to_remove:
+        print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
+
+    return vias_to_add, vias_to_remove
 
 
 def generate_bga_fanout(footprint: Footprint,
@@ -2755,79 +1346,7 @@ def generate_bga_fanout(footprint: Footprint,
     print(f"  Jog length: {jog_length:.2f} mm")
 
     # Calculate jog_end for each route based on layer
-    # For differential pairs, determine which track is on the outside of the bend
-    pair_spacing = track_width + diff_pair_gap  # Center-to-center spacing
-
-    for route in routes:
-        is_outside = False
-
-        if route.pair_id:
-            # Determine jog direction for this layer
-            try:
-                layer_idx = layers.index(route.layer)
-            except ValueError:
-                layer_idx = 0
-            num_layers = len(layers)
-            if num_layers <= 1:
-                jog_direction = -1  # left
-            else:
-                layer_factor = layer_idx / (num_layers - 1)
-                jog_direction = 2 * layer_factor - 1  # -1 = left, +1 = right
-
-            # Determine if this route is on the outside of the bend
-            # "Outside" means the track that is further from the bend direction
-            # For horizontal escape (left/right), the jog is in Y direction
-            # For vertical escape (up/down), the jog is in X direction
-            #
-            # For right escape with negative jog (up/-Y): lower Y is outside
-            # For right escape with positive jog (down/+Y): higher Y is outside
-            # Similar logic for other directions
-
-            if route.escape_dir in ['left', 'right']:
-                # Horizontal escape, jog is in Y direction
-                # Check if this route has higher or lower Y than its pair partner
-                # Find the partner route
-                for other in routes:
-                    if other.pair_id == route.pair_id and other is not route:
-                        if route.escape_dir == 'right':
-                            if jog_direction < 0:  # Jog goes up (-Y)
-                                is_outside = route.exit_pos[1] > other.exit_pos[1]
-                            else:  # Jog goes down (+Y)
-                                is_outside = route.exit_pos[1] < other.exit_pos[1]
-                        else:  # left
-                            if jog_direction < 0:  # Jog goes down (+Y)
-                                is_outside = route.exit_pos[1] < other.exit_pos[1]
-                            else:  # Jog goes up (-Y)
-                                is_outside = route.exit_pos[1] > other.exit_pos[1]
-                        break
-            else:
-                # Vertical escape, jog is in X direction
-                for other in routes:
-                    if other.pair_id == route.pair_id and other is not route:
-                        if route.escape_dir == 'down':
-                            if jog_direction < 0:  # Jog goes right (+X)
-                                is_outside = route.exit_pos[0] < other.exit_pos[0]
-                            else:  # Jog goes left (-X)
-                                is_outside = route.exit_pos[0] > other.exit_pos[0]
-                        else:  # up
-                            if jog_direction < 0:  # Jog goes left (-X)
-                                is_outside = route.exit_pos[0] > other.exit_pos[0]
-                            else:  # Jog goes right (+X)
-                                is_outside = route.exit_pos[0] < other.exit_pos[0]
-                        break
-
-        jog_end, extension = calculate_jog_end(
-            route.exit_pos,
-            route.escape_dir,
-            route.layer,
-            layers,
-            jog_length,
-            is_diff_pair=route.pair_id is not None,
-            is_outside_track=is_outside,
-            pair_spacing=pair_spacing
-        )
-        route.jog_end = jog_end
-        route.jog_extension = extension
+    calculate_jog_ends_for_routes(routes, layers, jog_length, track_width, diff_pair_gap)
 
     # Generate tracks
     tracks, edge_count, inner_count = generate_tracks_from_routes(routes, track_width, layers[0])
@@ -2935,71 +1454,9 @@ def generate_bga_fanout(footprint: Footprint,
         print(f"    {layer}: {count} routes")
 
     # Via management: add vias where needed, remove unnecessary ones
-    # Build list of existing vias for proximity checking
-    top_layer = layers[0]  # F.Cu typically
-
-    def find_nearby_via(x: float, y: float, net_id: int, max_dist: float) -> Optional['Via']:
-        """Find an existing via on the same net within max_dist of position."""
-        for via in pcb_data.vias:
-            if via.net_id != net_id:
-                continue
-            dist = math.sqrt((via.x - x)**2 + (via.y - y)**2)
-            if dist <= max_dist:
-                return via
-        return None
-
-    def would_overlap_existing_via(x: float, y: float, new_via_size: float) -> bool:
-        """Check if a new via at (x,y) would overlap within clearance of any existing via on any net."""
-        for via in pcb_data.vias:
-            dist = math.sqrt((via.x - x)**2 + (via.y - y)**2)
-            # Overlap if distance is less than sum of radii plus clearance
-            min_dist = (via.size / 2) + (new_via_size / 2) + clearance
-            if dist < min_dist:
-                return True
-        return False
-
-    vias_to_add: List[Dict] = []
-    vias_to_remove: List[Dict] = []
-
-    # Check distance threshold: via is "at pad" if within via radius + small tolerance
-    via_proximity_threshold = via_size / 2 + 0.1  # Via radius plus 0.1mm tolerance
-
-    for route in routes:
-        pad_x, pad_y = route.pad_pos
-        # Look for existing via on the same net near this pad
-        existing_via = find_nearby_via(pad_x, pad_y, route.net_id, via_proximity_threshold)
-
-        if route.layer == top_layer:
-            # Routing on top layer - no via needed at pad
-            # If there's an existing via at this pad for this net, remove it
-            if existing_via:
-                vias_to_remove.append({
-                    'x': existing_via.x,
-                    'y': existing_via.y
-                })
-        else:
-            # Routing on inner/bottom layer - via needed to connect from pad (F.Cu) to route layer
-            if not existing_via:
-                # Check if adding a via here would overlap with an existing via (on any net)
-                if would_overlap_existing_via(pad_x, pad_y, via_size):
-                    # Don't add - would overlap with existing via
-                    pass
-                else:
-                    # No existing via nearby - add one (through all layers: F.Cu to B.Cu)
-                    vias_to_add.append({
-                        'x': pad_x,
-                        'y': pad_y,
-                        'size': via_size,
-                        'drill': via_drill,
-                        'layers': ['F.Cu', 'B.Cu'],  # Through-hole via connecting all layers
-                        'net_id': route.net_id
-                    })
-            # If existing via already exists nearby, keep it (don't add duplicate)
-
-    if vias_to_add:
-        print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
-    if vias_to_remove:
-        print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
+    vias_to_add, vias_to_remove = manage_vias(
+        routes, pcb_data, layers[0], via_size, via_drill, clearance
+    )
 
     return tracks, vias_to_add, vias_to_remove
 
