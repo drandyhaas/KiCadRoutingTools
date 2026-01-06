@@ -135,6 +135,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 length_match_groups: Optional[List[List[str]]] = None,
                 length_match_tolerance: float = 0.1,
                 meander_amplitude: float = 1.0,
+                diff_chamfer_extra: float = 1.5,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -1252,4 +1253,5 @@ Differential pair routing:
                 length_match_groups=args.length_match_groups,
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,
+                diff_chamfer_extra=args.diff_chamfer_extra,
                 vis_callback=vis_callback)
