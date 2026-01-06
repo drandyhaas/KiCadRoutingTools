@@ -997,6 +997,117 @@ def create_parallel_path_float(centerline_path, coord, sign, spacing_mm=0.1, sta
     return result
 
 
+def create_parallel_path_from_float(centerline_path, sign, spacing_mm=0.1, start_dir=None, end_dir=None):
+    """
+    Create a path parallel to centerline from float coordinates (no grid conversion).
+
+    Uses bisector-based offsets at corners for smooth parallel paths.
+
+    Args:
+        centerline_path: List of (x, y, layer) floating-point coordinates
+        sign: +1 for one track, -1 for the other
+        spacing_mm: Distance from centerline in mm
+        start_dir: Optional (dx, dy) direction to use at start point for perpendicular calc
+        end_dir: Optional (dx, dy) direction to use at end point for perpendicular calc
+
+    Returns:
+        List of (x, y, layer) floating-point coordinates
+    """
+    if len(centerline_path) < 2:
+        return list(centerline_path)
+
+    result = []
+
+    for i in range(len(centerline_path)):
+        x, y, layer = centerline_path[i]
+
+        use_corner_scale = True  # Only apply corner scaling for bisector calculations
+        if i == 0:
+            # First point: bisector between start_dir (if provided) and first segment
+            next_x, next_y, _ = centerline_path[1]
+            seg_dx, seg_dy = next_x - x, next_y - y
+            seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy) or 1
+            seg_dx, seg_dy = seg_dx/seg_len, seg_dy/seg_len
+
+            if start_dir is not None:
+                # Normalize start_dir
+                dir_len = math.sqrt(start_dir[0]**2 + start_dir[1]**2) or 1
+                norm_start_dx = start_dir[0] / dir_len
+                norm_start_dy = start_dir[1] / dir_len
+                # Bisector between start_dir and first segment direction
+                dx = norm_start_dx + seg_dx
+                dy = norm_start_dy + seg_dy
+                use_corner_scale = True  # Apply corner scaling at junction
+            else:
+                dx, dy = seg_dx, seg_dy
+                use_corner_scale = False  # Single segment, no corner scaling
+        elif i == len(centerline_path) - 1:
+            # Last point: bisector between last segment and end_dir (if provided)
+            prev_x, prev_y, _ = centerline_path[i-1]
+            seg_dx, seg_dy = x - prev_x, y - prev_y
+            seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy) or 1
+            seg_dx, seg_dy = seg_dx/seg_len, seg_dy/seg_len
+
+            if end_dir is not None:
+                # Normalize end_dir
+                dir_len = math.sqrt(end_dir[0]**2 + end_dir[1]**2) or 1
+                norm_end_dx = end_dir[0] / dir_len
+                norm_end_dy = end_dir[1] / dir_len
+                # Bisector between last segment direction and end_dir
+                dx = seg_dx + norm_end_dx
+                dy = seg_dy + norm_end_dy
+                use_corner_scale = True  # Apply corner scaling at junction
+            else:
+                dx, dy = seg_dx, seg_dy
+                use_corner_scale = False  # Single segment, no corner scaling
+        else:
+            # Corner: use bisector of incoming and outgoing directions
+            prev = centerline_path[i-1]
+            next_pt = centerline_path[i+1]
+
+            if prev[2] != layer or next_pt[2] != layer:
+                # Layer change - use incoming direction
+                prev_x, prev_y, _ = prev
+                dx, dy = x - prev_x, y - prev_y
+            else:
+                prev_x, prev_y, _ = prev
+                next_x, next_y, _ = next_pt
+
+                dx_in, dy_in = x - prev_x, y - prev_y
+                dx_out, dy_out = next_x - x, next_y - y
+
+                len_in = math.sqrt(dx_in*dx_in + dy_in*dy_in) or 1
+                len_out = math.sqrt(dx_out*dx_out + dy_out*dy_out) or 1
+
+                # Bisector direction (sum of unit vectors)
+                dx = dx_in/len_in + dx_out/len_out
+                dy = dy_in/len_in + dy_out/len_out
+
+                if abs(dx) < 0.01 and abs(dy) < 0.01:
+                    dx, dy = dx_in, dy_in
+
+        # Normalize and compute perpendicular offset
+        length = math.sqrt(dx*dx + dy*dy) or 1
+        ndx, ndy = dx/length, dy/length
+
+        # Corner compensation: scale offset by 2/length to maintain perpendicular distance
+        # When summing two unit vectors, length = 2*cos(theta/2) where theta is angle between them
+        # To maintain spacing_mm perpendicular to each segment, multiply by 2/length
+        # Cap the scaling to avoid extreme miter extensions at very sharp corners (>135 deg turn)
+        # Only apply at actual corners (bisector calculations), not at endpoints
+        if use_corner_scale:
+            corner_scale = min(2.0 / length, 3.0) if length > 0.1 else 1.0
+        else:
+            corner_scale = 1.0
+
+        perp_x = -ndy * sign * spacing_mm * corner_scale
+        perp_y = ndx * sign * spacing_mm * corner_scale
+
+        result.append((x + perp_x, y + perp_y, layer))
+
+    return result
+
+
 def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
                                      config: GridRouteConfig) -> Optional[dict]:
     """
@@ -1902,6 +2013,24 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         'simplified_path': simplified_path_float,
         'debug_connector_lines': debug_connector_lines,  # For User.3 layer
         'debug_stub_arrows': debug_stub_arrows,  # For User.4 layer
+        # Additional data for length matching meander regeneration
+        'is_diff_pair': True,
+        'centerline_path_grid': simplified_path,  # Grid coords for meander insertion
+        'p_sign': p_sign,
+        'n_sign': n_sign,
+        'spacing_mm': spacing_mm,
+        'start_stub_dir': start_stub_dir,
+        'end_stub_dir': end_stub_dir,
+        'p_net_id': p_net_id,
+        'n_net_id': n_net_id,
+        # Connector segment data for regeneration
+        'p_start': p_start,
+        'n_start': n_start,
+        'p_end': p_end,
+        'n_end': n_end,
+        'src_stub_dir': src_stub_dir_tuple,
+        'tgt_stub_dir': tgt_stub_dir_tuple,
+        'layer_names': layer_names,
     }
 
     # If polarity was fixed, include info about which target pads need net swaps

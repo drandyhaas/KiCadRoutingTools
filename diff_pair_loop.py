@@ -268,7 +268,28 @@ def route_diff_pairs(
         total_time += elapsed
 
         if result and not result.get('failed'):
+            # Calculate centerline length for length matching
+            simplified_path = result.get('simplified_path', [])
+            centerline_length = 0.0
+            if len(simplified_path) >= 2:
+                for i in range(len(simplified_path) - 1):
+                    x1, y1, _ = simplified_path[i]
+                    x2, y2, _ = simplified_path[i + 1]
+                    centerline_length += ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
+
+            # Calculate stub lengths for pad-to-pad measurement
+            from routing_utils import calculate_stub_length
+            p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
+            n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
+            avg_stub_length = (p_stub_length + n_stub_length) / 2
+
+            # Store lengths for length matching
+            result['centerline_length'] = centerline_length
+            result['stub_length'] = avg_stub_length
+            result['route_length'] = centerline_length + avg_stub_length
+
             print(f"  SUCCESS: {len(result['new_segments'])} segments, {len(result['new_vias'])} vias, {result['iterations']} iterations ({elapsed:.2f}s)")
+            print(f"    Centerline length: {centerline_length:.3f}mm, stub length: {avg_stub_length:.3f}mm, total: {result['route_length']:.3f}mm")
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
@@ -466,7 +487,25 @@ def route_diff_pairs(
                         retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
                         if retry_result and not retry_result.get('failed') and not retry_result.get('probe_blocked'):
+                            # Calculate centerline length for length matching
+                            simplified_path = retry_result.get('simplified_path', [])
+                            centerline_length = 0.0
+                            if len(simplified_path) >= 2:
+                                for i in range(len(simplified_path) - 1):
+                                    x1, y1, _ = simplified_path[i]
+                                    x2, y2, _ = simplified_path[i + 1]
+                                    centerline_length += ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
+
+                            p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
+                            n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
+                            avg_stub_length = (p_stub_length + n_stub_length) / 2
+
+                            retry_result['centerline_length'] = centerline_length
+                            retry_result['stub_length'] = avg_stub_length
+                            retry_result['route_length'] = centerline_length + avg_stub_length
+
                             print(f"  RETRY SUCCESS (N={N}): {len(retry_result['new_segments'])} segments, {len(retry_result['new_vias'])} vias")
+                            print(f"    Centerline length: {centerline_length:.3f}mm, total: {retry_result['route_length']:.3f}mm")
                             results.append(retry_result)
                             successful += 1
                             total_iterations += retry_result['iterations']
@@ -550,7 +589,25 @@ def route_diff_pairs(
                         target_swaps, results=results)
 
                     if swap_success and swap_result:
+                        # Calculate centerline length for length matching
+                        simplified_path = swap_result.get('simplified_path', [])
+                        centerline_length = 0.0
+                        if len(simplified_path) >= 2:
+                            for i in range(len(simplified_path) - 1):
+                                x1, y1, _ = simplified_path[i]
+                                x2, y2, _ = simplified_path[i + 1]
+                                centerline_length += ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
+
+                        p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
+                        n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
+                        avg_stub_length = (p_stub_length + n_stub_length) / 2
+
+                        swap_result['centerline_length'] = centerline_length
+                        swap_result['stub_length'] = avg_stub_length
+                        swap_result['route_length'] = centerline_length + avg_stub_length
+
                         print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
+                        print(f"    Centerline length: {centerline_length:.3f}mm, total: {swap_result['route_length']:.3f}mm")
                         results.append(swap_result)
                         successful += 1
                         total_iterations += swap_result['iterations']

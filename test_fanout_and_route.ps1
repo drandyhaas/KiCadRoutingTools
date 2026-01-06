@@ -35,7 +35,7 @@ python3 test_diffpair.py "*rx1_1*" --swappable-nets "*rx1_1*" --layers F.Cu In1.
 
 # Route RAM
 python3 route.py test_diffpair.kicad_pcb test_diffpair_ram.kicad_pcb "Net-(U1*DQS*)" "Net-(U1*CK_*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK_*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu \
-    --bga-proximity-radius 1 --stub-proximity-radius 1
+    --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group "Net-(U1*DQS*)" "Net-(U1*CK_*)"
 #python3 route.py test_diffpair.kicad_pcb test_diffpair_ram.kicad_pcb "Net-(U1*)" --swappable-nets "Net-(U1*DQ*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu \
 #    --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group auto
 
