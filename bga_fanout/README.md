@@ -51,18 +51,18 @@ python bga_fanout.py input.kicad_pcb --component U3 --output output.kicad_pcb \
 
 ```
 bga_fanout/
-├── __init__.py          # Main fanout logic and public API (1300 lines)
-├── types.py             # Data types: Track, BGAGrid, FanoutRoute, etc. (159 lines)
-├── escape.py            # Escape channel finding and assignment (780 lines)
-├── reroute.py           # Collision resolution and rerouting (667 lines)
-├── layer_balance.py     # Layer rebalancing for even distribution (360 lines)
-├── layer_assignment.py  # Layer assignment for collision avoidance (350 lines)
-├── tracks.py            # Track generation and collision detection (210 lines)
-├── geometry.py          # 45° stub and jog calculations (166 lines)
-├── collision.py         # Low-level collision detection utilities (144 lines)
-├── grid.py              # BGA grid analysis (105 lines)
-├── diff_pair.py         # Differential pair detection (57 lines)
-└── constants.py         # Configuration constants (26 lines)
+├── __init__.py          # Main fanout logic and public API
+├── types.py             # Data types: Track, BGAGrid, FanoutRoute, etc.
+├── escape.py            # Escape channel finding and assignment
+├── reroute.py           # Collision resolution and rerouting
+├── layer_balance.py     # Layer rebalancing for even distribution
+├── layer_assignment.py  # Layer assignment for collision avoidance
+├── tracks.py            # Track generation and collision detection
+├── geometry.py          # 45° stub and jog calculations
+├── collision.py         # Low-level collision detection utilities
+├── grid.py              # BGA grid analysis
+├── diff_pair.py         # Differential pair detection
+└── constants.py         # Configuration constants
 ```
 
 ### Key Components

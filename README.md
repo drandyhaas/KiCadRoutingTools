@@ -66,6 +66,7 @@ python check_connected.py output.kicad_pcb --nets "*DATA*"
 | [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
 | [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher |
 | [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
+| [QFN Fanout](qfn_fanout/README.md) | QFN/QFP escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 
@@ -104,8 +105,8 @@ KiCadRoutingTools/
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
 ├── bga_fanout.py             # BGA fanout CLI wrapper
-├── bga_fanout/               # BGA fanout package (4324 lines total)
-│   ├── __init__.py           # Main fanout logic and public API (1300 lines)
+├── bga_fanout/               # BGA fanout package
+│   ├── __init__.py           # Main fanout logic and public API
 │   ├── types.py              # Track, BGAGrid, FanoutRoute, Channel, DiffPairPads
 │   ├── escape.py             # Escape channel finding and assignment
 │   ├── reroute.py            # Collision resolution and rerouting
@@ -117,7 +118,12 @@ KiCadRoutingTools/
 │   ├── grid.py               # BGA grid analysis
 │   ├── diff_pair.py          # Differential pair detection
 │   └── constants.py          # Configuration constants
-├── qfn_fanout.py             # QFN/QFP fanout generator
+├── qfn_fanout.py             # QFN/QFP fanout CLI wrapper
+├── qfn_fanout/               # QFN/QFP fanout package
+│   ├── __init__.py           # Main fanout logic and public API
+│   ├── layout.py             # Layout analysis functions
+│   ├── geometry.py           # Stub position calculations
+│   └── types.py              # QFNLayout, PadInfo, FanoutStub
 ├── switch_to_layer.py        # Move net segments to a different layer
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
