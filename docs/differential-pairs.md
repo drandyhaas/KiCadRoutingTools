@@ -317,6 +317,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize (mm, same layer) |
 | `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
+| `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair (meander shorter track) |
 
 ## Track Proximity Avoidance
 
@@ -353,6 +354,33 @@ Differential pairs support length matching with trombone-style meanders. This wo
 - **Single-layer routes**: Meanders are added to straight sections of the centerline, then P/N paths are regenerated
 - **Multi-layer routes**: Meanders are applied to same-layer straight sections, preserving via positions. GND vias are regenerated after meander application
 - **Via barrel length**: Route length calculations include via barrel length (parsed from board stackup) for accurate length matching that matches KiCad's measurements
+
+### Intra-Pair P/N Length Matching
+
+Use `--diff-pair-intra-match` to match P and N track lengths within each differential pair. This is useful when P and N have different lengths due to:
+- Connector regions near pads
+- Curves (inner vs outer radius)
+- Different via positions
+
+When enabled:
+1. After routing and inter-pair length matching, the router calculates P and N lengths for each pair
+2. If the difference exceeds `--length-match-tolerance` (default 0.1mm), meanders are added to the shorter track
+3. The meanders are placed with clearance checking against the other track of the pair
+
+```bash
+# Enable intra-pair matching
+python route.py input.kicad_pcb output.kicad_pcb "*DQS*" \
+    --diff-pairs "*DQS*" \
+    --diff-pair-intra-match
+
+# Combine with inter-pair matching
+python route.py input.kicad_pcb output.kicad_pcb "*DQS*" "*CK*" \
+    --diff-pairs "*DQS*" "*CK*" \
+    --length-match-group auto \
+    --diff-pair-intra-match
+```
+
+**Execution order**: Inter-pair matching runs first (on centerline), then intra-pair matching adds meanders to individual P/N tracks. This order is intentional - inter-pair regenerates P/N from the meandered centerline, so intra-pair must run last to preserve its meanders.
 
 ## Limitations
 

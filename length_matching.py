@@ -470,7 +470,7 @@ def generate_trombone_meander(
 
     # 45° chamfer size - use a small chamfer for smooth corners
     chamfer = 0.1  # mm - small 45° chamfer at corners
-    min_amplitude = 0.3  # mm - minimum useful amplitude
+    min_amplitude = 0.2  # mm - minimum useful amplitude
 
     # Horizontal distance consumed by one bump (just the chamfers' horizontal components)
     bump_width = 4 * chamfer
@@ -769,7 +769,7 @@ def apply_meanders_to_route(
         return segments, 0
 
     # Try each straight run until we find one that works
-    min_amplitude = 0.3  # Minimum useful amplitude
+    min_amplitude = 0.2  # Minimum useful amplitude
 
     for start_idx, end_idx, run_length in runs:
         # Check if this run is long enough for meanders
@@ -1343,7 +1343,7 @@ def generate_centerline_meander(
 
     # Meander parameters - chamfer must be larger than P/N half-spacing to avoid crossings
     chamfer = max(0.1, spacing_mm * config.diff_chamfer_extra)
-    min_amplitude = 0.3
+    min_amplitude = 0.2
     bump_width = 6 * chamfer  # wide entry (2) + wide top chamfers (4)
 
     # Account for full diff pair width in clearance
@@ -1927,9 +1927,15 @@ def apply_intra_pair_length_matching(
     p_vias = [v for v in all_vias if v.net_id == p_net_id]
     n_vias = [v for v in all_vias if v.net_id == n_net_id]
 
-    # Calculate lengths
-    p_length = calculate_route_length(p_segments, p_vias, pcb_data)
-    n_length = calculate_route_length(n_segments, n_vias, pcb_data)
+    # Get stub lengths (pre-existing segments not in new_segments)
+    p_stub_length = result.get('p_stub_length', 0.0)
+    n_stub_length = result.get('n_stub_length', 0.0)
+
+    # Calculate lengths (routed segments + stubs)
+    p_routed_length = calculate_route_length(p_segments, p_vias, pcb_data)
+    n_routed_length = calculate_route_length(n_segments, n_vias, pcb_data)
+    p_length = p_routed_length + p_stub_length
+    n_length = n_routed_length + n_stub_length
 
     delta = abs(p_length - n_length)
     if delta <= config.length_match_tolerance:
@@ -1941,14 +1947,14 @@ def apply_intra_pair_length_matching(
         shorter_segments = p_segments
         shorter_net_id = p_net_id
         shorter_vias = p_vias
-        longer_segments = n_segments
+        shorter_stub_length = p_stub_length
         longer_net_id = n_net_id
         shorter_label = "P"
     else:
         shorter_segments = n_segments
         shorter_net_id = n_net_id
         shorter_vias = n_vias
-        longer_segments = p_segments
+        shorter_stub_length = n_stub_length
         longer_net_id = p_net_id
         shorter_label = "N"
 
@@ -1959,24 +1965,45 @@ def apply_intra_pair_length_matching(
     print(f"    P/N intra-pair: P={p_length:.3f}mm, N={n_length:.3f}mm, delta={delta:.3f}mm, adding meanders to {shorter_label}")
 
     # Step 1: Generate initial meanders
+    # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer
+    # For 1 bump: extra = 2*amplitude - 2.34*chamfer
+    # For n bumps: extra ≈ n * (2*amplitude - 2.34*chamfer) (approximately, first bump has entry/exit)
+    chamfer = 0.1
+    min_amplitude = 0.2  # Minimum useful amplitude
+    max_amplitude = config.meander_amplitude  # Default 1.0mm
+
+    # Calculate max extra per bump at max amplitude
+    max_extra_per_bump = 2 * max_amplitude - 2.34 * chamfer  # ~1.766mm at amplitude=1.0
+
+    # Determine number of bumps needed
+    num_bumps_needed = max(1, int(math.ceil(delta / max_extra_per_bump)))
+
+    # Calculate amplitude for this number of bumps to hit target delta
+    # extra = n * (2*amp - 2.34*chamfer)
+    # amp = (extra/n + 2.34*chamfer) / 2
+    initial_amplitude = (delta / num_bumps_needed + 2.34 * chamfer) / 2
+    initial_amplitude = max(min_amplitude, min(initial_amplitude, max_amplitude))
+
     # Pass paired_net_id to use reduced clearance for the paired track
-    # (allows meanders to be close but not crossing)
+    # Use min_bumps to ensure we get exactly the calculated number of bumps
     meandered_segments, bump_count = apply_meanders_to_route(
         shorter_segments,
         delta,
         config,
         pcb_data=pcb_data,
         net_id=shorter_net_id,
-        extra_segments=longer_segments,
-        extra_vias=all_vias,
-        paired_net_id=longer_net_id
+        paired_net_id=longer_net_id,
+        amplitude_override=initial_amplitude,
+        min_bumps=num_bumps_needed
     )
 
     if bump_count == 0:
         print(f"    P/N intra-pair: could not fit meanders")
         return result
 
-    new_shorter_length = calculate_route_length(meandered_segments, shorter_vias, pcb_data)
+    # Calculate new length including stub (to compare with target which includes stub)
+    new_shorter_routed = calculate_route_length(meandered_segments, shorter_vias, pcb_data)
+    new_shorter_length = new_shorter_routed + shorter_stub_length
 
     # Keep track of best result (closest to target)
     best_segments = meandered_segments
@@ -1984,9 +2011,8 @@ def apply_intra_pair_length_matching(
     best_bump_count = bump_count
 
     # Step 2: Scale amplitude to hit target length (iterate to refine)
-    # For a meander bump: extra_length ≈ 2 * (amplitude - 2*chamfer) per bump
-    # Rearranging: amplitude ≈ extra_length / (2 * bump_count) + 2*chamfer
-    chamfer = 0.1
+    # For a meander bump: extra_length ≈ 2*amplitude - 2.34*chamfer per bump
+    # Rearranging: amplitude ≈ (extra_length/bump_count + 2.34*chamfer) / 2
     for scale_iter in range(5):
         new_delta = abs(new_shorter_length - target_length)
         if new_delta <= config.length_match_tolerance:
@@ -1999,9 +2025,9 @@ def apply_intra_pair_length_matching(
 
         needed_extra = target_length - shorter_length
         # Calculate amplitude that would give needed_extra with current bump_count
-        # extra = bump_count * 2 * (amplitude - 2*chamfer)
-        # amplitude = extra / (2 * bump_count) + 2*chamfer
-        target_amplitude = needed_extra / (2 * bump_count) + 2 * chamfer
+        # extra = bump_count * (2*amplitude - 2.34*chamfer)
+        # amplitude = (extra/bump_count + 2.34*chamfer) / 2
+        target_amplitude = (needed_extra / bump_count + 2.34 * chamfer) / 2
 
         if target_amplitude < 0.2:
             # Amplitude too small, accept current result
@@ -2014,8 +2040,6 @@ def apply_intra_pair_length_matching(
             config,
             pcb_data=pcb_data,
             net_id=shorter_net_id,
-            extra_segments=longer_segments,
-            extra_vias=all_vias,
             min_bumps=bump_count,  # Keep same bump count
             amplitude_override=target_amplitude,
             paired_net_id=longer_net_id
@@ -2025,7 +2049,8 @@ def apply_intra_pair_length_matching(
             # Scaling failed, use best result so far
             break
 
-        new_shorter_length = calculate_route_length(new_meandered_segments, shorter_vias, pcb_data)
+        new_shorter_routed = calculate_route_length(new_meandered_segments, shorter_vias, pcb_data)
+        new_shorter_length = new_shorter_routed + shorter_stub_length
 
         # Update best if this is closer to target
         if abs(new_shorter_length - target_length) < abs(best_length - target_length):
@@ -2043,6 +2068,13 @@ def apply_intra_pair_length_matching(
     new_shorter_length = best_length
     bump_count = best_bump_count
 
+    # Check if meanders actually improved delta (don't make things worse)
+    new_delta = abs(new_shorter_length - target_length)
+    if new_delta >= delta:
+        # Meanders made delta worse or same, skip them
+        print(f"    P/N intra-pair: meanders would increase delta ({new_delta:.3f}mm >= {delta:.3f}mm), skipping")
+        return result
+
     # Rebuild segment list with meandered shorter track
     other_segments = [s for s in all_segments if s.net_id != shorter_net_id]
     new_segments = other_segments + meandered_segments
@@ -2054,7 +2086,11 @@ def apply_intra_pair_length_matching(
     else:
         result['n_routed_length'] = new_shorter_length
 
-    new_delta = abs(result.get('p_routed_length', p_length) - result.get('n_routed_length', n_length))
+    # Calculate new delta using fresh values (not stale result dict values from inter-pair)
+    if shorter_net_id == p_net_id:
+        new_delta = abs(new_shorter_length - n_length)
+    else:
+        new_delta = abs(p_length - new_shorter_length)
     print(f"    P/N intra-pair: {bump_count} bumps added, new {shorter_label}={new_shorter_length:.3f}mm, new delta={new_delta:.3f}mm")
 
     return result

@@ -251,6 +251,7 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*"
 --length-match-tolerance 0.1    # Acceptable length variance within group (mm)
 --meander-amplitude 1.0         # Height of meanders perpendicular to trace (mm)
 --diff-chamfer-extra 1.5        # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
+--diff-pair-intra-match         # Match P/N lengths within each diff pair (meander shorter track)
 
 # Debug
 --verbose               # Print detailed diagnostic output
