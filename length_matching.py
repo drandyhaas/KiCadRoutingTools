@@ -500,6 +500,7 @@ def generate_trombone_meander(
     # Generate meander bumps
     direction = 1  # Alternates: 1 = up (positive perpendicular), -1 = down
     first_bump_direction = None  # Track direction of first bump for exit chamfer
+    prev_bump_direction = None  # Track previous bump direction for same-direction spacing
     bump_count = 0
 
     # Leave some margin at start and end
@@ -597,6 +598,32 @@ def generate_trombone_meander(
 
         # Generate this bump
 
+        # Add chamfers between same-direction bumps to prevent risers from touching
+        # This happens when clearance checking forces all bumps to one side (e.g., intra-pair matching)
+        if prev_bump_direction is not None and prev_bump_direction == direction:
+            # After a bump, we're at +chamfer offset from centerline.
+            # Add exit chamfer (to centerline) + entry chamfer (back to offset) to separate bumps
+
+            # Exit chamfer (return to centerline)
+            nx = cx + ux * chamfer - px * chamfer * prev_bump_direction
+            ny = cy + uy * chamfer - py * chamfer * prev_bump_direction
+            new_segments.append(Segment(
+                start_x=cx, start_y=cy,
+                end_x=nx, end_y=ny,
+                width=segment.width, layer=segment.layer, net_id=segment.net_id
+            ))
+            cx, cy = nx, ny
+
+            # Entry chamfer (go to offset for next bump's riser)
+            nx = cx + ux * chamfer + px * chamfer * direction
+            ny = cy + uy * chamfer + py * chamfer * direction
+            new_segments.append(Segment(
+                start_x=cx, start_y=cy,
+                end_x=nx, end_y=ny,
+                width=segment.width, layer=segment.layer, net_id=segment.net_id
+            ))
+            cx, cy = nx, ny
+
         # Entry chamfer (only for first bump)
         if has_entry_chamfer:
             first_bump_direction = direction  # Record direction for exit chamfer
@@ -655,6 +682,7 @@ def generate_trombone_meander(
         # Track progress
         total_extra_added += extra_this_bump
         bump_count += 1
+        prev_bump_direction = direction  # Remember direction for same-direction spacing check
 
         # Alternate direction for next bump
         direction *= -1
