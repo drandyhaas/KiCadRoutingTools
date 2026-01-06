@@ -51,17 +51,23 @@ python bga_fanout.py input.kicad_pcb --component U3 --output output.kicad_pcb \
 
 ```
 bga_fanout/
-├── __init__.py     # Main fanout logic and entry points
-├── types.py        # Data types (Track, RoutingConfig)
-├── collision.py    # Collision detection utilities
-└── constants.py    # Configuration constants
+├── __init__.py          # Main fanout logic and entry points (3107 lines)
+├── types.py             # Data types: Track, RoutingConfig, BGAGrid, FanoutRoute (159 lines)
+├── collision.py         # Collision detection utilities (144 lines)
+├── constants.py         # Configuration constants (26 lines)
+├── layer_assignment.py  # Layer assignment for collision avoidance (350 lines)
+└── layer_balance.py     # Layer rebalancing for even distribution (360 lines)
 ```
 
 ### Key Components
 
 - **`generate_bga_fanout()`** - Main function that generates fanout tracks
+- **`generate_tracks_from_routes()`** - Converts FanoutRoute objects to track dictionaries
+- **`assign_layers_smart()`** - Assigns routes to layers avoiding collisions
+- **`rebalance_layers()`** - Rebalances routes across layers for even distribution
 - **`BGAGrid`** - Analyzes BGA pad grid geometry
 - **`FanoutRoute`** - Represents a single pad's fanout route
+- **`RoutingConfig`** - Configuration parameters for routing
 - **`check_segment_collision()`** - Detects track collisions
 
 ## Algorithm

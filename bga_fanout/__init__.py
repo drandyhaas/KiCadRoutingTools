@@ -28,7 +28,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from kicad_writer import add_tracks_and_vias_to_pcb
 from routing_utils import extract_diff_pair_base
-from bga_fanout.types import create_track, RoutingConfig
+from bga_fanout.types import (
+    create_track,
+    RoutingConfig,
+    Channel,
+    BGAGrid,
+    DiffPairPads,
+    FanoutRoute,
+)
 from bga_fanout.collision import (
     check_segment_collision,
     find_colliding_pairs,
@@ -40,68 +47,13 @@ from bga_fanout.constants import (
     POSITION_TOLERANCE,
     EDGE_PAD_TOLERANCE,
     FANOUT_DETECTION_TOLERANCE,
-    MAX_REBALANCE_ITERATIONS,
-    MAX_EDGE_PAIR_ITERATIONS,
 )
-
-
-@dataclass
-class DiffPairPads:
-    """A differential pair of pads (P and N) - tracks pad objects."""
-    base_name: str  # Common name without _P/_N suffix
-    p_pad: Optional[Pad] = None
-    n_pad: Optional[Pad] = None
-
-    @property
-    def is_complete(self) -> bool:
-        return self.p_pad is not None and self.n_pad is not None
-
-
-@dataclass
-class BGAGrid:
-    """Represents the BGA ball grid structure."""
-    pitch_x: float
-    pitch_y: float
-    rows: List[float]  # Sorted Y positions
-    cols: List[float]  # Sorted X positions
-    center_x: float
-    center_y: float
-    min_x: float
-    max_x: float
-    min_y: float
-    max_y: float
-
-
-@dataclass
-class Channel:
-    """A routing channel between ball rows/columns."""
-    orientation: str  # 'horizontal' or 'vertical'
-    position: float   # Y for horizontal, X for vertical
-    index: int
-
-
-@dataclass
-class FanoutRoute:
-    """Complete fanout: pad -> 45° stub -> channel -> exit -> jog."""
-    pad: Pad
-    pad_pos: Tuple[float, float]
-    stub_end: Tuple[float, float]  # Where stub meets channel (or exit for edge pads)
-    exit_pos: Tuple[float, float]  # Where route exits BGA
-    jog_end: Tuple[float, float] = None  # End of 45° jog after exit
-    jog_extension: Tuple[float, float] = None  # Extension point for outside track of diff pair
-    channel_point: Tuple[float, float] = None  # First channel point for half-edge inner pads (45° entry)
-    channel_point2: Tuple[float, float] = None  # Second channel point (after horizontal segment)
-    pre_channel_jog: Tuple[float, float] = None  # Jog point before channel (for jogged routes to farther channel)
-    channel: Optional[Channel] = None  # None for edge pads with direct escape
-    escape_dir: str = ''  # 'left', 'right', 'up', 'down'
-    is_edge: bool = False  # True for outer row/column pads
-    layer: str = "F.Cu"
-    pair_id: Optional[str] = None  # Differential pair base name if part of a pair
-    is_p: bool = True  # True for P, False for N in differential pair
-
-    @property
-    def net_id(self) -> int:
-        return self.pad.net_id
+from bga_fanout.layer_balance import rebalance_layers
+from bga_fanout.layer_assignment import (
+    segments_overlap_on_channel,
+    assign_layers_smart,
+    try_reassign_layer,
+)
 
 
 def find_differential_pairs(footprint: Footprint,
@@ -1552,345 +1504,6 @@ def calculate_jog_end(exit_pos: Tuple[float, float],
     return jog_end, extension_point
 
 
-def segments_overlap_on_channel(route1: FanoutRoute, route2: FanoutRoute,
-                                min_spacing: float) -> bool:
-    """
-    Check if two routes on the same channel have overlapping channel segments.
-
-    For horizontal channels going right: segments from stub_end.x to exit.x
-    The segments overlap if one starts before the other ends.
-    """
-    if route1.channel.orientation == 'horizontal':
-        # Check if the horizontal channel segments overlap
-        # Going right: segment is from stub_end.x to exit_pos.x
-        # Going left: segment is from exit_pos.x to stub_end.x
-        if route1.escape_dir == 'right':
-            # Both going right - segment is stub_end.x to exit.x
-            # They overlap since they share the same exit point
-            # Route closer to exit (higher x) has segment that overlaps with further one
-            x1_start, x1_end = route1.stub_end[0], route1.exit_pos[0]
-            x2_start, x2_end = route2.stub_end[0], route2.exit_pos[0]
-        else:
-            # Both going left
-            x1_start, x1_end = route1.exit_pos[0], route1.stub_end[0]
-            x2_start, x2_end = route2.exit_pos[0], route2.stub_end[0]
-
-        # Segments overlap if max(starts) < min(ends) + spacing
-        if max(x1_start, x2_start) < min(x1_end, x2_end) + min_spacing:
-            return True
-    else:
-        # Vertical channel
-        if route1.escape_dir == 'down':
-            y1_start, y1_end = route1.stub_end[1], route1.exit_pos[1]
-            y2_start, y2_end = route2.stub_end[1], route2.exit_pos[1]
-        else:
-            y1_start, y1_end = route1.exit_pos[1], route1.stub_end[1]
-            y2_start, y2_end = route2.exit_pos[1], route2.stub_end[1]
-
-        if max(y1_start, y2_start) < min(y1_end, y2_end) + min_spacing:
-            return True
-
-    return False
-
-
-def assign_layers_smart(routes: List[FanoutRoute],
-                        available_layers: List[str],
-                        track_width: float,
-                        clearance: float,
-                        diff_pair_spacing: float = 0.0,
-                        existing_tracks: List[Dict] = None) -> None:
-    """
-    Assign layers to routes to avoid all collisions.
-
-    Strategy:
-    - Edge pads stay on first layer (F.Cu) with direct H/V escape
-    - Differential pairs are assigned to the same layer together
-    - Inner pads grouped by channel AND escape direction
-    - Routes with overlapping channel segments must use different layers
-    - Cross-escape routes (vertical exit) must NOT conflict with edge routes on same layer
-    - Avoid collisions with existing tracks from the PCB
-    """
-    min_spacing = track_width + clearance
-    if existing_tracks is None:
-        existing_tracks = []
-
-    # For diff pairs, we need to consider pair spacing when checking collisions
-    # Two traces from the same pair use 2*track_width + diff_pair_spacing
-    pair_width = 2 * track_width + diff_pair_spacing
-
-    # Edge routes stay on first layer
-    edge_routes = []
-    for route in routes:
-        if route.is_edge:
-            route.layer = available_layers[0]
-            edge_routes.append(route)
-
-    # Build lookup from pair_id to routes
-    pair_routes: Dict[str, List[FanoutRoute]] = defaultdict(list)
-    for route in routes:
-        if route.pair_id:
-            pair_routes[route.pair_id].append(route)
-
-    # Identify half-edge pairs (pairs where one route is an edge route)
-    # These pairs should have ALL routes on F.Cu, not just the edge route
-    half_edge_pairs: Set[str] = set()
-    for pair_id, routes_in_pair in pair_routes.items():
-        if any(r.is_edge for r in routes_in_pair):
-            half_edge_pairs.add(pair_id)
-            # Set ALL routes in this pair to F.Cu
-            for r in routes_in_pair:
-                r.layer = available_layers[0]
-                if r not in edge_routes:
-                    edge_routes.append(r)
-
-    # Group inner routes by (channel_index, escape_direction)
-    by_channel_dir: Dict[Tuple[int, str], List[FanoutRoute]] = defaultdict(list)
-    for route in routes:
-        if route.is_edge:
-            continue  # Skip edge pads
-        # Skip routes that are part of half-edge pairs (already assigned to F.Cu)
-        if route.pair_id in half_edge_pairs:
-            continue
-        key = (route.channel.index, route.escape_dir)
-        by_channel_dir[key].append(route)
-
-    # Track which pairs have been assigned
-    assigned_pairs: Set[str] = set()
-
-    # For each group, assign layers to avoid overlapping channel segments
-    for (channel_idx, escape_dir), group_routes in by_channel_dir.items():
-        if not group_routes:
-            continue
-
-        # Sort routes by position along the channel segment
-        # This puts routes in order from inner to outer (or vice versa)
-        if group_routes[0].channel.orientation == 'horizontal':
-            if escape_dir == 'right':
-                # Sort by stub_end X descending - routes closer to exit first
-                group_routes.sort(key=lambda r: r.stub_end[0], reverse=True)
-            else:
-                group_routes.sort(key=lambda r: r.stub_end[0])
-        else:
-            if escape_dir == 'down':
-                group_routes.sort(key=lambda r: r.stub_end[1], reverse=True)
-            else:
-                group_routes.sort(key=lambda r: r.stub_end[1])
-
-        # Greedy layer assignment
-        # For each route, find a layer where it doesn't conflict with already-assigned routes
-        # Inner pairs (using channels) should NOT use F.Cu (first layer) to avoid
-        # clearance violations with pads on the top layer
-        inner_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
-
-        for route in group_routes:
-            # If this route is part of a pair that's already assigned, use that layer
-            if route.pair_id and route.pair_id in assigned_pairs:
-                # Find the other route in the pair and use its layer
-                for other in pair_routes[route.pair_id]:
-                    if other is not route and other.layer:
-                        route.layer = other.layer
-                        break
-                continue
-
-            assigned = False
-
-            for layer in inner_layers:
-                conflict = False
-                # Check against all previously assigned routes on this layer in this group
-                for other in group_routes:
-                    if other is route:
-                        break  # Only check routes before this one
-                    if other.layer != layer:
-                        continue
-                    # Skip collision check for same diff pair (they route together)
-                    if route.pair_id and other.pair_id == route.pair_id:
-                        continue
-                    # Check if channel segments overlap
-                    # Use pair_width for spacing if either route is a diff pair
-                    spacing = min_spacing
-                    if route.pair_id or other.pair_id:
-                        spacing = pair_width + clearance
-                    if segments_overlap_on_channel(route, other, spacing):
-                        conflict = True
-                        break
-
-                # Also check against edge routes if assigning to first layer (F.Cu)
-                # Edge routes exit horizontally (left/right), inner vertical-exit routes
-                # could potentially cross them
-                if not conflict and layer == available_layers[0] and edge_routes:
-                    spacing = pair_width + clearance if route.pair_id else min_spacing
-                    for edge_route in edge_routes:
-                        # Check if this route's exit segment conflicts with edge route
-                        # Route goes from stub_end to exit_pos (for cross-escape, this is vertical)
-                        # Edge route goes from pad_pos/stub_end to exit_pos (horizontal)
-                        if route.escape_dir in ['up', 'down']:
-                            # Vertical exit - check if it crosses any horizontal edge route
-                            # Route vertical segment: from stub_end to exit_pos
-                            route_x = route.stub_end[0]  # X is constant for vertical
-                            route_y_min = min(route.stub_end[1], route.exit_pos[1])
-                            route_y_max = max(route.stub_end[1], route.exit_pos[1])
-
-                            # Edge route horizontal segment: from pad to exit
-                            edge_y = edge_route.exit_pos[1]  # Y is constant for horizontal edge
-                            edge_x_min = min(edge_route.pad_pos[0], edge_route.exit_pos[0])
-                            edge_x_max = max(edge_route.pad_pos[0], edge_route.exit_pos[0])
-
-                            # Check if vertical segment crosses horizontal segment
-                            if (route_y_min <= edge_y <= route_y_max and
-                                edge_x_min <= route_x <= edge_x_max):
-                                # Check spacing - are they too close?
-                                # For diff pairs, check both traces
-                                if route.pair_id:
-                                    # Both P and N traces at route_x +/- half_pair_spacing
-                                    for partner in pair_routes.get(route.pair_id, [route]):
-                                        partner_x = partner.stub_end[0]
-                                        if abs(partner_x - route_x) < spacing:
-                                            conflict = True
-                                            break
-                                else:
-                                    conflict = True
-                                if conflict:
-                                    break
-
-                # Check against existing tracks from the PCB on this layer
-                if not conflict and existing_tracks:
-                    # Build approximate segments for this route
-                    route_segs = [
-                        (route.pad_pos, route.stub_end),
-                        (route.stub_end, route.exit_pos)
-                    ]
-                    # Also add channel_point segments if present (for half-edge routes)
-                    if route.channel_point:
-                        route_segs.append((route.stub_end, route.channel_point))
-                        route_segs.append((route.channel_point, route.exit_pos))
-                    if route.jog_extension:
-                        route_segs.append((route.stub_end, route.jog_extension))
-                        route_segs.append((route.jog_extension, route.exit_pos))
-
-                    for existing in existing_tracks:
-                        if existing['layer'] != layer:
-                            continue
-                        # Skip if same net (e.g., connecting to existing stub)
-                        if existing.get('net_id') == route.net_id:
-                            continue
-                        for seg_start, seg_end in route_segs:
-                            if check_segment_collision(seg_start, seg_end,
-                                                       existing['start'], existing['end'],
-                                                       min_spacing):
-                                conflict = True
-                                break
-                        if conflict:
-                            break
-
-                if not conflict:
-                    route.layer = layer
-                    assigned = True
-                    # If this is a diff pair, mark it as assigned and set partner's layer
-                    if route.pair_id:
-                        assigned_pairs.add(route.pair_id)
-                        for partner in pair_routes[route.pair_id]:
-                            if partner is not route:
-                                partner.layer = layer
-                    break
-
-            if not assigned:
-                # Couldn't find a conflict-free layer - use first inner layer and warn
-                route.layer = inner_layers[0]
-                print(f"  Warning: Could not find collision-free layer for route at {route.pad_pos}")
-                if route.pair_id:
-                    assigned_pairs.add(route.pair_id)
-                    for partner in pair_routes[route.pair_id]:
-                        if partner is not route:
-                            partner.layer = inner_layers[0]
-
-
-def try_reassign_layer(identifier: str, routes: List[FanoutRoute], tracks: List[Dict],
-                       available_layers: List[str], track_width: float,
-                       clearance: float, diff_pair_spacing: float,
-                       avoid_layers: Set[str] = None,
-                       existing_tracks: List[Dict] = None) -> Optional[str]:
-    """Try to find a different layer for a colliding pair/net that has no conflicts.
-
-    Args:
-        identifier: pair_id for diff pairs, or 'net_<net_id>' for single-ended
-        existing_tracks: Read-only list of existing tracks to check against
-    """
-    min_spacing = track_width + clearance
-    if avoid_layers is None:
-        avoid_layers = set()
-    if existing_tracks is None:
-        existing_tracks = []
-
-    # Handle both pair_id and net_XXX identifiers
-    is_single_ended = identifier.startswith('net_')
-    if is_single_ended:
-        net_id = int(identifier[4:])
-        # Find routes for this net
-        id_routes = [r for r in routes if r.net_id == net_id and r.pair_id is None]
-    else:
-        # Find routes for this pair
-        id_routes = [r for r in routes if r.pair_id == identifier]
-
-    if not id_routes:
-        return None
-
-    current_layer = id_routes[0].layer
-
-    # Check if this has any edge route (either full edge or half-edge)
-    # Edge and half-edge can use F.Cu; only fully inner are restricted
-    has_edge = any(r.is_edge for r in id_routes)
-
-    # Only fully inner should NOT use F.Cu (first layer)
-    # to avoid clearance violations with pads on the top layer
-    if has_edge:
-        candidate_layers = available_layers
-    else:
-        candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
-
-    # Get tracks for this identifier
-    id_track_indices = [i for i, t in enumerate(tracks) if tracks_match_identifier(t, identifier)]
-
-    # Get other tracks (not this identifier) - includes both new and existing tracks
-    other_tracks = [t for i, t in enumerate(tracks) if i not in id_track_indices]
-    all_other_tracks = other_tracks + existing_tracks
-
-    # Count tracks per layer for load balancing
-    layer_counts = {layer: 0 for layer in candidate_layers}
-    for t in other_tracks:
-        if t['layer'] in layer_counts:
-            layer_counts[t['layer']] += 1
-
-    # Sort layers by count (prefer less crowded layers)
-    sorted_layers = sorted(candidate_layers, key=lambda l: layer_counts.get(l, 0))
-
-    # Try each candidate layer
-    for candidate_layer in sorted_layers:
-        if candidate_layer == current_layer:
-            continue
-        if candidate_layer in avoid_layers:
-            continue
-
-        # Check if moving to this layer would cause collisions with other tracks OR existing tracks
-        has_collision = False
-        for pt_idx in id_track_indices:
-            pt = tracks[pt_idx]
-            for ot in all_other_tracks:
-                if ot['layer'] != candidate_layer:
-                    continue
-                if check_segment_collision(pt['start'], pt['end'],
-                                            ot['start'], ot['end'],
-                                            min_spacing):
-                    has_collision = True
-                    break
-            if has_collision:
-                break
-
-        if not has_collision:
-            return candidate_layer
-
-    return None
-
-
 def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                        available_layers: List[str], track_width: float,
                        clearance: float, diff_pair_spacing: float,
@@ -2142,6 +1755,131 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
         print(f"  Rerouted {rerouted} signals to alternate channels")
 
     return reassigned + rerouted, failed_nets
+
+
+def generate_tracks_from_routes(
+    routes: List[FanoutRoute],
+    track_width: float,
+    top_layer: str,
+) -> Tuple[List[Dict], int, int]:
+    """
+    Generate track segments from routes.
+
+    Converts FanoutRoute objects into track dictionaries ready for output.
+
+    Args:
+        routes: List of FanoutRoute objects
+        track_width: Width of tracks
+        top_layer: Name of the top layer (for reporting)
+
+    Returns:
+        Tuple of (tracks, edge_count, inner_count)
+    """
+    tracks = []
+    edge_count = 0
+    inner_count = 0
+
+    for route in routes:
+        if route.is_edge:
+            # Edge pad: Check if stub_end differs from pad_pos (differential pair convergence)
+            if route.pair_id and (abs(route.stub_end[0] - route.pad_pos[0]) > POSITION_TOLERANCE or
+                                   abs(route.stub_end[1] - route.pad_pos[1]) > POSITION_TOLERANCE):
+                # Differential edge pair: 45° stub to converge, then straight to exit
+                # 45° stub: pad -> stub_end (convergence point)
+                tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
+                                           route.layer, route.net_id, route.pair_id))
+                # Straight segment: stub_end -> exit
+                tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
+                                           route.layer, route.net_id, route.pair_id))
+            else:
+                # Single-ended edge pad: direct segment to exit
+                tracks.append(create_track(route.pad_pos, route.exit_pos, track_width,
+                                           route.layer, route.net_id, route.pair_id))
+            # Add jog segment(s)
+            if route.jog_end:
+                if route.jog_extension:
+                    # Outside track of diff pair: extension segment first
+                    tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                    # Then the 45° jog from extension point
+                    tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                else:
+                    # Inside track or single-ended: direct 45° jog
+                    tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+            edge_count += 1
+        else:
+            # Inner pad: 45° stub + channel segment + jog
+            # For half-edge pairs: pad -> channel_point -> stub_end -> exit
+
+            if route.channel_point:
+                # Half-edge inner pad: tent shape with channel segment
+                # Path: pad -> channel_point -> channel_point2 -> stub_end -> exit
+                #
+                # First 45°: pad -> channel_point (entry to channel)
+                tracks.append(create_track(route.pad_pos, route.channel_point, track_width,
+                                           route.layer, route.net_id, route.pair_id))
+                # Straight segment in channel: channel_point -> channel_point2 (1 pitch)
+                if route.channel_point2:
+                    tracks.append(create_track(route.channel_point, route.channel_point2, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                    # Second 45°: channel_point2 -> stub_end (exit from channel)
+                    tracks.append(create_track(route.channel_point2, route.stub_end, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                else:
+                    # Fallback if no channel_point2 (shouldn't happen)
+                    tracks.append(create_track(route.channel_point, route.stub_end, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                # Straight segment: stub_end -> exit
+                tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
+                                           route.layer, route.net_id, route.pair_id))
+            else:
+                # Normal inner pad: single 45° stub to channel, then straight to exit
+                # Skip zero-length stubs
+                dx = abs(route.stub_end[0] - route.pad_pos[0])
+                dy = abs(route.stub_end[1] - route.pad_pos[1])
+                if dx < POSITION_TOLERANCE and dy < POSITION_TOLERANCE:
+                    inner_count += 1
+                    continue
+
+                # 45-degree stub: pad -> stub_end
+                tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
+                                           route.layer, route.net_id, route.pair_id))
+
+                if route.pre_channel_jog:
+                    # Jogged route: stub_end -> jog_point -> exit
+                    # Jog segment: stub_end -> pre_channel_jog
+                    tracks.append(create_track(route.stub_end, route.pre_channel_jog, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                    # Channel segment: pre_channel_jog -> exit
+                    tracks.append(create_track(route.pre_channel_jog, route.exit_pos, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                else:
+                    # Normal route: stub_end -> exit
+                    tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+
+            # Jog segment(s): exit -> jog_end
+            if route.jog_end:
+                if route.jog_extension:
+                    # Outside track of diff pair: extension segment first
+                    tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                    # Then the 45° jog from extension point
+                    tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+                else:
+                    # Inside track or single-ended: direct 45° jog
+                    tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
+                                               route.layer, route.net_id, route.pair_id))
+            inner_count += 1
+
+    print(f"  Generated {len(tracks)} track segments")
+    print(f"    Edge pads: {edge_count} (direct H/V on {top_layer})")
+    print(f"    Inner pads: {inner_count} (45° stub + channel)")
+
+    return tracks, edge_count, inner_count
 
 
 def generate_bga_fanout(footprint: Footprint,
@@ -3092,109 +2830,7 @@ def generate_bga_fanout(footprint: Footprint,
         route.jog_extension = extension
 
     # Generate tracks
-    tracks = []
-    edge_count = 0
-    inner_count = 0
-
-    for route in routes:
-        if route.is_edge:
-            # Edge pad: Check if stub_end differs from pad_pos (differential pair convergence)
-            if route.pair_id and (abs(route.stub_end[0] - route.pad_pos[0]) > POSITION_TOLERANCE or
-                                   abs(route.stub_end[1] - route.pad_pos[1]) > POSITION_TOLERANCE):
-                # Differential edge pair: 45° stub to converge, then straight to exit
-                # 45° stub: pad -> stub_end (convergence point)
-                tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-                # Straight segment: stub_end -> exit
-                tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-            else:
-                # Single-ended edge pad: direct segment to exit
-                tracks.append(create_track(route.pad_pos, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-            # Add jog segment(s)
-            if route.jog_end:
-                if route.jog_extension:
-                    # Outside track of diff pair: extension segment first
-                    tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Then the 45° jog from extension point
-                    tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Inside track or single-ended: direct 45° jog
-                    tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-            edge_count += 1
-        else:
-            # Inner pad: 45° stub + channel segment + jog
-            # For half-edge pairs: pad -> channel_point -> stub_end -> exit
-
-            if route.channel_point:
-                # Half-edge inner pad: tent shape with channel segment
-                # Path: pad -> channel_point -> channel_point2 -> stub_end -> exit
-                #
-                # First 45°: pad -> channel_point (entry to channel)
-                tracks.append(create_track(route.pad_pos, route.channel_point, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-                # Straight segment in channel: channel_point -> channel_point2 (1 pitch)
-                if route.channel_point2:
-                    tracks.append(create_track(route.channel_point, route.channel_point2, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Second 45°: channel_point2 -> stub_end (exit from channel)
-                    tracks.append(create_track(route.channel_point2, route.stub_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Fallback if no channel_point2 (shouldn't happen)
-                    tracks.append(create_track(route.channel_point, route.stub_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                # Straight segment: stub_end -> exit
-                tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-            else:
-                # Normal inner pad: single 45° stub to channel, then straight to exit
-                # Skip zero-length stubs
-                dx = abs(route.stub_end[0] - route.pad_pos[0])
-                dy = abs(route.stub_end[1] - route.pad_pos[1])
-                if dx < POSITION_TOLERANCE and dy < POSITION_TOLERANCE:
-                    inner_count += 1
-                    continue
-
-                # 45-degree stub: pad -> stub_end
-                tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
-                                           route.layer, route.net_id, route.pair_id))
-
-                if route.pre_channel_jog:
-                    # Jogged route: stub_end -> jog_point -> exit
-                    # Jog segment: stub_end -> pre_channel_jog
-                    tracks.append(create_track(route.stub_end, route.pre_channel_jog, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Channel segment: pre_channel_jog -> exit
-                    tracks.append(create_track(route.pre_channel_jog, route.exit_pos, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Normal route: stub_end -> exit
-                    tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-
-            # Jog segment(s): exit -> jog_end
-            if route.jog_end:
-                if route.jog_extension:
-                    # Outside track of diff pair: extension segment first
-                    tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                    # Then the 45° jog from extension point
-                    tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-                else:
-                    # Inside track or single-ended: direct 45° jog
-                    tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
-            inner_count += 1
-
-    print(f"  Generated {len(tracks)} track segments")
-    print(f"    Edge pads: {edge_count} (direct H/V on {layers[0]})")
-    print(f"    Inner pads: {inner_count} (45° stub + channel)")
+    tracks, edge_count, inner_count = generate_tracks_from_routes(routes, track_width, layers[0])
 
     # Validate no collisions
     min_spacing = track_width + clearance
@@ -3286,372 +2922,8 @@ def generate_bga_fanout(footprint: Footprint,
         collisions_remaining = 0
 
     # Post-resolution layer rebalancing for even distribution
-    # Only rebalance if there are no collisions remaining
-    # Include F.Cu for edge routes, inner layers for non-edge routes
-    inner_layers = layers[1:] if len(layers) > 1 else layers
-    all_layers = layers  # All layers including F.Cu
-
-    if collisions_remaining == 0 and len(all_layers) > 1:
-        max_rebalance_iterations = 100  # Limit total moves
-
-        # Track original layers to count net changes at the end
-        original_layers = {id(route): route.layer for route in routes}
-
-        # Identify edge/half-edge pairs BEFORE rebalancing to protect some on F.Cu
-        edge_pair_ids = set()
-        for route in routes:
-            if route.pair_id and route.is_edge:
-                edge_pair_ids.add(route.pair_id)
-        for route in routes:
-            if route.pair_id:
-                partner_routes = [r for r in routes if r.pair_id == route.pair_id and r is not route]
-                if any(r.is_edge for r in partner_routes):
-                    edge_pair_ids.add(route.pair_id)
-
-        # Categorize edge pairs by their escape direction (which edge they're on)
-        # Store (position_along_edge, pair_id) for sorting
-        edge_pairs_by_dir: Dict[str, List[Tuple[float, str]]] = {'left': [], 'right': [], 'up': [], 'down': []}
-        seen_pairs = set()
-        for route in routes:
-            if route.pair_id in edge_pair_ids and route.is_edge and route.pair_id not in seen_pairs:
-                esc_dir = route.escape_dir
-                if esc_dir and esc_dir in edge_pairs_by_dir:
-                    seen_pairs.add(route.pair_id)
-                    # Position along edge: Y for left/right edges, X for up/down edges
-                    if esc_dir in ['left', 'right']:
-                        pos = route.pad_pos[1]  # Y position
-                    else:
-                        pos = route.pad_pos[0]  # X position
-                    edge_pairs_by_dir[esc_dir].append((pos, route.pair_id))
-
-        # Sort each direction's pairs by position along the edge
-        for d in edge_pairs_by_dir:
-            edge_pairs_by_dir[d].sort(key=lambda x: x[0])
-
-        # Calculate how many edge pairs should stay on F.Cu for balanced total routes
-        total_routes = len(routes)
-        avg_routes_per_layer = total_routes / len(all_layers)
-        target_pairs_on_fcu = int(avg_routes_per_layer / 2 + 0.5)
-
-        # Distribute target pairs evenly across edge directions
-        directions = [d for d in ['up', 'down', 'left', 'right'] if edge_pairs_by_dir[d]]
-        pairs_to_keep_per_dir = {}
-        if directions:
-            base_per_dir = target_pairs_on_fcu // len(directions)
-            remainder = target_pairs_on_fcu % len(directions)
-            for i, d in enumerate(directions):
-                pairs_to_keep_per_dir[d] = min(base_per_dir + (1 if i < remainder else 0),
-                                               len(edge_pairs_by_dir[d]))
-
-        # Mark which pairs should stay on F.Cu - select evenly spaced pairs along each edge
-        pairs_to_keep_on_fcu = set()
-        for d, keep_count in pairs_to_keep_per_dir.items():
-            pairs_on_edge = edge_pairs_by_dir[d]
-            n = len(pairs_on_edge)
-            if keep_count >= n:
-                # Keep all
-                for _, pair_id in pairs_on_edge:
-                    pairs_to_keep_on_fcu.add(pair_id)
-            elif keep_count > 0:
-                # Select evenly spaced indices
-                # E.g., if n=14 and keep_count=3, pick indices at 0, 7, 13 (roughly evenly spaced)
-                for i in range(keep_count):
-                    idx = (i * (n - 1)) // (keep_count - 1) if keep_count > 1 else n // 2
-                    pairs_to_keep_on_fcu.add(pairs_on_edge[idx][1])
-
-
-        # Cycle through target layers for better spatial distribution
-        target_layer_idx = 0
-
-        def check_conflicts_on_layer(pair_routes_to_check, all_route_segs, all_net_ids, target_layer):
-            """Check if routes can move to target_layer without conflicts."""
-            # Check against other routes on target layer
-            for other in routes:
-                if other in pair_routes_to_check or other.layer != target_layer:
-                    continue
-                # Build segments for other route, including channel points for half-edge routes
-                other_segs = []
-                if other.channel_point:
-                    other_segs.append((other.pad_pos, other.channel_point))
-                    if other.channel_point2:
-                        other_segs.append((other.channel_point, other.channel_point2))
-                        other_segs.append((other.channel_point2, other.stub_end))
-                    else:
-                        other_segs.append((other.channel_point, other.stub_end))
-                else:
-                    other_segs.append((other.pad_pos, other.stub_end))
-                other_segs.append((other.stub_end, other.exit_pos))
-                for rs, re in all_route_segs:
-                    for os, oe in other_segs:
-                        if check_segment_collision(rs, re, os, oe, min_spacing):
-                            return True
-
-            # Check against existing tracks on target layer
-            existing_on_layer = [e for e in existing_tracks if e['layer'] == target_layer]
-            for existing in existing_on_layer:
-                for seg_start, seg_end in all_route_segs:
-                    if check_segment_collision(seg_start, seg_end,
-                                               existing['start'], existing['end'],
-                                               min_spacing):
-                        return True
-
-            # Check against new tracks already on target layer (from other nets)
-            for track in tracks:
-                if track['layer'] != target_layer:
-                    continue
-                if track.get('net_id') in all_net_ids:
-                    continue  # Skip our own tracks
-                for seg_start, seg_end in all_route_segs:
-                    if check_segment_collision(seg_start, seg_end,
-                                               track['start'], track['end'],
-                                               min_spacing):
-                        return True
-
-            return False
-
-        def move_connected_tracks(seed_positions, net_ids, old_layer, new_layer):
-            """Walk connected tracks from seed positions and move them to new_layer.
-
-            Uses flood-fill approach: start from pad positions, find connected tracks,
-            add their other endpoints to the frontier, repeat until no more found.
-            """
-            # Use rounded positions for matching
-            def round_pos(pos):
-                return (round(pos[0], 2), round(pos[1], 2))
-
-            frontier = set(round_pos(p) for p in seed_positions)
-            visited_positions = set()
-            tracks_to_move = []
-
-            while frontier:
-                current_pos = frontier.pop()
-                if current_pos in visited_positions:
-                    continue
-                visited_positions.add(current_pos)
-
-                # Find all tracks on old_layer that connect to current_pos
-                for track in tracks:
-                    if track.get('net_id') not in net_ids:
-                        continue
-                    if track['layer'] != old_layer:
-                        continue
-
-                    ts = round_pos(track['start'])
-                    te = round_pos(track['end'])
-
-                    if ts == current_pos:
-                        if track not in tracks_to_move:
-                            tracks_to_move.append(track)
-                        frontier.add(te)
-                    elif te == current_pos:
-                        if track not in tracks_to_move:
-                            tracks_to_move.append(track)
-                        frontier.add(ts)
-
-            # Move all found tracks
-            for track in tracks_to_move:
-                track['layer'] = new_layer
-
-        for iteration in range(max_rebalance_iterations):
-            # Count routes per layer
-            layer_counts = {layer: 0 for layer in all_layers}
-            for route in routes:
-                if route.layer in layer_counts:
-                    layer_counts[route.layer] += 1
-
-            if not any(layer_counts.values()):
-                break  # No routes to rebalance
-
-            # Find most crowded layer and check if balanced
-            max_layer = max(all_layers, key=lambda l: layer_counts[l])
-            min_count = min(layer_counts.values())
-            max_count = layer_counts[max_layer]
-
-            # Stop if difference is small enough (balanced)
-            if max_count - min_count <= 1:
-                break
-
-            # Try to move a route from most crowded layer to a less crowded layer
-            # Cycle through target layers for spatial distribution
-            moved_one = False
-            processed_pairs = set()
-
-            for route in routes:
-                if route.layer != max_layer:
-                    continue
-
-                # For diff pairs, process both together and skip if already processed
-                if route.pair_id:
-                    if route.pair_id in processed_pairs:
-                        continue
-                    processed_pairs.add(route.pair_id)
-                    # Skip edge pairs that should stay on F.Cu
-                    if route.pair_id in pairs_to_keep_on_fcu and max_layer == layers[0]:
-                        continue
-                    # Find both routes in the pair
-                    pair_routes = [r for r in routes if r.pair_id == route.pair_id]
-                    # Skip if not all on same layer
-                    if not all(r.layer == max_layer for r in pair_routes):
-                        continue
-                else:
-                    pair_routes = [route]
-
-                # Build segments for all routes being moved (including channel points for half-edge)
-                all_route_segs = []
-                all_net_ids = set()
-                for r in pair_routes:
-                    if r.channel_point:
-                        # Half-edge inner route: pad -> channel_point -> channel_point2 -> stub_end -> exit
-                        all_route_segs.append((r.pad_pos, r.channel_point))
-                        if r.channel_point2:
-                            all_route_segs.append((r.channel_point, r.channel_point2))
-                            all_route_segs.append((r.channel_point2, r.stub_end))
-                        else:
-                            all_route_segs.append((r.channel_point, r.stub_end))
-                    else:
-                        all_route_segs.append((r.pad_pos, r.stub_end))
-                    all_route_segs.append((r.stub_end, r.exit_pos))
-                    all_net_ids.add(r.net_id)
-
-                # Try each layer in cycling order, starting from current target_layer_idx
-                # Skip layers that are already at or above average, and skip source layer
-                avg_count = sum(layer_counts.values()) / len(all_layers)
-
-                for i in range(len(all_layers)):
-                    try_layer = all_layers[(target_layer_idx + i) % len(all_layers)]
-
-                    # Skip source layer
-                    if try_layer == max_layer:
-                        continue
-
-                    # Skip layers that are already crowded (at or above average)
-                    if layer_counts[try_layer] >= avg_count:
-                        continue
-
-                    # Non-edge routes should NOT move TO F.Cu (would conflict with pads)
-                    if not route.is_edge and try_layer == layers[0]:
-                        continue
-
-                    # Check for conflicts on this target layer
-                    if check_conflicts_on_layer(pair_routes, all_route_segs, all_net_ids, try_layer):
-                        continue  # Conflict found, try next layer
-                    else:
-                        # No conflict - move to this layer
-                        old_layer = pair_routes[0].layer
-                        for r in pair_routes:
-                            r.layer = try_layer
-                        # Walk connected tracks from pad positions and move them
-                        seed_positions = [r.pad_pos for r in pair_routes]
-                        move_connected_tracks(seed_positions, all_net_ids, old_layer, try_layer)
-                        moved_one = True
-                        # Advance the cycle for next move
-                        target_layer_idx = (target_layer_idx + 1) % len(all_layers)
-                        break
-
-                if moved_one:
-                    break  # Move one at a time, then recount
-
-            if not moved_one:
-                break  # No more moves possible
-
-        # Phase 2: Distribute remaining edge/half-edge pairs evenly across all layers
-        # (pairs_to_keep_on_fcu was already calculated above and respected in phase 1)
-        if edge_pair_ids:
-            # Move edge pairs from layers with too many to layers with fewer
-            for iteration in range(50):  # Limit iterations
-                # Count total routes per layer
-                total_layer_counts = {layer: 0 for layer in all_layers}
-                for route in routes:
-                    if route.layer in total_layer_counts:
-                        total_layer_counts[route.layer] += 1
-
-                # Count edge pairs per layer
-                edge_layer_counts = {layer: 0 for layer in all_layers}
-                processed = set()
-                for route in routes:
-                    if route.pair_id in edge_pair_ids and route.pair_id not in processed:
-                        processed.add(route.pair_id)
-                        edge_layer_counts[route.layer] += 1
-
-                # Find layer with most edge pairs
-                max_edge_layer = max(all_layers, key=lambda l: edge_layer_counts[l])
-                min_edge_count = min(edge_layer_counts.values())
-
-                # Stop if edge pairs are balanced (difference <= 1)
-                if edge_layer_counts[max_edge_layer] - min_edge_count <= 1:
-                    break
-
-                # Average total route count for balance check
-                avg_total = sum(total_layer_counts.values()) / len(all_layers)
-
-                # Try to move one edge pair from max_edge_layer to a layer with fewer edge pairs
-                moved_one = False
-                processed_pairs = set()
-
-                for route in routes:
-                    if route.pair_id not in edge_pair_ids:
-                        continue
-                    if route.pair_id in processed_pairs:
-                        continue
-                    if route.layer != max_edge_layer:
-                        continue
-                    # Skip pairs that should stay on F.Cu
-                    if route.pair_id in pairs_to_keep_on_fcu and max_edge_layer == layers[0]:
-                        continue
-
-                    processed_pairs.add(route.pair_id)
-                    pair_routes = [r for r in routes if r.pair_id == route.pair_id]
-                    if not all(r.layer == max_edge_layer for r in pair_routes):
-                        continue
-
-                    # Build segments (including channel points for half-edge)
-                    all_route_segs = []
-                    all_net_ids = set()
-                    for r in pair_routes:
-                        if r.channel_point:
-                            # Half-edge inner route: pad -> channel_point -> channel_point2 -> stub_end -> exit
-                            all_route_segs.append((r.pad_pos, r.channel_point))
-                            if r.channel_point2:
-                                all_route_segs.append((r.channel_point, r.channel_point2))
-                                all_route_segs.append((r.channel_point2, r.stub_end))
-                            else:
-                                all_route_segs.append((r.channel_point, r.stub_end))
-                        else:
-                            all_route_segs.append((r.pad_pos, r.stub_end))
-                        all_route_segs.append((r.stub_end, r.exit_pos))
-                        all_net_ids.add(r.net_id)
-
-                    # Try layers with fewer edge pairs, preferring those that won't exceed avg total
-                    candidate_layers = [l for l in all_layers if l != max_edge_layer and
-                                        edge_layer_counts[l] < edge_layer_counts[max_edge_layer]]
-                    # Sort by edge count (fewer first), then by total count (fewer first)
-                    candidate_layers.sort(key=lambda l: (edge_layer_counts[l], total_layer_counts[l]))
-
-                    for try_layer in candidate_layers:
-                        # Don't move if it would make target layer have too many total routes
-                        # (more than 2 above average)
-                        if total_layer_counts[try_layer] + len(pair_routes) > avg_total + 2:
-                            continue
-
-                        if not check_conflicts_on_layer(pair_routes, all_route_segs, all_net_ids, try_layer):
-                            # Move the pair
-                            old_layer = pair_routes[0].layer
-                            for r in pair_routes:
-                                r.layer = try_layer
-                            # Walk connected tracks from pad positions and move them
-                            seed_positions = [r.pad_pos for r in pair_routes]
-                            move_connected_tracks(seed_positions, all_net_ids, old_layer, try_layer)
-                            moved_one = True
-                            break
-
-                    if moved_one:
-                        break
-
-                if not moved_one:
-                    break
-
-        # Count routes that ended up on a different layer than they started
-        rebalanced_count = sum(1 for route in routes if route.layer != original_layers[id(route)])
+    if collisions_remaining == 0 and len(layers) > 1:
+        rebalanced_count = rebalance_layers(routes, tracks, existing_tracks, layers, min_spacing)
         if rebalanced_count > 0:
             print(f"  Rebalanced {rebalanced_count} routes for even layer distribution")
 
