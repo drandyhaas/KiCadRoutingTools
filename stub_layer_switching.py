@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig
 from routing_utils import get_stub_segments, get_stub_direction
+from geometry_utils import segments_intersect_2d, point_to_segment_distance_seg
 from typing import Set
 
 
@@ -262,54 +263,6 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
             pcb_data.vias.remove(via)
 
 
-def segments_intersect_2d(seg1_start: Tuple[float, float], seg1_end: Tuple[float, float],
-                          seg2_start: Tuple[float, float], seg2_end: Tuple[float, float],
-                          tolerance: float = 0.001) -> bool:
-    """
-    Check if two 2D line segments actually intersect (not just bounding boxes).
-
-    Uses cross product method to determine if segments cross each other.
-
-    Args:
-        seg1_start, seg1_end: Endpoints of first segment
-        seg2_start, seg2_end: Endpoints of second segment
-        tolerance: Numerical tolerance for collinear/touching cases
-
-    Returns:
-        True if segments intersect, False otherwise
-    """
-    # Vector cross product: (v1 x v2) = v1.x * v2.y - v1.y * v2.x
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-    # Check if point c is on segment a-b (when collinear)
-    def on_segment(a, b, c):
-        return (min(a[0], b[0]) - tolerance <= c[0] <= max(a[0], b[0]) + tolerance and
-                min(a[1], b[1]) - tolerance <= c[1] <= max(a[1], b[1]) + tolerance)
-
-    d1 = cross(seg2_start, seg2_end, seg1_start)
-    d2 = cross(seg2_start, seg2_end, seg1_end)
-    d3 = cross(seg1_start, seg1_end, seg2_start)
-    d4 = cross(seg1_start, seg1_end, seg2_end)
-
-    # Standard intersection: segments cross each other
-    if ((d1 > tolerance and d2 < -tolerance) or (d1 < -tolerance and d2 > tolerance)) and \
-       ((d3 > tolerance and d4 < -tolerance) or (d3 < -tolerance and d4 > tolerance)):
-        return True
-
-    # Collinear cases: check if endpoints lie on the other segment
-    if abs(d1) <= tolerance and on_segment(seg2_start, seg2_end, seg1_start):
-        return True
-    if abs(d2) <= tolerance and on_segment(seg2_start, seg2_end, seg1_end):
-        return True
-    if abs(d3) <= tolerance and on_segment(seg1_start, seg1_end, seg2_start):
-        return True
-    if abs(d4) <= tolerance and on_segment(seg1_start, seg1_end, seg2_end):
-        return True
-
-    return False
-
-
 def check_segments_overlap(segments: List[Segment], other_segments: List[Segment],
                            y_tolerance: float = 0.2) -> bool:
     """
@@ -392,30 +345,6 @@ def validate_stub_no_overlap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str
     return True, ""
 
 
-def point_to_segment_distance(px: float, py: float, seg: Segment) -> float:
-    """Calculate the minimum distance from a point to a line segment."""
-    x1, y1 = seg.start_x, seg.start_y
-    x2, y2 = seg.end_x, seg.end_y
-
-    # Vector from segment start to end
-    dx = x2 - x1
-    dy = y2 - y1
-    seg_len_sq = dx * dx + dy * dy
-
-    if seg_len_sq == 0:
-        # Segment is a point
-        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
-
-    # Project point onto segment line, clamped to [0, 1]
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
-
-    # Closest point on segment
-    closest_x = x1 + t * dx
-    closest_y = y1 + t * dy
-
-    return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
-
-
 def validate_setback_clear(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                            pcb_data: PCBData, config: GridRouteConfig,
                            exclude_net_ids: Set[int] = None) -> Tuple[bool, str]:
@@ -495,7 +424,7 @@ def validate_setback_clear(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
             if seg.net_id in exclude_net_ids:
                 continue
 
-            dist = point_to_segment_distance(setback_x, setback_y, seg)
+            dist = point_to_segment_distance_seg(setback_x, setback_y, seg)
             if dist < check_radius:
                 blocked = True
                 break
@@ -807,7 +736,7 @@ def validate_single_setback_clear(stub: StubInfo, dest_layer: str,
             if seg.net_id in exclude_net_ids:
                 continue
 
-            dist = point_to_segment_distance(setback_x, setback_y, seg)
+            dist = point_to_segment_distance_seg(setback_x, setback_y, seg)
             if dist < check_radius:
                 blocked = True
                 break

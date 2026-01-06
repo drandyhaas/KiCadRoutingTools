@@ -101,6 +101,7 @@ KiCadRoutingTools/
 ├── kicad_writer.py           # KiCad S-expression generator
 ├── output_writer.py          # Route output and debug geometry
 ├── chip_boundary.py          # Chip boundary detection
+├── geometry_utils.py         # Shared geometry calculations
 │
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
@@ -127,6 +128,7 @@ KiCadRoutingTools/
 ├── switch_to_layer.py        # Move net segments to a different layer
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
+├── test_fanout_and_route.py  # Full integration test (fanout + route)
 ├── test_diffpair.py          # Test single/multiple diff pairs with DRC
 ├── test_all_diffpairs.py     # Batch test all diff pairs (parallel)
 │
@@ -147,6 +149,7 @@ KiCadRoutingTools/
 | `routing_context.py` | Helper functions for building obstacles and recording success |
 | `routing_utils.py` | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
 | `obstacle_map.py` | Obstacle map building from PCB data |
+| `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection) |
 
 ### Routing Loops
 

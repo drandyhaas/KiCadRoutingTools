@@ -8,6 +8,11 @@ import math
 import fnmatch
 from typing import List, Tuple, Set, Optional
 from kicad_parser import parse_kicad_pcb, Segment, Via
+from geometry_utils import (
+    point_to_segment_distance,
+    closest_point_on_segment,
+    segment_to_segment_closest_points,
+)
 
 
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:
@@ -16,73 +21,6 @@ def matches_any_pattern(name: str, patterns: List[str]) -> bool:
         if fnmatch.fnmatch(name, pattern):
             return True
     return False
-
-
-def point_to_segment_distance(px: float, py: float,
-                               x1: float, y1: float,
-                               x2: float, y2: float) -> float:
-    """Calculate minimum distance from point (px, py) to segment (x1,y1)-(x2,y2)."""
-    dx = x2 - x1
-    dy = y2 - y1
-
-    if dx == 0 and dy == 0:
-        return math.sqrt((px - x1)**2 + (py - y1)**2)
-
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
-
-    proj_x = x1 + t * dx
-    proj_y = y1 + t * dy
-
-    return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
-
-
-def closest_point_on_segment(px: float, py: float,
-                              x1: float, y1: float,
-                              x2: float, y2: float) -> Tuple[float, float]:
-    """Find the closest point on segment (x1,y1)-(x2,y2) to point (px, py)."""
-    dx = x2 - x1
-    dy = y2 - y1
-
-    if dx == 0 and dy == 0:
-        return x1, y1
-
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
-    return x1 + t * dx, y1 + t * dy
-
-
-def segment_to_segment_closest_points(seg1: Segment, seg2: Segment) -> Tuple[float, Tuple[float, float], Tuple[float, float]]:
-    """Find closest point pair between two segments.
-
-    Returns (distance, point_on_seg1, point_on_seg2)
-    """
-    # Check all endpoint-to-segment distances and track closest points
-    candidates = []
-
-    # seg1 endpoints to seg2
-    p1 = closest_point_on_segment(seg1.start_x, seg1.start_y,
-                                   seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y)
-    d1 = math.sqrt((seg1.start_x - p1[0])**2 + (seg1.start_y - p1[1])**2)
-    candidates.append((d1, (seg1.start_x, seg1.start_y), p1))
-
-    p2 = closest_point_on_segment(seg1.end_x, seg1.end_y,
-                                   seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y)
-    d2 = math.sqrt((seg1.end_x - p2[0])**2 + (seg1.end_y - p2[1])**2)
-    candidates.append((d2, (seg1.end_x, seg1.end_y), p2))
-
-    # seg2 endpoints to seg1
-    p3 = closest_point_on_segment(seg2.start_x, seg2.start_y,
-                                   seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y)
-    d3 = math.sqrt((seg2.start_x - p3[0])**2 + (seg2.start_y - p3[1])**2)
-    candidates.append((d3, p3, (seg2.start_x, seg2.start_y)))
-
-    p4 = closest_point_on_segment(seg2.end_x, seg2.end_y,
-                                   seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y)
-    d4 = math.sqrt((seg2.end_x - p4[0])**2 + (seg2.end_y - p4[1])**2)
-    candidates.append((d4, p4, (seg2.end_x, seg2.end_y)))
-
-    # Return the minimum
-    best = min(candidates, key=lambda x: x[0])
-    return best
 
 
 def segment_to_segment_distance(seg1: Segment, seg2: Segment) -> float:

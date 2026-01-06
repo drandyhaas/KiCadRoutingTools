@@ -334,6 +334,25 @@ python extract_board_data.py board.kicad_pcb --nets "*DATA*" --output data_nets.
 
 ## Test Scripts
 
+### Full Fanout and Route Test (`test_fanout_and_route.py`)
+
+Runs a complete integration test: fanout generation followed by routing and verification.
+
+#### Usage
+
+```bash
+python test_fanout_and_route.py
+```
+
+This script runs a sequence of fanout and routing operations on the test board, including:
+1. BGA fanout for multiple components (FTDI, ADC, FPGA, DDR)
+2. Single-ended and differential pair routing
+3. DRC and connectivity verification
+
+#### Cross-Platform
+
+This Python script replaces the previous PowerShell script and works on any platform (Linux, macOS, Windows).
+
 ### Single Diff Pair Tester (`test_diffpair.py`)
 
 Routes one or more differential pairs and runs DRC/connectivity checks.

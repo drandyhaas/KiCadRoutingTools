@@ -12,61 +12,11 @@ from dataclasses import dataclass
 from kicad_parser import Segment, PCBData
 from routing_config import GridRouteConfig
 from routing_utils import segment_length
-
-
-def point_to_segment_distance(px: float, py: float,
-                               x1: float, y1: float, x2: float, y2: float) -> float:
-    """Calculate minimum distance from point (px, py) to segment (x1,y1)-(x2,y2)."""
-    dx = x2 - x1
-    dy = y2 - y1
-    length_sq = dx * dx + dy * dy
-
-    if length_sq < 1e-10:
-        # Segment is a point
-        return math.sqrt((px - x1)**2 + (py - y1)**2)
-
-    # Project point onto line, clamped to segment
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
-    proj_x = x1 + t * dx
-    proj_y = y1 + t * dy
-
-    return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
-
-
-def segments_intersect(seg1_x1: float, seg1_y1: float, seg1_x2: float, seg1_y2: float,
-                       seg2_x1: float, seg2_y1: float, seg2_x2: float, seg2_y2: float) -> bool:
-    """Check if two line segments intersect (cross each other)."""
-    # Using cross product method
-    def ccw(ax, ay, bx, by, cx, cy):
-        """Check if three points are in counter-clockwise order."""
-        return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
-
-    # Segments intersect if they straddle each other
-    a1x, a1y = seg1_x1, seg1_y1
-    a2x, a2y = seg1_x2, seg1_y2
-    b1x, b1y = seg2_x1, seg2_y1
-    b2x, b2y = seg2_x2, seg2_y2
-
-    # Check if segment 1 straddles segment 2's line and vice versa
-    return (ccw(a1x, a1y, b1x, b1y, b2x, b2y) != ccw(a2x, a2y, b1x, b1y, b2x, b2y) and
-            ccw(a1x, a1y, a2x, a2y, b1x, b1y) != ccw(a1x, a1y, a2x, a2y, b2x, b2y))
-
-
-def segment_to_segment_distance(seg1_x1: float, seg1_y1: float, seg1_x2: float, seg1_y2: float,
-                                 seg2_x1: float, seg2_y1: float, seg2_x2: float, seg2_y2: float) -> float:
-    """Calculate minimum distance between two line segments."""
-    # First check if segments intersect - if so, distance is 0
-    if segments_intersect(seg1_x1, seg1_y1, seg1_x2, seg1_y2,
-                          seg2_x1, seg2_y1, seg2_x2, seg2_y2):
-        return 0.0
-
-    # Check distance from each endpoint to the other segment
-    d1 = point_to_segment_distance(seg1_x1, seg1_y1, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
-    d2 = point_to_segment_distance(seg1_x2, seg1_y2, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
-    d3 = point_to_segment_distance(seg2_x1, seg2_y1, seg1_x1, seg1_y1, seg1_x2, seg1_y2)
-    d4 = point_to_segment_distance(seg2_x2, seg2_y2, seg1_x1, seg1_y1, seg1_x2, seg1_y2)
-
-    return min(d1, d2, d3, d4)
+from geometry_utils import (
+    point_to_segment_distance,
+    segments_intersect,
+    segment_to_segment_distance,
+)
 
 
 def get_bump_segments(
@@ -845,51 +795,6 @@ def apply_meanders_to_route(
 
     print(f"    Warning: No straight run with clearance found for meanders")
     return segments, 0
-
-
-def _old_apply_meanders_to_route(
-    segments: List[Segment],
-    extra_length: float,
-    config: GridRouteConfig
-) -> List[Segment]:
-    """Old version without clearance checking - kept for reference."""
-    if extra_length <= 0 or not segments:
-        return segments
-
-    min_length = config.meander_amplitude * 4
-    run = find_longest_straight_run(segments, min_length=min_length)
-
-    if run is None:
-        print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
-        return segments
-
-    start_idx, end_idx, run_length = run
-
-    first_seg = segments[start_idx]
-    last_seg = segments[end_idx]
-    merged_seg = Segment(
-        start_x=first_seg.start_x,
-        start_y=first_seg.start_y,
-        end_x=last_seg.end_x,
-        end_y=last_seg.end_y,
-        width=first_seg.width,
-        layer=first_seg.layer,
-        net_id=first_seg.net_id
-    )
-
-    print(f"    Inserting meanders at segments {start_idx}-{end_idx} (straight run={run_length:.2f}mm)")
-
-    meander_segs = generate_trombone_meander(
-        merged_seg,
-        extra_length,
-        config.meander_amplitude,
-        config.track_width
-    )
-
-    # Replace original segment run with meanders
-    new_segments = segments[:start_idx] + meander_segs + segments[end_idx + 1:]
-
-    return new_segments
 
 
 def apply_length_matching_to_group(

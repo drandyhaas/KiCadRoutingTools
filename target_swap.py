@@ -30,22 +30,7 @@ from chip_boundary import (
     compute_far_side, compute_boundary_position, crossings_from_boundary_order,
     generate_boundary_debug_labels
 )
-
-
-def segments_cross(p1: Tuple[float, float], p2: Tuple[float, float],
-                   p3: Tuple[float, float], p4: Tuple[float, float]) -> bool:
-    """
-    Check if line segment (p1->p2) properly crosses line segment (p3->p4).
-
-    Uses CCW (counter-clockwise) orientation test.
-    Returns True only for proper intersection (not endpoint touching).
-    """
-    def ccw(a: Tuple[float, float], b: Tuple[float, float], c: Tuple[float, float]) -> bool:
-        """Check if three points are in counter-clockwise order."""
-        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
-
-    # Two segments cross if they straddle each other
-    return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
+from geometry_utils import segments_intersect_tuple as segments_cross
 
 
 def get_source_centroid(endpoint: Tuple) -> Tuple[float, float]:
@@ -153,9 +138,6 @@ def get_stub_exit_edge(
         edge = 'right' if dx > 0 else 'left'
     else:
         edge = 'bottom' if dy > 0 else 'top'
-
-    # Debug output (enable with verbose)
-    # print(f"    DEBUG stub net={net_id}: pad={pad_end}, tip={stub_tip}, dx={dx:.1f}, dy={dy:.1f} -> {edge}")
 
     return edge
 

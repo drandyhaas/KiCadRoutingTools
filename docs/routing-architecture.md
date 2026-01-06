@@ -32,6 +32,7 @@ KiCadRoutingTools/
 ├── kicad_parser.py            # KiCad file parsing (including stackup for via barrel length)
 ├── kicad_writer.py            # KiCad S-expression output
 ├── output_writer.py           # Route output and debug geometry
+├── geometry_utils.py          # Shared geometry calculations
 └── rust_router/               # Rust A* implementation
 ```
 
@@ -47,6 +48,7 @@ KiCadRoutingTools/
 | `routing_context.py` | Helper functions for building obstacles and recording route success |
 | `routing_utils.py` | Connectivity analysis, endpoint finding, MPS ordering, segment cleanup |
 | `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones) |
+| `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, closest points) |
 
 #### Routing Loops
 
