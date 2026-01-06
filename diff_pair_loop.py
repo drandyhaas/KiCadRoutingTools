@@ -15,7 +15,7 @@ from obstacle_map import (
     add_same_net_via_clearance, add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
-from routing_utils import get_stub_endpoints, add_route_to_pcb_data, calculate_route_length, calculate_stub_length
+from routing_utils import get_stub_endpoints, add_route_to_pcb_data, calculate_route_length
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -280,8 +280,20 @@ def route_diff_pairs(
             centerline_length = (p_routed_length + n_routed_length) / 2
 
             # Calculate stub lengths for pad-to-pad measurement
-            p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
-            n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
+            # Use pre-calculated stub lengths from routing, accounting for polarity swap
+            p_src_stub = result.get('p_src_stub_length', 0.0)
+            p_tgt_stub = result.get('p_tgt_stub_length', 0.0)
+            n_src_stub = result.get('n_src_stub_length', 0.0)
+            n_tgt_stub = result.get('n_tgt_stub_length', 0.0)
+
+            polarity_fixed = result.get('polarity_fixed', False)
+            if polarity_fixed:
+                # After swap: P gets P_source + N_target, N gets N_source + P_target
+                p_stub_length = p_src_stub + n_tgt_stub
+                n_stub_length = n_src_stub + p_tgt_stub
+            else:
+                p_stub_length = p_src_stub + p_tgt_stub
+                n_stub_length = n_src_stub + n_tgt_stub
             avg_stub_length = (p_stub_length + n_stub_length) / 2
 
             # Store lengths for length matching
@@ -509,8 +521,19 @@ def route_diff_pairs(
                             n_routed_length = calculate_route_length(n_segments, n_vias, pcb_data)
                             centerline_length = (p_routed_length + n_routed_length) / 2
 
-                            p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
-                            n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
+                            # Use pre-calculated stub lengths from routing, accounting for polarity swap
+                            p_src_stub = retry_result.get('p_src_stub_length', 0.0)
+                            p_tgt_stub = retry_result.get('p_tgt_stub_length', 0.0)
+                            n_src_stub = retry_result.get('n_src_stub_length', 0.0)
+                            n_tgt_stub = retry_result.get('n_tgt_stub_length', 0.0)
+
+                            polarity_fixed = retry_result.get('polarity_fixed', False)
+                            if polarity_fixed:
+                                p_stub_length = p_src_stub + n_tgt_stub
+                                n_stub_length = n_src_stub + p_tgt_stub
+                            else:
+                                p_stub_length = p_src_stub + p_tgt_stub
+                                n_stub_length = n_src_stub + n_tgt_stub
                             avg_stub_length = (p_stub_length + n_stub_length) / 2
 
                             retry_result['centerline_length'] = centerline_length
@@ -623,8 +646,19 @@ def route_diff_pairs(
                         n_routed_length = calculate_route_length(n_segments, n_vias, pcb_data)
                         centerline_length = (p_routed_length + n_routed_length) / 2
 
-                        p_stub_length = calculate_stub_length(pcb_data, pair.p_net_id)
-                        n_stub_length = calculate_stub_length(pcb_data, pair.n_net_id)
+                        # Use pre-calculated stub lengths from routing, accounting for polarity swap
+                        p_src_stub = swap_result.get('p_src_stub_length', 0.0)
+                        p_tgt_stub = swap_result.get('p_tgt_stub_length', 0.0)
+                        n_src_stub = swap_result.get('n_src_stub_length', 0.0)
+                        n_tgt_stub = swap_result.get('n_tgt_stub_length', 0.0)
+
+                        polarity_fixed = swap_result.get('polarity_fixed', False)
+                        if polarity_fixed:
+                            p_stub_length = p_src_stub + n_tgt_stub
+                            n_stub_length = n_src_stub + p_tgt_stub
+                        else:
+                            p_stub_length = p_src_stub + p_tgt_stub
+                            n_stub_length = n_src_stub + n_tgt_stub
                         avg_stub_length = (p_stub_length + n_stub_length) / 2
 
                         swap_result['centerline_length'] = centerline_length

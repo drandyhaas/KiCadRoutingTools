@@ -771,7 +771,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             pair_name = pair_info[0] if pair_info else f"net_{net_id}"
 
             print(f"\n{pair_name}:")
+            seg_count_before = len(result.get('new_segments', []))
             apply_intra_pair_length_matching(result, config, pcb_data)
+            seg_count_after = len(result.get('new_segments', []))
 
     # Notify visualization callback that all routing is complete
     if visualize:

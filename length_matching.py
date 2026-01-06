@@ -164,10 +164,10 @@ def get_safe_amplitude_at_point(
                     continue
 
                 # Use reduced clearance for paired net (prevent DRC violations)
-                # The paired track is close (diff_pair_gap), so meanders need to go away from it
-                # Use full DRC clearance to avoid violations
+                # segment_to_segment_distance measures centerline-to-centerline distance
+                # For DRC compliance, need: center-to-center >= track_width + diff_pair_gap
                 if other_seg.net_id == paired_net_id:
-                    check_clearance = config.track_width + config.clearance  # Full DRC clearance
+                    check_clearance = config.track_width + config.diff_pair_gap
                 else:
                     check_clearance = required_clearance
                 if other_seg.layer != layer:
@@ -265,14 +265,14 @@ def check_meander_clearance(
         cy = segment.start_y + uy * seg_len * t
 
         # Check both directions
-        amp_pos = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, 1, amplitude, 0.3,
+        amp_pos = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, 1, amplitude, 0.1,
                                                segment.layer, pcb_data, net_id, config,
                                                paired_net_id=paired_net_id)
-        amp_neg = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, -1, amplitude, 0.3,
+        amp_neg = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, -1, amplitude, 0.1,
                                                segment.layer, pcb_data, net_id, config,
                                                paired_net_id=paired_net_id)
 
-        if amp_pos >= 0.3 or amp_neg >= 0.3:
+        if amp_pos >= 0.1 or amp_neg >= 0.1:
             return True  # At least some meanders possible
 
     return False
@@ -1941,15 +1941,74 @@ def apply_intra_pair_length_matching(
     p_vias = [v for v in all_vias if v.net_id == p_net_id]
     n_vias = [v for v in all_vias if v.net_id == n_net_id]
 
-    # Get stub lengths (pre-existing segments not in new_segments)
-    p_stub_length = result.get('p_stub_length', 0.0)
-    n_stub_length = result.get('n_stub_length', 0.0)
-
-    # Calculate lengths (routed segments + stubs)
+    # Calculate routed lengths (new segments only, without stubs)
     p_routed_length = calculate_route_length(p_segments, p_vias, pcb_data)
     n_routed_length = calculate_route_length(n_segments, n_vias, pcb_data)
+
+    # Get pre-calculated stub lengths from routing phase
+    p_src_stub = result.get('p_src_stub_length', 0.0)
+    p_tgt_stub = result.get('p_tgt_stub_length', 0.0)
+    n_src_stub = result.get('n_src_stub_length', 0.0)
+    n_tgt_stub = result.get('n_tgt_stub_length', 0.0)
+
+    polarity_fixed = result.get('polarity_fixed', False)
+
+    # Calculate total stub lengths based on polarity swap status
+    # If polarity will be swapped, target stubs swap between P and N:
+    #   After swap: P gets P_source + N_target, N gets N_source + P_target
+    if polarity_fixed:
+        p_stub_length = p_src_stub + n_tgt_stub
+        n_stub_length = n_src_stub + p_tgt_stub
+        if config.verbose:
+            print(f"      Polarity swap stub lengths:")
+            print(f"        P: src={p_src_stub:.3f}mm + N_tgt={n_tgt_stub:.3f}mm = {p_stub_length:.3f}mm")
+            print(f"        N: src={n_src_stub:.3f}mm + P_tgt={p_tgt_stub:.3f}mm = {n_stub_length:.3f}mm")
+    else:
+        p_stub_length = p_src_stub + p_tgt_stub
+        n_stub_length = n_src_stub + n_tgt_stub
+
     p_length = p_routed_length + p_stub_length
     n_length = n_routed_length + n_stub_length
+
+    # Debug: show length breakdown
+    if config.verbose:
+        from routing_utils import calculate_via_barrel_length
+        p_seg_only = sum(segment_length(s) for s in p_segments)
+        n_seg_only = sum(segment_length(s) for s in n_segments)
+        p_via_barrel = calculate_via_barrel_length(p_vias, pcb_data)
+        n_via_barrel = calculate_via_barrel_length(n_vias, pcb_data)
+        print(f"      P breakdown: {len(p_segments)} segs={p_seg_only:.3f}mm + {len(p_vias)} vias={p_via_barrel:.3f}mm + stub={p_stub_length:.3f}mm = {p_length:.3f}mm")
+        print(f"      N breakdown: {len(n_segments)} segs={n_seg_only:.3f}mm + {len(n_vias)} vias={n_via_barrel:.3f}mm + stub={n_stub_length:.3f}mm = {n_length:.3f}mm")
+
+        # Calculate pad escape distances (distance from pad center to nearest segment endpoint)
+        # KiCad includes this in its track length measurement, we don't
+        def calc_pad_escape(net_id, segments, stub_segs):
+            all_segs = list(segments) + list(stub_segs)
+            if not all_segs:
+                return 0.0
+            pads = pcb_data.pads_by_net.get(net_id, [])
+            total_escape = 0.0
+            for pad in pads:
+                px, py = pad.global_x, pad.global_y
+                # Find nearest segment endpoint to this pad
+                min_dist = float('inf')
+                for seg in all_segs:
+                    d1 = math.sqrt((seg.start_x - px)**2 + (seg.start_y - py)**2)
+                    d2 = math.sqrt((seg.end_x - px)**2 + (seg.end_y - py)**2)
+                    min_dist = min(min_dist, d1, d2)
+                if min_dist < float('inf'):
+                    total_escape += min_dist
+            return total_escape
+
+        # Get stub segments from pcb_data
+        p_stub_segs = [s for s in pcb_data.segments if s.net_id == p_net_id]
+        n_stub_segs = [s for s in pcb_data.segments if s.net_id == n_net_id]
+        p_escape = calc_pad_escape(p_net_id, p_segments, p_stub_segs)
+        n_escape = calc_pad_escape(n_net_id, n_segments, n_stub_segs)
+        print(f"      P pad escape: {p_escape:.3f}mm (KiCad adds this)")
+        print(f"      N pad escape: {n_escape:.3f}mm (KiCad adds this)")
+        print(f"      P total with escape: {p_length + p_escape:.3f}mm")
+        print(f"      N total with escape: {n_length + n_escape:.3f}mm")
 
     delta = abs(p_length - n_length)
     if delta <= config.length_match_tolerance:
@@ -1961,14 +2020,14 @@ def apply_intra_pair_length_matching(
         shorter_segments = p_segments
         shorter_net_id = p_net_id
         shorter_vias = p_vias
-        shorter_stub_length = p_stub_length
+        shorter_stub_length = p_stub_length  # Already post-swap if polarity_fixed
         longer_net_id = n_net_id
         shorter_label = "P"
     else:
         shorter_segments = n_segments
         shorter_net_id = n_net_id
         shorter_vias = n_vias
-        shorter_stub_length = n_stub_length
+        shorter_stub_length = n_stub_length  # Already post-swap if polarity_fixed
         longer_net_id = p_net_id
         shorter_label = "N"
 
@@ -1983,7 +2042,7 @@ def apply_intra_pair_length_matching(
     # For 1 bump: extra = 2*amplitude - 2.34*chamfer
     # For n bumps: extra ≈ n * (2*amplitude - 2.34*chamfer) (approximately, first bump has entry/exit)
     chamfer = 0.1
-    min_amplitude = 0.2  # Minimum useful amplitude
+    min_amplitude = 0.1  # Minimum useful amplitude (smaller for intra-pair small deltas)
     max_amplitude = config.meander_amplitude  # Default 1.0mm
 
     # Calculate max extra per bump at max amplitude
@@ -2012,6 +2071,10 @@ def apply_intra_pair_length_matching(
     )
 
     if bump_count == 0:
+        # Debug: show segment lengths
+        if config.verbose:
+            seg_lens = [segment_length(s) for s in shorter_segments]
+            print(f"      Shorter track segments: {len(shorter_segments)}, lengths: {[f'{l:.2f}' for l in sorted(seg_lens, reverse=True)[:5]]}")
         print(f"    P/N intra-pair: could not fit meanders")
         return result
 

@@ -11,7 +11,8 @@ from typing import List, Optional, Tuple, Dict
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from routing_utils import (
-    find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints
+    find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints,
+    get_stub_segments, segment_length
 )
 from obstacle_map import check_line_clearance
 # Note: Layer switching is now done upfront in route.py, not during routing
@@ -2001,6 +2002,21 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y
         )
 
+    # Calculate source and target stub lengths for each net
+    # These are based on ORIGINAL positions (before polarity swap affects route targets)
+    src_layer_name = layer_names[original_src[4]]
+    tgt_layer_name = layer_names[original_tgt[4]]
+
+    p_src_stub_segs = get_stub_segments(pcb_data, p_net_id, p_src_x, p_src_y, src_layer_name)
+    p_tgt_stub_segs = get_stub_segments(pcb_data, p_net_id, p_tgt_x, p_tgt_y, tgt_layer_name)
+    n_src_stub_segs = get_stub_segments(pcb_data, n_net_id, n_src_x, n_src_y, src_layer_name)
+    n_tgt_stub_segs = get_stub_segments(pcb_data, n_net_id, n_tgt_x, n_tgt_y, tgt_layer_name)
+
+    p_src_stub_length = sum(segment_length(s) for s in p_src_stub_segs)
+    p_tgt_stub_length = sum(segment_length(s) for s in p_tgt_stub_segs)
+    n_src_stub_length = sum(segment_length(s) for s in n_src_stub_segs)
+    n_tgt_stub_length = sum(segment_length(s) for s in n_tgt_stub_segs)
+
     # Build result with polarity fix info
     result = {
         'new_segments': new_segments,
@@ -2031,6 +2047,14 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         'src_stub_dir': src_stub_dir_tuple,
         'tgt_stub_dir': tgt_stub_dir_tuple,
         'layer_names': layer_names,
+        # Stub layer names for length matching (original source/target, not affected by routing direction)
+        'src_layer_name': layer_names[original_src[4]],
+        'tgt_layer_name': layer_names[original_tgt[4]],
+        # Pre-calculated stub lengths for intra-pair matching (based on original positions, not affected by polarity swap)
+        'p_src_stub_length': p_src_stub_length,
+        'p_tgt_stub_length': p_tgt_stub_length,
+        'n_src_stub_length': n_src_stub_length,
+        'n_tgt_stub_length': n_tgt_stub_length,
         # GND via data for regeneration after length matching
         'gnd_net_id': gnd_net_id,
         'gnd_via_dirs': gnd_via_dirs,

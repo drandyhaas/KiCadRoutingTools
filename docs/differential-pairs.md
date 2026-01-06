@@ -366,6 +366,7 @@ When enabled:
 1. After routing and inter-pair length matching, the router calculates P and N lengths for each pair
 2. If the difference exceeds `--length-match-tolerance` (default 0.1mm), meanders are added to the shorter track
 3. The meanders are placed with clearance checking against the other track of the pair
+4. For polarity-swapped pairs, stub lengths are correctly recalculated using post-swap assignments (P gets P_source + N_target stubs, N gets N_source + P_target stubs)
 
 ```bash
 # Enable intra-pair matching
