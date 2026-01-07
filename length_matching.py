@@ -1027,6 +1027,7 @@ def apply_length_matching_to_group(
 
                 if actual_bumps < bump_count or new_length <= prev_length:
                     print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
+                    bump_count = actual_bumps
                     break
 
             # Step 3: If we overshot, scale down amplitude
@@ -1108,6 +1109,7 @@ def apply_length_matching_to_group(
 
                 if actual_bumps < bump_count or new_length <= prev_length:
                     print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
+                    bump_count = actual_bumps
                     break
 
             # Step 3: If we overshot, iteratively scale down amplitude to hit target
