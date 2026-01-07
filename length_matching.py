@@ -163,12 +163,11 @@ def get_safe_amplitude_at_point(
                 if other_seg.net_id == net_id:
                     continue
 
-                # For paired net (intra-pair meanders), use minimal clearance to prevent overlap
-                # but allow meander bumps to get close. The meanders should extend away from
-                # the paired track, but we need to prevent them from going toward it.
+                # For paired net (intra-pair meanders), use minimum clearance for DRC compliance
+                # but less than full diff pair spacing. Center-to-center distance needs to be:
+                # track_width/2 + clearance + track_width/2 = track_width + clearance
                 if other_seg.net_id == paired_net_id:
-                    # Just prevent actual overlap - use track width as minimum distance
-                    check_clearance = config.track_width
+                    check_clearance = config.track_width + config.clearance
                 else:
                     check_clearance = required_clearance
                 if other_seg.layer != layer:
@@ -1902,23 +1901,6 @@ def apply_meanders_to_diff_pair(
         n_stub_length = result.get('n_stub_length', result.get('stub_length', 0.0))
         avg_stub_length = (p_stub_length + n_stub_length) / 2
 
-        # Calculate meander position range along centerline (for intra-pair meander exclusion)
-        # Project the meander start/end points onto the main centerline axis
-        cl_start = coord.to_float(centerline_grid[0][0], centerline_grid[0][1])
-        cl_end = coord.to_float(centerline_grid[-1][0], centerline_grid[-1][1])
-        cl_dx = cl_end[0] - cl_start[0]
-        cl_dy = cl_end[1] - cl_start[1]
-        cl_len = math.sqrt(cl_dx**2 + cl_dy**2)
-        if cl_len > 0.001:
-            cl_ux, cl_uy = cl_dx / cl_len, cl_dy / cl_len
-            meander_start_pt = coord.to_float(centerline_grid[start_idx][0], centerline_grid[start_idx][1])
-            meander_end_pt = coord.to_float(centerline_grid[end_idx][0], centerline_grid[end_idx][1])
-            meander_start_pos = (meander_start_pt[0] - cl_start[0]) * cl_ux + (meander_start_pt[1] - cl_start[1]) * cl_uy
-            meander_end_pos = (meander_end_pt[0] - cl_start[0]) * cl_ux + (meander_end_pt[1] - cl_start[1]) * cl_uy
-            inter_meander_range = (min(meander_start_pos, meander_end_pos), max(meander_start_pos, meander_end_pos))
-        else:
-            inter_meander_range = None
-
         # Update result
         modified_result = dict(result)
         modified_result['new_segments'] = new_segments
@@ -1936,8 +1918,6 @@ def apply_meanders_to_diff_pair(
             modified_result['route_length'] = avg_routed_length + avg_stub_length
         modified_result['simplified_path'] = new_centerline_float
         modified_result['centerline_path_grid'] = new_centerline_grid
-        if inter_meander_range:
-            modified_result['inter_meander_range'] = inter_meander_range
 
         return modified_result, bump_count
 
@@ -2167,12 +2147,6 @@ def apply_intra_pair_length_matching(
 
     print(f"    P/N intra-pair: P={p_length:.3f}mm, N={n_length:.3f}mm, delta={delta:.3f}mm, adding meanders to {shorter_label}")
 
-    # Get inter-pair meander position range from result (stored when inter-pair meanders were added)
-    inter_meander_range = result.get('inter_meander_range')
-    inter_meander_ranges = [inter_meander_range] if inter_meander_range else []
-    if inter_meander_ranges and config.verbose:
-        print(f"      Inter-pair meander range to avoid: ({inter_meander_range[0]:.1f}, {inter_meander_range[1]:.1f})")
-
     # Step 1: Generate initial meanders
     # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer
     # For 1 bump: extra = 2*amplitude - 2.34*chamfer
@@ -2195,7 +2169,6 @@ def apply_intra_pair_length_matching(
 
     # Pass paired_net_id to use reduced clearance for the paired track
     # Use min_bumps to ensure we get exactly the calculated number of bumps
-    # Pass inter_meander_ranges to avoid placing intra meanders where inter meanders exist
     meandered_segments, bump_count = apply_meanders_to_route(
         shorter_segments,
         delta,
@@ -2204,8 +2177,7 @@ def apply_intra_pair_length_matching(
         net_id=shorter_net_id,
         paired_net_id=longer_net_id,
         amplitude_override=initial_amplitude,
-        min_bumps=num_bumps_needed,
-        excluded_centerline_ranges=inter_meander_ranges
+        min_bumps=num_bumps_needed
     )
 
     if bump_count == 0:
@@ -2253,8 +2225,7 @@ def apply_intra_pair_length_matching(
             net_id=shorter_net_id,
             min_bumps=bump_count,  # Keep same bump count
             amplitude_override=target_amplitude,
-            paired_net_id=longer_net_id,
-            excluded_centerline_ranges=inter_meander_ranges
+            paired_net_id=longer_net_id
         )
 
         if new_bump_count == 0:
