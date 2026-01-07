@@ -15,6 +15,11 @@ from routing_utils import get_stub_segments, get_stub_direction
 from geometry_utils import segments_intersect_2d, point_to_segment_distance_seg
 from typing import Set
 
+# Layer swap tolerance constants
+STUB_OVERLAP_Y_TOLERANCE = 0.2  # mm - Y tolerance for bounding box overlap checks
+STUB_POSITION_TOLERANCE = 0.05  # mm - tolerance for position matching
+SEGMENT_MATCH_TOLERANCE = 0.001  # mm - tolerance for segment coordinate matching
+
 
 @dataclass
 class StubInfo:
@@ -30,7 +35,7 @@ class StubInfo:
 
 
 def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
-                  stub_layer: str, tolerance: float = 0.05) -> Optional[StubInfo]:
+                  stub_layer: str, tolerance: float = STUB_POSITION_TOLERANCE) -> Optional[StubInfo]:
     """
     Gather information about a stub for layer switching analysis.
 
@@ -178,7 +183,7 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
 
     # Find ALL segments on this layer for this net that connect to either the stub position
     # or the pad position. This handles cases where get_stub_segments walked the wrong direction.
-    tolerance = 0.05
+    tolerance = STUB_POSITION_TOLERANCE
     segments_to_switch = set(id(s) for s in stub.segments)
 
     for seg in pcb_data.segments:
@@ -249,10 +254,10 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
     for mod in segment_mods:
         for seg in pcb_data.segments:
             if (seg.net_id == mod['net_id'] and
-                abs(seg.start_x - mod['start'][0]) < 0.001 and
-                abs(seg.start_y - mod['start'][1]) < 0.001 and
-                abs(seg.end_x - mod['end'][0]) < 0.001 and
-                abs(seg.end_y - mod['end'][1]) < 0.001 and
+                abs(seg.start_x - mod['start'][0]) < SEGMENT_MATCH_TOLERANCE and
+                abs(seg.start_y - mod['start'][1]) < SEGMENT_MATCH_TOLERANCE and
+                abs(seg.end_x - mod['end'][0]) < SEGMENT_MATCH_TOLERANCE and
+                abs(seg.end_y - mod['end'][1]) < SEGMENT_MATCH_TOLERANCE and
                 seg.layer == mod['new_layer']):
                 seg.layer = mod['old_layer']
                 break
@@ -264,7 +269,7 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
 
 
 def check_segments_overlap(segments: List[Segment], other_segments: List[Segment],
-                           y_tolerance: float = 0.2) -> bool:
+                           y_tolerance: float = STUB_OVERLAP_Y_TOLERANCE) -> bool:
     """
     Check if any segment bounding boxes overlap.
 
@@ -639,8 +644,8 @@ def validate_single_stub_no_overlap(stub: StubInfo, dest_layer: str,
     # Also check against ALL existing segments on destination layer
     # This catches overlaps with stubs that aren't being layer-switched
     for our_seg in our_segments:
-        our_y_min = min(our_seg.start_y, our_seg.end_y) - 0.2
-        our_y_max = max(our_seg.start_y, our_seg.end_y) + 0.2
+        our_y_min = min(our_seg.start_y, our_seg.end_y) - STUB_OVERLAP_Y_TOLERANCE
+        our_y_max = max(our_seg.start_y, our_seg.end_y) + STUB_OVERLAP_Y_TOLERANCE
         our_x_min = min(our_seg.start_x, our_seg.end_x)
         our_x_max = max(our_seg.start_x, our_seg.end_x)
 

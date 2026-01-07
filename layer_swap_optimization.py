@@ -18,7 +18,8 @@ from routing_utils import is_edge_stub
 from stub_layer_switching import (
     get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer,
     collect_stub_endpoints_by_layer, validate_swap, validate_single_swap,
-    collect_single_ended_stubs_by_layer
+    collect_single_ended_stubs_by_layer, revert_stub_layer_switch,
+    STUB_OVERLAP_Y_TOLERANCE
 )
 from diff_pair_routing import get_diff_pair_endpoints
 from routing_utils import get_net_endpoints
@@ -39,7 +40,7 @@ def _find_blocking_single_ended_nets(
     blocking_nets = set()
 
     # Use same tolerance as validate_stub_no_overlap
-    y_tolerance = 0.2
+    y_tolerance = STUB_OVERLAP_Y_TOLERANCE
 
     for seg in pcb_data.segments:
         if seg.layer != dest_layer:
@@ -121,19 +122,6 @@ def _validate_single_ended_swap(
                 return False
 
     return True
-
-
-def _undo_stub_layer_switch(pcb_data: PCBData, mods: List[Dict], vias: List):
-    """Undo a stub layer switch by reverting segment layer modifications."""
-    # Revert segment layer changes
-    for mod in mods:
-        seg = mod['segment']
-        seg.layer = mod['old_layer']
-
-    # Remove added vias
-    for via in vias:
-        if via in pcb_data.vias:
-            pcb_data.vias.remove(via)
 
 
 def apply_diff_pair_layer_swaps(
@@ -219,8 +207,8 @@ def apply_diff_pair_layer_swaps(
         overlapping_nets = set()
         our_stubs = src_p_stub.segments + src_n_stub.segments
         for stub_seg in our_stubs:
-            stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - 0.2
-            stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + 0.2
+            stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - STUB_OVERLAP_Y_TOLERANCE
+            stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + STUB_OVERLAP_Y_TOLERANCE
             stub_x_min = min(stub_seg.start_x, stub_seg.end_x)
             stub_x_max = max(stub_seg.start_x, stub_seg.end_x)
 
@@ -471,8 +459,8 @@ def apply_diff_pair_layer_swaps(
         overlapping_nets = set()
         our_stubs = tgt_p_stub.segments + tgt_n_stub.segments
         for stub_seg in our_stubs:
-            stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - 0.2
-            stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + 0.2
+            stub_y_min = min(stub_seg.start_y, stub_seg.end_y) - STUB_OVERLAP_Y_TOLERANCE
+            stub_y_max = max(stub_seg.start_y, stub_seg.end_y) + STUB_OVERLAP_Y_TOLERANCE
             stub_x_min = min(stub_seg.start_x, stub_seg.end_x)
             stub_x_max = max(stub_seg.start_x, stub_seg.end_x)
 
@@ -1091,7 +1079,7 @@ def apply_diff_pair_layer_swaps(
                         break
                     else:
                         # Undo the single-ended swap since diff pair still can't swap
-                        _undo_stub_layer_switch(pcb_data, se_mods, se_vias)
+                        revert_stub_layer_switch(pcb_data, se_mods, se_vias)
 
                 if pair_name in applied_swaps:
                     break
@@ -1169,7 +1157,7 @@ def apply_diff_pair_layer_swaps(
                             print(f"  Solo target switch: {pair_name} ({tgt_layer}->{src_layer}) after moving {blocking_name} to {alt_layer}{via_msg}")
                             break
                         else:
-                            _undo_stub_layer_switch(pcb_data, se_mods, se_vias)
+                            revert_stub_layer_switch(pcb_data, se_mods, se_vias)
 
                     if pair_name in applied_swaps:
                         break
