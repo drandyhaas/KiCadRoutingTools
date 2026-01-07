@@ -9,7 +9,12 @@ from typing import List, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import get_net_endpoints
+from routing_utils import (
+    get_net_endpoints,
+    get_multipoint_net_pads,
+    find_closest_pad_pair,
+    find_closest_point_on_segments
+)
 from obstacle_map import build_obstacle_map
 
 # Import Rust router
@@ -587,3 +592,266 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         'path': path,
         'direction': direction_used,
     }
+
+
+def route_multipoint_net(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    obstacles: 'GridObstacleMap',
+    pad_info: List[Tuple]
+) -> Optional[dict]:
+    """
+    Route a multi-point net (3+ pads) using incremental routing.
+
+    Strategy:
+    1. Find the two closest pads and route them first
+    2. Find closest tap point on routed track to remaining pad(s)
+    3. Route from tap point to next pad
+    4. Repeat until all pads connected
+
+    Args:
+        pcb_data: PCB data
+        net_id: Net ID to route
+        config: Grid routing configuration
+        obstacles: Pre-built obstacle map
+        pad_info: List of (gx, gy, layer_idx, orig_x, orig_y, pad) from get_multipoint_net_pads()
+
+    Returns:
+        Routing result dict with combined segments/vias, or None on failure
+    """
+    if GridRouter is None:
+        print("  GridRouter not available")
+        return None
+
+    if len(pad_info) < 3:
+        print(f"  Multi-point routing requires 3+ pads, got {len(pad_info)}")
+        return None
+
+    coord = GridCoord(config.grid_step)
+    layer_names = config.layers
+
+    # Extract pads from pad_info
+    pads = [info[5] for info in pad_info]
+
+    # Find the two closest pads
+    idx_a, idx_b = find_closest_pad_pair(pads)
+
+    print(f"  Multi-point net with {len(pads)} pads, routing closest pair first (pads {idx_a} and {idx_b})")
+
+    # Build source/target for first pair
+    pad_a = pad_info[idx_a]
+    pad_b = pad_info[idx_b]
+
+    sources = [(pad_a[0], pad_a[1], pad_a[2])]  # (gx, gy, layer_idx)
+    targets = [(pad_b[0], pad_b[1], pad_b[2])]
+
+    # Mark source/target cells
+    for gx, gy, layer in sources + targets:
+        obstacles.add_source_target_cell(gx, gy, layer)
+
+    # Route first pair
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
+    path, iterations = router.route_multi(obstacles, sources, targets, config.max_iterations)
+
+    if path is None:
+        print(f"  Failed to route first pair after {iterations} iterations")
+        return {'failed': True, 'iterations': iterations}
+
+    total_iterations = iterations
+    all_segments = []
+    all_vias = []
+    all_paths = [path]
+
+    # Convert first path to segments/vias
+    segments, vias = _path_to_segments_vias(
+        path, coord, layer_names, net_id, config,
+        (pad_a[3], pad_a[4], layer_names[pad_a[2]]),  # start_original
+        (pad_b[3], pad_b[4], layer_names[pad_b[2]])   # end_original
+    )
+    all_segments.extend(segments)
+    all_vias.extend(vias)
+
+    print(f"  First pair routed in {iterations} iterations, {len(segments)} segments")
+
+    # NOTE: We don't add path obstacles between sub-routes of the same net
+    # because the new route needs to connect to the existing track (tap point)
+    # and blocking vias near the path would prevent layer changes at the tap point
+
+    # Route remaining pads
+    routed_indices = {idx_a, idx_b}
+    remaining_indices = [i for i in range(len(pad_info)) if i not in routed_indices]
+
+    def get_endpoint_info(endpoint):
+        """Get x, y, layers from Pad object or dict."""
+        if hasattr(endpoint, 'global_x'):
+            return endpoint.global_x, endpoint.global_y, endpoint.layers
+        elif isinstance(endpoint, dict):
+            return endpoint['x'], endpoint['y'], endpoint.get('layers', [endpoint.get('layer')])
+        else:
+            raise ValueError(f"Unknown endpoint type: {type(endpoint)}")
+
+    for pad_idx in remaining_indices:
+        pad = pad_info[pad_idx]
+        target_endpoint = pads[pad_idx]
+
+        # Get endpoint coordinates and layers
+        target_x, target_y, target_layers = get_endpoint_info(target_endpoint)
+
+        # Find closest tap point on existing segments
+        tap_result = find_closest_point_on_segments(
+            all_segments,
+            target_x,
+            target_y,
+            target_layers
+        )
+
+        if tap_result is None:
+            print(f"  Could not find tap point for pad {pad_idx}")
+            continue
+
+        tap_x, tap_y, tap_layer, tap_dist = tap_result
+        tap_layer_idx = layer_names.index(tap_layer) if tap_layer in layer_names else 0
+
+        # Convert tap point to grid
+        tap_gx, tap_gy = coord.to_grid(tap_x, tap_y)
+
+        # Build source (tap point) and target (pad)
+        sources = [(tap_gx, tap_gy, tap_layer_idx)]
+        targets = [(pad[0], pad[1], pad[2])]
+
+        # Mark source/target cells - need to allow routing on the tap point even though
+        # it's on the previously blocked path
+        for gx, gy, layer in sources + targets:
+            obstacles.add_source_target_cell(gx, gy, layer)
+
+        # Also add allowed cells around tap point and target to escape blocked areas
+        allow_radius = 10
+        for gx, gy, _ in sources + targets:
+            for dx in range(-allow_radius, allow_radius + 1):
+                for dy in range(-allow_radius, allow_radius + 1):
+                    obstacles.add_allowed_cell(gx + dx, gy + dy)
+
+        # Route to this pad
+        path, iterations = router.route_multi(obstacles, sources, targets, config.max_iterations)
+        total_iterations += iterations
+
+        if path is None:
+            print(f"  Failed to route to pad {pad_idx} after {iterations} iterations")
+            continue
+
+        print(f"  Routed to pad {pad_idx} in {iterations} iterations")
+
+        # Convert path to segments/vias
+        segments, vias = _path_to_segments_vias(
+            path, coord, layer_names, net_id, config,
+            (tap_x, tap_y, tap_layer),  # start_original (tap point)
+            (pad[3], pad[4], layer_names[pad[2]])  # end_original (pad)
+        )
+        all_segments.extend(segments)
+        all_vias.extend(vias)
+        all_paths.append(path)
+
+        # NOTE: Not adding obstacles - same net sub-routes can overlap
+
+    print(f"  Multi-point routing complete: {len(all_segments)} segments, {len(all_vias)} vias")
+
+    return {
+        'new_segments': all_segments,
+        'new_vias': all_vias,
+        'iterations': total_iterations,
+        'path_length': sum(len(p) for p in all_paths),
+        'path': all_paths[0] if all_paths else [],  # Return first path for compatibility
+    }
+
+
+def _path_to_segments_vias(
+    path: List[Tuple[int, int, int]],
+    coord: GridCoord,
+    layer_names: List[str],
+    net_id: int,
+    config: GridRouteConfig,
+    start_original: Tuple[float, float, str],
+    end_original: Tuple[float, float, str]
+) -> Tuple[List[Segment], List[Via]]:
+    """
+    Convert a grid path to Segment and Via objects.
+
+    Args:
+        path: List of (gx, gy, layer_idx) grid points
+        coord: Grid coordinate converter
+        layer_names: List of layer names
+        net_id: Net ID for segments/vias
+        config: Routing config with track width, via size
+        start_original: (x, y, layer) of path start in float coords
+        end_original: (x, y, layer) of path end in float coords
+
+    Returns:
+        (segments, vias): Lists of Segment and Via objects
+    """
+    segments = []
+    vias = []
+
+    if not path:
+        return segments, vias
+
+    path_start = path[0]
+    path_end = path[-1]
+
+    # Add connecting segment from original start to first path point if needed
+    if start_original:
+        first_grid_x, first_grid_y = coord.to_float(path_start[0], path_start[1])
+        orig_x, orig_y, orig_layer = start_original
+        if abs(orig_x - first_grid_x) > 0.001 or abs(orig_y - first_grid_y) > 0.001:
+            seg = Segment(
+                start_x=orig_x, start_y=orig_y,
+                end_x=first_grid_x, end_y=first_grid_y,
+                width=config.track_width,
+                layer=orig_layer,
+                net_id=net_id
+            )
+            segments.append(seg)
+
+    # Convert path points to segments and vias
+    for i in range(len(path) - 1):
+        gx1, gy1, layer1 = path[i]
+        gx2, gy2, layer2 = path[i + 1]
+
+        x1, y1 = coord.to_float(gx1, gy1)
+        x2, y2 = coord.to_float(gx2, gy2)
+
+        if layer1 != layer2:
+            via = Via(
+                x=x1, y=y1,
+                size=config.via_size,
+                drill=config.via_drill,
+                layers=[layer_names[layer1], layer_names[layer2]],
+                net_id=net_id
+            )
+            vias.append(via)
+        else:
+            if (x1, y1) != (x2, y2):
+                seg = Segment(
+                    start_x=x1, start_y=y1,
+                    end_x=x2, end_y=y2,
+                    width=config.track_width,
+                    layer=layer_names[layer1],
+                    net_id=net_id
+                )
+                segments.append(seg)
+
+    # Add connecting segment from last path point to original end if needed
+    if end_original:
+        last_grid_x, last_grid_y = coord.to_float(path_end[0], path_end[1])
+        orig_x, orig_y, orig_layer = end_original
+        if abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001:
+            seg = Segment(
+                start_x=last_grid_x, start_y=last_grid_y,
+                end_x=orig_x, end_y=orig_y,
+                width=config.track_width,
+                layer=orig_layer,
+                net_id=net_id
+            )
+            segments.append(seg)
+
+    return segments, vias

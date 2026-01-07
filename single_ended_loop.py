@@ -15,8 +15,11 @@ from obstacle_map import (
     add_cross_layer_tracks, compute_track_proximity_for_net, add_net_obstacles_with_vis,
     VisualizationData
 )
-from routing_utils import get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints, calculate_route_length, calculate_stub_length
-from single_ended_routing import route_net_with_obstacles, route_net_with_visualization
+from routing_utils import (
+    get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints,
+    calculate_route_length, calculate_stub_length, get_multipoint_net_pads
+)
+from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_net
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
@@ -155,7 +158,13 @@ def route_single_ended_nets(
                 user_quit = True
                 break
         else:
-            result = route_net_with_obstacles(pcb_data, net_id, config, obstacles)
+            # Check for multi-point net (3+ pads, no existing segments)
+            multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
+            if multipoint_pads:
+                print(f"  Detected multi-point net with {len(multipoint_pads)} pads")
+                result = route_multipoint_net(pcb_data, net_id, config, obstacles, multipoint_pads)
+            else:
+                result = route_net_with_obstacles(pcb_data, net_id, config, obstacles)
 
         elapsed = time.time() - start_time
         total_time += elapsed
@@ -355,7 +364,12 @@ def route_single_ended_nets(
                             all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
                         )
 
-                        retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles)
+                        # Check for multi-point net in retry as well
+                        retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
+                        if retry_multipoint_pads:
+                            retry_result = route_multipoint_net(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads)
+                        else:
+                            retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles)
 
                         if retry_result and not retry_result.get('failed'):
                             route_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)

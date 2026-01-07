@@ -97,6 +97,110 @@ def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
     return total
 
 
+def find_closest_pad_pair(pads) -> Tuple[int, int]:
+    """
+    Find the two closest pads/endpoints by Euclidean distance.
+
+    Args:
+        pads: List of Pad objects or dicts with 'x'/'y' keys (must have at least 2)
+
+    Returns:
+        (idx_a, idx_b): Indices of the two closest pads
+    """
+    if len(pads) < 2:
+        raise ValueError("Need at least 2 pads to find closest pair")
+
+    def get_coords(p):
+        """Get x, y coordinates from Pad object or dict."""
+        if hasattr(p, 'global_x'):
+            return p.global_x, p.global_y
+        elif isinstance(p, dict):
+            return p['x'], p['y']
+        else:
+            raise ValueError(f"Unknown pad type: {type(p)}")
+
+    min_dist = float('inf')
+    best_pair = (0, 1)
+
+    for i in range(len(pads)):
+        for j in range(i + 1, len(pads)):
+            x1, y1 = get_coords(pads[i])
+            x2, y2 = get_coords(pads[j])
+            dx = x1 - x2
+            dy = y1 - y2
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist < min_dist:
+                min_dist = dist
+                best_pair = (i, j)
+
+    return best_pair
+
+
+def find_closest_point_on_segments(
+    segments: List[Segment],
+    target_x: float,
+    target_y: float,
+    target_layers: List[str]
+) -> Tuple[float, float, str, float]:
+    """
+    Find the closest point on any segment to a target location.
+
+    For multi-point net routing, this finds where to tap into an existing
+    track to reach an additional pad.
+
+    Args:
+        segments: List of routed segments to search
+        target_x, target_y: Target location coordinates
+        target_layers: Preferred layers for the target (from pad.layers)
+
+    Returns:
+        (x, y, layer, distance): Closest point coordinates, its layer, and distance
+        Returns None if no segments provided
+    """
+    if not segments:
+        return None
+
+    best_point = None
+    best_dist = float('inf')
+    best_layer = None
+
+    for seg in segments:
+        # Project target point onto segment line
+        sx, sy = seg.start_x, seg.start_y
+        ex, ey = seg.end_x, seg.end_y
+
+        # Vector from start to end
+        dx = ex - sx
+        dy = ey - sy
+        seg_len_sq = dx * dx + dy * dy
+
+        if seg_len_sq < 1e-10:
+            # Degenerate segment (point)
+            px, py = sx, sy
+        else:
+            # Parameter t for projection onto line
+            t = ((target_x - sx) * dx + (target_y - sy) * dy) / seg_len_sq
+            # Clamp to segment bounds
+            t = max(0.0, min(1.0, t))
+            px = sx + t * dx
+            py = sy + t * dy
+
+        # Distance from projected point to target
+        dist = math.sqrt((px - target_x) ** 2 + (py - target_y) ** 2)
+
+        # Prefer same-layer connections (reduce via cost implicitly)
+        layer_bonus = 0.0 if seg.layer in target_layers else 0.5
+
+        effective_dist = dist + layer_bonus
+
+        if effective_dist < best_dist:
+            best_dist = effective_dist
+            best_point = (px, py)
+            best_layer = seg.layer
+
+    return (best_point[0], best_point[1], best_layer, best_dist) if best_point else None
+
+
 def calculate_stub_length(pcb_data, net_id: int) -> float:
     """
     Calculate the total length of existing stub segments for a net.
@@ -795,6 +899,76 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             return [], [], "Net segments are already connected (single group) with no unconnected pads"
 
     return [], [], f"Cannot determine endpoints: {len(net_segments)} segments, {len(net_pads)} pads"
+
+
+def get_multipoint_net_pads(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig
+) -> Optional[List[Tuple]]:
+    """
+    Check if a net has 3+ unconnected endpoints (multi-point net) and return stub endpoints.
+
+    Multi-point nets need special handling - they can't be routed with a single
+    A* path. Instead, they need incremental routing: closest pair first, then
+    tap into existing track for remaining pads.
+
+    Handles two cases:
+    1. No segments, 3+ pads -> return pad positions
+    2. 3+ disconnected segment groups -> return stub endpoints (free ends)
+
+    Args:
+        pcb_data: PCB data
+        net_id: Net ID to check
+        config: Grid routing configuration
+
+    Returns:
+        List of endpoint info if multi-point: [(gx, gy, layer_idx, orig_x, orig_y, endpoint_obj), ...]
+        None if not a multi-point net
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+    # Case 1: No segments and 3+ pads
+    if len(net_segments) == 0 and len(net_pads) >= 3:
+        pad_info = []
+        for pad in net_pads:
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            for layer in pad.layers:
+                layer_idx = layer_map.get(layer)
+                if layer_idx is not None:
+                    pad_info.append((gx, gy, layer_idx, pad.global_x, pad.global_y, pad))
+                    break
+        return pad_info if len(pad_info) >= 3 else None
+
+    # Case 2: Check for 3+ disconnected segment groups
+    if len(net_segments) >= 2:
+        groups = find_connected_groups(net_segments)
+        if len(groups) >= 3:
+            # Find stub free ends for each group (endpoints not touching pads)
+            endpoint_info = []
+            for group in groups:
+                free_ends = find_stub_free_ends(group, net_pads)
+                if free_ends:
+                    # Use the first free end from each group
+                    x, y, layer = free_ends[0]
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is not None:
+                        # Create a simple object to hold endpoint info
+                        endpoint_info.append((
+                            coord.to_grid(x, y)[0],
+                            coord.to_grid(x, y)[1],
+                            layer_idx,
+                            x,
+                            y,
+                            {'x': x, 'y': y, 'layer': layer, 'layers': [layer]}  # dict with layers attr for compatibility
+                        ))
+            return endpoint_info if len(endpoint_info) >= 3 else None
+
+    return None
 
 
 def normalize_endpoints_by_component(
