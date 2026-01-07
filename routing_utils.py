@@ -1633,7 +1633,7 @@ def _segments_cross(seg1: Segment, seg2: Segment) -> Optional[Tuple[float, float
 
 
 def fix_self_intersections(segments: List[Segment], existing_segments: List[Segment] = None,
-                           max_short_length: float = 1.0) -> List[Segment]:
+                           max_short_length: float = 1.0, vias: List[Via] = None) -> List[Segment]:
     """Fix self-intersections by trimming short connector segments that cross existing segments.
 
     When a short connector segment crosses an existing segment, we:
@@ -1647,17 +1647,39 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
         segments: New segments from routing
         existing_segments: Existing segments of the same net to check crossings against
         max_short_length: Maximum length for a segment to be considered "short"
+        vias: Vias on this net to check for connectivity
     """
     if not segments:
         return segments
 
     # Combine existing segments by layer for cross-checking
     existing_by_layer = {}
+    existing_endpoints_by_layer = {}
     if existing_segments:
         for seg in existing_segments:
             if seg.layer not in existing_by_layer:
                 existing_by_layer[seg.layer] = []
+                existing_endpoints_by_layer[seg.layer] = set()
             existing_by_layer[seg.layer].append(seg)
+            existing_endpoints_by_layer[seg.layer].add((round(seg.start_x, 3), round(seg.start_y, 3)))
+            existing_endpoints_by_layer[seg.layer].add((round(seg.end_x, 3), round(seg.end_y, 3)))
+
+    # Build via locations by layer for connectivity checking
+    via_locations_by_layer = {}
+    if vias:
+        all_copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'B.Cu']
+        for via in vias:
+            if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
+                via_layers = all_copper_layers
+            elif via.layers:
+                via_layers = via.layers
+            else:
+                via_layers = all_copper_layers
+            via_size = getattr(via, 'size', 0.6)
+            for layer in via_layers:
+                if layer not in via_locations_by_layer:
+                    via_locations_by_layer[layer] = []
+                via_locations_by_layer[layer].append((via.x, via.y, via_size))
 
     # Process each layer separately
     layer_segments = {}
@@ -1668,9 +1690,18 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 
     result_segments = []
 
+    def point_near_via(px, py, via_list):
+        """Check if point is within via_size/4 of any via in list."""
+        for vx, vy, via_size in via_list:
+            if math.sqrt((px - vx)**2 + (py - vy)**2) < via_size / 4:
+                return True
+        return False
+
     for layer, layer_segs in layer_segments.items():
         # Get existing segments on this layer
         existing_on_layer = existing_by_layer.get(layer, [])
+        layer_vias = via_locations_by_layer.get(layer, [])
+        layer_existing_endpoints = existing_endpoints_by_layer.get(layer, set())
 
         # Build connectivity map for new segments on this layer
         # endpoint -> list of segment indices that have this endpoint
@@ -1810,13 +1841,24 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
                                 continue
 
                             # If other_end only connects to segments we're removing, this seg is orphaned
+                            # But also check if other_end connects to a via or existing segment endpoint
                             other_connections = [j for j in endpoint_to_segs.get(other_end, [])
                                                  if j != idx and j not in segments_to_remove and j != crossing_idx]
-                            if not other_connections:
+                            connects_to_via = point_near_via(other_end[0], other_end[1], layer_vias)
+                            connects_to_existing = other_end in layer_existing_endpoints
+                            if not other_connections and not connects_to_via and not connects_to_existing:
                                 segments_to_remove.add(idx)
                                 if other_end not in visited_endpoints:
                                     visited_endpoints.add(other_end)
                                     to_check.append(other_end)
+                            else:
+                                # This segment connects to something important at other_end,
+                                # but is dangling at pt (the abandoned junction).
+                                # Extend it to snap_pt instead of leaving it dangling.
+                                if seg_end == pt:
+                                    segment_modifications[idx] = ('end', snap_pt[0], snap_pt[1])
+                                else:
+                                    segment_modifications[idx] = ('start', snap_pt[0], snap_pt[1])
             else:
                 # No upstream segment found at trim_endpoint - it's connected to a via/pad.
                 # We can't extend a non-existent upstream segment, so we need to check the
@@ -1892,7 +1934,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
         return segments
 
     # First fix self-intersections with existing segments
-    segments = fix_self_intersections(segments, existing_segments, max_appendix_length)
+    segments = fix_self_intersections(segments, existing_segments, max_appendix_length, vias)
 
     # Build map of existing segment endpoints by layer (store actual coordinates for proximity check)
     existing_endpoints = {}

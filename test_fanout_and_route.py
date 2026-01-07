@@ -71,8 +71,8 @@ def main():
         # Route diff pairs (and check for errors and connections)
         if quick: run('python3 test_diffpair.py "*rx1_1*" --swappable-nets "*rx1_1*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu') # quick test
         else:
-            run('python3 test_diffpair.py "*rx1_*" "*rx2_*" "*rx*clkin1*" "*rx*clkin2*" --swappable-nets "*rx1_*" "*rx2_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --output kicad_files/routed_output_diff12.pcb')
-            run('python3 test_diffpair.py "*rx3_*" "*rx4_*" "*rx*clkin3*" "*rx*clkin4*" --swappable-nets "*rx3_*" "*rx4_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --input kicad_files/routed_output_diff12.pcb')
+            run('python3 test_diffpair.py "*rx1_*" "*rx2_*" "*rx*clkin1*" "*rx*clkin2*" --swappable-nets "*rx1_*" "*rx2_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --output kicad_files/routed_output_diff12.kicad_pcb')
+            run('python3 test_diffpair.py "*rx3_*" "*rx4_*" "*rx*clkin3*" "*rx*clkin4*" --swappable-nets "*rx3_*" "*rx4_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --input kicad_files/routed_output_diff12.kicad_pcb')
 
     # Route RAM
     run('python3 route.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb "Net-(U1*DQS*)" "Net-(U1*CK_*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK_*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group "Net-(U1*DQS*)" "Net-(U1*CK_*)" --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5')
