@@ -26,6 +26,7 @@ MIN_AMPLITUDE = 0.2  # mm - minimum useful meander amplitude
 MIN_SEGMENT_LENGTH = 0.001  # mm - minimum meaningful segment length
 COLINEAR_DOT_THRESHOLD = 0.99  # dot product threshold for colinearity check
 POSITION_TOLERANCE = 0.01  # mm - tolerance for position comparisons
+CORNER_BLOAT_FACTOR = 0.42  # sqrt(2) - 1, extra copper extension at 90-degree corners
 
 def get_bump_segments(
     cx: float, cy: float,
@@ -130,8 +131,10 @@ def get_safe_amplitude_at_point(
     # The routing uses grid-snapped segments, but output merges them into longer
     # segments that may have slightly different coordinates (up to half a grid step)
     meander_clearance_margin = config.grid_step / 2
-    required_clearance = config.track_width + config.clearance + meander_clearance_margin
-    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin
+    # Add corner margin for track width bloat at 45-degree chamfered corners
+    corner_margin = config.track_width / 2 * CORNER_BLOAT_FACTOR
+    required_clearance = config.track_width + config.clearance + meander_clearance_margin + corner_margin
+    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
     chamfer = CHAMFER_SIZE
 
     max_safe = max_amplitude
@@ -221,6 +224,27 @@ def get_safe_amplitude_at_point(
                     if dist < via_clearance:
                         conflict_found = True
                         break
+
+        # Check bump segments against pads (on same layer)
+        if not conflict_found:
+            pad_clearance = config.track_width / 2 + config.clearance + corner_margin
+            for bx1, by1, bx2, by2 in bump_segs:
+                if conflict_found:
+                    break
+                for pad_net_id, pad_list in pcb_data.pads_by_net.items():
+                    if pad_net_id == net_id:
+                        continue
+                    if conflict_found:
+                        break
+                    for pad in pad_list:
+                        if layer not in pad.layers:
+                            continue
+                        # Treat pad as circle with radius = max(size_x, size_y)/2
+                        pad_radius = max(pad.size_x, pad.size_y) / 2
+                        dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
+                        if dist < pad_radius + pad_clearance:
+                            conflict_found = True
+                            break
 
         if not conflict_found:
             return test_amp
@@ -1624,8 +1648,10 @@ def get_safe_amplitude_for_diff_pair(
 
     # Add margin for segment merging
     meander_clearance_margin = config.grid_step / 2
-    required_clearance = config.track_width + config.clearance + meander_clearance_margin + diff_pair_extra
-    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra
+    # Add corner margin for track width bloat at 45-degree chamfered corners
+    corner_margin = config.track_width / 2 * CORNER_BLOAT_FACTOR
+    required_clearance = config.track_width + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
+    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
     chamfer = CHAMFER_SIZE
 
     # Get layer name for comparison
@@ -1705,6 +1731,27 @@ def get_safe_amplitude_for_diff_pair(
                     if dist < via_clearance:
                         conflict_found = True
                         break
+
+        # Check bump segments against pads (on same layer)
+        if not conflict_found:
+            pad_clearance = config.track_width / 2 + config.clearance + corner_margin + diff_pair_extra
+            for bx1, by1, bx2, by2 in bump_segs:
+                if conflict_found:
+                    break
+                for pad_net_id, pad_list in pcb_data.pads_by_net.items():
+                    if pad_net_id == p_net_id or pad_net_id == n_net_id:
+                        continue
+                    if conflict_found:
+                        break
+                    for pad in pad_list:
+                        if layer_name not in pad.layers:
+                            continue
+                        # Treat pad as circle with radius = max(size_x, size_y)/2
+                        pad_radius = max(pad.size_x, pad.size_y) / 2
+                        dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
+                        if dist < pad_radius + pad_clearance:
+                            conflict_found = True
+                            break
 
         if not conflict_found:
             return test_amp
