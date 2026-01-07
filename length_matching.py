@@ -5,7 +5,9 @@ Adds length to shorter routes by inserting perpendicular zigzag patterns
 at the longest straight segment.
 """
 
+import fnmatch
 import math
+import re
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
@@ -17,6 +19,13 @@ from geometry_utils import (
     segments_intersect,
     segment_to_segment_distance,
 )
+
+# Meander geometry constants
+CHAMFER_SIZE = 0.1  # mm - 45-degree chamfer size at meander corners
+MIN_AMPLITUDE = 0.2  # mm - minimum useful meander amplitude
+MIN_SEGMENT_LENGTH = 0.001  # mm - minimum meaningful segment length
+COLINEAR_DOT_THRESHOLD = 0.99  # dot product threshold for colinearity check
+POSITION_TOLERANCE = 0.01  # mm - tolerance for position comparisons
 
 def get_bump_segments(
     cx: float, cy: float,
@@ -123,7 +132,7 @@ def get_safe_amplitude_at_point(
     meander_clearance_margin = config.grid_step / 2
     required_clearance = config.track_width + config.clearance + meander_clearance_margin
     via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin
-    chamfer = 0.1
+    chamfer = CHAMFER_SIZE
 
     max_safe = max_amplitude
 
@@ -248,7 +257,7 @@ def check_meander_clearance(
     dy = segment.end_y - segment.start_y
     seg_len = math.sqrt(dx * dx + dy * dy)
 
-    if seg_len < 0.001:
+    if seg_len < MIN_SEGMENT_LENGTH:
         return False
 
     ux = dx / seg_len
@@ -278,7 +287,7 @@ def check_meander_clearance(
     return False
 
 
-def segments_are_colinear(seg1: Segment, seg2: Segment, tolerance: float = 0.01) -> bool:
+def segments_are_colinear(seg1: Segment, seg2: Segment, tolerance: float = POSITION_TOLERANCE) -> bool:
     """
     Check if two segments are colinear (same direction and connected).
 
@@ -308,7 +317,7 @@ def segments_are_colinear(seg1: Segment, seg2: Segment, tolerance: float = 0.01)
     len1 = math.sqrt(dx1*dx1 + dy1*dy1)
     len2 = math.sqrt(dx2*dx2 + dy2*dy2)
 
-    if len1 < 0.001 or len2 < 0.001:
+    if len1 < MIN_SEGMENT_LENGTH or len2 < MIN_SEGMENT_LENGTH:
         return False
 
     dx1, dy1 = dx1/len1, dy1/len1
@@ -316,7 +325,7 @@ def segments_are_colinear(seg1: Segment, seg2: Segment, tolerance: float = 0.01)
 
     # Check if same direction (dot product close to 1)
     dot = dx1*dx2 + dy1*dy2
-    return dot > 0.99
+    return dot > COLINEAR_DOT_THRESHOLD
 
 
 def find_longest_straight_run(segments: List[Segment], min_length: float = 1.0) -> Optional[Tuple[int, int, float]]:
@@ -380,31 +389,6 @@ def find_longest_segment(segments: List[Segment], min_length: float = 1.0) -> Op
     return best_idx
 
 
-def calculate_meander_params(extra_length: float, amplitude: float, spacing: float) -> Tuple[int, float]:
-    """
-    Calculate meander parameters to achieve target extra length.
-
-    Args:
-        extra_length: Additional length needed (mm)
-        amplitude: Height of meander perpendicular to trace (mm)
-        spacing: Distance between parallel meander traces (mm)
-
-    Returns:
-        (num_periods, actual_extra_length)
-    """
-    # Each meander period adds approximately 2 * amplitude of extra length
-    # (going up and coming back down)
-    length_per_period = 2 * amplitude
-
-    # Number of complete periods needed
-    num_periods = max(1, int(math.ceil(extra_length / length_per_period)))
-
-    # Actual extra length achieved
-    actual_extra = num_periods * length_per_period
-
-    return num_periods, actual_extra
-
-
 def generate_trombone_meander(
     segment: Segment,
     extra_length: float,
@@ -458,8 +442,8 @@ def generate_trombone_meander(
     dy = segment.end_y - segment.start_y
     seg_len = math.sqrt(dx * dx + dy * dy)
 
-    if seg_len < 0.001:
-        return [segment]
+    if seg_len < MIN_SEGMENT_LENGTH:
+        return [segment], 0
 
     # Unit vectors along and perpendicular to segment
     ux = dx / seg_len
@@ -469,8 +453,8 @@ def generate_trombone_meander(
     py = ux
 
     # 45° chamfer size - use a small chamfer for smooth corners
-    chamfer = 0.1  # mm - small 45° chamfer at corners
-    min_amplitude = 0.2  # mm - minimum useful amplitude
+    chamfer = CHAMFER_SIZE  # mm - small 45° chamfer at corners
+    min_amplitude = MIN_AMPLITUDE  # mm - minimum useful amplitude
 
     # Horizontal distance consumed by one bump (just the chamfers' horizontal components)
     bump_width = 4 * chamfer
@@ -507,7 +491,7 @@ def generate_trombone_meander(
     margin = bump_width
 
     # Straight lead-in
-    if margin > 0.01:
+    if margin > POSITION_TOLERANCE:
         end_x = cx + ux * margin
         end_y = cy + uy * margin
         new_segments.append(Segment(
@@ -707,7 +691,7 @@ def generate_trombone_meander(
     remaining_y = segment.end_y - cy
     remaining_dist = math.sqrt(remaining_x**2 + remaining_y**2)
 
-    if remaining_dist > 0.01:
+    if remaining_dist > POSITION_TOLERANCE:
         new_segments.append(Segment(
             start_x=cx, start_y=cy,
             end_x=segment.end_x, end_y=segment.end_y,
@@ -848,7 +832,7 @@ def apply_meanders_to_route(
             origin_y = first_seg.start_y
 
     # Try each straight run until we find one that works
-    min_amplitude = 0.2  # Minimum useful amplitude
+    min_amplitude = MIN_AMPLITUDE  # Minimum useful amplitude
 
     # Track run status for verbose output
     run_status = []  # List of (length, status) where status is 'inter-meander', 'clearance', 'used', 'too-short'
@@ -1185,9 +1169,6 @@ def match_net_pattern(net_name: str, pattern: str) -> bool:
     Returns:
         True if matches
     """
-    import fnmatch
-    import re
-
     # Convert pattern to regex
     # First, handle [0-9] style ranges
     regex_pattern = pattern
@@ -1247,8 +1228,6 @@ def auto_group_ddr4_nets(net_names: List[str]) -> List[List[str]]:
     Returns:
         List of groups, each group is a list of net names
     """
-    import re
-
     groups = {}
     ungrouped = []
 
@@ -1332,7 +1311,7 @@ def find_straight_runs_in_path(path: List[Tuple[int, int, int]],
         dy = y2 - y1
         seg_len = math.sqrt(dx * dx + dy * dy)
 
-        if seg_len < 0.001:
+        if seg_len < MIN_SEGMENT_LENGTH:
             i += 1
             continue
 
@@ -1353,7 +1332,7 @@ def find_straight_runs_in_path(path: List[Tuple[int, int, int]],
             dy = y2 - y1
             next_len = math.sqrt(dx * dx + dy * dy)
 
-            if next_len < 0.001:
+            if next_len < MIN_SEGMENT_LENGTH:
                 j += 1
                 continue
 
@@ -1361,7 +1340,7 @@ def find_straight_runs_in_path(path: List[Tuple[int, int, int]],
 
             # Check if colinear (dot product close to 1)
             dot = ux * next_ux + uy * next_uy
-            if dot < 0.99:
+            if dot < COLINEAR_DOT_THRESHOLD:
                 break
 
             run_length += next_len
@@ -1437,7 +1416,7 @@ def generate_centerline_meander(
     dy = end_pt[1] - start_pt[1]
     seg_len = math.sqrt(dx * dx + dy * dy)
 
-    if seg_len < 0.001:
+    if seg_len < MIN_SEGMENT_LENGTH:
         return float_path, 0
 
     ux = dx / seg_len
@@ -1447,7 +1426,7 @@ def generate_centerline_meander(
 
     # Meander parameters - chamfer must be larger than P/N half-spacing to avoid crossings
     chamfer = max(0.1, spacing_mm * config.diff_chamfer_extra)
-    min_amplitude = 0.2
+    min_amplitude = MIN_AMPLITUDE
     bump_width = 6 * chamfer  # wide entry (2) + wide top chamfers (4)
 
     # Account for full diff pair width in clearance
@@ -1476,7 +1455,7 @@ def generate_centerline_meander(
     margin = bump_width
 
     # Add lead-in
-    if margin > 0.01:
+    if margin > POSITION_TOLERANCE:
         cx += ux * margin
         cy += uy * margin
         new_path.append((cx, cy, layer))
@@ -1598,7 +1577,7 @@ def generate_centerline_meander(
         perp_dist = dx_to_end * px + dy_to_end * py
 
         # If we need to move perpendicular to reach end level, use wider chamfer
-        if abs(perp_dist) > 0.01:
+        if abs(perp_dist) > POSITION_TOLERANCE:
             # Move forward by 2x the perpendicular distance (2:1 ratio)
             chamfer_x = cx + ux * 2 * abs(perp_dist) + px * perp_dist
             chamfer_y = cy + uy * 2 * abs(perp_dist) + py * perp_dist
@@ -1645,7 +1624,7 @@ def get_safe_amplitude_for_diff_pair(
     meander_clearance_margin = config.grid_step / 2
     required_clearance = config.track_width + config.clearance + meander_clearance_margin + diff_pair_extra
     via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra
-    chamfer = 0.1
+    chamfer = CHAMFER_SIZE
 
     # Get layer name for comparison
     # config.layers is a list of layer names
@@ -1925,97 +1904,6 @@ def apply_meanders_to_diff_pair(
     return result, 0
 
 
-def _path_to_segments(float_path: List[Tuple[float, float, int]],
-                       net_id: int,
-                       track_width: float,
-                       layer_names: List[str]) -> List[Segment]:
-    """Convert a float path to a list of segments."""
-    segments = []
-    for i in range(len(float_path) - 1):
-        x1, y1, layer1 = float_path[i]
-        x2, y2, layer2 = float_path[i + 1]
-
-        # Only create segment if on same layer
-        if layer1 == layer2:
-            layer_name = layer_names[layer1] if layer1 < len(layer_names) else f"layer_{layer1}"
-            segments.append(Segment(
-                start_x=x1, start_y=y1,
-                end_x=x2, end_y=y2,
-                width=track_width,
-                layer=layer_name,
-                net_id=net_id
-            ))
-    return segments
-
-
-def _path_to_vias(float_path: List[Tuple[float, float, int]],
-                   net_id: int,
-                   config: GridRouteConfig,
-                   layer_names: List[str]) -> List:
-    """Generate vias at layer changes in a path."""
-    from kicad_parser import Via
-
-    vias = []
-    for i in range(len(float_path) - 1):
-        x1, y1, layer1 = float_path[i]
-        x2, y2, layer2 = float_path[i + 1]
-
-        if layer1 != layer2:
-            layer1_name = layer_names[layer1] if layer1 < len(layer_names) else f"layer_{layer1}"
-            layer2_name = layer_names[layer2] if layer2 < len(layer_names) else f"layer_{layer2}"
-            vias.append(Via(
-                x=x1, y=y1,
-                size=config.via_size,
-                drill=config.via_drill,
-                layers=[layer1_name, layer2_name],
-                net_id=net_id
-            ))
-    return vias
-
-
-def _create_connector_segment(start_pos: Tuple[float, float],
-                               end_pos,
-                               net_id: int,
-                               track_width: float,
-                               layer_names: List[str],
-                               layer_override: int = None) -> Optional[Segment]:
-    """Create a connector segment from start position to end position.
-
-    Args:
-        start_pos: (x, y) tuple
-        end_pos: Either (x, y) tuple or (x, y, layer) tuple
-        net_id: Net ID
-        track_width: Track width
-        layer_names: List of layer names
-        layer_override: Optional layer index to use instead of from end_pos
-    """
-    x1, y1 = start_pos[0], start_pos[1]
-
-    # Handle end_pos which can be (x, y) or (x, y, layer)
-    if len(end_pos) == 3:
-        x2, y2, layer = end_pos
-    else:
-        x2, y2 = end_pos
-        layer = layer_override if layer_override is not None else 0
-
-    if layer_override is not None:
-        layer = layer_override
-
-    # Skip if points are very close
-    dist = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    if dist < 0.01:
-        return None
-
-    layer_name = layer_names[layer] if layer < len(layer_names) else f"layer_{layer}"
-    return Segment(
-        start_x=x1, start_y=y1,
-        end_x=x2, end_y=y2,
-        width=track_width,
-        layer=layer_name,
-        net_id=net_id
-    )
-
-
 def apply_intra_pair_length_matching(
     result: dict,
     config: GridRouteConfig,
@@ -2151,7 +2039,7 @@ def apply_intra_pair_length_matching(
     # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer
     # For 1 bump: extra = 2*amplitude - 2.34*chamfer
     # For n bumps: extra ≈ n * (2*amplitude - 2.34*chamfer) (approximately, first bump has entry/exit)
-    chamfer = 0.1
+    chamfer = CHAMFER_SIZE
     min_amplitude = 0.1  # Minimum useful amplitude (smaller for intra-pair small deltas)
     max_amplitude = config.meander_amplitude  # Default 1.0mm
 
@@ -2203,7 +2091,7 @@ def apply_intra_pair_length_matching(
 
         # Calculate target amplitude based on needed extra length
         actual_extra = new_shorter_length - shorter_length
-        if actual_extra < 0.001 or bump_count == 0:
+        if actual_extra < MIN_SEGMENT_LENGTH or bump_count == 0:
             break  # No meaningful extra was added
 
         needed_extra = target_length - shorter_length
