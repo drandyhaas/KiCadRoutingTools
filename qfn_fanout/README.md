@@ -32,9 +32,8 @@ python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_f
 | `--output`, `-o` | Output PCB file | qfn_fanout_test.kicad_pcb |
 | `--layer`, `-l` | Routing layer | F.Cu |
 | `--width`, `-w` | Track width (mm) | 0.1 |
-| `--clearance` | Track clearance (mm) | 0.1 |
+| `--clearance` | Clearance (track spacing and margin past pad before bend) | 0.1 |
 | `--nets`, `-n` | Net patterns to include | All nets |
-| `--stub-length`, `-s` | Stub length (mm) | chip width / 2 |
 
 ## Module Structure
 
@@ -62,7 +61,7 @@ qfn_fanout/
 2. **Pad Classification** - Determine which side (top/bottom/left/right) each pad is on
 3. **Escape Direction** - Calculate perpendicular escape direction for each pad
 4. **Stub Generation** - Create two-segment stubs:
-   - Straight segment: perpendicular to chip edge (pad_length / 2)
+   - Straight segment: perpendicular to chip edge (pad_width / 2 + clearance, clears pad before bend)
    - 45-degree segment: fans outward, length varies by position (0 at center, max at corners)
 5. **Collision Check** - Validate endpoint spacing meets clearance requirements
 
