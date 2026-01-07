@@ -1032,6 +1032,8 @@ def generate_bga_fanout(footprint: Footprint,
                                 p_target_ch = channels_above[-1] if channels_above and p_is_top else (channels_below[0] if channels_below else None)
                                 n_target_ch = channels_below[0] if channels_below and not p_is_top else (channels_above[-1] if channels_above else None)
 
+                            # Initialize route_ch with default before conditional assignment
+                            route_ch = channel
                             if is_p_route and p_target_ch:
                                 target_y = p_target_ch.position
                                 route_ch = p_target_ch
@@ -1041,7 +1043,7 @@ def generate_bga_fanout(footprint: Footprint,
                             else:
                                 # Fallback to convergence if no separate channel available
                                 target_y = center_y - half_pair_spacing if (is_p_route and p_is_top) or (not is_p_route and not p_is_top) else center_y + half_pair_spacing
-                                route_ch = route_ch if 'route_ch' in dir() else channel
+                                # route_ch already initialized to channel above
 
                             # Route to target channel via 45° stub
                             dy_needed = target_y - pad_info.global_y

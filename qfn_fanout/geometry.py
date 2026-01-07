@@ -12,7 +12,7 @@ from qfn_fanout.types import QFNLayout, PadInfo
 
 def calculate_fanout_stub(pad_info: PadInfo, layout: QFNLayout,
                           straight_length: float, max_diagonal_length: float,
-                          fan_factor: float) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+                          ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
     """
     Calculate fanout stub with two segments: straight then 45 degrees.
 
@@ -31,7 +31,6 @@ def calculate_fanout_stub(pad_info: PadInfo, layout: QFNLayout,
         layout: QFN layout parameters
         straight_length: Length of straight stub (pad_length / 2, uniform for all)
         max_diagonal_length: Max diagonal length for corner pads (chip_width / 3)
-        fan_factor: Unused, kept for compatibility
     """
     pad = pad_info.pad
     pad_x, pad_y = pad.global_x, pad.global_y

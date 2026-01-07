@@ -377,7 +377,6 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
     # Start with pre-occupied positions from existing fanouts
     occupied: Dict[Tuple[str, str, float], str] = dict(pre_occupied) if pre_occupied else {}
 
-    pair_spacing = track_width * 2 + clearance  # Minimum spacing between diff pairs
     edge_layer = layers[0]  # Edge pairs go on top layer (F.Cu)
 
     # Calculate which directions require adjacent-channel routing
@@ -506,18 +505,7 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
         key = (layer, pos_key, pos)
         occupied[key] = pair_id
 
-    # Sort pairs by distance to primary exit edge (closest first - they must use primary)
-    # For horizontal primary: sort by distance to left/right edge
-    # For vertical primary: sort by distance to top/bottom edge
-    for pair_id, pair, min_dist, cx, cy in pair_info:
-        if primary_orientation == 'horizontal':
-            primary_dist = min(cx - grid.min_x, grid.max_x - cx)
-        else:
-            primary_dist = min(cy - grid.min_y, grid.max_y - cy)
-        # Store primary_dist for later use
-        pair_info_dict = {p[0]: (p[1], p[3], p[4], primary_dist) for p in pair_info}
-
-    # Rebuild pair_info with primary distance
+    # Build pair_info with primary and secondary distances
     pair_info_with_primary = []
     for pair_id, pair, min_dist, cx, cy in pair_info:
         if primary_orientation == 'horizontal':

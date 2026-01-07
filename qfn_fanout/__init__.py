@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kicad_parser import parse_kicad_pcb, Footprint, PCBData, find_components_by_type
 from kicad_writer import add_tracks_and_vias_to_pcb
 from qfn_fanout.types import QFNLayout, PadInfo, FanoutStub
+from bga_fanout.constants import POSITION_TOLERANCE
 from qfn_fanout.layout import analyze_qfn_layout, analyze_pad
 from qfn_fanout.geometry import calculate_fanout_stub
 
@@ -56,8 +57,7 @@ def generate_qfn_fanout(footprint: Footprint,
                         net_filter: Optional[List[str]] = None,
                         layer: str = "F.Cu",
                         track_width: float = 0.1,
-                        clearance: float = 0.1,
-                        fan_factor: float = 0.5) -> Tuple[List[Dict], List[Dict]]:
+                        clearance: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -75,7 +75,6 @@ def generate_qfn_fanout(footprint: Footprint,
         layer: Routing layer (default F.Cu)
         track_width: Width of fanout tracks
         clearance: Minimum clearance (used for track spacing and pad escape margin)
-        fan_factor: Unused, kept for compatibility
 
     Returns:
         (tracks, vias) - tracks are the segments, vias is empty
@@ -137,7 +136,7 @@ def generate_qfn_fanout(footprint: Footprint,
         # pad_width is the dimension perpendicular to the chip edge (escape direction)
         straight_length = pad_info.pad_width / 2 + clearance
         corner_pos, stub_end = calculate_fanout_stub(
-            pad_info, layout, straight_length, max_diagonal_length, fan_factor
+            pad_info, layout, straight_length, max_diagonal_length
         )
 
         stub = FanoutStub(
@@ -156,7 +155,7 @@ def generate_qfn_fanout(footprint: Footprint,
         # Segment 1: Straight from pad to corner
         dx1 = abs(stub.corner_pos[0] - stub.pad_pos[0])
         dy1 = abs(stub.corner_pos[1] - stub.pad_pos[1])
-        if dx1 > 0.001 or dy1 > 0.001:
+        if dx1 > POSITION_TOLERANCE or dy1 > POSITION_TOLERANCE:
             tracks.append({
                 'start': stub.pad_pos,
                 'end': stub.corner_pos,
@@ -168,7 +167,7 @@ def generate_qfn_fanout(footprint: Footprint,
         # Segment 2: 45 degree from corner to end
         dx2 = abs(stub.stub_end[0] - stub.corner_pos[0])
         dy2 = abs(stub.stub_end[1] - stub.corner_pos[1])
-        if dx2 > 0.001 or dy2 > 0.001:
+        if dx2 > POSITION_TOLERANCE or dy2 > POSITION_TOLERANCE:
             tracks.append({
                 'start': stub.corner_pos,
                 'end': stub.stub_end,
