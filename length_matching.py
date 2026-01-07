@@ -1055,6 +1055,10 @@ def apply_length_matching_to_group(
                     break
 
             # Step 3: If we overshot, scale down amplitude
+            # Save best result from Step 2 in case Step 3 makes things worse
+            best_result = modified_result.copy()
+            best_length = new_length
+            best_amplitude = config.meander_amplitude
             scaled_amplitude = config.meander_amplitude
             for scale_iter in range(5):
                 actual_extra = new_length - current_length
@@ -1068,14 +1072,28 @@ def apply_length_matching_to_group(
                 if scaled_amplitude < 0.2:
                     scaled_amplitude = 0.2
 
-                modified_result, _ = apply_meanders_to_diff_pair(
+                trial_result, trial_bumps = apply_meanders_to_diff_pair(
                     result, delta, config, pcb_data,
                     extra_segments=already_processed_segments,
                     extra_vias=already_processed_vias,
                     min_bumps=bump_count,
                     amplitude_override=scaled_amplitude
                 )
-                new_length = modified_result['route_length']
+                trial_length = trial_result['route_length']
+
+                # Only accept if we got bumps and the result is better (closer to target or longer)
+                if trial_bumps > 0 and trial_length >= best_length:
+                    modified_result = trial_result
+                    new_length = trial_length
+                    best_result = trial_result.copy()
+                    best_length = trial_length
+                    best_amplitude = scaled_amplitude
+                else:
+                    # Scaling made things worse, restore best and stop
+                    modified_result = best_result
+                    new_length = best_length
+                    scaled_amplitude = best_amplitude
+                    break
 
             if scaled_amplitude < config.meander_amplitude:
                 print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps, amplitude={scaled_amplitude:.3f})")
@@ -1137,6 +1155,10 @@ def apply_length_matching_to_group(
                     break
 
             # Step 3: If we overshot, iteratively scale down amplitude to hit target
+            # Save best result from Step 2 in case Step 3 makes things worse
+            best_segments = new_segments
+            best_length = new_length
+            best_amplitude = config.meander_amplitude
             scaled_amplitude = config.meander_amplitude
             for scale_iter in range(5):
                 actual_extra = new_length - current_length
@@ -1150,7 +1172,7 @@ def apply_length_matching_to_group(
                 if scaled_amplitude < 0.2:
                     scaled_amplitude = 0.2
 
-                new_segments, _ = apply_meanders_to_route(
+                trial_segments, trial_bumps = apply_meanders_to_route(
                     original_segments,
                     delta,
                     config,
@@ -1161,7 +1183,21 @@ def apply_length_matching_to_group(
                     min_bumps=bump_count,
                     amplitude_override=scaled_amplitude
                 )
-                new_length = calculate_route_length(new_segments) + stub_length
+                trial_length = calculate_route_length(trial_segments) + stub_length
+
+                # Only accept if we got bumps and the result is better (closer to target or longer)
+                if trial_bumps > 0 and trial_length >= best_length:
+                    new_segments = trial_segments
+                    new_length = trial_length
+                    best_segments = trial_segments
+                    best_length = trial_length
+                    best_amplitude = scaled_amplitude
+                else:
+                    # Scaling made things worse, restore best and stop
+                    new_segments = best_segments
+                    new_length = best_length
+                    scaled_amplitude = best_amplitude
+                    break
 
             if scaled_amplitude < config.meander_amplitude:
                 print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps, amplitude={scaled_amplitude:.3f})")
