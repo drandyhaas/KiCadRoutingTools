@@ -24,6 +24,118 @@ from diff_pair_routing import get_diff_pair_endpoints
 from routing_utils import get_net_endpoints
 
 
+def _find_blocking_single_ended_nets(
+    stub_p, stub_n, dest_layer: str, pcb_data: PCBData, diff_pair_net_ids: Set[int]
+) -> List[int]:
+    """
+    Find single-ended net IDs that block the given stubs from moving to dest_layer.
+
+    Returns list of net IDs that:
+    1. Have segments on dest_layer that overlap with stub bounding box
+    2. Are NOT part of any diff pair
+    """
+    our_segments = stub_p.segments + stub_n.segments
+    our_net_ids = {stub_p.net_id, stub_n.net_id}
+    blocking_nets = set()
+
+    # Use same tolerance as validate_stub_no_overlap
+    y_tolerance = 0.2
+
+    for seg in pcb_data.segments:
+        if seg.layer != dest_layer:
+            continue
+        if seg.net_id in our_net_ids:
+            continue
+        if seg.net_id in diff_pair_net_ids:
+            continue
+
+        # Check if segment bounding box overlaps with any of our segments
+        for our_seg in our_segments:
+            # Segment objects have start_x, start_y, end_x, end_y attributes
+            our_x_min = min(our_seg.start_x, our_seg.end_x)
+            our_x_max = max(our_seg.start_x, our_seg.end_x)
+            our_y_min = min(our_seg.start_y, our_seg.end_y)
+            our_y_max = max(our_seg.start_y, our_seg.end_y)
+
+            seg_x_min = min(seg.start_x, seg.end_x)
+            seg_x_max = max(seg.start_x, seg.end_x)
+            seg_y_min = min(seg.start_y, seg.end_y)
+            seg_y_max = max(seg.start_y, seg.end_y)
+
+            # Check if bounding boxes overlap (with y tolerance)
+            x_overlap = our_x_min <= seg_x_max and seg_x_min <= our_x_max
+            y_overlap = (our_y_min - y_tolerance) <= seg_y_max and seg_y_min <= (our_y_max + y_tolerance)
+
+            if x_overlap and y_overlap:
+                blocking_nets.add(seg.net_id)
+                break
+
+    return list(blocking_nets)
+
+
+def _get_single_ended_stub_on_layer(
+    pcb_data: PCBData, net_id: int, layer: str, config: GridRouteConfig
+):
+    """Get stub info for a single-ended net on the given layer."""
+    sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
+    if error or not sources or not targets:
+        return None
+
+    src_layer = config.layers[sources[0][2]]
+    tgt_layer = config.layers[targets[0][2]]
+
+    # Check if this net has a stub on the requested layer
+    if src_layer == layer:
+        return get_stub_info(pcb_data, net_id, sources[0][3], sources[0][4], layer)
+    elif tgt_layer == layer:
+        return get_stub_info(pcb_data, net_id, targets[0][3], targets[0][4], layer)
+
+    return None
+
+
+def _validate_single_ended_swap(
+    stub, dest_layer: str, pcb_data: PCBData, config: GridRouteConfig,
+    exclude_net_ids: Set[int] = None
+) -> bool:
+    """Validate that a single-ended stub can move to dest_layer without conflicts."""
+    from stub_layer_switching import segments_intersect_2d
+
+    if exclude_net_ids is None:
+        exclude_net_ids = set()
+
+    # Check for segment intersections on destination layer
+    our_segments = stub.segments
+    our_net_ids = {stub.net_id} | exclude_net_ids
+
+    for our_seg in our_segments:
+        for other in pcb_data.segments:
+            if other.layer != dest_layer:
+                continue
+            if other.net_id in our_net_ids:
+                continue
+            # Check if segments actually intersect
+            if segments_intersect_2d(
+                (our_seg.start_x, our_seg.start_y), (our_seg.end_x, our_seg.end_y),
+                (other.start_x, other.start_y), (other.end_x, other.end_y)
+            ):
+                return False
+
+    return True
+
+
+def _undo_stub_layer_switch(pcb_data: PCBData, mods: List[Dict], vias: List):
+    """Undo a stub layer switch by reverting segment layer modifications."""
+    # Revert segment layer changes
+    for mod in mods:
+        seg = mod['segment']
+        seg.layer = mod['old_layer']
+
+    # Remove added vias
+    for via in vias:
+        if via in pcb_data.vias:
+            pcb_data.vias.remove(via)
+
+
 def apply_diff_pair_layer_swaps(
     pcb_data: PCBData,
     config: GridRouteConfig,
@@ -885,6 +997,185 @@ def apply_diff_pair_layer_swaps(
 
     if swap_count > 0:
         print(f"Applied {swap_count} layer swap(s)")
+
+    # Phase 7: Try single-ended swaps to make room for diff pairs that still need vias
+    # Build set of all diff pair net IDs for exclusion
+    diff_pair_net_ids = set()
+    for pair_name, pair in diff_pairs.items():
+        diff_pair_net_ids.add(pair.p_net_id)
+        diff_pair_net_ids.add(pair.n_net_id)
+
+    single_ended_swap_count = 0
+    for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
+        if pair_name in applied_swaps:
+            continue
+
+        # Try source-side swap: move source stubs to target layer
+        src_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                   sources[0][5], sources[0][6], src_layer)
+        src_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                   sources[0][7], sources[0][8], src_layer)
+
+        if src_p_stub and src_n_stub:
+            # Find blocking single-ended nets on target layer
+            blocking_nets = _find_blocking_single_ended_nets(
+                src_p_stub, src_n_stub, tgt_layer, pcb_data, diff_pair_net_ids
+            )
+
+            for blocking_net_id in blocking_nets:
+                # Try to find an alternative layer for this single-ended net
+                se_stub = _get_single_ended_stub_on_layer(
+                    pcb_data, blocking_net_id, tgt_layer, config
+                )
+                if not se_stub:
+                    continue
+
+                # Try each available layer except source and target
+                for alt_layer in config.layers:
+                    if alt_layer == tgt_layer or alt_layer == src_layer:
+                        continue
+                    # Don't swap to F.Cu unless it's an edge stub
+                    if not can_swap_to_top_layer and alt_layer == 'F.Cu':
+                        if not is_edge_stub(se_stub.pad_x, se_stub.pad_y, config.bga_exclusion_zones):
+                            continue
+
+                    # Check if single-ended stub can move to alt_layer without conflicts
+                    se_valid = _validate_single_ended_swap(
+                        se_stub, alt_layer, pcb_data, config, {pair.p_net_id, pair.n_net_id}
+                    )
+                    if not se_valid:
+                        continue
+
+                    # Apply the single-ended swap
+                    se_vias, se_mods = apply_stub_layer_switch(
+                        pcb_data, se_stub, alt_layer, config, debug=False
+                    )
+                    all_segment_modifications.extend(se_mods)
+                    all_swap_vias.extend(se_vias)
+
+                    # Now retry the diff pair source switch
+                    valid, reason = validate_swap(
+                        src_p_stub, src_n_stub, tgt_layer, all_stubs_by_layer,
+                        pcb_data, config, swap_partner_name=None,
+                        swap_partner_net_ids=set(),
+                        stub_endpoints_by_layer=stub_endpoints_by_layer
+                    )
+
+                    if valid:
+                        # Apply diff pair source switch
+                        vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
+                        vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
+                        all_segment_modifications.extend(mods1 + mods2)
+                        all_swap_vias.extend(vias1 + vias2)
+
+                        # Update tracking structures
+                        if src_layer in all_stubs_by_layer:
+                            all_stubs_by_layer[src_layer] = [s for s in all_stubs_by_layer[src_layer] if s[0] != pair_name]
+                        if tgt_layer not in all_stubs_by_layer:
+                            all_stubs_by_layer[tgt_layer] = []
+                        all_stubs_by_layer[tgt_layer].append((pair_name, src_p_stub.segments + src_n_stub.segments))
+                        if src_layer in stub_endpoints_by_layer:
+                            stub_endpoints_by_layer[src_layer] = [e for e in stub_endpoints_by_layer[src_layer] if e[0] != pair_name]
+                        if tgt_layer not in stub_endpoints_by_layer:
+                            stub_endpoints_by_layer[tgt_layer] = []
+                        stub_endpoints_by_layer[tgt_layer].append((pair_name, [(src_p_stub.x, src_p_stub.y), (src_n_stub.x, src_n_stub.y)]))
+
+                        applied_swaps.add(pair_name)
+                        single_ended_swap_count += 1
+                        total_layer_swaps += 1
+
+                        net = pcb_data.nets.get(blocking_net_id)
+                        blocking_name = net.name if net else f"net {blocking_net_id}"
+                        via_msg = f", added {len(vias1) + len(vias2)} pad via(s)" if vias1 or vias2 else ""
+                        print(f"  Solo source switch: {pair_name} ({src_layer}->{tgt_layer}) after moving {blocking_name} to {alt_layer}{via_msg}")
+                        break
+                    else:
+                        # Undo the single-ended swap since diff pair still can't swap
+                        _undo_stub_layer_switch(pcb_data, se_mods, se_vias)
+
+                if pair_name in applied_swaps:
+                    break
+
+        # If source side didn't work, try target side
+        if pair_name not in applied_swaps:
+            tgt_p_stub = get_stub_info(pcb_data, pair.p_net_id,
+                                       targets[0][5], targets[0][6], tgt_layer)
+            tgt_n_stub = get_stub_info(pcb_data, pair.n_net_id,
+                                       targets[0][7], targets[0][8], tgt_layer)
+
+            if tgt_p_stub and tgt_n_stub:
+                # Find blocking single-ended nets on source layer
+                blocking_nets = _find_blocking_single_ended_nets(
+                    tgt_p_stub, tgt_n_stub, src_layer, pcb_data, diff_pair_net_ids
+                )
+
+                for blocking_net_id in blocking_nets:
+                    se_stub = _get_single_ended_stub_on_layer(
+                        pcb_data, blocking_net_id, src_layer, config
+                    )
+                    if not se_stub:
+                        continue
+
+                    for alt_layer in config.layers:
+                        if alt_layer == src_layer or alt_layer == tgt_layer:
+                            continue
+                        if not can_swap_to_top_layer and alt_layer == 'F.Cu':
+                            if not is_edge_stub(se_stub.pad_x, se_stub.pad_y, config.bga_exclusion_zones):
+                                continue
+
+                        se_valid = _validate_single_ended_swap(
+                            se_stub, alt_layer, pcb_data, config, {pair.p_net_id, pair.n_net_id}
+                        )
+                        if not se_valid:
+                            continue
+
+                        se_vias, se_mods = apply_stub_layer_switch(
+                            pcb_data, se_stub, alt_layer, config, debug=False
+                        )
+                        all_segment_modifications.extend(se_mods)
+                        all_swap_vias.extend(se_vias)
+
+                        valid, reason = validate_swap(
+                            tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
+                            pcb_data, config, swap_partner_name=None,
+                            swap_partner_net_ids=set(),
+                            stub_endpoints_by_layer=stub_endpoints_by_layer
+                        )
+
+                        if valid:
+                            vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
+                            vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
+                            all_segment_modifications.extend(mods1 + mods2)
+                            all_swap_vias.extend(vias1 + vias2)
+
+                            if tgt_layer in all_stubs_by_layer:
+                                all_stubs_by_layer[tgt_layer] = [s for s in all_stubs_by_layer[tgt_layer] if s[0] != pair_name]
+                            if src_layer not in all_stubs_by_layer:
+                                all_stubs_by_layer[src_layer] = []
+                            all_stubs_by_layer[src_layer].append((pair_name, tgt_p_stub.segments + tgt_n_stub.segments))
+                            if tgt_layer in stub_endpoints_by_layer:
+                                stub_endpoints_by_layer[tgt_layer] = [e for e in stub_endpoints_by_layer[tgt_layer] if e[0] != pair_name]
+                            if src_layer not in stub_endpoints_by_layer:
+                                stub_endpoints_by_layer[src_layer] = []
+                            stub_endpoints_by_layer[src_layer].append((pair_name, [(tgt_p_stub.x, tgt_p_stub.y), (tgt_n_stub.x, tgt_n_stub.y)]))
+
+                            applied_swaps.add(pair_name)
+                            single_ended_swap_count += 1
+                            total_layer_swaps += 1
+
+                            net = pcb_data.nets.get(blocking_net_id)
+                            blocking_name = net.name if net else f"net {blocking_net_id}"
+                            via_msg = f", added {len(vias1) + len(vias2)} pad via(s)" if vias1 or vias2 else ""
+                            print(f"  Solo target switch: {pair_name} ({tgt_layer}->{src_layer}) after moving {blocking_name} to {alt_layer}{via_msg}")
+                            break
+                        else:
+                            _undo_stub_layer_switch(pcb_data, se_mods, se_vias)
+
+                    if pair_name in applied_swaps:
+                        break
+
+    if single_ended_swap_count > 0:
+        print(f"Applied {single_ended_swap_count} single-ended swap(s) to enable diff pair switches")
 
     # Report pairs that need vias but couldn't be swapped
     for pair_name, (src_layer, tgt_layer, sources, targets, pair) in pairs_needing_via:
