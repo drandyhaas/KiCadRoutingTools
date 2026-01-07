@@ -57,7 +57,7 @@ KiCadRoutingTools/
 | `single_ended_loop.py` | Main loop iterating over single-ended nets to route |
 | `reroute_loop.py` | Processes queue of routes that need rerouting after rip-up |
 | `diff_pair_routing.py` | Routes P/N pairs using centerline + offset approach with GND vias |
-| `single_ended_routing.py` | Routes individual nets using A* pathfinding |
+| `single_ended_routing.py` | Routes individual nets using A* pathfinding; multi-point routing (3+ pads) |
 
 #### Optimization
 
@@ -276,6 +276,64 @@ for i in range(len(path) - 1):
         # Same layer = segment
         segments.append(Segment(x1, y1, x2, y2, layer=layer1, ...))
 ```
+
+## Multi-Point Routing
+
+Nets with 3+ pads require special handling to work correctly with length matching. The router uses a 3-phase approach:
+
+### The Problem
+
+When a net has more than 2 pads (e.g., a signal that fans out to multiple destinations), routing all connections before length matching creates issues:
+- Tap connections that branch off the main route add non-linear geometry
+- The length-matching algorithm can't cleanly add meanders to branching routes
+- Tap segments shouldn't be included in length-matched measurements
+
+### 3-Phase Solution
+
+```
+Phase 1: Route main path    Phase 2: Length match      Phase 3: Route taps
+
+    B                           B                           B
+    |                           |                           |
+A---+---C                   A~~~+~~~C                   A~~~+~~~C
+                               meanders                     |
+    D (unrouted)               D (unrouted)                 D (connected)
+```
+
+#### Phase 1: Main Route
+- Find the two **farthest** pads by Manhattan distance (not closest)
+- Route only between this pair using standard A* routing
+- Track pending multi-point nets in `state.pending_multipoint_nets`
+- Result includes `multipoint_pad_info` with all pads and `routed_pad_indices` tracking which are connected
+
+#### Phase 2: Length Matching
+- Apply meanders to the clean 2-point main routes
+- Works exactly like regular 2-point net length matching
+- Meanders are added to the main route segments
+
+#### Phase 3: Tap Connections
+- For each remaining unrouted pad:
+  - Find the closest tap point on the (now-meandered) main route
+  - Route from the tap point to the remaining pad
+- Uses `route_multipoint_taps()` in `single_ended_routing.py`
+- Must rebuild obstacles excluding the current net (so we can tap into our own route)
+
+### Implementation Details
+
+Key functions in `single_ended_routing.py`:
+- `route_multipoint_main()` - Phase 1: Routes farthest pair only
+- `route_multipoint_taps()` - Phase 3: Completes remaining connections
+
+Key utility in `routing_utils.py`:
+- `find_farthest_pad_pair()` - Finds two pads with maximum Manhattan distance
+
+State tracking in `routing_state.py`:
+- `pending_multipoint_nets` - Dict mapping net_id to main_result for Phase 3
+
+### Limitations
+
+- **Layer swaps not supported** - Multi-point nets are skipped during layer swap optimization (warning printed)
+- Layer swaps would need to handle all pads consistently, which is complex when pads may be on different layers
 
 ## Post-Processing
 

@@ -27,6 +27,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
+- **Multi-point routing** - Routes nets with 3+ pads using a 3-phase approach: (1) route the main path between farthest pads, (2) apply length matching, (3) route tap connections to remaining pads. This ensures length-matched routes are clean 2-point paths while still connecting all pads
 
 ## Quick Start
 
