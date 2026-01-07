@@ -330,7 +330,8 @@ def generate_bga_fanout(footprint: Footprint,
                         rebalance_escape: bool = False,
                         via_size: float = 0.3,
                         via_drill: float = 0.2,
-                        check_for_previous: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        check_for_previous: bool = False,
+                        no_inner_top_layer: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -354,6 +355,7 @@ def generate_bga_fanout(footprint: Footprint,
         via_size: Size of vias to add at pads (default 0.3mm)
         via_drill: Drill size for vias (default 0.2mm)
         check_for_previous: If True, skip pads that already have fanout tracks
+        no_inner_top_layer: If True, inner pads cannot use F.Cu (top layer)
 
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove)
@@ -1130,7 +1132,7 @@ def generate_bga_fanout(footprint: Footprint,
     existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
 
     # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
-    assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks)
+    assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks, no_inner_top_layer)
 
     # Calculate jog length = distance from BGA edge to first pad row/col
     # This is half the pitch (since edge is pitch/2 from first pad)
@@ -1159,7 +1161,7 @@ def generate_bga_fanout(footprint: Footprint,
         # Build net_id -> net_name mapping for error reporting
         net_id_to_name = {r.net_id: r.pad.net_name for r in routes if r.pad.net_name}
         reassigned, failed_nets = resolve_collisions(routes, tracks, layers, track_width, clearance, diff_pair_gap,
-                                        existing_tracks, grid, channels, exit_margin, net_id_to_name)
+                                        existing_tracks, grid, channels, exit_margin, net_id_to_name, no_inner_top_layer)
 
         if failed_nets:
             print(f"\n  ERROR: Failed to route {len(failed_nets)} net(s):")
@@ -1236,6 +1238,9 @@ def main():
     parser.add_argument('--check-for-previous', action='store_true',
                         help='Check for existing fanout tracks and skip pads that are already '
                              'fanned out. Also avoids occupied channel positions.')
+    parser.add_argument('--no-inner-top-layer', action='store_true',
+                        help='Prevent inner pads from using F.Cu (top layer). '
+                             'Use when there is not enough clearance on top layer for inner routes.')
 
     args = parser.parse_args()
 
@@ -1279,7 +1284,8 @@ def main():
         primary_escape=args.primary_escape,
         force_escape_direction=args.force_escape_direction,
         rebalance_escape=args.rebalance_escape,
-        check_for_previous=args.check_for_previous
+        check_for_previous=args.check_for_previous,
+        no_inner_top_layer=args.no_inner_top_layer
     )
 
     if tracks:

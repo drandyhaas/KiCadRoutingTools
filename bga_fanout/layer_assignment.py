@@ -57,7 +57,8 @@ def assign_layers_smart(routes: List[FanoutRoute],
                         track_width: float,
                         clearance: float,
                         diff_pair_spacing: float = 0.0,
-                        existing_tracks: List[Dict] = None) -> None:
+                        existing_tracks: List[Dict] = None,
+                        no_inner_top_layer: bool = False) -> None:
     """
     Assign layers to routes to avoid all collisions.
 
@@ -68,6 +69,9 @@ def assign_layers_smart(routes: List[FanoutRoute],
     - Routes with overlapping channel segments must use different layers
     - Cross-escape routes (vertical exit) must NOT conflict with edge routes on same layer
     - Avoid collisions with existing tracks from the PCB
+
+    Args:
+        no_inner_top_layer: If True, inner pads cannot use F.Cu (top layer)
     """
     min_spacing = track_width + clearance
     if existing_tracks is None:
@@ -137,10 +141,6 @@ def assign_layers_smart(routes: List[FanoutRoute],
 
         # Greedy layer assignment
         # For each route, find a layer where it doesn't conflict with already-assigned routes
-        # Inner pairs (using channels) should NOT use F.Cu (first layer) to avoid
-        # clearance violations with pads on the top layer
-        inner_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
-
         for route in group_routes:
             # If this route is part of a pair that's already assigned, use that layer
             if route.pair_id and route.pair_id in assigned_pairs:
@@ -153,7 +153,16 @@ def assign_layers_smart(routes: List[FanoutRoute],
 
             assigned = False
 
-            for layer in inner_layers:
+            # Determine which layers this route can use:
+            # - Diff pairs should NOT use F.Cu (first layer) to avoid clearance violations
+            # - If no_inner_top_layer is set, ALL inner routes avoid F.Cu
+            # - Single-ended signals can use any layer (unless no_inner_top_layer)
+            if route.pair_id or no_inner_top_layer:
+                candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
+            else:
+                candidate_layers = available_layers
+
+            for layer in candidate_layers:
                 conflict = False
                 # Check against all previously assigned routes on this layer in this group
                 for other in group_routes:
@@ -253,26 +262,28 @@ def assign_layers_smart(routes: List[FanoutRoute],
                     break
 
             if not assigned:
-                # Couldn't find a conflict-free layer - use first inner layer and warn
-                route.layer = inner_layers[0]
+                # Couldn't find a conflict-free layer - use first candidate layer and warn
+                route.layer = candidate_layers[0]
                 print(f"  Warning: Could not find collision-free layer for route at {route.pad_pos}")
                 if route.pair_id:
                     assigned_pairs.add(route.pair_id)
                     for partner in pair_routes[route.pair_id]:
                         if partner is not route:
-                            partner.layer = inner_layers[0]
+                            partner.layer = candidate_layers[0]
 
 
 def try_reassign_layer(identifier: str, routes: List[FanoutRoute], tracks: List[Dict],
                        available_layers: List[str], track_width: float,
                        clearance: float, diff_pair_spacing: float,
                        avoid_layers: Set[str] = None,
-                       existing_tracks: List[Dict] = None) -> Optional[str]:
+                       existing_tracks: List[Dict] = None,
+                       no_inner_top_layer: bool = False) -> Optional[str]:
     """Try to find a different layer for a colliding pair/net that has no conflicts.
 
     Args:
         identifier: pair_id for diff pairs, or 'net_<net_id>' for single-ended
         existing_tracks: Read-only list of existing tracks to check against
+        no_inner_top_layer: If True, inner pads cannot use F.Cu (top layer)
     """
     min_spacing = track_width + clearance
     if avoid_layers is None:
@@ -295,16 +306,13 @@ def try_reassign_layer(identifier: str, routes: List[FanoutRoute], tracks: List[
 
     current_layer = id_routes[0].layer
 
-    # Check if this has any edge route (either full edge or half-edge)
-    # Edge and half-edge can use F.Cu; only fully inner are restricted
-    has_edge = any(r.is_edge for r in id_routes)
-
-    # Only fully inner should NOT use F.Cu (first layer)
-    # to avoid clearance violations with pads on the top layer
-    if has_edge:
-        candidate_layers = available_layers
-    else:
+    # Diff pairs should NOT use F.Cu (first layer) to avoid clearance violations with pads.
+    # If no_inner_top_layer is set, single-ended signals also avoid F.Cu.
+    is_diff_pair = not identifier.startswith('net_')
+    if is_diff_pair or no_inner_top_layer:
         candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
+    else:
+        candidate_layers = available_layers
 
     # Get tracks for this identifier
     id_track_indices = [i for i, t in enumerate(tracks) if tracks_match_identifier(t, identifier)]

@@ -31,6 +31,7 @@ rust_router/target/
 /kicad_files/routed_output*.kicad_pcb
 /kicad_files/qfn_fanned_out.kicad_pcb
 /kicad_files/fanout_starting_point.kicad_pcb
+/kicad_files/routed_output_diff12.pcb
 /kicad_files/fp-info-cache
 
 # Visualization outputs

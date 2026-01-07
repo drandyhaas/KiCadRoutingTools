@@ -37,7 +37,8 @@ def try_reroute_single_ended(route: 'FanoutRoute',
                               existing_tracks: List[Dict],
                               available_layers: List[str],
                               track_width: float,
-                              clearance: float) -> Optional[Tuple['FanoutRoute', str]]:
+                              clearance: float,
+                              no_inner_top_layer: bool = False) -> Optional[Tuple['FanoutRoute', str]]:
     """
     Try rerouting a single-ended signal through an alternate channel.
 
@@ -51,6 +52,7 @@ def try_reroute_single_ended(route: 'FanoutRoute',
         available_layers: Available layers to try
         track_width: Track width
         clearance: Required clearance
+        no_inner_top_layer: If True, inner pads cannot use F.Cu (top layer)
 
     Returns:
         (new_route, layer) if successful, None if no collision-free option found
@@ -68,12 +70,11 @@ def try_reroute_single_ended(route: 'FanoutRoute',
         {'start': new_stub_end, 'end': new_exit_pos}
     ]
 
-    # Check if this is an inner route (should avoid F.Cu)
-    is_edge, _ = is_edge_pad(pad_x, pad_y, grid)
-    if is_edge:
-        candidate_layers = available_layers
-    else:
+    # If no_inner_top_layer is set, exclude F.Cu for inner routes
+    if no_inner_top_layer:
         candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
+    else:
+        candidate_layers = available_layers
 
     # Get other tracks (excluding this route's current tracks)
     other_new_tracks = [t for t in tracks if t.get('net_id') != route.net_id]
@@ -193,7 +194,8 @@ def try_jogged_route(route: 'FanoutRoute',
                      available_layers: List[str],
                      track_width: float,
                      clearance: float,
-                     jog_length: float = None) -> Optional[Tuple['FanoutRoute', str, List[Dict]]]:
+                     jog_length: float = None,
+                     no_inner_top_layer: bool = False) -> Optional[Tuple['FanoutRoute', str, List[Dict]]]:
     """
     Try rerouting a signal through a farther channel using a jogged path.
 
@@ -252,12 +254,11 @@ def try_jogged_route(route: 'FanoutRoute',
         {'start': jog_point, 'end': exit_pos}           # Channel to exit
     ]
 
-    # Check if this is an inner route (should avoid F.Cu)
-    is_edge, _ = is_edge_pad(pad_x, pad_y, grid)
-    if is_edge:
-        candidate_layers = available_layers
-    else:
+    # If no_inner_top_layer is set, exclude F.Cu for inner routes
+    if no_inner_top_layer:
         candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
+    else:
+        candidate_layers = available_layers
 
     # Get other tracks (excluding this route's current tracks)
     other_new_tracks = [t for t in tracks if t.get('net_id') != route.net_id]
@@ -421,7 +422,8 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                        grid: BGAGrid = None,
                        channels: List[Channel] = None,
                        exit_margin: float = 0.5,
-                       net_names: Dict[int, str] = None) -> Tuple[int, List[str]]:
+                       net_names: Dict[int, str] = None,
+                       no_inner_top_layer: bool = False) -> Tuple[int, List[str]]:
     """Try to resolve collisions by reassigning layers for colliding pairs.
 
     First tries layer reassignment. If that fails for single-ended signals,
@@ -467,7 +469,7 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
 
         new_layer = try_reassign_layer(identifier, routes, tracks, available_layers,
                                         track_width, clearance, diff_pair_spacing,
-                                        avoid_layers, existing_tracks)
+                                        avoid_layers, existing_tracks, no_inner_top_layer)
         if new_layer:
             # Determine if this is a single-ended net or a diff pair
             is_single_ended = identifier.startswith('net_')
@@ -521,7 +523,7 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         result = try_reroute_single_ended(
                             route, alt_channel, grid, exit_margin,
                             tracks, existing_tracks, available_layers,
-                            track_width, clearance
+                            track_width, clearance, no_inner_top_layer
                         )
                         if result:
                             new_route, new_layer = result
@@ -586,7 +588,7 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         result = try_jogged_route(
                             to_jog, farther_ch, grid, exit_margin,
                             tracks, existing_tracks, available_layers,
-                            track_width, clearance
+                            track_width, clearance, None, no_inner_top_layer
                         )
                         if result:
                             new_jogged_route, new_layer, new_jogged_tracks = result
@@ -618,7 +620,7 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                                 retry_result = try_reroute_single_ended(
                                     route, route.channel, grid, exit_margin,
                                     tracks, existing_tracks, available_layers,
-                                    track_width, clearance
+                                    track_width, clearance, no_inner_top_layer
                                 )
                                 if retry_result:
                                     new_route, retry_layer = retry_result

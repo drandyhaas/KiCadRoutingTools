@@ -481,8 +481,7 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
 
         pos_key, pos = get_exit_key(pair, channel, escape_dir)
 
-        # Inner pairs (using channels) should NOT use F.Cu (first layer) to avoid
-        # clearance violations with pads on the top layer. Only edge pairs use F.Cu.
+        # Diff pairs should NOT use F.Cu (first layer) to avoid clearance violations with pads
         inner_layers = layers[1:] if len(layers) > 1 else layers
 
         # Check each layer for availability
