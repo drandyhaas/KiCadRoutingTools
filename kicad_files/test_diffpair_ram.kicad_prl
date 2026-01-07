@@ -51,7 +51,7 @@
       "shapes"
     ],
     "visible_layers": "ffffffff_ffffffff_ffdfffff_ffffffff",
-    "zone_display_mode": 0
+    "zone_display_mode": 1
   },
   "git": {
     "repo_type": "",
@@ -59,7 +59,7 @@
     "ssh_key": ""
   },
   "meta": {
-    "filename": "test_batch_diffpair.kicad_prl",
+    "filename": "test_diffpair_ram.kicad_prl",
     "version": 5
   },
   "net_inspector_panel": {
