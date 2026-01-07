@@ -163,11 +163,12 @@ def get_safe_amplitude_at_point(
                 if other_seg.net_id == net_id:
                     continue
 
-                # Use reduced clearance for paired net (prevent DRC violations)
-                # segment_to_segment_distance measures centerline-to-centerline distance
-                # For DRC compliance, need: center-to-center >= track_width + diff_pair_gap
+                # For paired net (intra-pair meanders), use minimal clearance to prevent overlap
+                # but allow meander bumps to get close. The meanders should extend away from
+                # the paired track, but we need to prevent them from going toward it.
                 if other_seg.net_id == paired_net_id:
-                    check_clearance = config.track_width + config.diff_pair_gap
+                    # Just prevent actual overlap - use track width as minimum distance
+                    check_clearance = config.track_width
                 else:
                     check_clearance = required_clearance
                 if other_seg.layer != layer:
@@ -717,6 +718,41 @@ def generate_trombone_meander(
     return new_segments, bump_count
 
 
+def get_segment_centerline_range(
+    segments: List[Segment],
+    start_idx: int,
+    end_idx: int,
+    main_ux: float,
+    main_uy: float,
+    origin_x: float,
+    origin_y: float
+) -> Tuple[float, float]:
+    """
+    Get the centerline position range for a segment run.
+
+    Args:
+        segments: All segments
+        start_idx, end_idx: Run indices
+        main_ux, main_uy: Main direction unit vector
+        origin_x, origin_y: Origin point for projection
+
+    Returns:
+        (start_pos, end_pos) along centerline
+    """
+    first_seg = segments[start_idx]
+    last_seg = segments[end_idx]
+
+    start_proj = (first_seg.start_x - origin_x) * main_ux + (first_seg.start_y - origin_y) * main_uy
+    end_proj = (last_seg.end_x - origin_x) * main_ux + (last_seg.end_y - origin_y) * main_uy
+
+    return (min(start_proj, end_proj), max(start_proj, end_proj))
+
+
+def ranges_overlap(range1: Tuple[float, float], range2: Tuple[float, float]) -> bool:
+    """Check if two ranges overlap."""
+    return range1[0] < range2[1] and range2[0] < range1[1]
+
+
 def find_all_straight_runs(segments: List[Segment], min_length: float = 1.0) -> List[Tuple[int, int, float]]:
     """
     Find all straight runs of colinear segments, sorted by length descending.
@@ -762,7 +798,8 @@ def apply_meanders_to_route(
     extra_vias: List = None,
     min_bumps: int = 0,
     amplitude_override: float = None,
-    paired_net_id: int = None
+    paired_net_id: int = None,
+    excluded_centerline_ranges: List[Tuple[float, float]] = None
 ) -> Tuple[List[Segment], int]:
     """
     Apply meanders to a route to add extra length.
@@ -778,6 +815,7 @@ def apply_meanders_to_route(
         min_bumps: Minimum number of bumps to generate
         amplitude_override: Override amplitude (for scaling down to hit target length)
         paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
+        excluded_centerline_ranges: List of (start, end) position ranges to avoid (e.g., inter-pair meanders)
 
     Returns:
         Tuple of (modified segment list, bump_count)
@@ -796,13 +834,41 @@ def apply_meanders_to_route(
         print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
         return segments, 0
 
+    # Calculate main direction for centerline projection (if we have excluded ranges)
+    main_ux, main_uy, origin_x, origin_y = 0, 0, 0, 0
+    if excluded_centerline_ranges:
+        first_seg = segments[0]
+        last_seg = segments[-1]
+        main_dx = last_seg.end_x - first_seg.start_x
+        main_dy = last_seg.end_y - first_seg.start_y
+        main_len = math.sqrt(main_dx**2 + main_dy**2)
+        if main_len > 0.001:
+            main_ux = main_dx / main_len
+            main_uy = main_dy / main_len
+            origin_x = first_seg.start_x
+            origin_y = first_seg.start_y
+
     # Try each straight run until we find one that works
     min_amplitude = 0.2  # Minimum useful amplitude
+
+    # Track run status for verbose output
+    run_status = []  # List of (length, status) where status is 'inter-meander', 'clearance', 'used', 'too-short'
 
     for start_idx, end_idx, run_length in runs:
         # Check if this run is long enough for meanders
         if run_length < amplitude * 2:
+            run_status.append((run_length, 'too-short'))
             continue
+
+        # Check if this run overlaps with excluded centerline ranges (e.g., inter-pair meanders)
+        if excluded_centerline_ranges and (main_ux != 0 or main_uy != 0):
+            run_range = get_segment_centerline_range(
+                segments, start_idx, end_idx, main_ux, main_uy, origin_x, origin_y
+            )
+            overlaps = any(ranges_overlap(run_range, excluded) for excluded in excluded_centerline_ranges)
+            if overlaps:
+                run_status.append((run_length, 'inter-meander'))
+                continue
 
         # Create a merged segment from the run
         first_seg = segments[start_idx]
@@ -816,13 +882,6 @@ def apply_meanders_to_route(
             layer=first_seg.layer,
             net_id=first_seg.net_id
         )
-
-        # Quick check if there's ANY space for meanders at this location
-        if pcb_data is not None and net_id is not None:
-            if not check_meander_clearance(merged_seg, amplitude, pcb_data, net_id, config,
-                                           paired_net_id=paired_net_id):
-                # No space at all - try next run
-                continue
 
         # Generate meanders - per-bump clearance checking will adjust amplitudes
         meander_segs, bump_count = generate_trombone_meander(
@@ -838,9 +897,27 @@ def apply_meanders_to_route(
             paired_net_id=paired_net_id
         )
 
+        if bump_count == 0:
+            # Per-bump clearance checking rejected all positions
+            run_status.append((run_length, 'no-bumps'))
+            continue
+
+        run_status.append((run_length, 'used'))
+
         # Replace original segment run with meanders
         new_segments = segments[:start_idx] + meander_segs + segments[end_idx + 1:]
+
+        # Print verbose status only if there were rejections before success
+        if config and config.verbose and len(run_status) > 1:
+            status_str = ', '.join(f"{length:.2f}({status})" for length, status in run_status)
+            print(f"      Straight runs: {status_str}")
+
         return new_segments, bump_count
+
+    # Print verbose status when no run worked
+    if config and config.verbose and run_status:
+        status_str = ', '.join(f"{length:.2f}({status})" for length, status in run_status)
+        print(f"      Straight runs: {status_str}")
 
     print(f"    Warning: No straight run with clearance found for meanders")
     return segments, 0
@@ -1825,6 +1902,23 @@ def apply_meanders_to_diff_pair(
         n_stub_length = result.get('n_stub_length', result.get('stub_length', 0.0))
         avg_stub_length = (p_stub_length + n_stub_length) / 2
 
+        # Calculate meander position range along centerline (for intra-pair meander exclusion)
+        # Project the meander start/end points onto the main centerline axis
+        cl_start = coord.to_float(centerline_grid[0][0], centerline_grid[0][1])
+        cl_end = coord.to_float(centerline_grid[-1][0], centerline_grid[-1][1])
+        cl_dx = cl_end[0] - cl_start[0]
+        cl_dy = cl_end[1] - cl_start[1]
+        cl_len = math.sqrt(cl_dx**2 + cl_dy**2)
+        if cl_len > 0.001:
+            cl_ux, cl_uy = cl_dx / cl_len, cl_dy / cl_len
+            meander_start_pt = coord.to_float(centerline_grid[start_idx][0], centerline_grid[start_idx][1])
+            meander_end_pt = coord.to_float(centerline_grid[end_idx][0], centerline_grid[end_idx][1])
+            meander_start_pos = (meander_start_pt[0] - cl_start[0]) * cl_ux + (meander_start_pt[1] - cl_start[1]) * cl_uy
+            meander_end_pos = (meander_end_pt[0] - cl_start[0]) * cl_ux + (meander_end_pt[1] - cl_start[1]) * cl_uy
+            inter_meander_range = (min(meander_start_pos, meander_end_pos), max(meander_start_pos, meander_end_pos))
+        else:
+            inter_meander_range = None
+
         # Update result
         modified_result = dict(result)
         modified_result['new_segments'] = new_segments
@@ -1842,6 +1936,8 @@ def apply_meanders_to_diff_pair(
             modified_result['route_length'] = avg_routed_length + avg_stub_length
         modified_result['simplified_path'] = new_centerline_float
         modified_result['centerline_path_grid'] = new_centerline_grid
+        if inter_meander_range:
+            modified_result['inter_meander_range'] = inter_meander_range
 
         return modified_result, bump_count
 
@@ -2071,6 +2167,12 @@ def apply_intra_pair_length_matching(
 
     print(f"    P/N intra-pair: P={p_length:.3f}mm, N={n_length:.3f}mm, delta={delta:.3f}mm, adding meanders to {shorter_label}")
 
+    # Get inter-pair meander position range from result (stored when inter-pair meanders were added)
+    inter_meander_range = result.get('inter_meander_range')
+    inter_meander_ranges = [inter_meander_range] if inter_meander_range else []
+    if inter_meander_ranges and config.verbose:
+        print(f"      Inter-pair meander range to avoid: ({inter_meander_range[0]:.1f}, {inter_meander_range[1]:.1f})")
+
     # Step 1: Generate initial meanders
     # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer
     # For 1 bump: extra = 2*amplitude - 2.34*chamfer
@@ -2093,6 +2195,7 @@ def apply_intra_pair_length_matching(
 
     # Pass paired_net_id to use reduced clearance for the paired track
     # Use min_bumps to ensure we get exactly the calculated number of bumps
+    # Pass inter_meander_ranges to avoid placing intra meanders where inter meanders exist
     meandered_segments, bump_count = apply_meanders_to_route(
         shorter_segments,
         delta,
@@ -2101,14 +2204,11 @@ def apply_intra_pair_length_matching(
         net_id=shorter_net_id,
         paired_net_id=longer_net_id,
         amplitude_override=initial_amplitude,
-        min_bumps=num_bumps_needed
+        min_bumps=num_bumps_needed,
+        excluded_centerline_ranges=inter_meander_ranges
     )
 
     if bump_count == 0:
-        # Debug: show segment lengths
-        if config.verbose:
-            seg_lens = [segment_length(s) for s in shorter_segments]
-            print(f"      Shorter track segments: {len(shorter_segments)}, lengths: {[f'{l:.2f}' for l in sorted(seg_lens, reverse=True)[:5]]}")
         print(f"    P/N intra-pair: could not fit meanders")
         return result
 
@@ -2153,7 +2253,8 @@ def apply_intra_pair_length_matching(
             net_id=shorter_net_id,
             min_bumps=bump_count,  # Keep same bump count
             amplitude_override=target_amplitude,
-            paired_net_id=longer_net_id
+            paired_net_id=longer_net_id,
+            excluded_centerline_ranges=inter_meander_ranges
         )
 
         if new_bump_count == 0:
