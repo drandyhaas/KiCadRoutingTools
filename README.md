@@ -59,6 +59,25 @@ python check_drc.py kicad_files/output.kicad_pcb --clearance 0.1
 python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 ```
 
+### 4. Full Integration Test
+
+Run the complete pipeline (QFN/BGA fanout → routing → DRC → connectivity) on the test board:
+
+```bash
+python test_fanout_and_route.py
+
+# Quick mode (reduced scope)
+python test_fanout_and_route.py --quick
+```
+
+This script demonstrates a real-world workflow:
+1. QFN fanout for U2 (ADC interface)
+2. BGA fanout for FTDI (U3), ADC (IC1), FPGA (U3), and DDR (U1)
+3. Single-ended routing (FTDI data lanes with swappable targets)
+4. Differential pair routing (LVDS with length matching)
+5. DDR routing (DQS/CK diff pairs + DQ data lanes with auto byte-lane grouping)
+6. DRC and connectivity verification after each stage
+
 ## Documentation
 
 | Document | Description |
