@@ -656,13 +656,20 @@ def route_multipoint_main(
     for gx, gy, layer in sources + targets:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    # Route farthest pair
+    # Route farthest pair (use route_with_frontier to get blocked cells for analysis)
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
-    path, iterations = router.route_multi(obstacles, sources, targets, config.max_iterations)
+    path, iterations, blocked_cells = router.route_with_frontier(obstacles, sources, targets, config.max_iterations)
 
     if path is None:
         print(f"  Failed to route farthest pair after {iterations} iterations")
-        return {'failed': True, 'iterations': iterations}
+        return {
+            'failed': True,
+            'iterations': iterations,
+            'blocked_cells_forward': blocked_cells,
+            'blocked_cells_backward': [],
+            'iterations_forward': iterations,
+            'iterations_backward': 0,
+        }
 
     # Convert path to segments/vias
     segments, vias = _path_to_segments_vias(
