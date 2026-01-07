@@ -1217,7 +1217,7 @@ def apply_single_ended_layer_swaps(
             single_net_layer_info[net_name] = (src_layer, tgt_layer, sources, targets, net_id)
 
     if skipped_multipoint:
-        print(f"  WARNING: Skipping layer swaps for {len(skipped_multipoint)} multi-point net(s) (not yet supported)")
+        print(f"\nWARNING: Skipping layer swaps for {len(skipped_multipoint)} multi-point net(s) (not yet supported)")
         if len(skipped_multipoint) <= 5:
             for name in skipped_multipoint:
                 print(f"    - {name}")

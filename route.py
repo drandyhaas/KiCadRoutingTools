@@ -33,7 +33,8 @@ from routing_utils import (
     compute_mps_net_ordering, add_route_to_pcb_data, remove_route_from_pcb_data,
     find_pad_nearest_to_position, find_connected_segment_positions,
     find_stub_free_ends, find_connected_groups, pos_key,
-    is_edge_stub, find_pad_at_position, expand_net_patterns
+    is_edge_stub, find_pad_at_position, expand_net_patterns,
+    get_net_endpoints, find_single_ended_nets
 )
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
@@ -282,6 +283,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("No valid nets to route!")
         return 0, 0, 0.0
 
+    # Filter out nets that are already fully connected (no routing needed)
+    already_routed = []
+    nets_to_route = []
+    for net_name, net_id in net_ids:
+        _, _, error = get_net_endpoints(pcb_data, net_id, config)
+        if error and "already" in error.lower():
+            already_routed.append((net_name, error))
+        else:
+            nets_to_route.append((net_name, net_id))
+
+    if already_routed:
+        print(f"\nSkipping {len(already_routed)} already-routed net(s):")
+        for net_name, reason in already_routed:
+            print(f"  {net_name}: {reason}")
+
+    net_ids = nets_to_route
+
+    if not net_ids:
+        print("All nets are already fully connected - nothing to route!")
+        return 0, 0, 0.0
+
     # Track all segment layer modifications for file output
     all_segment_modifications = []
     # Track all vias added during stub layer swapping
@@ -336,7 +358,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     single_ended_target_swap_info: List[Dict] = []
     if swappable_net_patterns:
         from target_swap import apply_single_ended_target_swaps
-        from routing_utils import find_single_ended_nets, get_net_endpoints
 
         # Get diff pair net IDs to exclude
         diff_pair_net_id_set: Set[int] = set()
@@ -519,7 +540,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Generate stub position labels for single-ended nets (when debug_lines enabled)
     if debug_lines and single_ended_nets:
         from target_swap import generate_single_ended_debug_labels
-        from routing_utils import get_net_endpoints
         stub_labels = generate_single_ended_debug_labels(
             pcb_data, single_ended_nets,
             lambda net_id: get_net_endpoints(pcb_data, net_id, config),
