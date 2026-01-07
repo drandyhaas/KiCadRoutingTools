@@ -97,43 +97,14 @@ def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
     return total
 
 
-def find_closest_pad_pair(pads) -> Tuple[int, int]:
-    """
-    Find the two closest pads/endpoints by Euclidean distance.
-
-    Args:
-        pads: List of Pad objects or dicts with 'x'/'y' keys (must have at least 2)
-
-    Returns:
-        (idx_a, idx_b): Indices of the two closest pads
-    """
-    if len(pads) < 2:
-        raise ValueError("Need at least 2 pads to find closest pair")
-
-    def get_coords(p):
-        """Get x, y coordinates from Pad object or dict."""
-        if hasattr(p, 'global_x'):
-            return p.global_x, p.global_y
-        elif isinstance(p, dict):
-            return p['x'], p['y']
-        else:
-            raise ValueError(f"Unknown pad type: {type(p)}")
-
-    min_dist = float('inf')
-    best_pair = (0, 1)
-
-    for i in range(len(pads)):
-        for j in range(i + 1, len(pads)):
-            x1, y1 = get_coords(pads[i])
-            x2, y2 = get_coords(pads[j])
-            dx = x1 - x2
-            dy = y1 - y2
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist < min_dist:
-                min_dist = dist
-                best_pair = (i, j)
-
-    return best_pair
+def _get_pad_coords(p) -> Tuple[float, float]:
+    """Get x, y coordinates from Pad object or dict."""
+    if hasattr(p, 'global_x'):
+        return p.global_x, p.global_y
+    elif isinstance(p, dict):
+        return p['x'], p['y']
+    else:
+        raise ValueError(f"Unknown pad type: {type(p)}")
 
 
 def find_farthest_pad_pair(pads) -> Tuple[int, int]:
@@ -152,23 +123,13 @@ def find_farthest_pad_pair(pads) -> Tuple[int, int]:
     if len(pads) < 2:
         raise ValueError("Need at least 2 pads to find farthest pair")
 
-    def get_coords(p):
-        """Get x, y coordinates from Pad object or dict."""
-        if hasattr(p, 'global_x'):
-            return p.global_x, p.global_y
-        elif isinstance(p, dict):
-            return p['x'], p['y']
-        else:
-            raise ValueError(f"Unknown pad type: {type(p)}")
-
     max_dist = -1
     best_pair = (0, 1)
 
     for i in range(len(pads)):
         for j in range(i + 1, len(pads)):
-            x1, y1 = get_coords(pads[i])
-            x2, y2 = get_coords(pads[j])
-            # Manhattan distance
+            x1, y1 = _get_pad_coords(pads[i])
+            x2, y2 = _get_pad_coords(pads[j])
             dist = abs(x1 - x2) + abs(y1 - y2)
             if dist > max_dist:
                 max_dist = dist

@@ -786,21 +786,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
             print(f"\n{net_name} (net {net_id}):")
 
-            # Get the length-matched result (meanders applied)
-            length_matched_result = routed_results.get(net_id, main_result)
+            # Get the length-matched result (with meanders applied)
+            lm_result = routed_results.get(net_id, main_result)
+            lm_segments = lm_result.get('new_segments', main_result['new_segments'])
+            lm_vias = lm_result.get('new_vias', main_result.get('new_vias', []))
 
-            # Rebuild obstacles - exclude current net from routed_net_ids so we can
-            # tap into our own main route (it shouldn't be treated as an obstacle)
+            # Rebuild obstacles - exclude current net so we can tap into our own main route
             phase3_routed_ids = [rid for rid in routed_net_ids if rid != net_id]
             obstacles, _ = build_single_ended_obstacles(
                 base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
                 all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
             )
 
-            # Update main_result with length-matched segments for tap finding
+            # Build input with length-matched segments for tap point finding
             tap_input = dict(main_result)
-            tap_input['new_segments'] = length_matched_result.get('new_segments', main_result['new_segments'])
-            tap_input['new_vias'] = length_matched_result.get('new_vias', main_result.get('new_vias', []))
+            tap_input['new_segments'] = lm_segments
+            tap_input['new_vias'] = lm_vias
 
             # Route the tap connections
             completed_result = route_multipoint_taps(
@@ -808,25 +809,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             )
 
             if completed_result:
-                # Get only the NEW tap segments (not the main route)
-                # Use length_matched_result count since that's what was passed to route_multipoint_taps
-                lm_seg_count = len(length_matched_result.get('new_segments', main_result['new_segments']))
-                lm_via_count = len(length_matched_result.get('new_vias', main_result.get('new_vias', [])))
-                tap_segments = completed_result['new_segments'][lm_seg_count:]
-                tap_vias = completed_result['new_vias'][lm_via_count:]
+                # Extract only the NEW tap segments (after the length-matched main route)
+                tap_segments = completed_result['new_segments'][len(lm_segments):]
+                tap_vias = completed_result['new_vias'][len(lm_vias):]
 
                 if tap_segments or tap_vias:
-                    # Add tap segments/vias to pcb_data
-                    tap_result = {
-                        'new_segments': tap_segments,
-                        'new_vias': tap_vias
-                    }
+                    tap_result = {'new_segments': tap_segments, 'new_vias': tap_vias}
                     add_route_to_pcb_data(pcb_data, tap_result, debug_lines=config.debug_lines)
-                    # Also add to results list for output writing
                     results.append(tap_result)
                     print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
-                # Update routed_results with the complete result
                 routed_results[net_id] = completed_result
 
     # Notify visualization callback that all routing is complete

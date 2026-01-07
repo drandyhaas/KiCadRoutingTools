@@ -12,7 +12,6 @@ from routing_config import GridRouteConfig, GridCoord
 from routing_utils import (
     get_net_endpoints,
     get_multipoint_net_pads,
-    find_closest_pad_pair,
     find_farthest_pad_pair,
     find_closest_point_on_segments
 )
