@@ -24,7 +24,12 @@ def run(cmd: str) -> None:
 
 
 def main():
-    # Remaining FTDI nets (the DATA ones are already in the fanout_starting_point file)
+
+    # Fan out QFN
+    run('python3 qfn_fanout.py kicad_files/haasoscope_pro_max_test.kicad_pcb --output kicad_files/qfn_fanned_out.kicad_pcb --component U2 --nets "Net-(U2*)"')
+
+    # FTDI nets, first DATA nets, then others (to test "--check-for-previous")
+    run('python3 bga_fanout.py kicad_files/qfn_fanned_out.kicad_pcb --component U3 --output kicad_files/fanout_starting_point.kicad_pcb --nets "*U2A*DATA*" --primary-escape horizontal --force-escape-direction')
     run('python3 bga_fanout.py kicad_files/fanout_starting_point.kicad_pcb --component U3 --output kicad_files/fanout_output1.kicad_pcb --nets "*U2A*" --primary-escape horizontal --check-for-previous --force-escape-direction')
 
     # LVDS from ADC
