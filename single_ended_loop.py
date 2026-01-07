@@ -19,7 +19,7 @@ from routing_utils import (
     get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints,
     calculate_route_length, calculate_stub_length, get_multipoint_net_pads
 )
-from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_net
+from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
@@ -161,8 +161,11 @@ def route_single_ended_nets(
             # Check for multi-point net (3+ pads, no existing segments)
             multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
             if multipoint_pads:
-                print(f"  Detected multi-point net with {len(multipoint_pads)} pads")
-                result = route_multipoint_net(pcb_data, net_id, config, obstacles, multipoint_pads)
+                print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
+                result = route_multipoint_main(pcb_data, net_id, config, obstacles, multipoint_pads)
+                # Track for Phase 3 completion after length matching
+                if result and not result.get('failed') and result.get('is_multipoint'):
+                    state.pending_multipoint_nets[net_id] = result
             else:
                 result = route_net_with_obstacles(pcb_data, net_id, config, obstacles)
 
@@ -367,7 +370,10 @@ def route_single_ended_nets(
                         # Check for multi-point net in retry as well
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
                         if retry_multipoint_pads:
-                            retry_result = route_multipoint_net(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads)
+                            retry_result = route_multipoint_main(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads)
+                            # Track for Phase 3 completion after length matching
+                            if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
+                                state.pending_multipoint_nets[net_id] = retry_result
                         else:
                             retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles)
 

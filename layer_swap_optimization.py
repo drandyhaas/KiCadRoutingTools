@@ -22,7 +22,7 @@ from stub_layer_switching import (
     STUB_OVERLAP_Y_TOLERANCE
 )
 from diff_pair_routing import get_diff_pair_endpoints
-from routing_utils import get_net_endpoints
+from routing_utils import get_net_endpoints, get_multipoint_net_pads
 
 
 def _find_blocking_single_ended_nets(
@@ -1201,7 +1201,13 @@ def apply_single_ended_layer_swaps(
     """
     # Collect layer info for single-ended nets
     single_net_layer_info = {}  # net_name -> (src_layer, tgt_layer, sources, targets, net_id)
+    skipped_multipoint = []
     for net_name, net_id in single_ended_net_ids:
+        # Skip multi-point nets - layer swaps not yet supported for them
+        multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
+        if multipoint_pads:
+            skipped_multipoint.append(net_name)
+            continue
         sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
         if error or not sources or not targets:
             continue
@@ -1209,6 +1215,16 @@ def apply_single_ended_layer_swaps(
         tgt_layer = config.layers[targets[0][2]]
         if src_layer != tgt_layer:  # Only track nets needing via
             single_net_layer_info[net_name] = (src_layer, tgt_layer, sources, targets, net_id)
+
+    if skipped_multipoint:
+        print(f"  WARNING: Skipping layer swaps for {len(skipped_multipoint)} multi-point net(s) (not yet supported)")
+        if len(skipped_multipoint) <= 5:
+            for name in skipped_multipoint:
+                print(f"    - {name}")
+        else:
+            for name in skipped_multipoint[:3]:
+                print(f"    - {name}")
+            print(f"    ... and {len(skipped_multipoint) - 3} more")
 
     if not single_net_layer_info:
         return 0

@@ -43,7 +43,7 @@ from obstacle_map import (
     compute_track_proximity_for_net, merge_track_proximity_costs, add_cross_layer_tracks,
     draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
-from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization
+from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization, route_multipoint_taps
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -774,6 +774,60 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             seg_count_before = len(result.get('new_segments', []))
             apply_intra_pair_length_matching(result, config, pcb_data)
             seg_count_after = len(result.get('new_segments', []))
+
+    # Phase 3: Complete multi-point routing (tap connections)
+    # This happens AFTER length matching so tap routes connect to meandered main routes
+    if state.pending_multipoint_nets:
+        print("\n" + "=" * 60)
+        print("Multi-point Phase 3: Routing tap connections")
+        print("=" * 60)
+
+        for net_id, main_result in state.pending_multipoint_nets.items():
+            net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
+            print(f"\n{net_name} (net {net_id}):")
+
+            # Get the length-matched result (meanders applied)
+            length_matched_result = routed_results.get(net_id, main_result)
+
+            # Rebuild obstacles - exclude current net from routed_net_ids so we can
+            # tap into our own main route (it shouldn't be treated as an obstacle)
+            phase3_routed_ids = [rid for rid in routed_net_ids if rid != net_id]
+            obstacles, _ = build_single_ended_obstacles(
+                base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
+                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
+            )
+
+            # Update main_result with length-matched segments for tap finding
+            tap_input = dict(main_result)
+            tap_input['new_segments'] = length_matched_result.get('new_segments', main_result['new_segments'])
+            tap_input['new_vias'] = length_matched_result.get('new_vias', main_result.get('new_vias', []))
+
+            # Route the tap connections
+            completed_result = route_multipoint_taps(
+                pcb_data, net_id, config, obstacles, tap_input
+            )
+
+            if completed_result:
+                # Get only the NEW tap segments (not the main route)
+                # Use length_matched_result count since that's what was passed to route_multipoint_taps
+                lm_seg_count = len(length_matched_result.get('new_segments', main_result['new_segments']))
+                lm_via_count = len(length_matched_result.get('new_vias', main_result.get('new_vias', [])))
+                tap_segments = completed_result['new_segments'][lm_seg_count:]
+                tap_vias = completed_result['new_vias'][lm_via_count:]
+
+                if tap_segments or tap_vias:
+                    # Add tap segments/vias to pcb_data
+                    tap_result = {
+                        'new_segments': tap_segments,
+                        'new_vias': tap_vias
+                    }
+                    add_route_to_pcb_data(pcb_data, tap_result, debug_lines=config.debug_lines)
+                    # Also add to results list for output writing
+                    results.append(tap_result)
+                    print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
+
+                # Update routed_results with the complete result
+                routed_results[net_id] = completed_result
 
     # Notify visualization callback that all routing is complete
     if visualize:

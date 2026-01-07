@@ -285,9 +285,8 @@ See [Configuration](docs/configuration.md) for complete option reference.
 
 ## Limitations
 
-- Requires existing stub tracks to identify connection points
-- Grid-based (0.1mm default) - may miss very tight fits
 - No push-and-shove (routes around obstacles, doesn't move them)
+- Layer swaps not supported for multi-point nets (3+ pads)
 
 ## License
 

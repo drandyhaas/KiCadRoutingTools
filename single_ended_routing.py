@@ -13,6 +13,7 @@ from routing_utils import (
     get_net_endpoints,
     get_multipoint_net_pads,
     find_closest_pad_pair,
+    find_farthest_pad_pair,
     find_closest_point_on_segments
 )
 from obstacle_map import build_obstacle_map
@@ -594,7 +595,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
     }
 
 
-def route_multipoint_net(
+def route_multipoint_main(
     pcb_data: PCBData,
     net_id: int,
     config: GridRouteConfig,
@@ -602,13 +603,14 @@ def route_multipoint_net(
     pad_info: List[Tuple]
 ) -> Optional[dict]:
     """
-    Route a multi-point net (3+ pads) using incremental routing.
+    Route only the main (farthest pair) connection of a multi-point net.
 
-    Strategy:
-    1. Find the two closest pads and route them first
-    2. Find closest tap point on routed track to remaining pad(s)
-    3. Route from tap point to next pad
-    4. Repeat until all pads connected
+    This is Phase 1 of multi-point routing. It routes the two pads that are
+    farthest apart by Manhattan distance, creating a clean 2-point route
+    suitable for length matching.
+
+    After length matching is applied, call route_multipoint_taps() to
+    complete the remaining connections.
 
     Args:
         pcb_data: PCB data
@@ -618,7 +620,12 @@ def route_multipoint_net(
         pad_info: List of (gx, gy, layer_idx, orig_x, orig_y, pad) from get_multipoint_net_pads()
 
     Returns:
-        Routing result dict with combined segments/vias, or None on failure
+        Routing result dict with:
+        - 'new_segments', 'new_vias', 'iterations', 'path_length', 'path'
+        - 'is_multipoint': True (flag for Phase 3)
+        - 'multipoint_pad_info': Full pad_info list for Phase 3
+        - 'routed_pad_indices': Set of indices already routed (the farthest pair)
+        Or {'failed': True, 'iterations': N} on failure
     """
     if GridRouter is None:
         print("  GridRouter not available")
@@ -634,12 +641,12 @@ def route_multipoint_net(
     # Extract pads from pad_info
     pads = [info[5] for info in pad_info]
 
-    # Find the two closest pads
-    idx_a, idx_b = find_closest_pad_pair(pads)
+    # Find the two FARTHEST pads (for length matching compatibility)
+    idx_a, idx_b = find_farthest_pad_pair(pads)
 
-    print(f"  Multi-point net with {len(pads)} pads, routing closest pair first (pads {idx_a} and {idx_b})")
+    print(f"  Multi-point net Phase 1: routing farthest pair (pads {idx_a} and {idx_b})")
 
-    # Build source/target for first pair
+    # Build source/target for farthest pair
     pad_a = pad_info[idx_a]
     pad_b = pad_info[idx_b]
 
@@ -650,37 +657,86 @@ def route_multipoint_net(
     for gx, gy, layer in sources + targets:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    # Route first pair
+    # Route farthest pair
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
     path, iterations = router.route_multi(obstacles, sources, targets, config.max_iterations)
 
     if path is None:
-        print(f"  Failed to route first pair after {iterations} iterations")
+        print(f"  Failed to route farthest pair after {iterations} iterations")
         return {'failed': True, 'iterations': iterations}
 
-    total_iterations = iterations
-    all_segments = []
-    all_vias = []
-    all_paths = [path]
-
-    # Convert first path to segments/vias
+    # Convert path to segments/vias
     segments, vias = _path_to_segments_vias(
         path, coord, layer_names, net_id, config,
         (pad_a[3], pad_a[4], layer_names[pad_a[2]]),  # start_original
         (pad_b[3], pad_b[4], layer_names[pad_b[2]])   # end_original
     )
-    all_segments.extend(segments)
-    all_vias.extend(vias)
 
-    print(f"  First pair routed in {iterations} iterations, {len(segments)} segments")
+    print(f"  Phase 1 routed in {iterations} iterations, {len(segments)} segments")
 
-    # NOTE: We don't add path obstacles between sub-routes of the same net
-    # because the new route needs to connect to the existing track (tap point)
-    # and blocking vias near the path would prevent layer changes at the tap point
+    return {
+        'new_segments': segments,
+        'new_vias': vias,
+        'iterations': iterations,
+        'path_length': len(path),
+        'path': path,
+        'is_multipoint': True,
+        'multipoint_pad_info': pad_info,
+        'routed_pad_indices': {idx_a, idx_b},
+    }
 
-    # Route remaining pads
-    routed_indices = {idx_a, idx_b}
+
+def route_multipoint_taps(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    obstacles: 'GridObstacleMap',
+    main_result: dict
+) -> Optional[dict]:
+    """
+    Route the remaining tap connections for a multi-point net.
+
+    This is Phase 3 of multi-point routing - called AFTER length matching
+    has been applied to the main route. It finds tap points on the (now
+    meandered) segments and routes to remaining pads.
+
+    Args:
+        pcb_data: PCB data
+        net_id: Net ID to route
+        config: Grid routing configuration
+        obstacles: Pre-built obstacle map (should include length-matched segments)
+        main_result: Result from route_multipoint_main() with meanders applied
+
+    Returns:
+        Updated result dict with tap segments/vias added, or None on failure
+    """
+    if GridRouter is None:
+        print("  GridRouter not available")
+        return None
+
+    pad_info = main_result['multipoint_pad_info']
+    routed_indices = main_result['routed_pad_indices']
+
+    # Get the current segments (which may have meanders from length matching)
+    all_segments = list(main_result['new_segments'])
+    all_vias = list(main_result.get('new_vias', []))
+
+    coord = GridCoord(config.grid_step)
+    layer_names = config.layers
+
+    # Extract pads from pad_info
+    pads = [info[5] for info in pad_info]
+
     remaining_indices = [i for i in range(len(pad_info)) if i not in routed_indices]
+
+    if not remaining_indices:
+        print(f"  No remaining pads to route in Phase 3")
+        return main_result
+
+    print(f"  Multi-point net Phase 3: routing {len(remaining_indices)} remaining pads")
+
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
+    total_iterations = 0
 
     def get_endpoint_info(endpoint):
         """Get x, y, layers from Pad object or dict."""
@@ -698,7 +754,7 @@ def route_multipoint_net(
         # Get endpoint coordinates and layers
         target_x, target_y, target_layers = get_endpoint_info(target_endpoint)
 
-        # Find closest tap point on existing segments
+        # Find closest tap point on existing segments (which now include meanders)
         tap_result = find_closest_point_on_segments(
             all_segments,
             target_x,
@@ -720,12 +776,11 @@ def route_multipoint_net(
         sources = [(tap_gx, tap_gy, tap_layer_idx)]
         targets = [(pad[0], pad[1], pad[2])]
 
-        # Mark source/target cells - need to allow routing on the tap point even though
-        # it's on the previously blocked path
+        # Mark source/target cells
         for gx, gy, layer in sources + targets:
             obstacles.add_source_target_cell(gx, gy, layer)
 
-        # Also add allowed cells around tap point and target to escape blocked areas
+        # Add allowed cells around tap point and target to escape blocked areas
         allow_radius = 10
         for gx, gy, _ in sources + targets:
             for dx in range(-allow_radius, allow_radius + 1):
@@ -750,19 +805,16 @@ def route_multipoint_net(
         )
         all_segments.extend(segments)
         all_vias.extend(vias)
-        all_paths.append(path)
 
-        # NOTE: Not adding obstacles - same net sub-routes can overlap
+    print(f"  Phase 3 routing complete: {len(all_segments)} total segments, {len(all_vias)} total vias")
 
-    print(f"  Multi-point routing complete: {len(all_segments)} segments, {len(all_vias)} vias")
+    # Update result - preserve original fields, update segments/vias
+    updated_result = dict(main_result)
+    updated_result['new_segments'] = all_segments
+    updated_result['new_vias'] = all_vias
+    updated_result['iterations'] = main_result['iterations'] + total_iterations
 
-    return {
-        'new_segments': all_segments,
-        'new_vias': all_vias,
-        'iterations': total_iterations,
-        'path_length': sum(len(p) for p in all_paths),
-        'path': all_paths[0] if all_paths else [],  # Return first path for compatibility
-    }
+    return updated_result
 
 
 def _path_to_segments_vias(

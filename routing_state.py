@@ -63,6 +63,10 @@ class RoutingState:
     # Results collection
     results: List[Dict] = field(default_factory=list)
 
+    # Multi-point routing: track nets needing Phase 3 completion
+    # Maps net_id -> main_result dict with 'multipoint_pad_info' and 'routed_pad_indices'
+    pending_multipoint_nets: Dict[int, Dict] = field(default_factory=dict)
+
     # Layer swap tracking
     all_segment_modifications: List = field(default_factory=list)
     all_swap_vias: List = field(default_factory=list)
