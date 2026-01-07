@@ -1384,9 +1384,10 @@ def generate_centerline_meander(
     # Current position
     cx, cy = start_pt[0], start_pt[1]
 
-    # For layer changes at meander start, include the via point on the target layer.
-    # This ensures create_parallel_path_from_float sees proper layer transition.
-    if start_idx > 0 and float_path[start_idx - 1][2] != layer:
+    # Always include start_pt when there's path before the straight run.
+    # This ensures proper 45-degree transitions from the previous segment.
+    # For layer changes, this also ensures create_parallel_path_from_float sees proper layer transition.
+    if start_idx > 0:
         new_path.append((cx, cy, layer))
 
     # Meander generation
