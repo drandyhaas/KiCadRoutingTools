@@ -21,8 +21,7 @@ KiCadRoutingTools/
 ├── diff_pair_routing.py       # Diff pair A* implementation
 ├── single_ended_routing.py    # Single-ended A* implementation
 │
-├── layer_swap_upfront.py      # Upfront layer optimization
-├── layer_swap_optimization.py # Layer swap cost analysis
+├── layer_swap_optimization.py # Upfront layer optimization
 ├── layer_swap_fallback.py     # Fallback layer swap on failure
 ├── rip_up_reroute.py          # Rip-up and reroute logic
 ├── blocking_analysis.py       # Analyze blocking nets
@@ -64,8 +63,7 @@ KiCadRoutingTools/
 
 | Module | Purpose |
 |--------|---------|
-| `layer_swap_upfront.py` | Analyzes and performs layer swaps before routing starts |
-| `layer_swap_optimization.py` | Cost/benefit analysis for layer swap decisions |
+| `layer_swap_optimization.py` | Analyzes and performs layer swaps before routing starts |
 | `layer_swap_fallback.py` | Attempts layer swap when a route fails |
 | `rip_up_reroute.py` | Rips up blocking routes and adds them to reroute queue |
 | `blocking_analysis.py` | Identifies which previously-routed nets are blocking |

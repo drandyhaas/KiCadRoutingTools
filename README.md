@@ -90,8 +90,7 @@ KiCadRoutingTools/
 ├── diff_pair_routing.py      # Diff pair A* routing implementation
 ├── single_ended_routing.py   # Single-ended A* routing implementation
 │
-├── layer_swap_upfront.py     # Upfront layer swap optimization
-├── layer_swap_optimization.py # Layer swap cost optimization
+├── layer_swap_optimization.py # Upfront layer swap optimization
 ├── layer_swap_fallback.py    # Fallback layer swap on failure
 ├── stub_layer_switching.py   # Stub layer swap utilities
 ├── mps_layer_swap.py         # MPS-aware layer swap for crossing conflicts
@@ -169,8 +168,7 @@ KiCadRoutingTools/
 
 | Module | Purpose |
 |--------|---------|
-| `layer_swap_upfront.py` | Upfront layer swap optimization before routing |
-| `layer_swap_optimization.py` | Layer swap cost/benefit analysis |
+| `layer_swap_optimization.py` | Upfront layer swap optimization before routing |
 | `layer_swap_fallback.py` | Try layer swap when route fails |
 | `stub_layer_switching.py` | Low-level stub layer swap utilities |
 | `mps_layer_swap.py` | MPS-aware layer swap for crossing conflicts |
