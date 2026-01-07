@@ -818,7 +818,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
             )
 
-            # Build input with length-matched segments for tap point finding
+            # Build input - use LENGTH-MATCHED segments (so taps connect to actual final route)
+            # The segment filtering in route_multipoint_taps will avoid meander regions
             tap_input = dict(main_result)
             tap_input['new_segments'] = lm_segments
             tap_input['new_vias'] = lm_vias

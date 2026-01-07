@@ -689,6 +689,11 @@ def route_multipoint_main(
         'is_multipoint': True,
         'multipoint_pad_info': pad_info,
         'routed_pad_indices': {idx_a, idx_b},
+        # Store main pad positions for Phase 3 tap filtering
+        'main_pad_a': (pad_a[3], pad_a[4]),  # (orig_x, orig_y) of first main pad
+        'main_pad_b': (pad_b[3], pad_b[4]),  # (orig_x, orig_y) of second main pad
+        # Store original segments for identifying meanders in Phase 3
+        'original_segments': segments,
     }
 
 
@@ -753,6 +758,11 @@ def route_multipoint_taps(
         else:
             raise ValueError(f"Unknown endpoint type: {type(endpoint)}")
 
+    # Get main pad positions for filtering tap segments
+    # Taps should connect to segments on the tap pad's side (past the meander)
+    main_pad_a = main_result.get('main_pad_a')
+    main_pad_b = main_result.get('main_pad_b')
+
     for pad_idx in remaining_indices:
         pad = pad_info[pad_idx]
         target_endpoint = pads[pad_idx]
@@ -760,9 +770,73 @@ def route_multipoint_taps(
         # Get endpoint coordinates and layers
         target_x, target_y, target_layers = get_endpoint_info(target_endpoint)
 
-        # Find closest tap point on existing segments (which now include meanders)
+        # Filter segments to only those reachable from closer main pad before hitting meanders
+        # This ensures taps connect past the meander, not into it
+        segments_for_tap = all_segments
+        original_segments = main_result.get('original_segments', [])
+
+        if main_pad_a and main_pad_b and original_segments:
+            # Find which main pad is closer to this tap pad
+            dist_a = abs(target_x - main_pad_a[0]) + abs(target_y - main_pad_a[1])
+            dist_b = abs(target_x - main_pad_b[0]) + abs(target_y - main_pad_b[1])
+            closer_main_pad = main_pad_a if dist_a < dist_b else main_pad_b
+
+            # Build set of original segment signatures for comparison
+            def seg_sig(seg):
+                return (round(seg.start_x, 3), round(seg.start_y, 3),
+                        round(seg.end_x, 3), round(seg.end_y, 3), seg.layer)
+            original_sigs = set(seg_sig(s) for s in original_segments)
+
+            # Trace connected segments from closer main pad, stopping at meander segments
+            # Build adjacency: position -> list of segments touching that position
+            pos_to_segs = {}
+            for seg in all_segments:
+                for pos in [(round(seg.start_x, 3), round(seg.start_y, 3)),
+                            (round(seg.end_x, 3), round(seg.end_y, 3))]:
+                    if pos not in pos_to_segs:
+                        pos_to_segs[pos] = []
+                    pos_to_segs[pos].append(seg)
+
+            # Start from closer main pad position
+            start_pos = (round(closer_main_pad[0], 3), round(closer_main_pad[1], 3))
+
+            # BFS to find all original segments reachable from start without crossing meanders
+            visited_segs = set()
+            visited_pos = set()
+            queue = [start_pos]
+            valid_segments = []
+
+            while queue:
+                pos = queue.pop(0)
+                if pos in visited_pos:
+                    continue
+                visited_pos.add(pos)
+
+                for seg in pos_to_segs.get(pos, []):
+                    if id(seg) in visited_segs:
+                        continue
+
+                    # Check if this segment is an original (non-meander) segment
+                    if seg_sig(seg) not in original_sigs:
+                        # This is a meander segment - don't traverse through it
+                        continue
+
+                    visited_segs.add(id(seg))
+                    valid_segments.append(seg)
+
+                    # Add the other endpoint to continue traversal
+                    other_pos = (round(seg.end_x, 3), round(seg.end_y, 3))
+                    if other_pos == pos:
+                        other_pos = (round(seg.start_x, 3), round(seg.start_y, 3))
+                    queue.append(other_pos)
+
+            if valid_segments:
+                segments_for_tap = valid_segments
+                print(f"  Traced {len(valid_segments)}/{len(all_segments)} segments from main pad (before meander)")
+
+        # Find closest tap point on filtered segments
         tap_result = find_closest_point_on_segments(
-            all_segments,
+            segments_for_tap,
             target_x,
             target_y,
             target_layers
