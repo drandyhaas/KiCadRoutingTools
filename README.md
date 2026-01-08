@@ -152,8 +152,6 @@ KiCadRoutingTools/
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
 ├── test_fanout_and_route.py  # Full integration test (fanout + route)
-├── test_diffpair.py          # Test single/multiple diff pairs with DRC
-├── test_all_diffpairs.py     # Batch test all diff pairs (parallel)
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization

@@ -27,19 +27,16 @@ The router recognizes common differential pair naming conventions:
 
 ## Usage
 
-### Basic Usage
-
 ```bash
 # Route a specific diff pair
-python test_diffpair.py "*lvds_rx1_11" --stub-proximity-radius 4
+python route.py input.kicad_pcb output.kicad_pcb "*lvds_rx1_11*" \
+    --diff-pairs "*lvds*" --stub-proximity-radius 4
 
 # Route with debug visualization
-python test_diffpair.py "*lvds_rx1_11" --stub-proximity-radius 4 --debug-lines
-```
+python route.py input.kicad_pcb output.kicad_pcb "*lvds_rx1_11*" \
+    --diff-pairs "*lvds*" --stub-proximity-radius 4 --debug-lines
 
-### Direct Router Usage
-
-```bash
+# Route all LVDS nets with custom gap
 python route.py input.kicad_pcb output.kicad_pcb "*lvds*" \
     --diff-pairs "*lvds*" \
     --diff-pair-gap 0.1 \
