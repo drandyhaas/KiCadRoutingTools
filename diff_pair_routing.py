@@ -501,7 +501,7 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
                 x=gnd_p_x, y=gnd_p_y,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=[layer_names[layer1], layer_names[layer2]],
+                layers=["F.Cu", "B.Cu"],  # Always through-hole
                 net_id=gnd_net_id,
                 free=True
             ))
@@ -509,7 +509,7 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
                 x=gnd_n_x, y=gnd_n_y,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=[layer_names[layer1], layer_names[layer2]],
+                layers=["F.Cu", "B.Cu"],  # Always through-hole
                 net_id=gnd_net_id,
                 free=True
             ))
@@ -668,7 +668,7 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=[layer_names[layer1], layer_names[layer2]],
+                layers=["F.Cu", "B.Cu"],  # Always through-hole
                 net_id=net_id
             ))
         elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:

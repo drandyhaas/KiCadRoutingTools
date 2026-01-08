@@ -157,7 +157,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=[layer_names[layer1], layer_names[layer2]],
+                layers=["F.Cu", "B.Cu"],  # Always through-hole
                 net_id=net_id
             )
             new_vias.append(via)
@@ -342,7 +342,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=[layer_names[layer1], layer_names[layer2]],
+                layers=["F.Cu", "B.Cu"],  # Always through-hole
                 net_id=net_id
             )
             new_vias.append(via)
@@ -556,7 +556,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=[layer_names[layer1], layer_names[layer2]],
+                layers=["F.Cu", "B.Cu"],  # Always through-hole
                 net_id=net_id
             )
             new_vias.append(via)
@@ -958,7 +958,7 @@ def _path_to_segments_vias(
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=[layer_names[layer1], layer_names[layer2]],
+                layers=["F.Cu", "B.Cu"],  # Always through-hole
                 net_id=net_id
             )
             vias.append(via)
