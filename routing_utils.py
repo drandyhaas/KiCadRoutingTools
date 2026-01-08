@@ -17,6 +17,32 @@ from chip_boundary import (
 )
 
 
+def get_copper_layers_from_segments(segments: List[Segment], existing_segments: List[Segment] = None) -> List[str]:
+    """
+    Build a list of all copper layers from segments.
+
+    For through-hole vias that connect all layers, we need to know all copper layers
+    present in the design. This function extracts them from the segments.
+
+    Args:
+        segments: New segments being processed
+        existing_segments: Optional existing segments to also consider
+
+    Returns:
+        List of copper layer names (always includes F.Cu and B.Cu for through-hole vias)
+    """
+    all_copper_layers = set()
+    for seg in segments:
+        all_copper_layers.add(seg.layer)
+    if existing_segments:
+        for seg in existing_segments:
+            all_copper_layers.add(seg.layer)
+    # Ensure F.Cu and B.Cu are always included for through-hole vias
+    all_copper_layers.add('F.Cu')
+    all_copper_layers.add('B.Cu')
+    return list(all_copper_layers)
+
+
 @dataclass
 class MPSResult:
     """Extended result from MPS net ordering with conflict and layer information."""
@@ -1843,7 +1869,7 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
     # Build via locations by layer for connectivity checking
     via_locations_by_layer = {}
     if vias:
-        all_copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'B.Cu']
+        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
         for via in vias:
             if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
                 via_layers = all_copper_layers
@@ -2124,7 +2150,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     # Build map of via locations by layer (store actual coordinates and size for proximity check)
     via_locations = {}
     if vias:
-        all_copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
         for via in vias:
             # Through-hole vias connect all layers
             if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
