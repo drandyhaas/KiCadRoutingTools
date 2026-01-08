@@ -55,7 +55,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original` |
 | `--direction` / `-d` | forward | Direction: `forward`, `backward`, or `random` |
 | `--layers` / `-l` | F.Cu In1.Cu In2.Cu B.Cu | Routing layers |
-| `--no-bga-zones` | false | Disable BGA exclusion zone detection |
+| `--no-bga-zones [REFS...]` | (auto-detect) | Disable BGA exclusion zones. No args = all. With refs (U1 U3) = only those |
 
 ### Proximity Penalty Options
 

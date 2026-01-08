@@ -18,7 +18,8 @@ from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import (
     parse_kicad_pcb, PCBData, Pad,
-    auto_detect_bga_exclusion_zones, find_components_by_type
+    auto_detect_bga_exclusion_zones, find_components_by_type,
+    get_footprint_bounds, detect_bga_pitch
 )
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, generate_gr_text_sexpr,
@@ -95,7 +96,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
-                disable_bga_zones: bool = False,
+                disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = 0.1,
                 clearance: float = 0.1,
                 via_size: float = 0.3,
@@ -186,9 +187,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # Auto-detect BGA exclusion zones if not specified
-    if disable_bga_zones:
-        bga_exclusion_zones = []
-        print("BGA exclusion zones disabled")
+    if disable_bga_zones is not None:
+        if len(disable_bga_zones) == 0:
+            # --no-bga-zones with no args: disable all
+            bga_exclusion_zones = []
+            print("BGA exclusion zones disabled (all)")
+        else:
+            # --no-bga-zones U1 U3: disable only those components
+            bga_components = find_components_by_type(pcb_data, 'BGA')
+            bga_exclusion_zones = []
+            disabled_refs = set(disable_bga_zones)
+            for fp in bga_components:
+                if fp.reference not in disabled_refs:
+                    bounds = get_footprint_bounds(fp, margin=0.5)
+                    pitch = detect_bga_pitch(fp)
+                    edge_tolerance = 0.5 + pitch * 1.1
+                    bga_exclusion_zones.append((*bounds, edge_tolerance))
+            if bga_exclusion_zones:
+                print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s) (excluding {', '.join(disable_bga_zones)}):")
+                enabled_fps = [fp for fp in bga_components if fp.reference not in disabled_refs]
+                for fp, zone in zip(enabled_fps, bga_exclusion_zones):
+                    edge_tol = zone[4] if len(zone) > 4 else 1.6
+                    print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
+            else:
+                print(f"BGA exclusion zones disabled for: {', '.join(disable_bga_zones)}")
     elif bga_exclusion_zones is None:
         bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.5)
         if bga_exclusion_zones:
@@ -1181,8 +1203,8 @@ Differential pair routing:
     parser.add_argument("--direction", "-d", choices=["forward", "backward", "random"],
                         default=None,
                         help="Direction search order for each net route")
-    parser.add_argument("--no-bga-zones", action="store_true",
-                        help="Disable BGA exclusion zone detection (allows routing through BGA areas)")
+    parser.add_argument("--no-bga-zones", nargs="*", default=None,
+                        help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
     parser.add_argument("--layers", "-l", nargs="+",
                         default=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
                         help="Routing layers to use (default: F.Cu In1.Cu In2.Cu B.Cu)")

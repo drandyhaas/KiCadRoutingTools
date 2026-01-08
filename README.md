@@ -198,11 +198,17 @@ KiCadRoutingTools/
 
 ## Performance
 
-| Metric | Value |
-|--------|-------|
-| 56 LVDS diff pairs | 100% (polarity fix enabled by default) |
-| Parallel testing | 14 threads default |
-| Speedup vs Python | ~10x |
+Integration test results (`test_fanout_and_route.py`):
+
+| Stage | Nets | Time | Iterations |
+|-------|------|------|------------|
+| FTDI single-ended | 47/47 | 8.6s | 319K |
+| LVDS diff pairs (batch 1) | 28/28 | 29.7s | 10.2M |
+| LVDS diff pairs (batch 2) | 28/28 | 28.0s | 12.0M |
+| DDR diff pairs | 5/5 | 0.3s | 25K |
+| DDR single-ended | 51/51 | 6.2s | 565K |
+
+Rust acceleration provides ~10x speedup vs pure Python.
 
 ## Common Options
 
@@ -229,7 +235,8 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*"
 # Strategy
 --ordering mps          # mps | inside_out | original
 --layers F.Cu In1.Cu In2.Cu B.Cu
---no-bga-zones          # Allow routing through BGA areas
+--no-bga-zones          # Allow routing through all BGA areas
+--no-bga-zones U1 U3    # Allow routing through specific BGAs only (or all if none given)
 
 # Proximity penalties
 --stub-proximity-radius 2.0  # Radius around stubs to penalize (mm)
