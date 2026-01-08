@@ -79,6 +79,16 @@ This script demonstrates a real-world workflow:
 5. DDR routing (DQS/CK diff pairs + DQ data lanes with auto byte-lane grouping)
 6. DRC and connectivity verification after each stage
 
+### 5. Pad-to-Pad Routing Test
+
+Route directly between pads without fanout (for boards with standard through-hole or SMD pads):
+
+```bash
+python test_kit_route.py
+```
+
+This script routes nets on the kit-dev-coldfire-xilinx board directly from pads, demonstrating routing without BGA fanout.
+
 ## Documentation
 
 | Document | Description |
@@ -152,6 +162,7 @@ KiCadRoutingTools/
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script
 ├── test_fanout_and_route.py  # Full integration test (fanout + route)
+├── test_kit_route.py         # Pad-to-pad routing test (no fanout)
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
