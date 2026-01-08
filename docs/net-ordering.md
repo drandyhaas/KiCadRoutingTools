@@ -18,6 +18,8 @@ Three ordering strategies are available:
 
 **Default strategy.** Minimizes crossing conflicts between net paths.
 
+[View interactive MPS visualization](https://htmlpreview.github.io/?https://github.com/drandyhaas/KiCadRoutingTools/blob/main/docs/MPS.html)
+
 ### How It Works
 
 1. **Identify chips**: Detect source and target chips from pad positions
