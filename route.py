@@ -408,6 +408,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
             verbose=args.verbose
         )
+        # Add stub swap vias to pcb_data so routing and length matching see them as obstacles
+        for via in all_swap_vias:
+            pcb_data.vias.append(via)
 
     # Apply net ordering strategy
     if ordering_strategy == "mps":

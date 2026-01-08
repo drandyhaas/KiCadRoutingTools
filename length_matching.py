@@ -509,6 +509,7 @@ def generate_trombone_meander(
     direction = 1  # Alternates: 1 = up (positive perpendicular), -1 = down
     first_bump_direction = None  # Track direction of first bump for exit chamfer
     prev_bump_direction = None  # Track previous bump direction for same-direction spacing
+    blocked_direction = None  # Track which direction is completely blocked (safe_amp=0)
     bump_count = 0
 
     # Leave some margin at start and end
@@ -583,6 +584,9 @@ def generate_trombone_meander(
                     paired_net_id=paired_net_id
                 )
                 if safe_amp_other >= min_amplitude:
+                    # Mark the original direction as blocked if safe_amp was 0
+                    if safe_amp == 0:
+                        blocked_direction = direction
                     direction = other_dir
                     safe_amp = safe_amp_other
                     needs_same_dir_spacing = other_needs_spacing
@@ -635,29 +639,47 @@ def generate_trombone_meander(
             # After a bump, we're at +chamfer offset from centerline.
             # Add exit chamfer (to centerline) + entry chamfer (back to offset) to separate bumps
 
-            # Exit chamfer (return to centerline)
-            nx = cx + ux * chamfer - px * chamfer * prev_bump_direction
-            ny = cy + uy * chamfer - py * chamfer * prev_bump_direction
-            new_segments.append(Segment(
-                start_x=cx, start_y=cy,
-                end_x=nx, end_y=ny,
-                width=segment.width, layer=segment.layer, net_id=segment.net_id
-            ))
-            cx, cy = nx, ny
+            # Check if chamfers would go into blocked direction - use flat segments instead
+            exit_goes_blocked = (blocked_direction is not None and -prev_bump_direction == blocked_direction)
 
-            # Entry chamfer (go to offset for next bump's riser)
-            nx = cx + ux * chamfer + px * chamfer * direction
-            ny = cy + uy * chamfer + py * chamfer * direction
-            new_segments.append(Segment(
-                start_x=cx, start_y=cy,
-                end_x=nx, end_y=ny,
-                width=segment.width, layer=segment.layer, net_id=segment.net_id
-            ))
-            cx, cy = nx, ny
+            if exit_goes_blocked:
+                # Can't return to centerline (blocked direction), so stay at current offset
+                # Use a single flat segment for separation - we're already at the correct offset
+                # for the next bump since both bumps go in the same (unblocked) direction
+                nx = cx + ux * 2 * chamfer  # Double length to maintain spacing
+                ny = cy + uy * 2 * chamfer
+                new_segments.append(Segment(
+                    start_x=cx, start_y=cy,
+                    end_x=nx, end_y=ny,
+                    width=segment.width, layer=segment.layer, net_id=segment.net_id
+                ))
+                cx, cy = nx, ny
+            else:
+                # Normal case: exit chamfer returns to centerline, entry goes to new offset
+                # Exit chamfer (return to centerline)
+                nx = cx + ux * chamfer - px * chamfer * prev_bump_direction
+                ny = cy + uy * chamfer - py * chamfer * prev_bump_direction
+                new_segments.append(Segment(
+                    start_x=cx, start_y=cy,
+                    end_x=nx, end_y=ny,
+                    width=segment.width, layer=segment.layer, net_id=segment.net_id
+                ))
+                cx, cy = nx, ny
+
+                # Entry chamfer (go to offset for next bump's riser)
+                nx = cx + ux * chamfer + px * chamfer * direction
+                ny = cy + uy * chamfer + py * chamfer * direction
+                new_segments.append(Segment(
+                    start_x=cx, start_y=cy,
+                    end_x=nx, end_y=ny,
+                    width=segment.width, layer=segment.layer, net_id=segment.net_id
+                ))
+                cx, cy = nx, ny
 
         # Entry chamfer (only for first bump)
         if has_entry_chamfer:
             first_bump_direction = direction  # Record direction for exit chamfer
+            # Direction switching already ensured we're going in the unblocked direction
             nx = cx + ux * chamfer + px * chamfer * direction
             ny = cy + uy * chamfer + py * chamfer * direction
             new_segments.append(Segment(
@@ -719,12 +741,19 @@ def generate_trombone_meander(
         direction *= -1
 
     # Add exit chamfer to return to centerline
-    # After any number of bumps, we're at ±chamfer from centerline depending on
-    # which direction the first bump went. Move opposite to first_bump_direction.
+    # After any number of bumps, we're at ±chamfer from centerline.
+    # Use first_bump_direction to determine the exit direction.
     if bump_count > 0 and first_bump_direction is not None:
-        # Exit chamfer moves opposite to first bump's entry direction
-        nx = cx + ux * chamfer - px * chamfer * first_bump_direction
-        ny = cy + uy * chamfer - py * chamfer * first_bump_direction
+        # Check if exit chamfer would go into blocked direction
+        exit_direction = -first_bump_direction
+        if blocked_direction is not None and exit_direction == blocked_direction:
+            # Can't return to centerline in blocked direction, use flat segment
+            nx = cx + ux * chamfer
+            ny = cy + uy * chamfer
+        else:
+            # Normal exit chamfer
+            nx = cx + ux * chamfer - px * chamfer * first_bump_direction
+            ny = cy + uy * chamfer - py * chamfer * first_bump_direction
         new_segments.append(Segment(
             start_x=cx, start_y=cy,
             end_x=nx, end_y=ny,
