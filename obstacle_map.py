@@ -430,8 +430,10 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
 
     # Rectangular expansion for track clearance
-    half_x_mm = pad.size_x / 2 + config.clearance + extra_clearance
-    half_y_mm = pad.size_y / 2 + config.clearance + extra_clearance
+    # Track path is the CENTER of the track, so we need:
+    # pad_half_size + track_half_width + clearance
+    half_x_mm = pad.size_x / 2 + config.track_width / 2 + config.clearance + extra_clearance
+    half_y_mm = pad.size_y / 2 + config.track_width / 2 + config.clearance + extra_clearance
     expand_x = coord.to_grid_dist(half_x_mm)
     expand_y = coord.to_grid_dist(half_y_mm)
 

@@ -145,6 +145,55 @@ def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_marg
     return False, 0.0
 
 
+def point_to_rect_distance(px: float, py: float, cx: float, cy: float,
+                           half_x: float, half_y: float) -> float:
+    """Calculate distance from a point to an axis-aligned rectangle.
+
+    Args:
+        px, py: Point coordinates
+        cx, cy: Rectangle center coordinates
+        half_x, half_y: Rectangle half-widths
+
+    Returns:
+        Distance from point to rectangle edge (0 if point is inside)
+    """
+    # Distance from point to rectangle in each axis
+    dx = max(0, abs(px - cx) - half_x)
+    dy = max(0, abs(py - cy) - half_y)
+    return math.sqrt(dx * dx + dy * dy)
+
+
+def segment_to_rect_distance(x1: float, y1: float, x2: float, y2: float,
+                             cx: float, cy: float, half_x: float, half_y: float) -> Tuple[float, Tuple[float, float]]:
+    """Calculate minimum distance from a segment to an axis-aligned rectangle.
+
+    Args:
+        x1, y1, x2, y2: Segment endpoints
+        cx, cy: Rectangle center coordinates
+        half_x, half_y: Rectangle half-widths
+
+    Returns:
+        (distance, closest_point_on_segment)
+    """
+    # Sample points along the segment and find minimum distance to rectangle
+    # This is a simplified approach - for production code would use proper geometry
+    min_dist = float('inf')
+    closest_pt = (x1, y1)
+
+    # Check endpoints and intermediate points
+    num_samples = max(10, int(math.sqrt((x2-x1)**2 + (y2-y1)**2) / 0.05))  # Sample every ~0.05mm
+    for i in range(num_samples + 1):
+        t = i / num_samples
+        px = x1 + t * (x2 - x1)
+        py = y1 + t * (y2 - y1)
+        dist = point_to_rect_distance(px, py, cx, cy, half_x, half_y)
+        if dist < min_dist:
+            min_dist = dist
+            closest_pt = (px, py)
+
+    return min_dist, closest_pt
+
+
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
                                clearance_margin: float = 0.10) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
@@ -167,29 +216,19 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
     if seg.layer not in expanded_layers:
         return False, 0.0, None
 
-    # Calculate distance from pad center to segment
-    dist_to_center = point_to_segment_distance(
-        pad.global_x, pad.global_y,
-        seg.start_x, seg.start_y,
-        seg.end_x, seg.end_y
+    # Calculate distance from segment to rectangular pad
+    dist_to_pad, closest_pt = segment_to_rect_distance(
+        seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+        pad.global_x, pad.global_y, pad.size_x / 2, pad.size_y / 2
     )
 
-    # For rectangular pads, use the larger dimension for conservative check
-    # More accurate would be to check against the actual rectangle, but this is good enough
-    pad_half_size = max(pad.size_x, pad.size_y) / 2
-
-    # Required distance: pad half-size + segment half-width + clearance
-    required_dist = pad_half_size + seg.width / 2 + clearance
-    overlap = required_dist - dist_to_center
+    # Required clearance: segment half-width + clearance
+    # (dist_to_pad is already edge-to-edge from pad)
+    required_dist = seg.width / 2 + clearance
+    overlap = required_dist - dist_to_pad
 
     tolerance = clearance * clearance_margin
     if overlap > tolerance:
-        # Get closest point on segment to pad center
-        closest_pt = closest_point_on_segment(
-            pad.global_x, pad.global_y,
-            seg.start_x, seg.start_y,
-            seg.end_x, seg.end_y
-        )
         return True, overlap, closest_pt
 
     return False, 0.0, None
@@ -217,15 +256,17 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     if not any(layer.endswith('.Cu') for layer in expanded_layers):
         return False, 0.0
 
-    # Distance from pad center to via center
-    dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
+    # Distance from via center to rectangular pad edge
+    dist_to_pad = point_to_rect_distance(
+        via.x, via.y,
+        pad.global_x, pad.global_y,
+        pad.size_x / 2, pad.size_y / 2
+    )
 
-    # For rectangular pads, use the larger dimension for conservative check
-    pad_half_size = max(pad.size_x, pad.size_y) / 2
-
-    # Required distance: pad half-size + via half-size + clearance
-    required_dist = pad_half_size + via.size / 2 + clearance
-    overlap = required_dist - dist
+    # Required clearance: via half-size + clearance
+    # (dist_to_pad is already edge-to-edge from pad)
+    required_dist = via.size / 2 + clearance
+    overlap = required_dist - dist_to_pad
 
     tolerance = clearance * clearance_margin
     if overlap > tolerance:
