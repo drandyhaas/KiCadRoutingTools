@@ -731,9 +731,9 @@ def calculate_stub_via_barrel_length(stub_vias: List, stub_layer: str, pcb_data)
         net_pads = pcb_data.pads_by_net.get(via.net_id, [])
         for pad in net_pads:
             if abs(pad.global_x - via.x) < 0.05 and abs(pad.global_y - via.y) < 0.05:
-                # Find copper layer from pad's layers (filter out mask/paste layers)
+                # Find copper layer from pad's layers (filter out mask/paste layers and wildcards)
                 for layer in pad.layers:
-                    if layer.endswith('.Cu'):
+                    if layer.endswith('.Cu') and not layer.startswith('*'):
                         pad_layer = layer
                         break
                 break
@@ -997,7 +997,9 @@ def get_multipoint_net_pads(
         pad_info = []
         for pad in net_pads:
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-            for layer in pad.layers:
+            # Expand wildcard layers like "*.Cu" to actual routing layers
+            expanded_layers = expand_pad_layers(pad.layers, config.layers)
+            for layer in expanded_layers:
                 layer_idx = layer_map.get(layer)
                 if layer_idx is not None:
                     pad_info.append((gx, gy, layer_idx, pad.global_x, pad.global_y, pad))

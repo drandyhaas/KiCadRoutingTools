@@ -7,12 +7,13 @@ import argparse
 import math
 import fnmatch
 from typing import List, Tuple, Set, Optional
-from kicad_parser import parse_kicad_pcb, Segment, Via
+from kicad_parser import parse_kicad_pcb, Segment, Via, Pad
 from geometry_utils import (
     point_to_segment_distance,
     closest_point_on_segment,
     segment_to_segment_closest_points,
 )
+from routing_utils import expand_pad_layers
 
 
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:
@@ -141,6 +142,95 @@ def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_marg
     tolerance = clearance * clearance_margin
     if overlap > tolerance:
         return True, overlap
+    return False, 0.0
+
+
+def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
+                               routing_layers: List[str],
+                               clearance_margin: float = 0.10) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
+    """Check if a segment is too close to a pad on the same layer.
+
+    Args:
+        pad: Pad object with global_x, global_y, size_x, size_y, layers
+        seg: Segment to check against
+        clearance: Minimum clearance in mm
+        routing_layers: List of routing layer names (for expanding *.Cu wildcards)
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+
+    Returns:
+        (has_violation, overlap_mm, closest_point_on_segment)
+    """
+    # Expand pad layers (handles *.Cu wildcards)
+    expanded_layers = expand_pad_layers(pad.layers, routing_layers)
+
+    # Check if segment is on a layer the pad is on
+    if seg.layer not in expanded_layers:
+        return False, 0.0, None
+
+    # Calculate distance from pad center to segment
+    dist_to_center = point_to_segment_distance(
+        pad.global_x, pad.global_y,
+        seg.start_x, seg.start_y,
+        seg.end_x, seg.end_y
+    )
+
+    # For rectangular pads, use the larger dimension for conservative check
+    # More accurate would be to check against the actual rectangle, but this is good enough
+    pad_half_size = max(pad.size_x, pad.size_y) / 2
+
+    # Required distance: pad half-size + segment half-width + clearance
+    required_dist = pad_half_size + seg.width / 2 + clearance
+    overlap = required_dist - dist_to_center
+
+    tolerance = clearance * clearance_margin
+    if overlap > tolerance:
+        # Get closest point on segment to pad center
+        closest_pt = closest_point_on_segment(
+            pad.global_x, pad.global_y,
+            seg.start_x, seg.start_y,
+            seg.end_x, seg.end_y
+        )
+        return True, overlap, closest_pt
+
+    return False, 0.0, None
+
+
+def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
+                          routing_layers: List[str],
+                          clearance_margin: float = 0.10) -> Tuple[bool, float]:
+    """Check if a via is too close to a pad.
+
+    Args:
+        pad: Pad object
+        via: Via to check against
+        clearance: Minimum clearance in mm
+        routing_layers: List of routing layer names (for expanding *.Cu wildcards)
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+
+    Returns:
+        (has_violation, overlap_mm)
+    """
+    # Expand pad layers (handles *.Cu wildcards)
+    expanded_layers = expand_pad_layers(pad.layers, routing_layers)
+
+    # Vias are through-hole, so they conflict with pads on any copper layer
+    if not any(layer.endswith('.Cu') for layer in expanded_layers):
+        return False, 0.0
+
+    # Distance from pad center to via center
+    dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
+
+    # For rectangular pads, use the larger dimension for conservative check
+    pad_half_size = max(pad.size_x, pad.size_y) / 2
+
+    # Required distance: pad half-size + via half-size + clearance
+    required_dist = pad_half_size + via.size / 2 + clearance
+    overlap = required_dist - dist
+
+    tolerance = clearance * clearance_margin
+    if overlap > tolerance:
+        return True, overlap
+
     return False, 0.0
 
 
@@ -425,6 +515,91 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             'loc2': (via2.x, via2.y),
                         })
 
+    # Get routing layers for pad layer expansion
+    routing_layers = list(set(seg.layer for seg in pcb_data.segments if seg.layer.endswith('.Cu')))
+    if not routing_layers:
+        routing_layers = ['F.Cu', 'B.Cu']  # Fallback
+
+    # Check pad-to-segment violations (different nets only)
+    if not quiet:
+        print("Checking pad-to-segment clearances...")
+
+    # Group pads by net
+    pads_by_net = pcb_data.pads_by_net
+
+    # Pre-compute matching pad nets
+    pad_net_ids = list(pads_by_net.keys())
+    if net_patterns:
+        matching_pad_nets = set(n for n in pad_net_ids if net_matches_filter(n))
+        if not quiet:
+            print(f"  Found {len(matching_pad_nets)} matching pad nets out of {len(pad_net_ids)}")
+    else:
+        matching_pad_nets = None
+
+    for pad_net in pad_net_ids:
+        pad_net_matches = matching_pad_nets is None or pad_net in matching_pad_nets
+        for seg_net in net_ids:
+            if pad_net == seg_net:
+                continue  # Same net - skip
+            # Skip if neither net matches
+            seg_net_matches = matching_seg_net_set is None or seg_net in matching_seg_net_set
+            if not pad_net_matches and not seg_net_matches:
+                continue
+            for pad in pads_by_net.get(pad_net, []):
+                for seg in segments_by_net.get(seg_net, []):
+                    has_violation, overlap, closest_pt = check_pad_segment_overlap(
+                        pad, seg, clearance, routing_layers
+                    )
+                    if has_violation:
+                        pad_net_name = pcb_data.nets.get(pad_net, None)
+                        seg_net_name = pcb_data.nets.get(seg_net, None)
+                        pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
+                        seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
+                        violations.append({
+                            'type': 'pad-segment',
+                            'net1': pad_net_str,
+                            'net2': seg_net_str,
+                            'layer': seg.layer,
+                            'overlap_mm': overlap,
+                            'pad_loc': (pad.global_x, pad.global_y),
+                            'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                            'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                            'closest_pt': closest_pt,
+                        })
+
+    # Check pad-to-via violations (different nets only)
+    if not quiet:
+        print("Checking pad-to-via clearances...")
+
+    for pad_net in pad_net_ids:
+        pad_net_matches = matching_pad_nets is None or pad_net in matching_pad_nets
+        for via_net in via_net_ids:
+            if pad_net == via_net:
+                continue  # Same net - skip
+            # Skip if neither net matches
+            via_net_matches = matching_via_nets is None or via_net in matching_via_nets
+            if not pad_net_matches and not via_net_matches:
+                continue
+            for pad in pads_by_net.get(pad_net, []):
+                for via in vias_by_net.get(via_net, []):
+                    has_violation, overlap = check_pad_via_overlap(
+                        pad, via, clearance, routing_layers
+                    )
+                    if has_violation:
+                        pad_net_name = pcb_data.nets.get(pad_net, None)
+                        via_net_name = pcb_data.nets.get(via_net, None)
+                        pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
+                        via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
+                        violations.append({
+                            'type': 'pad-via',
+                            'net1': pad_net_str,
+                            'net2': via_net_str,
+                            'overlap_mm': overlap,
+                            'pad_loc': (pad.global_x, pad.global_y),
+                            'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                            'via_loc': (via.x, via.y),
+                        })
+
     # Report violations
     if quiet:
         if violations:
@@ -471,6 +646,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
+                    elif vtype == 'pad-segment':
+                        print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Seg:{v['net2']}")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'pad-via':
+                        print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Via:{v['net2']}")
+                        print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
 
                 if len(vlist) > 20:
                     print(f"  ... and {len(vlist) - 20} more")

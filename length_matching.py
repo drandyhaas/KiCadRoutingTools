@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from kicad_parser import Segment, PCBData
 from routing_config import GridRouteConfig
-from routing_utils import segment_length, calculate_route_length
+from routing_utils import segment_length, calculate_route_length, expand_pad_layers
 from geometry_utils import (
     point_to_segment_distance,
     segments_intersect,
@@ -237,7 +237,9 @@ def get_safe_amplitude_at_point(
                     if conflict_found:
                         break
                     for pad in pad_list:
-                        if layer not in pad.layers:
+                        # Expand wildcard layers like "*.Cu" to actual routing layers
+                        expanded_pad_layers = expand_pad_layers(pad.layers, config.layers)
+                        if layer not in expanded_pad_layers:
                             continue
                         # Treat pad as circle with radius = max(size_x, size_y)/2
                         pad_radius = max(pad.size_x, pad.size_y) / 2
@@ -1832,7 +1834,9 @@ def get_safe_amplitude_for_diff_pair(
                     if conflict_found:
                         break
                     for pad in pad_list:
-                        if layer_name not in pad.layers:
+                        # Expand wildcard layers like "*.Cu" to actual routing layers
+                        expanded_pad_layers = expand_pad_layers(pad.layers, config.layers)
+                        if layer_name not in expanded_pad_layers:
                             continue
                         # Treat pad as circle with radius = max(size_x, size_y)/2
                         pad_radius = max(pad.size_x, pad.size_y) / 2

@@ -9,6 +9,7 @@ import fnmatch
 from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 from kicad_parser import parse_kicad_pcb, Segment, Via, Pad, PCBData
+from routing_utils import expand_pad_layers
 
 
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:
@@ -80,7 +81,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                     copper_layer_set.add(layer)
     for pad in pads:
         for layer in pad.layers:
-            if layer.endswith('.Cu'):
+            # Skip wildcards like "*.Cu" - they don't represent actual layers
+            if layer.endswith('.Cu') and not layer.startswith('*'):
                 copper_layer_set.add(layer)
 
     # Sort layers: F.Cu first, then In*.Cu in order, then B.Cu last
@@ -147,7 +149,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     pad_locations = []
     copper_layers = set(all_copper_layers)
     for pad_idx, pad in enumerate(pads):
-        for layer in pad.layers:
+        # Expand wildcard layers like "*.Cu" to actual copper layers
+        expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
+        for layer in expanded_layers:
             if layer not in copper_layers:
                 continue
             pad_size = 0.4  # Default pad connection tolerance

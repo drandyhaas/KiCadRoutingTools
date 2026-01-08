@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import expand_pad_layers
 
 # Import Rust router
 import sys
@@ -434,17 +435,20 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     expand_x = coord.to_grid_dist(half_x_mm)
     expand_y = coord.to_grid_dist(half_y_mm)
 
+    # Expand wildcard layers like "*.Cu" to actual routing layers
+    expanded_layers = expand_pad_layers(pad.layers, config.layers)
     for ex in range(-expand_x, expand_x + 1):
         for ey in range(-expand_y, expand_y + 1):
-            for layer in pad.layers:
+            for layer in expanded_layers:
                 layer_idx = layer_map.get(layer)
                 if layer_idx is not None:
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
                     if blocked_cells is not None:
                         blocked_cells[layer_idx].add((gx + ex, gy + ey))
 
-    # Via blocking near pads
-    if 'F.Cu' in pad.layers or 'B.Cu' in pad.layers:
+    # Via blocking near pads - block vias if pad is on any copper layer
+    # (expanded_layers already handles *.Cu wildcard)
+    if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_clear_mm = config.via_size / 2 + config.clearance
         via_expand_x = int((pad.size_x / 2 + via_clear_mm) / config.grid_step)
         via_expand_y = int((pad.size_y / 2 + via_clear_mm) / config.grid_step)
