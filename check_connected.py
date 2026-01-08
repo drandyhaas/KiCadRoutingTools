@@ -54,6 +54,37 @@ def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 
     return abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance
 
 
+def point_on_segment(px: float, py: float, seg_x1: float, seg_y1: float,
+                     seg_x2: float, seg_y2: float, tolerance: float) -> bool:
+    """Check if point (px, py) lies on segment from (seg_x1, seg_y1) to (seg_x2, seg_y2).
+
+    Uses perpendicular distance check plus bounding box containment.
+    """
+    # Vector from segment start to end
+    dx = seg_x2 - seg_x1
+    dy = seg_y2 - seg_y1
+    seg_len_sq = dx * dx + dy * dy
+
+    if seg_len_sq < 1e-10:
+        # Degenerate segment (zero length)
+        return points_match(px, py, seg_x1, seg_y1, tolerance)
+
+    # Project point onto segment line, get parameter t
+    t = ((px - seg_x1) * dx + (py - seg_y1) * dy) / seg_len_sq
+
+    # Check if projection is within segment bounds (with small margin)
+    if t < -0.001 or t > 1.001:
+        return False
+
+    # Find closest point on segment
+    closest_x = seg_x1 + t * dx
+    closest_y = seg_y1 + t * dy
+
+    # Check distance from point to closest point on segment
+    dist = math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+    return dist < tolerance
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], tolerance: float = 0.02,
                            verbose: bool = False) -> Dict:
@@ -158,17 +189,46 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_id += 1
 
     # Connect all points that are within tolerance on the same layer
-    # Use size/4 as the tolerance for each point pair (use the larger of the two)
-    # but ensure we never go below the minimum tolerance parameter
+    # Use size/2 (radius) for each point - if the copper extents can touch, they connect
+    # This properly handles via radius and track half-width
     for i, (x1, y1, l1, id1, size1) in enumerate(all_points):
         for j in range(i + 1, len(all_points)):
             x2, y2, l2, id2, size2 = all_points[j]
             if l1 != l2:
                 continue
-            # Use max(size1, size2) / 4, but at least the minimum tolerance
-            point_tolerance = max(max(size1, size2) / 4, tolerance)
+            # Two features connect if their copper extents overlap
+            # Each feature's copper extends size/2 from center
+            point_tolerance = max((size1 + size2) / 2, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
                 uf.union(id1, id2)
+
+    # Connect points that lie along segments (for T-junctions / tap connections)
+    # Build a map of segments by layer for efficient lookup
+    segments_by_layer = defaultdict(list)
+    for seg_idx, seg in enumerate(segments):
+        segments_by_layer[seg.layer].append((seg_idx, seg))
+
+    # Check each point against segments on the same layer
+    for (x, y, layer, pid, size) in all_points:
+        # Get segment index if this point is a segment endpoint (to avoid self-check)
+        point_info_entry = point_info.get(pid)
+        if point_info_entry and point_info_entry[0] in ('segment_start', 'segment_end'):
+            this_seg_idx = point_info_entry[1]
+        else:
+            this_seg_idx = None
+
+        for seg_idx, seg in segments_by_layer.get(layer, []):
+            # Don't check a segment endpoint against its own segment
+            if seg_idx == this_seg_idx:
+                continue
+
+            # Use segment width / 2 as tolerance (point must be within the track)
+            seg_tolerance = max(seg.width / 2, tolerance)
+            if point_on_segment(x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg_tolerance):
+                # Union this point with one of the segment's endpoints
+                # Segment endpoints are added first, so segment i has start_id = 2*i, end_id = 2*i + 1
+                seg_start_id = 2 * seg_idx
+                uf.union(pid, seg_start_id)
 
     # Check if all pads are in the same component
     if not pad_ids:
