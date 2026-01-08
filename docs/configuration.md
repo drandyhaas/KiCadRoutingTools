@@ -47,6 +47,8 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
+| `--hole-to-hole-clearance` | 0.2 | Minimum drill hole edge-to-edge clearance (mm) |
+| `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
 
 ### Routing Strategy Options
 
@@ -178,6 +180,8 @@ class GridRouteConfig:
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
     max_setback_angle: float = 45.0  # degrees
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
+    hole_to_hole_clearance: float = 0.2  # mm - minimum drill hole edge-to-edge clearance
+    board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
 
     # Layers
     layers: List[str] = ['F.Cu', 'B.Cu']

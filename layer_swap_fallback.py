@@ -17,8 +17,8 @@ from routing_utils import (
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_stub_proximity_costs, merge_track_proximity_costs, add_same_net_via_clearance,
-    add_diff_pair_own_stubs_as_obstacles, compute_track_proximity_for_net,
-    add_vias_list_as_obstacles, add_segments_list_as_obstacles
+    add_same_net_pad_drill_via_clearance, add_diff_pair_own_stubs_as_obstacles,
+    compute_track_proximity_for_net, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
 from blocking_analysis import analyze_frontier_blocking
 from polarity_swap import get_canonical_net_id
@@ -193,6 +193,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
             merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
+            add_same_net_pad_drill_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
+            add_same_net_pad_drill_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
             add_own_stubs_as_obstacles_for_diff_pair(retry_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
 
             retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
@@ -303,6 +305,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             merge_track_proximity_costs(rip_obstacles, track_proximity_cache)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.p_net_id, config)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.n_net_id, config)
+                            add_same_net_pad_drill_via_clearance(rip_obstacles, pcb_data, pair.p_net_id, config)
+                            add_same_net_pad_drill_via_clearance(rip_obstacles, pcb_data, pair.n_net_id, config)
                             add_own_stubs_as_obstacles_for_diff_pair(rip_obstacles, pcb_data, pair.p_net_id, pair.n_net_id, config, diff_pair_extra_clearance)
 
                             rip_result = route_diff_pair_with_obstacles(pcb_data, pair, config, rip_obstacles, base_obstacles, rip_unrouted_stubs)

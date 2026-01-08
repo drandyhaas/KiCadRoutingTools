@@ -11,7 +11,8 @@ from typing import List, Tuple, Optional, Any
 from routing_state import RoutingState
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
-    add_same_net_via_clearance, add_stub_proximity_costs, merge_track_proximity_costs,
+    add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
+    add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net, add_net_obstacles_with_vis,
     VisualizationData
 )
@@ -119,6 +120,7 @@ def route_single_ended_nets(
             merge_track_proximity_costs(obstacles, track_proximity_cache)
             add_cross_layer_tracks(obstacles, pcb_data, config, layer_map, exclude_net_ids={net_id})
             add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
+            add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
         else:
             # Use helper for non-visualization case
             obstacles, unrouted_stubs = build_single_ended_obstacles(

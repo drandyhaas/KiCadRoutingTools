@@ -438,6 +438,35 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
                     obstacles.add_blocked_via(gx + ex, gy + ey)
 
 
+def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
+                                          net_id: int, config: GridRouteConfig):
+    """Add via blocking near same-net pad drill holes (hole-to-hole clearance).
+
+    This blocks via placement near through-hole pads on the same net,
+    enforcing manufacturing hole-to-hole clearance even within a single net.
+    New vias must maintain hole_to_hole_clearance from existing pad drill holes.
+    """
+    if config.hole_to_hole_clearance <= 0:
+        return
+
+    coord = GridCoord(config.grid_step)
+
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    for pad in pads:
+        if pad.drill <= 0:
+            continue  # SMD pad, no drill hole
+
+        # Required center-to-center distance = (pad_drill/2) + (new_via_drill/2) + clearance
+        required_dist = pad.drill / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
+        expand = coord.to_grid_dist(required_dist)
+        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+
+        for ex in range(-expand, expand + 1):
+            for ey in range(-expand, expand + 1):
+                if ex*ex + ey*ey <= expand*expand:
+                    obstacles.add_blocked_via(gx + ex, gy + ey)
+
+
 def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
                           layer_idx: int, expansion_grid: int, via_block_grid: int,
                           blocked_cells: List[Set[Tuple[int, int]]] = None,
@@ -934,6 +963,9 @@ def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     # Add same-net via clearance blocking (for DRC - vias can't be too close even on same net)
     add_same_net_via_clearance(obstacles, pcb_data, exclude_net_id, config)
+
+    # Add same-net pad drill hole-to-hole clearance blocking
+    add_same_net_pad_drill_via_clearance(obstacles, pcb_data, exclude_net_id, config)
 
     return obstacles
 

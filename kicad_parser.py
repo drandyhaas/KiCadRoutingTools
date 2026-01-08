@@ -364,7 +364,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
         pad_pattern = r'\(pad\s+"([^"]+)"\s+(\w+)\s+(\w+)(.*?)\)\s*(?=\(pad|\(model|\(zone|\Z|$)'
 
         # Simpler approach: find pad starts and extract info
-        for pad_match in re.finditer(r'\(pad\s+"([^"]+)"\s+(\w+)\s+(\w+)', fp_text):
+        # Note: pad number can be empty string (pad "") so use [^"]* not [^"]+
+        for pad_match in re.finditer(r'\(pad\s+"([^"]*)"\s+(\w+)\s+(\w+)', fp_text):
             pad_start = pad_match.start()
             # Find end of this pad block
             depth = 0

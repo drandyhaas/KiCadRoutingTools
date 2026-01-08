@@ -45124,17 +45124,6 @@
 		(layer "Edge.Cuts")
 		(uuid "efa6ca48-549a-4f7c-9021-6caccb21b1a4")
 	)
-	(gr_text "JTAG_EN\n"
-		(at 108 93.5 0)
-		(layer "F.Cu")
-		(uuid "0ab78673-12b8-43cb-8c06-e64722d79f26")
-		(effects
-			(font
-				(size 1 1)
-				(thickness 0.2)
-			)
-		)
-	)
 	(gr_text "CARTE COLDFIRE"
 		(at 213.995 58.42 0)
 		(layer "F.Cu")
@@ -45143,28 +45132,6 @@
 			(font
 				(size 2.032 1.524)
 				(thickness 0.3048)
-			)
-		)
-	)
-	(gr_text "MOD1"
-		(at 109 96 0)
-		(layer "F.Cu")
-		(uuid "c77ef3f0-701c-4675-a417-9a1dfad15600")
-		(effects
-			(font
-				(size 1 1)
-				(thickness 0.2)
-			)
-		)
-	)
-	(gr_text "MOD0"
-		(at 109 99.5 0)
-		(layer "F.Cu")
-		(uuid "e0a31601-c55c-4fd3-8ee0-5d848f875b65")
-		(effects
-			(font
-				(size 1 1)
-				(thickness 0.2)
 			)
 		)
 	)
@@ -45178,6 +45145,39 @@
 				(thickness 0.3048)
 			)
 			(justify mirror)
+		)
+	)
+	(gr_text "JTAG_EN\n"
+		(at 108 93.5 0)
+		(layer "F.SilkS")
+		(uuid "0ab78673-12b8-43cb-8c06-e64722d79f26")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.2)
+			)
+		)
+	)
+	(gr_text "MOD1"
+		(at 109 96 0)
+		(layer "F.SilkS")
+		(uuid "c77ef3f0-701c-4675-a417-9a1dfad15600")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.2)
+			)
+		)
+	)
+	(gr_text "MOD0"
+		(at 108.9 98.5 0)
+		(layer "F.SilkS")
+		(uuid "e0a31601-c55c-4fd3-8ee0-5d848f875b65")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.2)
+			)
 		)
 	)
 	(zone

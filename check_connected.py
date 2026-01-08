@@ -329,7 +329,7 @@ def find_gap_between_components(debug_info: Dict, tolerance: float) -> Optional[
 
 def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = None,
                            tolerance: float = 0.02, quiet: bool = False,
-                           verbose: bool = False) -> List[Dict]:
+                           verbose: bool = False, component: Optional[str] = None) -> List[Dict]:
     """Run connectivity checks on the PCB file.
 
     Args:
@@ -338,13 +338,15 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         tolerance: Minimum connection tolerance in mm (default: 0.02mm)
         quiet: If True, only print a summary line unless there are issues
         verbose: If True, show detailed info about where breaks are
+        component: Optional component reference to filter nets (e.g., "U1")
 
     Returns:
         List of connectivity issues found
     """
-    if quiet and net_patterns:
+    if quiet and (net_patterns or component):
         # Print a brief summary line in quiet mode
-        print(f"Checking {', '.join(net_patterns)} for connectivity...", end=" ", flush=True)
+        desc = ', '.join(net_patterns) if net_patterns else f"component {component}"
+        print(f"Checking {desc} for connectivity...", end=" ", flush=True)
     elif not quiet:
         print(f"Loading {pcb_file}...")
 
@@ -367,11 +369,31 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     # Use existing pads_by_net from pcb_data
     pads_by_net = pcb_data.pads_by_net
 
+    # Filter by component if specified
+    component_net_ids = None
+    if component:
+        component_net_ids = set()
+        for net_id, pads in pads_by_net.items():
+            for pad in pads:
+                if pad.component_ref == component:
+                    component_net_ids.add(net_id)
+                    break
+        if not quiet:
+            print(f"Found {len(component_net_ids)} nets on component {component}")
+
     # Determine which nets to check
     nets_to_check = []
     for net_id, net_info in pcb_data.nets.items():
+        # Filter by component if specified
+        if component_net_ids is not None and net_id not in component_net_ids:
+            continue
+
         if net_patterns:
             if matches_any_pattern(net_info.name, net_patterns):
+                nets_to_check.append((net_id, net_info.name))
+        elif component_net_ids is not None:
+            # Component specified but no patterns - check all component nets with segments or pads
+            if net_id in segments_by_net or net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
         else:
             # Only check nets that have both segments and pads
@@ -379,8 +401,12 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                 nets_to_check.append((net_id, net_info.name))
 
     if not quiet:
-        if net_patterns:
+        if net_patterns and component:
+            print(f"Checking {len(nets_to_check)} nets on {component} matching: {net_patterns}")
+        elif net_patterns:
             print(f"Checking {len(nets_to_check)} nets matching: {net_patterns}")
+        elif component:
+            print(f"Checking {len(nets_to_check)} nets on component {component}")
         else:
             print(f"Checking {len(nets_to_check)} routed nets")
 
@@ -466,6 +492,8 @@ if __name__ == "__main__":
     parser.add_argument('pcb', help='Input PCB file')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
                         help='Net name patterns to check (fnmatch wildcards supported, e.g., "*lvds*")')
+    parser.add_argument('--component', '-C',
+                        help='Check all nets connected to this component (e.g., U1)')
     parser.add_argument('--tolerance', '-t', type=float, default=0.02,
                         help='Minimum connection tolerance in mm (default: 0.02)')
     parser.add_argument('--quiet', '-q', action='store_true',
@@ -475,5 +503,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet, args.verbose)
+    issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet, args.verbose, args.component)
     sys.exit(1 if issues else 0)

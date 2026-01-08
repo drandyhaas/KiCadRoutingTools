@@ -65,8 +65,11 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "*lvds*
 # Check for DRC violations
 python check_drc.py kicad_files/output.kicad_pcb --clearance 0.1
 
-# Check connectivity
+# Check connectivity for specific nets
 python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
+
+# Check connectivity for all nets on a component
+python check_connected.py kicad_files/output.kicad_pcb --component U1
 ```
 
 ### 4. Full Integration Test
@@ -94,6 +97,9 @@ Route directly between pads without fanout (for boards with standard through-hol
 
 ```bash
 python test_kit_route.py
+
+# Quick mode (only /DDAT* nets)
+python test_kit_route.py --quick
 ```
 
 This script routes nets on the kit-dev-coldfire-xilinx board directly from pads, demonstrating routing without BGA fanout.

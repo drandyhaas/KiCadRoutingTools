@@ -12,7 +12,8 @@ from routing_state import RoutingState
 from routing_config import DiffPairNet
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
-    add_same_net_via_clearance, add_stub_proximity_costs, merge_track_proximity_costs,
+    add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
+    add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
 from routing_utils import get_stub_endpoints, add_route_to_pcb_data, calculate_route_length
@@ -125,6 +126,10 @@ def route_diff_pairs(
         # Add same-net via clearance for both P and N
         add_same_net_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
         add_same_net_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
+
+        # Add same-net pad drill hole-to-hole clearance for both P and N
+        add_same_net_pad_drill_via_clearance(obstacles, pcb_data, pair.p_net_id, config)
+        add_same_net_pad_drill_via_clearance(obstacles, pcb_data, pair.n_net_id, config)
 
         # Add the diff pair's own stub segments as obstacles to prevent the centerline
         # from routing through them

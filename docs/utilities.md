@@ -14,6 +14,8 @@ python check_drc.py output.kicad_pcb [OPTIONS]
 Options:
   --clearance FLOAT    Track-to-track clearance in mm (default: 0.1)
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
+  --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm (default: 0.2)
+  --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
   --nets PATTERN       Only check nets matching pattern
   --debug-lines        Output debug lines on User.7 showing violation locations
 ```
@@ -27,9 +29,25 @@ python check_drc.py routed.kicad_pcb
 # Check with tighter clearances
 python check_drc.py routed.kicad_pcb --clearance 0.15
 
+# Check with hole-to-hole clearance (for via drill spacing)
+python check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.2
+
 # Check specific nets only
 python check_drc.py routed.kicad_pcb --nets "*DATA*"
 ```
+
+### Checks Performed
+
+The DRC checker validates:
+
+1. **Track-to-track clearance** - Segments on the same layer maintain minimum clearance
+2. **Track-to-pad clearance** - Tracks maintain clearance from pads on other nets
+3. **Via-to-track clearance** - Vias maintain clearance from tracks on other nets
+4. **Via-to-via clearance** - Vias maintain clearance from each other
+5. **Pad-to-via clearance** - Vias maintain clearance from pads on other nets
+6. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
+7. **Board edge clearance** - Tracks and vias maintain clearance from the board outline
+8. **Same-net crossings** - Detects tracks crossing on the same layer within a net
 
 ### Clearance Margin
 
@@ -83,8 +101,11 @@ Verifies that all nets are fully connected after routing.
 python check_connected.py output.kicad_pcb [OPTIONS]
 
 Options:
-  --nets PATTERN    Only check nets matching pattern
-  --verbose         Show connection details
+  --nets PATTERN       Only check nets matching pattern
+  --component, -C REF  Check all nets connected to a component (e.g., U1)
+  --tolerance FLOAT    Connection tolerance in mm (default: 0.02)
+  --verbose            Show detailed break location info
+  --quiet              Only print summary line unless issues found
 ```
 
 ### Examples
@@ -96,7 +117,13 @@ python check_connected.py routed.kicad_pcb
 # Check specific nets
 python check_connected.py routed.kicad_pcb --nets "*lvds*"
 
-# Verbose output
+# Check all nets on a component
+python check_connected.py routed.kicad_pcb --component U102
+
+# Check specific patterns on a component
+python check_connected.py routed.kicad_pcb --component U1 --nets "*DATA*"
+
+# Verbose output with break locations
 python check_connected.py routed.kicad_pcb --verbose
 ```
 
@@ -364,8 +391,11 @@ python route.py input.kicad_pcb routed.kicad_pcb "Net-*" --ordering mps
 # Check for DRC violations
 python check_drc.py routed.kicad_pcb
 
-# Verify connectivity
+# Verify connectivity (all routed nets)
 python check_connected.py routed.kicad_pcb
+
+# Or verify connectivity for a specific component
+python check_connected.py routed.kicad_pcb --component U1
 ```
 
 ### BGA Differential Pair Flow

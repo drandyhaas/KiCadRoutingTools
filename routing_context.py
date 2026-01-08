@@ -8,7 +8,8 @@ like building obstacle maps and recording route results.
 from typing import List, Set, Dict, Optional, Tuple
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
-    add_same_net_via_clearance, add_stub_proximity_costs, merge_track_proximity_costs,
+    add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
+    add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
 from routing_utils import get_stub_endpoints, add_route_to_pcb_data
@@ -89,6 +90,10 @@ def build_diff_pair_obstacles(
     add_same_net_via_clearance(obstacles, pcb_data, p_net_id, config)
     add_same_net_via_clearance(obstacles, pcb_data, n_net_id, config)
 
+    # Add same-net pad drill hole-to-hole clearance
+    add_same_net_pad_drill_via_clearance(obstacles, pcb_data, p_net_id, config)
+    add_same_net_pad_drill_via_clearance(obstacles, pcb_data, n_net_id, config)
+
     # Add own stubs as obstacles if function provided
     if add_own_stubs_func:
         add_own_stubs_func(obstacles, pcb_data, p_net_id, n_net_id, config, extra_clearance)
@@ -163,6 +168,9 @@ def build_single_ended_obstacles(
 
     # Add same-net via clearance
     add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
+
+    # Add same-net pad drill hole-to-hole clearance
+    add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
 
     return obstacles, unrouted_stubs
 

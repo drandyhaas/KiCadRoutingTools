@@ -6,7 +6,8 @@ import sys
 import argparse
 import math
 import fnmatch
-from typing import List, Tuple, Set, Optional
+from collections import defaultdict
+from typing import List, Tuple, Set, Optional, Dict, Any
 from kicad_parser import parse_kicad_pcb, Segment, Via, Pad
 from geometry_utils import (
     point_to_segment_distance,
@@ -14,6 +15,135 @@ from geometry_utils import (
     segment_to_segment_closest_points,
 )
 from routing_utils import expand_pad_layers
+
+
+class SpatialIndex:
+    """Grid-based spatial index for fast proximity queries."""
+
+    def __init__(self, cell_size: float = 2.0):
+        """Initialize with given cell size in mm."""
+        self.cell_size = cell_size
+        self.inv_cell_size = 1.0 / cell_size
+        # Dict[layer][cell_key] -> list of (object, net_id)
+        self.cells_by_layer: Dict[str, Dict[Tuple[int, int], List[Tuple[Any, int]]]] = defaultdict(lambda: defaultdict(list))
+        # For objects that span all layers (vias)
+        self.all_layer_cells: Dict[Tuple[int, int], List[Tuple[Any, int]]] = defaultdict(list)
+
+    def _get_cell(self, x: float, y: float) -> Tuple[int, int]:
+        """Get cell coordinates for a point."""
+        return (int(x * self.inv_cell_size), int(y * self.inv_cell_size))
+
+    def _get_segment_cells(self, seg: Segment) -> Set[Tuple[int, int]]:
+        """Get all cells a segment passes through."""
+        cells = set()
+        x1, y1 = seg.start_x, seg.start_y
+        x2, y2 = seg.end_x, seg.end_y
+
+        # Add endpoint cells
+        cells.add(self._get_cell(x1, y1))
+        cells.add(self._get_cell(x2, y2))
+
+        # Walk along segment and add intermediate cells
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx*dx + dy*dy)
+        if length > 0:
+            # Sample every half cell size
+            steps = max(1, int(length * self.inv_cell_size * 2))
+            for i in range(1, steps):
+                t = i / steps
+                x = x1 + t * dx
+                y = y1 + t * dy
+                cells.add(self._get_cell(x, y))
+
+        return cells
+
+    def add_segment(self, seg: Segment, net_id: int):
+        """Add a segment to the index."""
+        cells = self._get_segment_cells(seg)
+        layer_cells = self.cells_by_layer[seg.layer]
+        for cell in cells:
+            layer_cells[cell].append((seg, net_id))
+
+    def add_via(self, via: Via, net_id: int):
+        """Add a via to the index (spans all layers)."""
+        cell = self._get_cell(via.x, via.y)
+        self.all_layer_cells[cell].append((via, net_id))
+
+    def add_pad(self, pad: Pad, net_id: int, expanded_layers: List[str]):
+        """Add a pad to the index."""
+        # Pad covers a rectangular area
+        half_x = pad.size_x / 2
+        half_y = pad.size_y / 2
+        min_cell = self._get_cell(pad.global_x - half_x, pad.global_y - half_y)
+        max_cell = self._get_cell(pad.global_x + half_x, pad.global_y + half_y)
+
+        for layer in expanded_layers:
+            if not layer.endswith('.Cu'):
+                continue
+            layer_cells = self.cells_by_layer[layer]
+            for cx in range(min_cell[0], max_cell[0] + 1):
+                for cy in range(min_cell[1], max_cell[1] + 1):
+                    layer_cells[(cx, cy)].append((pad, net_id))
+
+    def get_nearby_segments(self, seg: Segment) -> List[Tuple[Segment, int]]:
+        """Get segments that might be near the given segment (same layer, nearby cells)."""
+        cells = self._get_segment_cells(seg)
+        layer_cells = self.cells_by_layer[seg.layer]
+
+        seen = set()
+        result = []
+        for cell in cells:
+            for obj, net_id in layer_cells.get(cell, []):
+                if isinstance(obj, Segment) and id(obj) not in seen:
+                    seen.add(id(obj))
+                    result.append((obj, net_id))
+        return result
+
+    def get_nearby_for_via(self, via: Via, layer: str) -> List[Tuple[Any, int]]:
+        """Get objects near a via on a specific layer."""
+        cell = self._get_cell(via.x, via.y)
+        # Check neighboring cells too (via has size)
+        result = []
+        seen = set()
+        layer_cells = self.cells_by_layer[layer]
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor = (cell[0] + dx, cell[1] + dy)
+                for obj, net_id in layer_cells.get(neighbor, []):
+                    if id(obj) not in seen:
+                        seen.add(id(obj))
+                        result.append((obj, net_id))
+        return result
+
+    def get_nearby_vias(self, via: Via) -> List[Tuple[Via, int]]:
+        """Get vias near the given via."""
+        cell = self._get_cell(via.x, via.y)
+        result = []
+        seen = set()
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor = (cell[0] + dx, cell[1] + dy)
+                for obj, net_id in self.all_layer_cells.get(neighbor, []):
+                    if isinstance(obj, Via) and id(obj) not in seen:
+                        seen.add(id(obj))
+                        result.append((obj, net_id))
+        return result
+
+    def get_nearby_pads(self, x: float, y: float, layer: str) -> List[Tuple[Pad, int]]:
+        """Get pads near a point on a specific layer."""
+        cell = self._get_cell(x, y)
+        result = []
+        seen = set()
+        layer_cells = self.cells_by_layer[layer]
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                neighbor = (cell[0] + dx, cell[1] + dy)
+                for obj, net_id in layer_cells.get(neighbor, []):
+                    if isinstance(obj, Pad) and id(obj) not in seen:
+                        seen.add(id(obj))
+                        result.append((obj, net_id))
+        return result
 
 
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:
@@ -275,6 +405,164 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     return False, 0.0
 
 
+def check_via_drill_overlap(via1: Via, via2: Via, hole_to_hole_clearance: float,
+                            clearance_margin: float = 0.10) -> Tuple[bool, float]:
+    """Check if two via drill holes violate hole-to-hole clearance.
+
+    Args:
+        via1, via2: Via objects with drill attribute
+        hole_to_hole_clearance: Minimum clearance between drill hole edges in mm
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+
+    Returns:
+        (has_violation, overlap_mm)
+    """
+    # Required distance between drill hole centers
+    required_dist = via1.drill / 2 + via2.drill / 2 + hole_to_hole_clearance
+    actual_dist = math.sqrt((via1.x - via2.x)**2 + (via1.y - via2.y)**2)
+    overlap = required_dist - actual_dist
+
+    tolerance = hole_to_hole_clearance * clearance_margin
+    if overlap > tolerance:
+        return True, overlap
+    return False, 0.0
+
+
+def check_pad_drill_via_overlap(pad: Pad, via: Via, hole_to_hole_clearance: float,
+                                clearance_margin: float = 0.10) -> Tuple[bool, float]:
+    """Check if a via drill hole is too close to a pad's drill hole.
+
+    Args:
+        pad: Pad object with drill attribute (through-hole pad)
+        via: Via to check against
+        hole_to_hole_clearance: Minimum clearance between drill hole edges in mm
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+
+    Returns:
+        (has_violation, overlap_mm)
+    """
+    if pad.drill <= 0:
+        return False, 0.0  # SMD pad, no drill
+
+    # Required distance between drill hole centers
+    required_dist = pad.drill / 2 + via.drill / 2 + hole_to_hole_clearance
+    actual_dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
+    overlap = required_dist - actual_dist
+
+    tolerance = hole_to_hole_clearance * clearance_margin
+    if overlap > tolerance:
+        return True, overlap
+    return False, 0.0
+
+
+def check_segment_board_edge(seg: Segment, board_bounds: Tuple[float, float, float, float],
+                             clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float, str]:
+    """Check if a segment is too close to the board edge.
+
+    Args:
+        seg: Segment to check
+        board_bounds: (min_x, min_y, max_x, max_y) of the board
+        clearance: Minimum clearance from board edge in mm
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+
+    Returns:
+        (has_violation, overlap_mm, edge_name)
+    """
+    min_x, min_y, max_x, max_y = board_bounds
+    half_width = seg.width / 2
+    required_clearance = clearance + half_width
+
+    # Check all segment points against all edges
+    for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
+        # Left edge
+        dist_left = x - min_x
+        if dist_left < required_clearance:
+            overlap = required_clearance - dist_left
+            tolerance = clearance * clearance_margin
+            if overlap > tolerance:
+                return True, overlap, "left"
+
+        # Right edge
+        dist_right = max_x - x
+        if dist_right < required_clearance:
+            overlap = required_clearance - dist_right
+            tolerance = clearance * clearance_margin
+            if overlap > tolerance:
+                return True, overlap, "right"
+
+        # Bottom edge
+        dist_bottom = y - min_y
+        if dist_bottom < required_clearance:
+            overlap = required_clearance - dist_bottom
+            tolerance = clearance * clearance_margin
+            if overlap > tolerance:
+                return True, overlap, "bottom"
+
+        # Top edge
+        dist_top = max_y - y
+        if dist_top < required_clearance:
+            overlap = required_clearance - dist_top
+            tolerance = clearance * clearance_margin
+            if overlap > tolerance:
+                return True, overlap, "top"
+
+    return False, 0.0, ""
+
+
+def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, float],
+                         clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float, str]:
+    """Check if a via is too close to the board edge.
+
+    Args:
+        via: Via to check
+        board_bounds: (min_x, min_y, max_x, max_y) of the board
+        clearance: Minimum clearance from board edge in mm
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+
+    Returns:
+        (has_violation, overlap_mm, edge_name)
+    """
+    min_x, min_y, max_x, max_y = board_bounds
+    half_size = via.size / 2
+    required_clearance = clearance + half_size
+
+    x, y = via.x, via.y
+
+    # Left edge
+    dist_left = x - min_x
+    if dist_left < required_clearance:
+        overlap = required_clearance - dist_left
+        tolerance = clearance * clearance_margin
+        if overlap > tolerance:
+            return True, overlap, "left"
+
+    # Right edge
+    dist_right = max_x - x
+    if dist_right < required_clearance:
+        overlap = required_clearance - dist_right
+        tolerance = clearance * clearance_margin
+        if overlap > tolerance:
+            return True, overlap, "right"
+
+    # Bottom edge
+    dist_bottom = y - min_y
+    if dist_bottom < required_clearance:
+        overlap = required_clearance - dist_bottom
+        tolerance = clearance * clearance_margin
+        if overlap > tolerance:
+            return True, overlap, "bottom"
+
+    # Top edge
+    dist_top = max_y - y
+    if dist_top < required_clearance:
+        overlap = required_clearance - dist_top
+        tolerance = clearance * clearance_margin
+        if overlap > tolerance:
+            return True, overlap, "top"
+
+    return False, 0.0, ""
+
+
 def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, layer: str = "User.7"):
     """Write debug lines to PCB file showing violation locations.
 
@@ -328,7 +616,8 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
 
 
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
-            debug_output: bool = False, quiet: bool = False):
+            debug_output: bool = False, quiet: bool = False,
+            hole_to_hole_clearance: float = 0.2, board_edge_clearance: float = 0.0):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -338,7 +627,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                      If provided, only checks involving at least one matching net are reported.
         debug_output: If True, write debug lines to User.7 layer showing violation locations
         quiet: If True, only print a summary line unless there are violations
+        hole_to_hole_clearance: Minimum clearance between drill hole edges in mm (default: 0.2)
+        board_edge_clearance: Minimum clearance from board edge in mm (0 = use clearance)
     """
+    # Use track clearance for board edge if not specified
+    effective_board_edge_clearance = board_edge_clearance if board_edge_clearance > 0 else clearance
     if quiet and net_patterns:
         # Print a brief summary line in quiet mode
         print(f"Checking {', '.join(net_patterns)} for DRC...", end=" ", flush=True)
@@ -368,13 +661,32 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if net_patterns and not quiet:
         print(f"Filtering to nets matching: {net_patterns}")
 
-    # Group segments and vias by net
-    segments_by_net = {}
-    for seg in pcb_data.segments:
-        if seg.net_id not in segments_by_net:
-            segments_by_net[seg.net_id] = []
-        segments_by_net[seg.net_id].append(seg)
+    # Get routing layers for pad layer expansion
+    routing_layers = list(set(seg.layer for seg in pcb_data.segments if seg.layer.endswith('.Cu')))
+    if not routing_layers:
+        routing_layers = ['F.Cu', 'B.Cu']  # Fallback
 
+    # Build spatial index for fast proximity queries
+    if not quiet:
+        print("Building spatial index...")
+    spatial_idx = SpatialIndex(cell_size=2.0)  # 2mm cells
+
+    # Add all segments to spatial index
+    for seg in pcb_data.segments:
+        spatial_idx.add_segment(seg, seg.net_id)
+
+    # Add all vias to spatial index
+    for via in pcb_data.vias:
+        spatial_idx.add_via(via, via.net_id)
+
+    # Add all pads to spatial index
+    pads_by_net = pcb_data.pads_by_net
+    for net_id, pads in pads_by_net.items():
+        for pad in pads:
+            expanded_layers = expand_pad_layers(pad.layers, routing_layers)
+            spatial_idx.add_pad(pad, net_id, expanded_layers)
+
+    # Group vias by net (still needed for some checks)
     vias_by_net = {}
     for via in pcb_data.vias:
         if via.net_id not in vias_by_net:
@@ -383,256 +695,311 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     violations = []
 
-    # Check segment-to-segment violations (different nets only)
+    # Pre-compute matching nets for filtering
+    if net_patterns:
+        matching_net_ids = set(net_id for net_id in pcb_data.nets.keys() if net_matches_filter(net_id))
+        if not quiet:
+            print(f"Filtering to {len(matching_net_ids)} matching nets")
+    else:
+        matching_net_ids = None
+
+    # Check segment-to-segment violations using spatial index
     if not quiet:
         print("\nChecking segment-to-segment clearances...")
-    net_ids = list(segments_by_net.keys())
 
-    # If filtering, only check pairs where at least one net matches
-    if net_patterns:
-        matching_seg_nets = [n for n in net_ids if net_matches_filter(n)]
-        if not quiet:
-            print(f"  Found {len(matching_seg_nets)} matching segment nets out of {len(net_ids)}")
-    else:
-        matching_seg_nets = None
+    checked_pairs = set()  # Track checked segment pairs to avoid duplicates
+    for seg1 in pcb_data.segments:
+        net1 = seg1.net_id
+        net1_matches = matching_net_ids is None or net1 in matching_net_ids
 
-    for i, net1 in enumerate(net_ids):
-        net1_matches = matching_seg_nets is None or net1 in matching_seg_nets
-        for net2 in net_ids[i+1:]:
+        # Get nearby segments from spatial index (same layer only)
+        for seg2, net2 in spatial_idx.get_nearby_segments(seg1):
             if net1 == net2:
-                continue
-            # Skip if neither net matches the filter
-            net2_matches = matching_seg_nets is None or net2 in matching_seg_nets
+                continue  # Same net
+            if seg1 is seg2:
+                continue  # Same segment
+
+            # Skip if neither net matches filter
+            net2_matches = matching_net_ids is None or net2 in matching_net_ids
             if not net1_matches and not net2_matches:
                 continue
-            for seg1 in segments_by_net[net1]:
-                for seg2 in segments_by_net[net2]:
-                    has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance)
-                    if has_violation:
-                        net1_name = pcb_data.nets.get(net1, None)
-                        net2_name = pcb_data.nets.get(net2, None)
-                        net1_str = net1_name.name if net1_name else f"net_{net1}"
-                        net2_str = net2_name.name if net2_name else f"net_{net2}"
-                        violations.append({
-                            'type': 'segment-segment',
-                            'net1': net1_str,
-                            'net2': net2_str,
-                            'layer': seg1.layer,
-                            'overlap_mm': overlap,
-                            'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
-                            'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
-                            'closest_pt1': pt1,
-                            'closest_pt2': pt2,
-                        })
-                    # Also check for segment crossings (different nets)
-                    crosses, cross_point = segments_cross(seg1, seg2)
-                    if crosses:
-                        net1_name = pcb_data.nets.get(net1, None)
-                        net2_name = pcb_data.nets.get(net2, None)
-                        net1_str = net1_name.name if net1_name else f"net_{net1}"
-                        net2_str = net2_name.name if net2_name else f"net_{net2}"
-                        violations.append({
-                            'type': 'segment-crossing',
-                            'net1': net1_str,
-                            'net2': net2_str,
-                            'layer': seg1.layer,
-                            'cross_point': cross_point,
-                            'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
-                            'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
-                        })
 
-    # Check for same-net segment crossings (self-intersections)
+            # Avoid checking same pair twice
+            pair_key = (min(id(seg1), id(seg2)), max(id(seg1), id(seg2)))
+            if pair_key in checked_pairs:
+                continue
+            checked_pairs.add(pair_key)
+
+            has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance)
+            if has_violation:
+                net1_name = pcb_data.nets.get(net1, None)
+                net2_name = pcb_data.nets.get(net2, None)
+                net1_str = net1_name.name if net1_name else f"net_{net1}"
+                net2_str = net2_name.name if net2_name else f"net_{net2}"
+                violations.append({
+                    'type': 'segment-segment',
+                    'net1': net1_str,
+                    'net2': net2_str,
+                    'layer': seg1.layer,
+                    'overlap_mm': overlap,
+                    'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
+                    'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
+                    'closest_pt1': pt1,
+                    'closest_pt2': pt2,
+                })
+
+            # Also check for segment crossings (different nets)
+            crosses, cross_point = segments_cross(seg1, seg2)
+            if crosses:
+                net1_name = pcb_data.nets.get(net1, None)
+                net2_name = pcb_data.nets.get(net2, None)
+                net1_str = net1_name.name if net1_name else f"net_{net1}"
+                net2_str = net2_name.name if net2_name else f"net_{net2}"
+                violations.append({
+                    'type': 'segment-crossing',
+                    'net1': net1_str,
+                    'net2': net2_str,
+                    'layer': seg1.layer,
+                    'cross_point': cross_point,
+                    'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
+                    'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
+                })
+
+    # Check for same-net segment crossings using spatial index
     if not quiet:
         print("Checking for same-net segment crossings...")
-    for net_id in net_ids:
-        if matching_seg_nets is not None and net_id not in matching_seg_nets:
+    same_net_checked = set()
+    for seg1 in pcb_data.segments:
+        net_id = seg1.net_id
+        if matching_net_ids is not None and net_id not in matching_net_ids:
             continue
-        segs = segments_by_net[net_id]
-        for i in range(len(segs)):
-            for j in range(i + 1, len(segs)):
-                seg1, seg2 = segs[i], segs[j]
-                crosses, cross_point = segments_cross(seg1, seg2)
-                if crosses:
-                    net_name = pcb_data.nets.get(net_id, None)
-                    net_str = net_name.name if net_name else f"net_{net_id}"
-                    violations.append({
-                        'type': 'segment-crossing-same-net',
-                        'net1': net_str,
-                        'net2': net_str,
-                        'layer': seg1.layer,
-                        'cross_point': cross_point,
-                        'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
-                        'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
-                    })
+        for seg2, net2 in spatial_idx.get_nearby_segments(seg1):
+            if net2 != net_id:
+                continue  # Different net
+            if seg1 is seg2:
+                continue
+            pair_key = (min(id(seg1), id(seg2)), max(id(seg1), id(seg2)))
+            if pair_key in same_net_checked:
+                continue
+            same_net_checked.add(pair_key)
+            crosses, cross_point = segments_cross(seg1, seg2)
+            if crosses:
+                net_name = pcb_data.nets.get(net_id, None)
+                net_str = net_name.name if net_name else f"net_{net_id}"
+                violations.append({
+                    'type': 'segment-crossing-same-net',
+                    'net1': net_str,
+                    'net2': net_str,
+                    'layer': seg1.layer,
+                    'cross_point': cross_point,
+                    'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
+                    'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
+                })
 
-    # Check via-to-segment violations (different nets only)
+    # Check via-to-segment violations using spatial index
     if not quiet:
         print("Checking via-to-segment clearances...")
-    via_net_ids = list(vias_by_net.keys())
+    for via in pcb_data.vias:
+        via_net = via.net_id
+        via_net_matches = matching_net_ids is None or via_net in matching_net_ids
 
-    # Pre-compute matching via nets
-    if net_patterns:
-        matching_via_nets = set(n for n in via_net_ids if net_matches_filter(n))
-        matching_seg_net_set = set(matching_seg_nets) if matching_seg_nets else set()
-        if not quiet:
-            print(f"  Found {len(matching_via_nets)} matching via nets out of {len(via_net_ids)}")
-    else:
-        matching_via_nets = None
-        matching_seg_net_set = None
+        # Check against segments on each copper layer (vias go through all layers)
+        for layer in routing_layers:
+            for obj, seg_net in spatial_idx.get_nearby_for_via(via, layer):
+                if not isinstance(obj, Segment):
+                    continue
+                seg = obj
+                if via_net == seg_net:
+                    continue  # Same net
 
-    for via_net in via_net_ids:
-        via_net_matches = matching_via_nets is None or via_net in matching_via_nets
-        for seg_net in net_ids:
-            if via_net == seg_net:
-                continue
-            # Skip if neither net matches
-            seg_net_matches = matching_seg_net_set is None or seg_net in matching_seg_net_set
-            if not via_net_matches and not seg_net_matches:
-                continue
-            for via in vias_by_net[via_net]:
-                for seg in segments_by_net.get(seg_net, []):
-                    has_violation, overlap = check_via_segment_overlap(via, seg, clearance)
-                    if has_violation:
-                        via_net_name = pcb_data.nets.get(via_net, None)
-                        seg_net_name = pcb_data.nets.get(seg_net, None)
-                        via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
-                        seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                        violations.append({
-                            'type': 'via-segment',
-                            'net1': via_net_str,
-                            'net2': seg_net_str,
-                            'layer': seg.layer,
-                            'overlap_mm': overlap,
-                            'via_loc': (via.x, via.y),
-                            'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                        })
+                seg_net_matches = matching_net_ids is None or seg_net in matching_net_ids
+                if not via_net_matches and not seg_net_matches:
+                    continue
 
-    # Check via-to-via violations (all nets, including same-net)
+                has_violation, overlap = check_via_segment_overlap(via, seg, clearance)
+                if has_violation:
+                    via_net_name = pcb_data.nets.get(via_net, None)
+                    seg_net_name = pcb_data.nets.get(seg_net, None)
+                    via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
+                    seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
+                    violations.append({
+                        'type': 'via-segment',
+                        'net1': via_net_str,
+                        'net2': seg_net_str,
+                        'layer': seg.layer,
+                        'overlap_mm': overlap,
+                        'via_loc': (via.x, via.y),
+                        'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                    })
+
+    # Check via-to-via violations using spatial index
     if not quiet:
         print("Checking via-to-via clearances...")
-    for i, net1 in enumerate(via_net_ids):
-        net1_matches = matching_via_nets is None or net1 in matching_via_nets
-        for net2 in via_net_ids[i+1:]:
-            # Skip if neither net matches
-            net2_matches = matching_via_nets is None or net2 in matching_via_nets
+    via_via_checked = set()
+    for via1 in pcb_data.vias:
+        net1 = via1.net_id
+        net1_matches = matching_net_ids is None or net1 in matching_net_ids
+
+        for via2, net2 in spatial_idx.get_nearby_vias(via1):
+            if via1 is via2:
+                continue
+
+            net2_matches = matching_net_ids is None or net2 in matching_net_ids
             if not net1_matches and not net2_matches:
                 continue
-            for via1 in vias_by_net[net1]:
-                for via2 in vias_by_net[net2]:
-                    # Skip if same via (can happen with same-net checking)
-                    if via1 is via2:
-                        continue
-                    has_violation, overlap = check_via_via_overlap(via1, via2, clearance)
-                    if has_violation:
-                        net1_name = pcb_data.nets.get(net1, None)
-                        net2_name = pcb_data.nets.get(net2, None)
-                        net1_str = net1_name.name if net1_name else f"net_{net1}"
-                        net2_str = net2_name.name if net2_name else f"net_{net2}"
-                        violations.append({
-                            'type': 'via-via' if net1 != net2 else 'via-via-same-net',
-                            'net1': net1_str,
-                            'net2': net2_str,
-                            'overlap_mm': overlap,
-                            'loc1': (via1.x, via1.y),
-                            'loc2': (via2.x, via2.y),
-                        })
-        # Also check same-net via pairs (only if this net matches filter)
-        if net1_matches and net1 in vias_by_net:
-            vias_list = vias_by_net[net1]
-            for j in range(len(vias_list)):
-                for k in range(j + 1, len(vias_list)):
-                    via1 = vias_list[j]
-                    via2 = vias_list[k]
-                    has_violation, overlap = check_via_via_overlap(via1, via2, clearance)
-                    if has_violation:
-                        net1_name = pcb_data.nets.get(net1, None)
-                        net1_str = net1_name.name if net1_name else f"net_{net1}"
-                        violations.append({
-                            'type': 'via-via-same-net',
-                            'net1': net1_str,
-                            'net2': net1_str,
-                            'overlap_mm': overlap,
-                            'loc1': (via1.x, via1.y),
-                            'loc2': (via2.x, via2.y),
-                        })
 
-    # Get routing layers for pad layer expansion
-    routing_layers = list(set(seg.layer for seg in pcb_data.segments if seg.layer.endswith('.Cu')))
-    if not routing_layers:
-        routing_layers = ['F.Cu', 'B.Cu']  # Fallback
+            pair_key = (min(id(via1), id(via2)), max(id(via1), id(via2)))
+            if pair_key in via_via_checked:
+                continue
+            via_via_checked.add(pair_key)
 
-    # Check pad-to-segment violations (different nets only)
+            has_violation, overlap = check_via_via_overlap(via1, via2, clearance)
+            if has_violation:
+                net1_name = pcb_data.nets.get(net1, None)
+                net2_name = pcb_data.nets.get(net2, None)
+                net1_str = net1_name.name if net1_name else f"net_{net1}"
+                net2_str = net2_name.name if net2_name else f"net_{net2}"
+                violations.append({
+                    'type': 'via-via' if net1 != net2 else 'via-via-same-net',
+                    'net1': net1_str,
+                    'net2': net2_str,
+                    'overlap_mm': overlap,
+                    'loc1': (via1.x, via1.y),
+                    'loc2': (via2.x, via2.y),
+                })
+
+    # Check pad-to-segment violations using spatial index
     if not quiet:
         print("Checking pad-to-segment clearances...")
 
-    # Group pads by net
-    pads_by_net = pcb_data.pads_by_net
-
-    # Pre-compute matching pad nets
     pad_net_ids = list(pads_by_net.keys())
-    if net_patterns:
-        matching_pad_nets = set(n for n in pad_net_ids if net_matches_filter(n))
-        if not quiet:
-            print(f"  Found {len(matching_pad_nets)} matching pad nets out of {len(pad_net_ids)}")
-    else:
-        matching_pad_nets = None
+    for seg in pcb_data.segments:
+        seg_net = seg.net_id
+        seg_net_matches = matching_net_ids is None or seg_net in matching_net_ids
 
-    for pad_net in pad_net_ids:
-        pad_net_matches = matching_pad_nets is None or pad_net in matching_pad_nets
-        for seg_net in net_ids:
-            if pad_net == seg_net:
-                continue  # Same net - skip
-            # Skip if neither net matches
-            seg_net_matches = matching_seg_net_set is None or seg_net in matching_seg_net_set
-            if not pad_net_matches and not seg_net_matches:
-                continue
-            for pad in pads_by_net.get(pad_net, []):
-                for seg in segments_by_net.get(seg_net, []):
-                    has_violation, overlap, closest_pt = check_pad_segment_overlap(
-                        pad, seg, clearance, routing_layers
-                    )
-                    if has_violation:
-                        pad_net_name = pcb_data.nets.get(pad_net, None)
-                        seg_net_name = pcb_data.nets.get(seg_net, None)
-                        pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
-                        seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                        violations.append({
-                            'type': 'pad-segment',
-                            'net1': pad_net_str,
-                            'net2': seg_net_str,
-                            'layer': seg.layer,
-                            'overlap_mm': overlap,
-                            'pad_loc': (pad.global_x, pad.global_y),
-                            'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
-                            'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                            'closest_pt': closest_pt,
-                        })
+        # Get pads near the segment endpoints
+        for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
+            for pad, pad_net in spatial_idx.get_nearby_pads(x, y, seg.layer):
+                if pad_net == seg_net:
+                    continue  # Same net
 
-    # Check pad-to-via violations (different nets only)
+                pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
+                if not seg_net_matches and not pad_net_matches:
+                    continue
+
+                has_violation, overlap, closest_pt = check_pad_segment_overlap(
+                    pad, seg, clearance, routing_layers
+                )
+                if has_violation:
+                    pad_net_name = pcb_data.nets.get(pad_net, None)
+                    seg_net_name = pcb_data.nets.get(seg_net, None)
+                    pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
+                    seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
+                    violations.append({
+                        'type': 'pad-segment',
+                        'net1': pad_net_str,
+                        'net2': seg_net_str,
+                        'layer': seg.layer,
+                        'overlap_mm': overlap,
+                        'pad_loc': (pad.global_x, pad.global_y),
+                        'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                        'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                        'closest_pt': closest_pt,
+                    })
+
+    # Check pad-to-via violations using spatial index
     if not quiet:
         print("Checking pad-to-via clearances...")
 
-    for pad_net in pad_net_ids:
-        pad_net_matches = matching_pad_nets is None or pad_net in matching_pad_nets
-        for via_net in via_net_ids:
-            if pad_net == via_net:
-                continue  # Same net - skip
-            # Skip if neither net matches
-            via_net_matches = matching_via_nets is None or via_net in matching_via_nets
-            if not pad_net_matches and not via_net_matches:
-                continue
-            for pad in pads_by_net.get(pad_net, []):
-                for via in vias_by_net.get(via_net, []):
-                    has_violation, overlap = check_pad_via_overlap(
-                        pad, via, clearance, routing_layers
-                    )
+    for via in pcb_data.vias:
+        via_net = via.net_id
+        via_net_matches = matching_net_ids is None or via_net in matching_net_ids
+
+        for layer in routing_layers:
+            for pad, pad_net in spatial_idx.get_nearby_pads(via.x, via.y, layer):
+                if pad_net == via_net:
+                    continue  # Same net
+
+                pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
+                if not via_net_matches and not pad_net_matches:
+                    continue
+
+                has_violation, overlap = check_pad_via_overlap(
+                    pad, via, clearance, routing_layers
+                )
+                if has_violation:
+                    pad_net_name = pcb_data.nets.get(pad_net, None)
+                    via_net_name = pcb_data.nets.get(via_net, None)
+                    pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
+                    via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
+                    violations.append({
+                        'type': 'pad-via',
+                        'net1': pad_net_str,
+                        'net2': via_net_str,
+                        'overlap_mm': overlap,
+                        'pad_loc': (pad.global_x, pad.global_y),
+                        'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                        'via_loc': (via.x, via.y),
+                    })
+
+    # Dummy variables for compatibility with remaining code
+    via_net_ids = list(vias_by_net.keys())
+    matching_via_nets = matching_net_ids
+    matching_seg_net_set = matching_net_ids
+    matching_pad_nets = matching_net_ids
+
+    # Check hole-to-hole clearance (via drill to via drill)
+    if hole_to_hole_clearance > 0:
+        if not quiet:
+            print("Checking via drill hole-to-hole clearances...")
+        all_vias = list(pcb_data.vias)
+        for i in range(len(all_vias)):
+            via1 = all_vias[i]
+            via1_matches = matching_via_nets is None or via1.net_id in matching_via_nets
+            for j in range(i + 1, len(all_vias)):
+                via2 = all_vias[j]
+                # Skip if neither net matches filter
+                via2_matches = matching_via_nets is None or via2.net_id in matching_via_nets
+                if not via1_matches and not via2_matches:
+                    continue
+                has_violation, overlap = check_via_drill_overlap(via1, via2, hole_to_hole_clearance)
+                if has_violation:
+                    net1_name = pcb_data.nets.get(via1.net_id, None)
+                    net2_name = pcb_data.nets.get(via2.net_id, None)
+                    net1_str = net1_name.name if net1_name else f"net_{via1.net_id}"
+                    net2_str = net2_name.name if net2_name else f"net_{via2.net_id}"
+                    violations.append({
+                        'type': 'via-drill-hole',
+                        'net1': net1_str,
+                        'net2': net2_str,
+                        'overlap_mm': overlap,
+                        'loc1': (via1.x, via1.y),
+                        'loc2': (via2.x, via2.y),
+                    })
+
+        # Check via drill to pad drill (through-hole pads)
+        # NOTE: Hole-to-hole clearance applies regardless of net (manufacturing constraint)
+        if not quiet:
+            print("Checking via drill to pad drill clearances...")
+        for via in all_vias:
+            via_matches = matching_via_nets is None or via.net_id in matching_via_nets
+            for pad_net, pads in pads_by_net.items():
+                # Don't skip same-net - hole clearance is a manufacturing constraint
+                pad_net_matches = matching_pad_nets is None or pad_net in matching_pad_nets
+                if not via_matches and not pad_net_matches:
+                    continue
+                for pad in pads:
+                    if pad.drill <= 0:
+                        continue  # SMD pad
+                    has_violation, overlap = check_pad_drill_via_overlap(pad, via, hole_to_hole_clearance)
                     if has_violation:
+                        via_net_name = pcb_data.nets.get(via.net_id, None)
                         pad_net_name = pcb_data.nets.get(pad_net, None)
-                        via_net_name = pcb_data.nets.get(via_net, None)
+                        via_net_str = via_net_name.name if via_net_name else f"net_{via.net_id}"
                         pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
-                        via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
+                        same_net = pad_net == via.net_id
                         violations.append({
-                            'type': 'pad-via',
+                            'type': 'pad-drill-via-drill-same-net' if same_net else 'pad-drill-via-drill',
                             'net1': pad_net_str,
                             'net2': via_net_str,
                             'overlap_mm': overlap,
@@ -640,6 +1007,47 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
                             'via_loc': (via.x, via.y),
                         })
+
+    # Check board edge clearances
+    board_bounds = pcb_data.board_info.board_bounds
+    if board_bounds and effective_board_edge_clearance > 0:
+        if not quiet:
+            print("Checking board edge clearances...")
+
+        # Check segments
+        for seg in pcb_data.segments:
+            seg_matches = matching_seg_net_set is None or seg.net_id in matching_seg_net_set
+            if matching_seg_net_set is not None and not seg_matches:
+                continue
+            has_violation, overlap, edge = check_segment_board_edge(seg, board_bounds, effective_board_edge_clearance)
+            if has_violation:
+                net_name = pcb_data.nets.get(seg.net_id, None)
+                net_str = net_name.name if net_name else f"net_{seg.net_id}"
+                violations.append({
+                    'type': 'segment-board-edge',
+                    'net1': net_str,
+                    'edge': edge,
+                    'layer': seg.layer,
+                    'overlap_mm': overlap,
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                })
+
+        # Check vias
+        for via in pcb_data.vias:
+            via_matches = matching_via_nets is None or via.net_id in matching_via_nets
+            if matching_via_nets is not None and not via_matches:
+                continue
+            has_violation, overlap, edge = check_via_board_edge(via, board_bounds, effective_board_edge_clearance)
+            if has_violation:
+                net_name = pcb_data.nets.get(via.net_id, None)
+                net_str = net_name.name if net_name else f"net_{via.net_id}"
+                violations.append({
+                    'type': 'via-board-edge',
+                    'net1': net_str,
+                    'edge': edge,
+                    'overlap_mm': overlap,
+                    'via_loc': (via.x, via.y),
+                })
 
     # Report violations
     if quiet:
@@ -697,6 +1105,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'via-drill-hole':
+                        print(f"  Via:{v['net1']} <-> Via:{v['net2']} (drill hole clearance)")
+                        print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Via1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})")
+                        print(f"    Via2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})")
+                    elif vtype in ('pad-drill-via-drill', 'pad-drill-via-drill-same-net'):
+                        same_net_msg = " [SAME NET]" if vtype.endswith('same-net') else ""
+                        print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Via:{v['net2']} (drill hole clearance){same_net_msg}")
+                        print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'segment-board-edge':
+                        print(f"  {v['net1']} too close to {v['edge']} board edge")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'via-board-edge':
+                        print(f"  Via:{v['net1']} too close to {v['edge']} board edge")
+                        print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
 
                 if len(vlist) > 20:
                     print(f"  ... and {len(vlist) - 20} more")
@@ -717,6 +1144,10 @@ if __name__ == "__main__":
     parser.add_argument('pcb', help='Input PCB file')
     parser.add_argument('--clearance', '-c', type=float, default=0.1,
                         help='Minimum clearance in mm (default: 0.1)')
+    parser.add_argument('--hole-to-hole-clearance', type=float, default=0.2,
+                        help='Minimum drill hole edge-to-edge clearance in mm (default: 0.2)')
+    parser.add_argument('--board-edge-clearance', type=float, default=0.0,
+                        help='Minimum clearance from board edge in mm (0 = use --clearance value)')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
                         help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
     parser.add_argument('--debug-lines', '-d', action='store_true',
@@ -726,5 +1157,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet)
+    violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
+                         args.hole_to_hole_clearance, args.board_edge_clearance)
     sys.exit(1 if violations else 0)
