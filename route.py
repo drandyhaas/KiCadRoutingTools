@@ -1195,7 +1195,8 @@ Differential pair routing:
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", help="Output KiCad PCB file")
-    parser.add_argument("net_patterns", nargs="+", help="Net names or wildcard patterns to route")
+    parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (optional if --component used)")
+    parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1)")
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
                         default="mps",
@@ -1330,7 +1331,43 @@ Differential pair routing:
     # Load PCB to expand wildcards
     print(f"Loading {args.input_file} to expand net patterns...")
     pcb_data = parse_kicad_pcb(args.input_file)
-    net_names = expand_net_patterns(pcb_data, args.net_patterns)
+
+    # Get nets from patterns and/or component
+    if args.net_patterns:
+        net_names = expand_net_patterns(pcb_data, args.net_patterns)
+    elif args.component:
+        net_names = []  # Will be populated by component filter below
+    else:
+        print("Error: Must specify net patterns or --component")
+        sys.exit(1)
+
+    # Filter by component if specified
+    if args.component:
+        component_nets = set()
+        for net_id, pads in pcb_data.pads_by_net.items():
+            for pad in pads:
+                if pad.component_ref == args.component:
+                    net_info = pcb_data.nets.get(net_id)
+                    if net_info and net_info.name:
+                        component_nets.add(net_info.name)
+                    break
+        if args.net_patterns:
+            # Intersect with pattern-matched nets
+            net_names = [n for n in net_names if n in component_nets]
+        else:
+            # Use all component nets (excluding power/ground)
+            exclude_patterns = ['*GND*', '*VCC*', '*VDD*', '+*V', '-*V', '']
+            filtered = []
+            for name in component_nets:
+                excluded = False
+                for pattern in exclude_patterns:
+                    if pattern and fnmatch.fnmatch(name.upper(), pattern.upper()):
+                        excluded = True
+                        break
+                if not excluded:
+                    filtered.append(name)
+            net_names = sorted(filtered)
+        print(f"Filtered to {len(net_names)} nets on component {args.component}")
 
     if not net_names:
         print("No nets matched the given patterns!")

@@ -23,7 +23,8 @@ def run(cmd: str) -> None:
 
 def main():
     # Route DDAT nets from pads (no fanout needed)
-    run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb "/DDAT*" --track-width 0.2 --clearance 0.15')
+    #run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb "/DDAT*" --track-width 0.2 --clearance 0.15 --via-size 0.5 --via-drill 0.4')
+    run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb --component U102 --track-width 0.2 --clearance 0.2 --via-size 0.5 --via-drill 0.4')
 
     # Check for DRC errors
     run('python3 check_drc.py kicad_files/kit-out.kicad_pcb --clearance 0.15 --nets "/DDAT*"')

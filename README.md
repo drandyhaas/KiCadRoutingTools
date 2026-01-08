@@ -46,6 +46,12 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U
 # Route with wildcard patterns
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-DATA_*)"
 
+# Route all nets on a component (excludes GND/VCC/VDD)
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --component U1
+
+# Route specific patterns on a component
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "/DDAT*" --component U1
+
 # Route differential pairs
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
 ```
@@ -244,6 +250,7 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*"
 --routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)
 
 # Strategy
+--component U1          # Route all nets on component U1 (excludes GND/VCC/VDD)
 --ordering mps          # mps | inside_out | original
 --layers F.Cu In1.Cu In2.Cu B.Cu
 --no-bga-zones          # Allow routing through all BGA areas
