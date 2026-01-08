@@ -131,6 +131,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 mps_unroll: bool = True,
                 skip_routing: bool = False,
                 routing_clearance_margin: float = 1.15,
+                hole_to_hole_clearance: float = 0.2,
+                board_edge_clearance: float = 0.0,
                 max_turn_angle: float = 180.0,
                 gnd_via_enabled: bool = True,
                 vertical_attraction_radius: float = 1.0,
@@ -253,6 +255,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         target_swap_crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check,
         routing_clearance_margin=routing_clearance_margin,
+        hole_to_hole_clearance=hole_to_hole_clearance,
+        board_edge_clearance=board_edge_clearance,
         max_turn_angle=max_turn_angle,
         gnd_via_enabled=gnd_via_enabled,
         vertical_attraction_radius=vertical_attraction_radius,
@@ -1196,7 +1200,7 @@ Differential pair routing:
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", help="Output KiCad PCB file")
     parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (optional if --component used)")
-    parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1)")
+    parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
                         default="mps",
@@ -1301,6 +1305,10 @@ Differential pair routing:
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
                         help="Multiplier on track-via clearance (1.0 = minimum DRC)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2,
+                        help="Minimum clearance between drill holes in mm (default: 0.2)")
+    parser.add_argument("--board-edge-clearance", type=float, default=0.0,
+                        help="Clearance from board edge in mm (default: 0 = use track clearance)")
     parser.add_argument("--max-turn-angle", type=float, default=180.0,
                         help="Max cumulative turn angle (degrees) before reset, to prevent U-turns (default: 180)")
 
@@ -1428,6 +1436,8 @@ Differential pair routing:
                 crossing_penalty=args.crossing_penalty,
                 skip_routing=args.skip_routing,
                 routing_clearance_margin=args.routing_clearance_margin,
+                hole_to_hole_clearance=args.hole_to_hole_clearance,
+                board_edge_clearance=args.board_edge_clearance,
                 max_turn_angle=args.max_turn_angle,
                 gnd_via_enabled=not args.no_gnd_vias,
                 vertical_attraction_radius=args.vertical_attraction_radius,

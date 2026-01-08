@@ -87,7 +87,127 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         for pad in pads:
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance)
 
+    # Add board edge clearance
+    add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
+
+    # Add hole-to-hole clearance blocking for existing drills
+    add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set)
+
     return obstacles
+
+
+def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                              config: GridRouteConfig, extra_clearance: float = 0.0):
+    """Block tracks and vias near the board edge.
+
+    Args:
+        obstacles: The obstacle map to add to
+        pcb_data: PCB data containing board bounds
+        config: Routing configuration
+        extra_clearance: Additional clearance to add
+    """
+    board_bounds = pcb_data.board_info.board_bounds
+    if not board_bounds:
+        return
+
+    coord = GridCoord(config.grid_step)
+    num_layers = len(config.layers)
+    min_x, min_y, max_x, max_y = board_bounds
+
+    # Use board_edge_clearance if set, otherwise use track clearance
+    edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
+    # Add track half-width to clearance (tracks need to stay away from edge)
+    track_edge_clearance = edge_clearance + config.track_width / 2 + extra_clearance
+    via_edge_clearance = edge_clearance + config.via_size / 2 + extra_clearance
+
+    # Convert to grid coordinates
+    track_expand = coord.to_grid_dist(track_edge_clearance)
+    via_expand = coord.to_grid_dist(via_edge_clearance)
+
+    # Get grid bounds
+    gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+    gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+
+    # Block cells outside the board (with clearance margin)
+    # We block a margin around the entire grid range
+    grid_margin = max(track_expand, via_expand) + 5  # Extra margin for safety
+
+    # Block left edge
+    for gx in range(gmin_x - grid_margin, gmin_x + track_expand + 1):
+        for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+            for layer_idx in range(num_layers):
+                obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if gx < gmin_x + via_expand:
+                obstacles.add_blocked_via(gx, gy)
+
+    # Block right edge
+    for gx in range(gmax_x - track_expand, gmax_x + grid_margin + 1):
+        for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+            for layer_idx in range(num_layers):
+                obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if gx > gmax_x - via_expand:
+                obstacles.add_blocked_via(gx, gy)
+
+    # Block top edge (excluding corners already done)
+    for gy in range(gmin_y - grid_margin, gmin_y + track_expand + 1):
+        for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
+            for layer_idx in range(num_layers):
+                obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if gy < gmin_y + via_expand:
+                obstacles.add_blocked_via(gx, gy)
+
+    # Block bottom edge (excluding corners already done)
+    for gy in range(gmax_y - track_expand, gmax_y + grid_margin + 1):
+        for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
+            for layer_idx in range(num_layers):
+                obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if gy > gmax_y - via_expand:
+                obstacles.add_blocked_via(gx, gy)
+
+
+def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                              config: GridRouteConfig, nets_to_route_set: set):
+    """Block via placement near existing drill holes (hole-to-hole clearance).
+
+    Args:
+        obstacles: The obstacle map to add to
+        pcb_data: PCB data containing vias and pads with drills
+        config: Routing configuration
+        nets_to_route_set: Set of net IDs being routed (excluded from blocking)
+    """
+    if config.hole_to_hole_clearance <= 0:
+        return
+
+    coord = GridCoord(config.grid_step)
+
+    # Collect all existing drill holes: (x, y, drill_diameter)
+    drill_holes = []
+
+    # Add via drills (excluding nets being routed)
+    for via in pcb_data.vias:
+        if via.net_id not in nets_to_route_set:
+            drill_holes.append((via.x, via.y, via.drill))
+
+    # Add pad drills (through-hole pads have drills)
+    for net_id, pads in pcb_data.pads_by_net.items():
+        if net_id in nets_to_route_set:
+            continue
+        for pad in pads:
+            if pad.drill > 0:
+                drill_holes.append((pad.global_x, pad.global_y, pad.drill))
+
+    # Block via placement near each drill hole
+    # New via drill needs to be hole_to_hole_clearance away from existing drill edge
+    for hx, hy, drill_dia in drill_holes:
+        # Required center-to-center distance = (existing_drill/2) + (new_via_drill/2) + clearance
+        required_dist = drill_dia / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
+        expand = coord.to_grid_dist(required_dist)
+        gx, gy = coord.to_grid(hx, hy)
+
+        for ex in range(-expand, expand + 1):
+            for ey in range(-expand, expand + 1):
+                if ex*ex + ey*ey <= expand*expand:
+                    obstacles.add_blocked_via(gx + ex, gy + ey)
 
 
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,

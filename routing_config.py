@@ -59,6 +59,8 @@ class GridRouteConfig:
     target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap
     crossing_layer_check: bool = True  # Only count crossings when routes share a layer
     routing_clearance_margin: float = 1.15  # Multiplier on track-via clearance (1.0 = minimum DRC, 1.15 = safe)
+    hole_to_hole_clearance: float = 0.2  # mm - minimum clearance between drill holes (edge to edge)
+    board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack

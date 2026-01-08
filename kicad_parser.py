@@ -27,6 +27,7 @@ class Pad:
     net_name: str
     rotation: float = 0.0  # Total rotation in degrees (pad + footprint)
     pinfunction: str = ""
+    drill: float = 0.0  # Drill size for through-hole pads (0 for SMD)
     pintype: str = ""
 
 
@@ -413,11 +414,11 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
             if 45 < pad_rot_normalized < 135:  # Close to 90°
                 size_x, size_y = size_y, size_x
 
-            # Extract layers
-            layers_match = re.search(r'\(layers\s+"([^"]+)"(?:\s+"([^"]+)")*', pad_text)
+            # Extract layers - use findall to get all quoted layer names
+            layers_section = re.search(r'\(layers\s+([^)]+)\)', pad_text)
             pad_layers = []
-            if layers_match:
-                pad_layers = [g for g in layers_match.groups() if g]
+            if layers_section:
+                pad_layers = re.findall(r'"([^"]+)"', layers_section.group(1))
 
             # Extract net
             net_match = re.search(r'\(net\s+(\d+)\s+"([^"]*)"\)', pad_text)
@@ -435,6 +436,10 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
             # Extract pintype
             pintype_match = re.search(r'\(pintype\s+"([^"]*)"\)', pad_text)
             pintype = pintype_match.group(1) if pintype_match else ""
+
+            # Extract drill size for through-hole pads
+            drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
+            drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
@@ -454,7 +459,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
                 net_name=net_name,
                 rotation=total_rotation,
                 pinfunction=pinfunction,
-                pintype=pintype
+                pintype=pintype,
+                drill=drill_size
             )
 
             footprint.pads.append(pad)
