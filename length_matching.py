@@ -543,24 +543,50 @@ def generate_trombone_meander(
         # Determine amplitude for this bump
         bump_amplitude = amplitude
 
-        # If we have clearance checking, find safe amplitude at this position
+        # First bump includes entry chamfer, subsequent bumps don't
         is_first = (bump_count == 0)
+        has_entry_chamfer = is_first
+
+        # Calculate the ACTUAL bump start position (after any same-direction spacing)
+        # This is where the clearance check should be done
+        check_cx, check_cy = cx, cy
+
+        # For same-direction bumps, we need to account for the spacing chamfers
+        # that will be added before the bump. The bump will start 2*chamfer further along.
+        needs_same_dir_spacing = (prev_bump_direction is not None and prev_bump_direction == direction)
+        if needs_same_dir_spacing:
+            # The bump will start after exit chamfer + entry chamfer = 2*chamfer forward
+            check_cx = cx + ux * 2 * chamfer
+            check_cy = cy + uy * 2 * chamfer
+
+        # If we have clearance checking, find safe amplitude at the ACTUAL bump position
         if pcb_data is not None and config is not None:
             safe_amp = get_safe_amplitude_at_point(
-                cx, cy, ux, uy, px, py, direction, amplitude, min_amplitude,
+                check_cx, check_cy, ux, uy, px, py, direction, amplitude, min_amplitude,
                 segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
                 paired_net_id=paired_net_id
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
+                # For the other direction, same-direction spacing might not be needed
+                other_dir = -direction
+                other_needs_spacing = (prev_bump_direction is not None and prev_bump_direction == other_dir)
+                if other_needs_spacing:
+                    other_check_cx = cx + ux * 2 * chamfer
+                    other_check_cy = cy + uy * 2 * chamfer
+                else:
+                    other_check_cx, other_check_cy = cx, cy
+
                 safe_amp_other = get_safe_amplitude_at_point(
-                    cx, cy, ux, uy, px, py, -direction, amplitude, min_amplitude,
+                    other_check_cx, other_check_cy, ux, uy, px, py, other_dir, amplitude, min_amplitude,
                     segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
                     paired_net_id=paired_net_id
                 )
                 if safe_amp_other >= min_amplitude:
-                    direction = -direction
+                    direction = other_dir
                     safe_amp = safe_amp_other
+                    needs_same_dir_spacing = other_needs_spacing
+                    check_cx, check_cy = other_check_cx, other_check_cy
                 else:
                     # No room for a bump here, skip forward with a straight segment
                     skip_dist = 0.2
@@ -586,9 +612,6 @@ def generate_trombone_meander(
         # Without inter-bump chamfers: 2 top chamfers + 2 risers (for middle bumps)
         chamfer_diag = chamfer * math.sqrt(2)
 
-        # First bump includes entry chamfer, subsequent bumps don't
-        has_entry_chamfer = (bump_count == 0)
-
         if has_entry_chamfer:
             # Full bump with entry chamfer
             bump_path_length = 3 * chamfer_diag + 2 * riser_height  # entry + 2 top chamfers + risers
@@ -608,7 +631,7 @@ def generate_trombone_meander(
 
         # Add chamfers between same-direction bumps to prevent risers from touching
         # This happens when clearance checking forces all bumps to one side (e.g., intra-pair matching)
-        if prev_bump_direction is not None and prev_bump_direction == direction:
+        if needs_same_dir_spacing:
             # After a bump, we're at +chamfer offset from centerline.
             # Add exit chamfer (to centerline) + entry chamfer (back to offset) to separate bumps
 
