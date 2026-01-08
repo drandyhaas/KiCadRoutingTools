@@ -861,7 +861,8 @@ def route_multipoint_taps(
             obstacles.add_source_target_cell(gx, gy, layer)
 
         # Add allowed cells around tap point and target to escape blocked areas
-        allow_radius = 10
+        # Use a smaller radius to avoid overriding blocking from other nets' segments
+        allow_radius = 5
         for gx, gy, _ in sources + targets:
             for dx in range(-allow_radius, allow_radius + 1):
                 for dy in range(-allow_radius, allow_radius + 1):

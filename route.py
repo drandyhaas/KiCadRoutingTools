@@ -585,6 +585,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
 
+    # Save original (pre-routing) segment signatures to preserve stubs during sync
+    # We use object identity since segments are mutable and could be duplicated
+    original_segment_ids = set(id(s) for s in pcb_data.segments)
+
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
     # Extra clearance = spacing from centerline to P/N track center
     # (The obstacle formulas already include track_width/2, so we only need spacing)
@@ -794,6 +798,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             seg_count_before = len(result.get('new_segments', []))
             apply_intra_pair_length_matching(result, config, pcb_data)
             seg_count_after = len(result.get('new_segments', []))
+
+    # Sync pcb_data with length-matched segments before Phase 3
+    # This ensures tap routes see meanders from other nets as obstacles
+    # IMPORTANT: Preserve original stubs (segments from input file) - only replace routed segments
+    if routed_results:
+        routed_net_ids_set = set(routed_results.keys())
+        seg_count_before = len(pcb_data.segments)
+        # Remove only ROUTED segments (not original stubs) for routed nets
+        # Original stubs have id() in original_segment_ids, routed segments don't
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if s.net_id not in routed_net_ids_set or id(s) in original_segment_ids]
+        seg_count_after_remove = len(pcb_data.segments)
+        # Add current (possibly meandered) segments
+        total_added = 0
+        for net_id, result in routed_results.items():
+            for seg in result.get('new_segments', []):
+                pcb_data.segments.append(seg)
+                total_added += 1
+        print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")
 
     # Phase 3: Complete multi-point routing (tap connections)
     # This happens AFTER length matching so tap routes connect to meandered main routes
