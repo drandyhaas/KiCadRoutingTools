@@ -749,6 +749,32 @@ def calculate_stub_via_barrel_length(stub_vias: List, stub_layer: str, pcb_data)
     return total
 
 
+def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
+    """
+    Expand wildcard layer specifications to actual layer names.
+
+    KiCad uses "*.Cu" to mean all copper layers for through-hole pads.
+    This function expands such wildcards to the actual routing layers.
+
+    Args:
+        pad_layers: List of layer names from the pad (may include wildcards like "*.Cu")
+        routing_layers: List of actual routing layer names (e.g., ["F.Cu", "In1.Cu", "B.Cu"])
+
+    Returns:
+        List of expanded layer names (no wildcards)
+    """
+    expanded = []
+    for layer in pad_layers:
+        if layer == "*.Cu":
+            # Expand to all copper routing layers
+            expanded.extend(routing_layers)
+        elif layer.endswith(".Cu"):
+            # Regular copper layer
+            expanded.append(layer)
+        # Skip non-copper layers like "*.Mask", "*.Paste", etc.
+    return list(set(expanded))  # Remove duplicates
+
+
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """
@@ -863,7 +889,9 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 targets = []
                 for pad in unconnected_pads:
                     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                    for layer in pad.layers:
+                    # Expand wildcard layers like "*.Cu" to actual routing layers
+                    expanded_layers = expand_pad_layers(pad.layers, config.layers)
+                    for layer in expanded_layers:
                         layer_idx = layer_map.get(layer)
                         if layer_idx is not None:
                             targets.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
@@ -897,7 +925,9 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         sources = []
         pad = net_pads[0]
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-        for layer in pad.layers:
+        # Expand wildcard layers like "*.Cu" to actual routing layers
+        expanded_layers = expand_pad_layers(pad.layers, config.layers)
+        for layer in expanded_layers:
             layer_idx = layer_map.get(layer)
             if layer_idx is not None:
                 sources.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
@@ -905,7 +935,9 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         targets = []
         for pad in net_pads[1:]:
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-            for layer in pad.layers:
+            # Expand wildcard layers like "*.Cu" to actual routing layers
+            expanded_layers = expand_pad_layers(pad.layers, config.layers)
+            for layer in expanded_layers:
                 layer_idx = layer_map.get(layer)
                 if layer_idx is not None:
                     targets.append((gx, gy, layer_idx, pad.global_x, pad.global_y))

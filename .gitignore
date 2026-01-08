@@ -20,6 +20,18 @@ wheels/
 .installed.cfg
 *.egg
 
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+/.claude/settings.local.json
+
 # Rust build outputs
 rust_router/target/
 *.pyd
@@ -33,18 +45,4 @@ rust_router/target/
 /kicad_files/fanout_starting_point.kicad_pcb
 /kicad_files/routed_output_diff12.pcb
 /kicad_files/fp-info-cache
-
-# Visualization outputs
-route_viz_*.png
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-/.claude/settings.local.json
+/kicad_files/kit-out.kicad_pcb
