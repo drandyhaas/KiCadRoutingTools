@@ -30,7 +30,7 @@ def main():
 
     quick = args.quick
 
-    # Route DDAT nets from pads (no fanout needed)
+    # Route some nets from pads (no fanout needed)
     options = "--track-width 0.2 --clearance 0.2 --via-size 0.5 --via-drill 0.4 --hole-to-hole-clearance 0.3"
     if quick:
         run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb "/DDAT*" "/AN*" ' + options)

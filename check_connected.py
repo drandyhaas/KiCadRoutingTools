@@ -145,12 +145,14 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             uf.union(via_ids[0], vid)
 
     # Add pads (use a reasonable default size for pads)
+    # Through-hole pads span multiple layers and should connect them (like vias)
     pad_ids = []
     pad_locations = []
     copper_layers = set(all_copper_layers)
     for pad_idx, pad in enumerate(pads):
         # Expand wildcard layers like "*.Cu" to actual copper layers
         expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
+        this_pad_ids = []  # Track all layer points for this pad
         for layer in expanded_layers:
             if layer not in copper_layers:
                 continue
@@ -159,7 +161,11 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_info[point_id] = ('pad', pad_idx, layer, pad.global_x, pad.global_y, pad.component_ref)
             pad_ids.append(point_id)
             pad_locations.append((pad.global_x, pad.global_y, layer, pad.component_ref))
+            this_pad_ids.append(point_id)
             point_id += 1
+        # Connect all layers of this pad together (through-hole pads act like vias)
+        for pid in this_pad_ids[1:]:
+            uf.union(this_pad_ids[0], pid)
 
     # Connect all points that are within tolerance on the same layer
     # Use size/4 as the tolerance for each point pair (use the larger of the two)
