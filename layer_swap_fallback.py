@@ -12,7 +12,7 @@ from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
 from routing_utils import (
     add_route_to_pcb_data, remove_route_from_pcb_data, get_stub_endpoints,
-    find_stub_free_ends
+    get_chip_pad_positions, find_stub_free_ends
 )
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -188,8 +188,10 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                        if nid != pair.p_net_id and nid != pair.n_net_id
                                        and nid not in routed_net_ids]
             unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-            if unrouted_stubs:
-                add_stub_proximity_costs(retry_obstacles, unrouted_stubs, config)
+            chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+            all_stubs = unrouted_stubs + chip_pads
+            if all_stubs:
+                add_stub_proximity_costs(retry_obstacles, all_stubs, config)
             merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
@@ -300,8 +302,10 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                                        if nid != pair.p_net_id and nid != pair.n_net_id
                                                        and nid not in routed_net_ids]
                             rip_unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-                            if rip_unrouted_stubs:
-                                add_stub_proximity_costs(rip_obstacles, rip_unrouted_stubs, config)
+                            rip_chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+                            rip_all_stubs = rip_unrouted_stubs + rip_chip_pads
+                            if rip_all_stubs:
+                                add_stub_proximity_costs(rip_obstacles, rip_all_stubs, config)
                             merge_track_proximity_costs(rip_obstacles, track_proximity_cache)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.p_net_id, config)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.n_net_id, config)
@@ -338,12 +342,15 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                         # Also add segments from rip_result (the just-routed pair) which aren't in pcb_data yet
                                         if rip_result.get('new_segments'):
                                             add_segments_list_as_obstacles(reroute_obstacles, rip_result['new_segments'], config, diff_pair_extra_clearance)
-                                        reroute_stubs = get_stub_endpoints(pcb_data, [nid for nid in all_unrouted_net_ids
-                                                                                       if nid not in routed_net_ids
-                                                                                       and nid != ripped_pair.p_net_id
-                                                                                       and nid != ripped_pair.n_net_id])
-                                        if reroute_stubs:
-                                            add_stub_proximity_costs(reroute_obstacles, reroute_stubs, config)
+                                        reroute_stub_net_ids = [nid for nid in all_unrouted_net_ids
+                                                                if nid not in routed_net_ids
+                                                                and nid != ripped_pair.p_net_id
+                                                                and nid != ripped_pair.n_net_id]
+                                        reroute_stubs = get_stub_endpoints(pcb_data, reroute_stub_net_ids)
+                                        reroute_chip_pads = get_chip_pad_positions(pcb_data, reroute_stub_net_ids)
+                                        reroute_all_stubs = reroute_stubs + reroute_chip_pads
+                                        if reroute_all_stubs:
+                                            add_stub_proximity_costs(reroute_obstacles, reroute_all_stubs, config)
                                         merge_track_proximity_costs(reroute_obstacles, track_proximity_cache)
 
                                         reroute_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, reroute_obstacles, base_obstacles, reroute_stubs)

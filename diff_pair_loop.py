@@ -16,7 +16,7 @@ from obstacle_map import (
     add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
-from routing_utils import get_stub_endpoints, add_route_to_pcb_data, calculate_route_length
+from routing_utils import get_stub_endpoints, get_chip_pad_positions, add_route_to_pcb_data, calculate_route_length
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -110,12 +110,15 @@ def route_diff_pairs(
             add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, diff_pair_extra_clearance)
 
         # Add stub proximity costs for ALL unrouted nets in PCB (not just current batch)
+        # Includes chip pads as pseudo-stubs to avoid blocking them
         stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                    if nid != pair.p_net_id and nid != pair.n_net_id
                                    and nid not in routed_net_ids]
         unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-        if unrouted_stubs:
-            add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+        chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+        all_stubs = unrouted_stubs + chip_pads
+        if all_stubs:
+            add_stub_proximity_costs(obstacles, all_stubs, config)
         # Add track proximity costs for previously routed tracks (same layer only)
         merge_track_proximity_costs(obstacles, track_proximity_cache)
 

@@ -12,7 +12,7 @@ from obstacle_map import (
     add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
-from routing_utils import get_stub_endpoints, add_route_to_pcb_data
+from routing_utils import get_stub_endpoints, get_chip_pad_positions, add_route_to_pcb_data
 
 
 def build_diff_pair_obstacles(
@@ -71,13 +71,15 @@ def build_diff_pair_obstacles(
         add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
         add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
 
-    # Add stub proximity costs
+    # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                if nid != p_net_id and nid != n_net_id
                                and nid not in routed_net_ids]
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-    if unrouted_stubs:
-        add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+    chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+    all_stubs = unrouted_stubs + chip_pads
+    if all_stubs:
+        add_stub_proximity_costs(obstacles, all_stubs, config)
 
     # Add track proximity costs
     merge_track_proximity_costs(obstacles, track_proximity_cache)
@@ -98,7 +100,7 @@ def build_diff_pair_obstacles(
     if add_own_stubs_func:
         add_own_stubs_func(obstacles, pcb_data, p_net_id, n_net_id, config, extra_clearance)
 
-    return obstacles, unrouted_stubs
+    return obstacles, all_stubs
 
 
 def build_single_ended_obstacles(
@@ -152,12 +154,14 @@ def build_single_ended_obstacles(
         add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diagonal_margin=diagonal_margin)
         add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
 
-    # Add stub proximity costs
+    # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                if nid != net_id and nid not in routed_net_ids]
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-    if unrouted_stubs:
-        add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+    chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+    all_stubs = unrouted_stubs + chip_pads
+    if all_stubs:
+        add_stub_proximity_costs(obstacles, all_stubs, config)
 
     # Add track proximity costs
     merge_track_proximity_costs(obstacles, track_proximity_cache)
@@ -172,7 +176,7 @@ def build_single_ended_obstacles(
     # Add same-net pad drill hole-to-hole clearance
     add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
 
-    return obstacles, unrouted_stubs
+    return obstacles, all_stubs
 
 
 def record_diff_pair_success(

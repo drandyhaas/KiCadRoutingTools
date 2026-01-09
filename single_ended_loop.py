@@ -17,7 +17,7 @@ from obstacle_map import (
     VisualizationData
 )
 from routing_utils import (
-    get_stub_endpoints, add_route_to_pcb_data, get_net_endpoints,
+    get_stub_endpoints, get_chip_pad_positions, add_route_to_pcb_data, get_net_endpoints,
     calculate_route_length, calculate_stub_length, get_multipoint_net_pads
 )
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
@@ -115,8 +115,10 @@ def route_single_ended_nets(
             stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                        if nid != net_id and nid not in routed_net_ids]
             unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-            if unrouted_stubs:
-                add_stub_proximity_costs(obstacles, unrouted_stubs, config)
+            chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+            all_stubs = unrouted_stubs + chip_pads
+            if all_stubs:
+                add_stub_proximity_costs(obstacles, all_stubs, config)
             merge_track_proximity_costs(obstacles, track_proximity_cache)
             add_cross_layer_tracks(obstacles, pcb_data, config, layer_map, exclude_net_ids={net_id})
             add_same_net_via_clearance(obstacles, pcb_data, net_id, config)

@@ -30,7 +30,7 @@ from kicad_writer import (
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from routing_utils import (
-    find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints,
+    find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints, get_chip_pad_positions,
     compute_mps_net_ordering, add_route_to_pcb_data, remove_route_from_pcb_data,
     find_pad_nearest_to_position, find_connected_segment_positions,
     find_stub_free_ends, find_connected_groups, pos_key,
@@ -666,8 +666,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     exclusion_zone_lines = []
     if debug_lines:
         all_unrouted_stubs = get_stub_endpoints(pcb_data, list(all_unrouted_net_ids))
-        exclusion_zone_lines = draw_exclusion_zones_debug(config, all_unrouted_stubs)
-        print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_unrouted_stubs)} stub proximity circles on User.5")
+        all_chip_pads = get_chip_pad_positions(pcb_data, list(all_unrouted_net_ids))
+        all_proximity_points = all_unrouted_stubs + all_chip_pads
+        exclusion_zone_lines = draw_exclusion_zones_debug(config, all_proximity_points)
+        print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_proximity_points)} stub/pad proximity circles on User.5")
 
     # Find GND net ID for GND via obstacle tracking (if GND vias enabled)
     gnd_net_id = None

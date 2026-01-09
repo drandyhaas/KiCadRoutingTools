@@ -1083,10 +1083,15 @@ def normalize_endpoints_by_component(
 
 def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
     """
-    Find all net IDs in the PCB that have unrouted stubs (multiple disconnected segment groups).
-    These are nets that have partial routing but aren't fully connected.
+    Find all net IDs in the PCB that need routing.
+
+    A net is unrouted if it has 2+ pads and they're not all connected.
+    This includes:
+    1. Nets with multiple disconnected segment groups (partial routing)
+    2. Nets with 2+ pads but no segments (completely unrouted)
+    3. Nets with 2+ pads but only 1 segment group (stub connects to 1 pad only)
     """
-    unrouted_ids = []
+    unrouted_ids = set()
 
     # Group segments by net ID
     net_segments: Dict[int, List[Segment]] = {}
@@ -1095,18 +1100,28 @@ def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
             net_segments[seg.net_id] = []
         net_segments[seg.net_id].append(seg)
 
-    # Check each net for multiple disconnected groups
-    for net_id, segments in net_segments.items():
+    # Check each net with 2+ pads
+    for net_id, pads in pcb_data.pads_by_net.items():
         if net_id == 0:  # Skip unassigned net
             continue
-        if len(segments) < 2:
+        if len(pads) < 2:  # Single-pad nets don't need routing
             continue
-        groups = find_connected_groups(segments)
-        if len(groups) >= 2:
-            # Net has multiple disconnected stub groups = unrouted
-            unrouted_ids.append(net_id)
 
-    return unrouted_ids
+        segments = net_segments.get(net_id, [])
+        if not segments:
+            # No segments at all - completely unrouted
+            unrouted_ids.add(net_id)
+        else:
+            # Check if segments form multiple disconnected groups
+            groups = find_connected_groups(segments)
+            if len(groups) >= 2:
+                # Multiple disconnected stub groups = unrouted
+                unrouted_ids.add(net_id)
+            elif len(groups) == 1 and len(pads) > 1:
+                # Only 1 segment group but multiple pads - stub connects to some but not all
+                unrouted_ids.add(net_id)
+
+    return list(unrouted_ids)
 
 
 def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[float, float, str]]:
@@ -1130,6 +1145,50 @@ def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[floa
                 for fe_x, fe_y, fe_layer in free_ends:
                     stubs.append((fe_x, fe_y, fe_layer))
     return stubs
+
+
+def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int = 4) -> List[Tuple[float, float, str]]:
+    """Get pad positions on chips for unrouted nets, to use as pseudo-stubs for proximity avoidance.
+
+    This treats pads on "chips" (components with many pads) as stubs, discouraging
+    routing near them to avoid blocking future routes to those pads.
+
+    Args:
+        pcb_data: PCB data
+        net_ids: List of unrouted net IDs to get chip pads for
+        min_pads: Minimum pads for a footprint to be considered a "chip" (default: 4)
+
+    Returns:
+        List of (x, y, layer) tuples for chip pad positions.
+    """
+    # Build set of chip footprint references
+    chip_refs = set()
+    for ref, footprint in pcb_data.footprints.items():
+        if footprint.pads and len(footprint.pads) >= min_pads:
+            chip_refs.add(ref)
+
+    if not chip_refs:
+        return []
+
+    # Collect pad positions for unrouted nets that are on chips
+    net_id_set = set(net_ids)
+    chip_pads = []
+
+    for ref in chip_refs:
+        footprint = pcb_data.footprints[ref]
+        for pad in footprint.pads:
+            # Only include pads for nets we're tracking
+            if pad.net_id in net_id_set:
+                # Use first copper layer from pad's layers
+                pad_layer = None
+                for layer in pad.layers:
+                    if layer.endswith('.Cu') and not layer.startswith('*'):
+                        pad_layer = layer
+                        break
+                if pad_layer:
+                    chip_pads.append((pad.global_x, pad.global_y, pad_layer))
+
+    return chip_pads
 
 
 def get_net_stub_centroids(pcb_data: PCBData, net_id: int) -> List[Tuple[float, float]]:
