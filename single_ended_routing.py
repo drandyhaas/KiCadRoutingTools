@@ -4,7 +4,6 @@ Single-ended net routing functions.
 Routes individual nets using A* pathfinding on a grid obstacle map.
 """
 
-import random
 from typing import List, Optional, Tuple
 
 # ANSI color codes
@@ -73,10 +72,8 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
 
-    # Determine direction order
-    if config.direction_order == "random":
-        start_backwards = random.choice([True, False])
-    elif config.direction_order in ("backwards", "backward"):
+    # Determine direction order (always deterministic)
+    if config.direction_order in ("backwards", "backward"):
         start_backwards = True
     else:  # "forward" or default
         start_backwards = False
@@ -234,10 +231,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
 
-    # Determine direction order
-    if config.direction_order == "random":
-        start_backwards = random.choice([True, False])
-    elif config.direction_order in ("backwards", "backward"):
+    # Determine direction order (always deterministic)
+    if config.direction_order in ("backwards", "backward"):
         start_backwards = True
     else:
         start_backwards = False
@@ -430,10 +425,8 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    # Determine direction order
-    if config.direction_order == "random":
-        start_backwards = random.choice([True, False])
-    elif config.direction_order in ("backwards", "backward"):
+    # Determine direction order (always deterministic)
+    if config.direction_order in ("backwards", "backward"):
         start_backwards = True
     else:
         start_backwards = False
@@ -715,6 +708,53 @@ def route_multipoint_main(
     }
 
 
+def get_all_segment_tap_points(
+    segments: List[Segment],
+    coord: GridCoord,
+    layer_names: List[str]
+) -> List[Tuple[int, int, int, float, float]]:
+    """
+    Get all grid points along existing segments as potential tap sources.
+
+    Returns list of (gx, gy, layer_idx, orig_x, orig_y) for each point.
+    Points are sampled at grid resolution along each segment.
+    Sorted by grid coordinates for deterministic iteration.
+    """
+    # Use dict keyed by (gx, gy, layer_idx) to deduplicate while keeping original coords
+    tap_points = {}  # (gx, gy, layer_idx) -> (orig_x, orig_y)
+    layer_map = {name: i for i, name in enumerate(layer_names)}
+
+    for seg in segments:
+        layer_idx = layer_map.get(seg.layer, 0)
+
+        # Sample points along the segment at grid resolution
+        dx = seg.end_x - seg.start_x
+        dy = seg.end_y - seg.start_y
+        length = (dx*dx + dy*dy) ** 0.5
+
+        if length < 0.001:
+            # Point segment
+            gx, gy = coord.to_grid(seg.start_x, seg.start_y)
+            key = (gx, gy, layer_idx)
+            if key not in tap_points:
+                tap_points[key] = (seg.start_x, seg.start_y)
+        else:
+            # Sample along segment at grid step intervals
+            num_steps = max(1, int(length / coord.grid_step))
+            for i in range(num_steps + 1):
+                t = i / num_steps
+                x = seg.start_x + t * dx
+                y = seg.start_y + t * dy
+                gx, gy = coord.to_grid(x, y)
+                key = (gx, gy, layer_idx)
+                if key not in tap_points:
+                    tap_points[key] = (x, y)
+
+    # Return sorted list for deterministic iteration
+    return sorted([(gx, gy, layer_idx, ox, oy)
+                   for (gx, gy, layer_idx), (ox, oy) in tap_points.items()])
+
+
 def route_multipoint_taps(
     pcb_data: PCBData,
     net_id: int,
@@ -809,56 +849,41 @@ def route_multipoint_taps(
 
         print(f"    Routing MST edge: pad {src_idx} -> pad {tgt_idx} (length={edge_len:.2f}mm)")
 
-        # Find tap point on existing segments near the source pad
-        src_x, src_y = src_pad[3], src_pad[4]  # Original coordinates
+        # Get target pad coordinates
         tgt_x, tgt_y = tgt_pad[3], tgt_pad[4]
 
-        # Get source pad layers for tap point search
-        src_endpoint = pad_info[src_idx][5]  # The pad object
-        if hasattr(src_endpoint, 'layers'):
-            src_layers = src_endpoint.layers
-        elif isinstance(src_endpoint, dict):
-            src_layers = src_endpoint.get('layers', [src_endpoint.get('layer')])
-        else:
-            src_layers = [layer_names[src_pad[2]]]
+        # Get ALL points along existing segments as potential tap sources
+        # The router will find the shortest path from ANY of these points
+        all_tap_points = get_all_segment_tap_points(all_segments, coord, layer_names)
 
-        # Find closest tap point on existing segments near source pad
-        tap_result = find_closest_point_on_segments(
-            all_segments,
-            src_x,
-            src_y,
-            src_layers
-        )
-
-        if tap_result is None:
+        if not all_tap_points:
             # Fall back to using source pad position directly
-            tap_x, tap_y = src_x, src_y
-            tap_layer = layer_names[src_pad[2]]
-            print(f"      No tap point found, using pad position directly")
+            src_x, src_y = src_pad[3], src_pad[4]
+            src_gx, src_gy = coord.to_grid(src_x, src_y)
+            sources = [(src_gx, src_gy, src_pad[2])]
+            tap_point_map = {(src_gx, src_gy, src_pad[2]): (src_x, src_y, layer_names[src_pad[2]])}
+            print(f"      No tap points found, using pad position directly")
         else:
-            tap_x, tap_y, tap_layer, tap_dist = tap_result
+            # Use all segment points as sources - router finds shortest path from any
+            sources = [(gx, gy, layer_idx) for gx, gy, layer_idx, _, _ in all_tap_points]
+            # Map grid coords back to original coords for segment generation
+            tap_point_map = {(gx, gy, layer_idx): (ox, oy, layer_names[layer_idx])
+                            for gx, gy, layer_idx, ox, oy in all_tap_points}
 
-        tap_layer_idx = layer_names.index(tap_layer) if tap_layer in layer_names else 0
-
-        # Convert to grid coordinates
-        tap_gx, tap_gy = coord.to_grid(tap_x, tap_y)
-
-        # Build source (tap point) and target (new pad)
-        sources = [(tap_gx, tap_gy, tap_layer_idx)]
         targets = [(tgt_pad[0], tgt_pad[1], tgt_pad[2])]
 
         # Mark source/target cells
         for gx, gy, layer in sources + targets:
             obstacles.add_source_target_cell(gx, gy, layer)
 
-        # Add allowed cells around tap point and target to escape blocked areas
+        # Add allowed cells around target to escape blocked areas
         allow_radius = 5
-        for gx, gy, _ in sources + targets:
-            for dx in range(-allow_radius, allow_radius + 1):
-                for dy in range(-allow_radius, allow_radius + 1):
-                    obstacles.add_allowed_cell(gx + dx, gy + dy)
+        tgt_gx, tgt_gy = tgt_pad[0], tgt_pad[1]
+        for dx in range(-allow_radius, allow_radius + 1):
+            for dy in range(-allow_radius, allow_radius + 1):
+                obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
 
-        # Route this MST edge
+        # Route from ANY tap point to target - router finds shortest path
         path, iterations = router.route_multi(obstacles, sources, targets, config.max_iterations)
         total_iterations += iterations
 
@@ -869,10 +894,19 @@ def route_multipoint_taps(
 
         print(f"      Routed in {iterations} iterations")
 
+        # Get the actual tap point used (first point of path)
+        path_start = path[0]  # (gx, gy, layer_idx)
+        if path_start in tap_point_map:
+            tap_x, tap_y, tap_layer = tap_point_map[path_start]
+        else:
+            # Fallback: convert grid coords back to original
+            tap_x, tap_y = coord.from_grid(path_start[0], path_start[1])
+            tap_layer = layer_names[path_start[2]]
+
         # Convert path to segments/vias
         segments, vias = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
-            (tap_x, tap_y, tap_layer),  # start_original (tap point)
+            (tap_x, tap_y, tap_layer),  # start_original (actual tap point used)
             (tgt_x, tgt_y, layer_names[tgt_pad[2]])  # end_original (target pad)
         )
         all_segments.extend(segments)

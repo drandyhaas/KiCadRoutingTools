@@ -42,7 +42,7 @@ class GridRouteConfig:
     via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = block vias)
     bga_proximity_radius: float = 10.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
-    # Direction search order: "forward", "backward", or "random"
+    # Direction search order: "forward" or "backward"
     direction_order: str = "forward"
     # Differential pair routing parameters
     diff_pair_gap: float = 0.101  # mm - gap between P and N traces (center-to-center = track_width + gap)

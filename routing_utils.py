@@ -772,7 +772,10 @@ def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[
             # Regular copper layer
             expanded.append(layer)
         # Skip non-copper layers like "*.Mask", "*.Paste", etc.
-    return list(set(expanded))  # Remove duplicates
+    # Remove duplicates while preserving routing_layers order (deterministic)
+    unique = set(expanded)
+    layer_order = {layer: i for i, layer in enumerate(routing_layers)}
+    return sorted(unique, key=lambda l: layer_order.get(l, len(routing_layers)))
 
 
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -2016,10 +2019,10 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         round_remaining = set(remaining)
         while round_remaining:
             # Find unit with minimum active conflicts among round_remaining
-            # Tiebreaker: shorter route distance first
+            # Tiebreaker: shorter route distance first, then unit ID for determinism
             best_unit = min(
                 round_remaining,
-                key=lambda uid: (len(conflicts[uid] & round_remaining), unit_distances.get(uid, 0))
+                key=lambda uid: (len(conflicts[uid] & round_remaining), unit_distances.get(uid, 0), uid)
             )
 
             # This unit wins this round

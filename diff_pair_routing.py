@@ -5,7 +5,6 @@ Routes differential pairs (P and N nets) together using centerline + offset appr
 """
 
 import math
-import random
 from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
@@ -1626,10 +1625,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # Calculate spacing from config (track_width + diff_pair_gap is center-to-center)
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
 
-    # Determine direction order (same as single_ended_routing)
-    if config.direction_order == "random":
-        start_backwards = random.choice([True, False])
-    elif config.direction_order in ("backwards", "backward"):
+    # Determine direction order (always deterministic)
+    if config.direction_order in ("backwards", "backward"):
         start_backwards = True
     else:  # "forward" or default
         start_backwards = False

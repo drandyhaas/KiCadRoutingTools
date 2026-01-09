@@ -153,7 +153,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers: List of copper layers to route on (must be specified - cannot auto-detect
                 which layers are ground planes vs signal layers)
         bga_exclusion_zones: Optional list of BGA exclusion zones (auto-detected if None)
-        direction_order: Direction search order - "forward", "backwards", or "random"
+        direction_order: Direction search order - "forward" or "backward"
                         (None = use GridRouteConfig default)
         ordering_strategy: Net ordering strategy:
             - "inside_out": Sort BGA nets by distance from BGA center (default)
@@ -659,7 +659,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         vis_callback.on_routing_start(total_routes, layers, grid_step)
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
-    all_unrouted_net_ids = set(get_all_unrouted_net_ids(pcb_data))
+    # Use sorted list for deterministic iteration order
+    all_unrouted_net_ids = sorted(set(get_all_unrouted_net_ids(pcb_data)))
     print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
 
     # Get exclusion zone lines for User.5 if debug_lines is enabled
@@ -1235,7 +1236,7 @@ Differential pair routing:
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
                         default="mps",
                         help="Net ordering strategy: mps (default, crossing conflicts), inside_out, or original")
-    parser.add_argument("--direction", "-d", choices=["forward", "backward", "random"],
+    parser.add_argument("--direction", "-d", choices=["forward", "backward"],
                         default=None,
                         help="Direction search order for each net route")
     parser.add_argument("--no-bga-zones", nargs="*", default=None,

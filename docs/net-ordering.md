@@ -324,16 +324,15 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-C" --order
 Net ordering (which net routes first) combines with direction order (which endpoint is source vs target):
 
 ```bash
-# MPS ordering + random direction per net
+# MPS ordering + backward direction
 python route.py input.kicad_pcb output.kicad_pcb "Net-*" \
     --ordering mps \
-    --direction random
+    --direction backward
 ```
 
 Direction options:
 - `forward`: Always route from stub group 1 to stub group 2
-- `backwards`: Always route from stub group 2 to stub group 1
-- `random`: Randomly choose direction per net (helps avoid systematic bias)
+- `backward`: Always route from stub group 2 to stub group 1
 
 ## Performance Notes
 

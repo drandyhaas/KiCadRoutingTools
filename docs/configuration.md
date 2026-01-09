@@ -55,7 +55,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original` |
-| `--direction` / `-d` | forward | Direction: `forward`, `backward`, or `random` |
+| `--direction` / `-d` | forward | Direction: `forward` or `backward` |
 | `--layers` / `-l` | F.Cu In1.Cu In2.Cu B.Cu | Routing layers |
 | `--no-bga-zones [REFS...]` | (auto-detect) | Disable BGA exclusion zones. No args = all. With refs (U1 U3) = only those |
 
@@ -208,7 +208,7 @@ class GridRouteConfig:
     vertical_attraction_cost: float = 0.1    # mm equivalent bonus
 
     # Direction
-    direction_order: str = "forward"     # forward, backward, or random
+    direction_order: str = "forward"     # forward or backward
 
     # Differential pairs
     diff_pair_gap: float = 0.101         # mm between P and N
