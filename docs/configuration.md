@@ -7,22 +7,25 @@ This document describes all configuration options for the KiCad Grid Router.
 ### Basic Usage
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" [OPTIONS]
+python route.py input.kicad_pcb output.kicad_pcb --nets "Net-*" [OPTIONS]
 ```
 
 ### Net Selection
 
-Net names support glob wildcards:
+Net names support glob wildcards. Use `--nets` (or `-n`) to specify patterns:
 
 ```bash
 # Exact net names
-python route.py in.kicad_pcb out.kicad_pcb "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
 
 # Wildcard patterns
-python route.py in.kicad_pcb out.kicad_pcb "Net-(U2A-DATA_*)"
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(U2A-DATA_*)"
 
 # Multiple patterns
-python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(*CLK*)" "Net-(*DATA*)"
+
+# Route all nets on a component (auto-excludes GND/VCC/VDD/unconnected)
+python route.py in.kicad_pcb out.kicad_pcb --component U1
 ```
 
 ### Geometry Options
@@ -304,7 +307,7 @@ This encourages routes to avoid blocking future routing paths.
 ### BGA Fanout (Dense, Many Vias)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
+python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --ordering inside_out \
     --via-cost 10 \
     --heuristic-weight 1.2 \
@@ -315,7 +318,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
 ### Long Routes (Few Vias)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
+python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --ordering mps \
     --via-cost 50 \
     --heuristic-weight 2.0
@@ -324,7 +327,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
 ### Differential Pairs (LVDS)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "*lvds*" \
+python route.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --diff-pairs "*lvds*" \
     --diff-pair-gap 0.1 \
     --track-width 0.1 \
@@ -335,7 +338,7 @@ python route.py input.kicad_pcb output.kicad_pcb "*lvds*" \
 ### Fast Routing (Large Boards)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
+python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --grid-step 0.2 \
     --heuristic-weight 2.0 \
     --max-iterations 50000
@@ -344,7 +347,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
 ### Fine-Pitch BGA
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-(*)" \
+python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --grid-step 0.05 \
     --track-width 0.075 \
     --clearance 0.075 \

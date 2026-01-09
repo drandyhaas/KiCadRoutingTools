@@ -1230,7 +1230,8 @@ Differential pair routing:
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", help="Output KiCad PCB file")
-    parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (optional if --component used)")
+    parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (optional if --component or --nets used)")
+    parser.add_argument("--nets", "-n", nargs="+", help="Net names or wildcard patterns to route (alternative to positional args)")
     parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
@@ -1373,9 +1374,14 @@ Differential pair routing:
     print(f"Loading {args.input_file} to expand net patterns...")
     pcb_data = parse_kicad_pcb(args.input_file)
 
+    # Combine positional net_patterns and --nets argument
+    all_patterns = list(args.net_patterns) if args.net_patterns else []
+    if args.nets:
+        all_patterns.extend(args.nets)
+
     # Get nets from patterns and/or component
-    if args.net_patterns:
-        net_names = expand_net_patterns(pcb_data, args.net_patterns)
+    if all_patterns:
+        net_names = expand_net_patterns(pcb_data, all_patterns)
     elif args.component:
         net_names = []  # Will be populated by component filter below
     else:
@@ -1392,12 +1398,12 @@ Differential pair routing:
                     if net_info and net_info.name:
                         component_nets.add(net_info.name)
                     break
-        if args.net_patterns:
+        if all_patterns:
             # Intersect with pattern-matched nets
             net_names = [n for n in net_names if n in component_nets]
         else:
-            # Use all component nets (excluding power/ground)
-            exclude_patterns = ['*GND*', '*VCC*', '*VDD*', '+*V', '-*V', '']
+            # Use all component nets (excluding power/ground and unconnected pins)
+            exclude_patterns = ['*GND*', '*VCC*', '*VDD*', '+*V', '-*V', 'unconnected-*', '']
             filtered = []
             for name in component_nets:
                 excluded = False

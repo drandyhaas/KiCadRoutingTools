@@ -8,7 +8,6 @@ import argparse
 import shlex
 import subprocess
 
-
 def run(cmd: str) -> None:
     """Run a command string and exit if it fails.
 
@@ -21,7 +20,6 @@ def run(cmd: str) -> None:
     if result.returncode != 0:
         print(f"Command failed with exit code {result.returncode}")
 
-
 def main():
     parser = argparse.ArgumentParser(description='Test routing on kit-dev-coldfire-xilinx board')
     parser.add_argument('--quick', '-q', action='store_true',
@@ -30,23 +28,23 @@ def main():
 
     quick = args.quick
 
-    # Route some nets from pads (no fanout needed)
+    #target = "--component U102"
+    #target = "--component U301"
+    #target = "--component U204"
+    target = '--nets "/*" "Net-*"'
+    if quick: target = '--nets "/IRQ*" "/AN*"'
     options = "--track-width 0.2 --clearance 0.2 --via-size 0.5 --via-drill 0.4 --hole-to-hole-clearance 0.3 --via-proximity-cost 100 --stub-proximity-cost 0.5 --stub-proximity-radius 4.0 --max-iterations 10000000"
-    if quick:
-        run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb "/IRQ*" "/AN*" ' + options)
-    else:
-        run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb --component U102 ' + options)
+
+    # Route some nets from pads (no fanout needed)
+    run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options)
 
     # Check for DRC errors
     run('python3 check_drc.py kicad_files/kit-out.kicad_pcb --clearance 0.15')
 
-    if quick:
-        run('python3 check_connected.py kicad_files/kit-out.kicad_pcb --nets "/IRQ*" "/AN*" ')
-    else:
-        run('python3 check_connected.py kicad_files/kit-out.kicad_pcb --component U102')
+    # Check for connectivity
+    run('python3 check_connected.py kicad_files/kit-out.kicad_pcb '+target)
 
     print("\n=== Test completed ===")
-
 
 if __name__ == "__main__":
     main()

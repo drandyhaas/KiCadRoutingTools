@@ -40,23 +40,23 @@ python build_router.py
 ### 2. Route Nets
 
 ```bash
-# Route specific nets
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
+# Route specific nets (using --nets option)
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
 
 # Route with wildcard patterns
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-(U2A-DATA_*)"
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_*)"
 
-# Route all nets on a component (auto-excludes GND/VCC/VDD)
+# Route all nets on a component (auto-excludes GND/VCC/VDD/unconnected)
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --component U1
 
 # Route specific patterns on a component (no auto-exclusion)
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "/DDAT*" --component U1
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "/DDAT*" --component U1
 
 # Route ALL nets on a component including power (use "*" pattern)
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "*" --component U1
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
 
 # Route differential pairs
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
 ```
 
 ### 3. Verify Results
@@ -239,7 +239,11 @@ Rust acceleration provides ~10x speedup vs pure Python.
 ## Common Options
 
 ```bash
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*" [OPTIONS]
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-*" [OPTIONS]
+
+# Net selection
+--nets "pattern" ...    # Net names or wildcard patterns to route
+--component U1          # Route all nets on U1 (auto-excludes GND/VCC/VDD/unconnected unless --nets given)
 
 # Geometry
 --track-width 0.1       # Track width (mm)
@@ -261,7 +265,6 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*"
 --board-edge-clearance 0.0   # Clearance from board edge (0 = use track clearance)
 
 # Strategy
---component U1          # Route all nets on U1 (auto-excludes GND/VCC/VDD unless patterns given)
 --ordering mps          # mps | inside_out | original
 --layers F.Cu In1.Cu In2.Cu B.Cu
 --no-bga-zones          # Allow routing through all BGA areas
