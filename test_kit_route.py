@@ -33,7 +33,7 @@ def main():
     #target = "--component U204"
     target = '--nets "/*" "Net-*"'
     if quick: target = '--nets "/IRQ*" "/AN*"'
-    options = "--track-width 0.2 --clearance 0.2 --via-size 0.5 --via-drill 0.4 --hole-to-hole-clearance 0.3 --via-proximity-cost 100 --stub-proximity-cost 0.5 --stub-proximity-radius 4.0 --max-iterations 10000000"
+    options = "--track-width 0.2 --clearance 0.2 --via-size 0.5 --via-drill 0.4 --hole-to-hole-clearance 0.3 --via-proximity-cost 100 --stub-proximity-cost 0.5 --stub-proximity-radius 4.0 --max-ripup 10 --max-iterations 10000000 --debug-memory"
 
     # Route some nets from pads (no fanout needed)
     run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options)

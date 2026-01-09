@@ -9,6 +9,7 @@ import time
 from typing import List, Tuple, Optional, Any
 
 from routing_state import RoutingState
+from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
@@ -89,6 +90,13 @@ def route_single_ended_nets(
         failed_str = f" ({failed} failed)" if failed > 0 else ""
         print(f"\n[{route_index}/{total_routes}{failed_str}] Routing {net_name} (id={net_id})")
         print("-" * 40)
+
+        # Periodic memory reporting (every 10 nets)
+        if config.debug_memory and (route_index % 10 == 1 or route_index == total_routes):
+            current_mem = get_process_memory_mb()
+            prox_cache_mb = estimate_track_proximity_cache_mb(track_proximity_cache)
+            print(f"[MEMORY] Route {route_index}/{total_routes}: {current_mem:.1f} MB total, "
+                  f"track_proximity_cache: {prox_cache_mb:.1f} MB ({len(track_proximity_cache)} nets)")
 
         start_time = time.time()
 

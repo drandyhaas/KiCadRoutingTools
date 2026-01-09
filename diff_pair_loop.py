@@ -10,6 +10,7 @@ from typing import List, Tuple
 
 from routing_state import RoutingState
 from routing_config import DiffPairNet
+from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
@@ -85,6 +86,13 @@ def route_diff_pairs(
         print(f"  P: {pair.p_net_name} (id={pair.p_net_id})")
         print(f"  N: {pair.n_net_name} (id={pair.n_net_id})")
         print("-" * 40)
+
+        # Periodic memory reporting (every 5 diff pairs)
+        if config.debug_memory and (route_index % 5 == 1 or route_index == len(diff_pair_ids_to_route)):
+            current_mem = get_process_memory_mb()
+            prox_cache_mb = estimate_track_proximity_cache_mb(track_proximity_cache)
+            print(f"[MEMORY] Diff pair {route_index}/{len(diff_pair_ids_to_route)}: {current_mem:.1f} MB total, "
+                  f"track_proximity_cache: {prox_cache_mb:.1f} MB ({len(track_proximity_cache)} nets)")
 
         start_time = time.time()
 

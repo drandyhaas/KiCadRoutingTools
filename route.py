@@ -60,6 +60,11 @@ from routing_context import (
     restore_ripped_net
 )
 from routing_state import RoutingState, create_routing_state
+from memory_debug import (
+    get_process_memory_mb, format_memory_stats,
+    estimate_net_obstacles_cache_mb, estimate_track_proximity_cache_mb,
+    estimate_routed_paths_mb
+)
 from diff_pair_loop import route_diff_pairs
 from single_ended_loop import route_single_ended_nets
 from reroute_loop import run_reroute_loop
@@ -244,7 +249,7 @@ def _try_phase3_ripup(
                     tap_segments = retry_result['new_segments'][len(lm_segments):]
                     tap_vias = retry_result['new_vias'][len(lm_vias):]
                     if tap_segments or tap_vias:
-                        print(f"    Adding {len(tap_segments)} tap segments to obstacles before re-routing...")
+                        print(f"    Adding {len(tap_segments)} tap segments, {len(tap_vias)} tap vias to obstacles before re-routing...")
                         add_segments_list_as_obstacles(state.working_obstacles, tap_segments, config)
                         add_vias_list_as_obstacles(state.working_obstacles, tap_vias, config)
 
@@ -340,6 +345,7 @@ def _reroute_phase3_ripped_nets(
             result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
 
         if result and not result.get('failed') and result.get('path'):
+            main_vias = result.get('new_vias', [])
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
             results.append(result)
             routed_net_ids.append(ripped_net_id)
@@ -350,7 +356,7 @@ def _reroute_phase3_ripped_nets(
             track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(
                 pcb_data, ripped_net_id, config, layer_map
             )
-            print(f"    Re-routed main path: {len(result['new_segments'])} segments")
+            print(f"    Re-routed main path: {len(result['new_segments'])} segments, {len(main_vias)} vias")
 
             # Update working obstacles
             if state.working_obstacles is not None and state.net_obstacles_cache is not None:
@@ -383,8 +389,7 @@ def _reroute_phase3_ripped_nets(
                     if tap_segments or tap_vias:
                         tap_result_data = {'new_segments': tap_segments, 'new_vias': tap_vias}
                         add_route_to_pcb_data(pcb_data, tap_result_data, debug_lines=config.debug_lines)
-                        results.append(tap_result_data)
-                        print(f"    Re-routed {len(tap_segments)} tap segments")
+                        print(f"    Re-routed {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                         # Update working obstacles with tap segments
                         if state.working_obstacles is not None and state.net_obstacles_cache is not None:
@@ -393,6 +398,12 @@ def _reroute_phase3_ripped_nets(
                             update_net_obstacles_after_routing(pcb_data, ripped_net_id, tap_result, config, state.net_obstacles_cache)
                             add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
 
+                    # IMPORTANT: Replace the main route result with tap_result in results
+                    # The main route result was added above. We need routed_results[net_id] to
+                    # point to something that's actually in results for rip_up_net to work correctly.
+                    if result in results:
+                        results.remove(result)
+                    results.append(tap_result)
                     routed_results[ripped_net_id] = tap_result
         else:
             print(f"    {RED}Failed to re-route{RESET}")
@@ -449,6 +460,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 meander_amplitude: float = 1.0,
                 diff_chamfer_extra: float = 1.5,
                 diff_pair_intra_match: bool = False,
+                debug_memory: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route multiple nets using the Rust router.
@@ -487,6 +499,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         (successful_count, failed_count, total_time)
     """
     visualize = vis_callback is not None
+
+    # Track memory if debug_memory enabled
+    mem_start = get_process_memory_mb() if debug_memory else 0.0
+    if debug_memory:
+        print(format_memory_stats("Initial memory", mem_start))
+
     print(f"Loading {input_file}...")
     pcb_data = parse_kicad_pcb(input_file)
 
@@ -923,6 +941,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
+    if debug_memory:
+        mem_after_base = get_process_memory_mb()
+        print(format_memory_stats("After base obstacle map", mem_after_base, mem_after_base - mem_start))
 
     # Save original (pre-routing) segment signatures to preserve stubs during sync
     # We use object identity since segments are mutable and could be duplicated
@@ -937,6 +958,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route, diff_pair_extra_clearance)
     dp_base_elapsed = time.time() - dp_base_start
     print(f"Diff pair obstacle map built in {dp_base_elapsed:.2f}s")
+    if debug_memory:
+        mem_after_dp = get_process_memory_mb()
+        print(format_memory_stats("After diff pair obstacle map", mem_after_dp, mem_after_dp - mem_start))
 
     # Block connector regions for ALL diff pairs upfront
     # Vias span all layers, so we must block connector regions before any routing starts
@@ -998,10 +1022,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     )
     cache_time = time.time() - cache_start
     print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
+    if debug_memory:
+        mem_after_cache = get_process_memory_mb()
+        cache_size = estimate_net_obstacles_cache_mb(net_obstacles_cache)
+        print(format_memory_stats("After net obstacles cache", mem_after_cache, mem_after_cache - mem_start))
+        print(f"[MEMORY]   Cache estimated size: {cache_size:.1f} MB for {len(net_obstacles_cache)} nets")
 
     # Build working obstacle map (base + all nets) for incremental updates
     # Uses reference counting in Rust to correctly handle cells blocked by multiple nets
     working_obstacles = build_working_obstacle_map(base_obstacles, net_obstacles_cache)
+    if debug_memory:
+        mem_after_working = get_process_memory_mb()
+        print(format_memory_stats("After working obstacle map", mem_after_working, mem_after_working - mem_start))
 
     # Create routing state object to hold all shared state
     state = create_routing_state(
@@ -1276,7 +1308,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 if tap_segments or tap_vias:
                     tap_result = {'new_segments': tap_segments, 'new_vias': tap_vias}
                     add_route_to_pcb_data(pcb_data, tap_result, debug_lines=config.debug_lines)
-                    results.append(tap_result)
                     print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                     # Update working obstacles with tap segments for subsequent nets
@@ -1286,6 +1317,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
                         update_net_obstacles_after_routing(pcb_data, net_id, completed_result, config, state.net_obstacles_cache)
                         add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+
+                # IMPORTANT: Replace the Phase 1 result in results list with completed_result
+                # The Phase 1 result (main_result) was added to results during Phase 1 routing.
+                # We need to remove it and add completed_result so that:
+                # 1. The output file contains the combined result (not duplicates)
+                # 2. rip_up_net can find routed_results[net_id] in the results list
+                if main_result in results:
+                    results.remove(main_result)
+                results.append(completed_result)
 
                 routed_results[net_id] = completed_result
 
@@ -1605,6 +1645,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
         print(f"Successfully wrote {output_file}")
 
+    # Final memory summary
+    if debug_memory:
+        final_mem = get_process_memory_mb()
+        print("\n" + "=" * 50)
+        print("[MEMORY] Final Memory Summary")
+        print("=" * 50)
+        print(f"  Process RSS: {final_mem:.1f} MB (delta: {final_mem - mem_start:+.1f} MB)")
+        print(f"  Net obstacles cache: {estimate_net_obstacles_cache_mb(state.net_obstacles_cache):.1f} MB ({len(state.net_obstacles_cache)} nets)")
+        print(f"  Track proximity cache: {estimate_track_proximity_cache_mb(state.track_proximity_cache):.1f} MB ({len(state.track_proximity_cache)} nets)")
+        print(f"  Routed paths: {estimate_routed_paths_mb(state.routed_net_paths):.1f} MB ({len(state.routed_net_paths)} nets)")
+        print(f"  Routed results: {len(state.routed_results)} nets")
+        print("=" * 50)
+
     return successful, failed, total_time
 
 if __name__ == "__main__":
@@ -1761,6 +1814,8 @@ Differential pair routing:
                         help="Print detailed diagnostic output (setback checks, etc.)")
     parser.add_argument("--skip-routing", action="store_true",
                         help="Skip actual routing, only do swaps and write debug info")
+    parser.add_argument("--debug-memory", action="store_true",
+                        help="Print memory usage statistics at key points during routing")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",
@@ -1888,4 +1943,5 @@ Differential pair routing:
                 meander_amplitude=args.meander_amplitude,
                 diff_chamfer_extra=args.diff_chamfer_extra,
                 diff_pair_intra_match=args.diff_pair_intra_match,
+                debug_memory=args.debug_memory,
                 vis_callback=vis_callback)

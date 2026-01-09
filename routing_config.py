@@ -72,6 +72,7 @@ class GridRouteConfig:
     meander_amplitude: float = 1.0  # mm - height of meander perpendicular to trace
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
+    debug_memory: bool = False  # Print memory usage statistics at key points
 
 
 class GridCoord:
