@@ -273,7 +273,7 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 # Proximity penalties
 --stub-proximity-radius 2.0  # Radius around stubs to penalize (mm)
 --stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
---bga-proximity-radius 10.0  # Radius around BGA edges to penalize (mm)
+--bga-proximity-radius 7.0  # Radius around BGA edges to penalize (mm)
 --bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
 --track-proximity-distance 2.0  # Radius around routed tracks to penalize (mm, same layer)
 --track-proximity-cost 0.2   # Cost penalty near routed tracks (mm equivalent)

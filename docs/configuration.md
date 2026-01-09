@@ -69,7 +69,7 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 | `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty at stub center (mm equivalent) |
 | `--via-proximity-cost` | 10.0 | Via cost multiplier in stub proximity zones (0 = block vias) |
-| `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize (mm) |
+| `--bga-proximity-radius` | 7.0 | Radius around BGA edges to penalize (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
 | `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
@@ -197,10 +197,10 @@ class GridRouteConfig:
     # Stub proximity
     stub_proximity_radius: float = 2.0   # mm
     stub_proximity_cost: float = 0.2     # mm equivalent
-    via_proximity_cost: float = 50.0     # multiplier for vias near stubs
+    via_proximity_cost: float = 10.0     # multiplier for vias near stubs
 
     # BGA proximity
-    bga_proximity_radius: float = 10.0   # mm from BGA edges
+    bga_proximity_radius: float = 7.0   # mm from BGA edges
     bga_proximity_cost: float = 0.2      # mm equivalent
 
     # Track proximity (same layer)

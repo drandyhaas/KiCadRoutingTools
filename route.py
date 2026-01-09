@@ -105,12 +105,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 via_cost: int = 50,
                 max_iterations: int = 200000,
                 max_probe_iterations: int = 5000,
-                heuristic_weight: float = 2.0,
+                heuristic_weight: float = 1.9,
                 turn_cost: int = 1000,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
-                via_proximity_cost: float = 50.0,
-                bga_proximity_radius: float = 10.0,
+                via_proximity_cost: float = 10.0,
+                bga_proximity_radius: float = 7.0,
                 bga_proximity_cost: float = 0.2,
                 track_proximity_distance: float = 2.0,
                 track_proximity_cost: float = 0.2,
@@ -122,7 +122,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 verbose: bool = False,
                 fix_polarity: bool = True,
                 max_rip_up_count: int = 3,
-                max_setback_angle: float = 22.5,
+                max_setback_angle: float = 45.0,
                 enable_layer_switch: bool = True,
                 crossing_layer_check: bool = True,
                 can_swap_to_top_layer: bool = False,
@@ -130,7 +130,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 crossing_penalty: float = 1000.0,
                 mps_unroll: bool = True,
                 skip_routing: bool = False,
-                routing_clearance_margin: float = 1.15,
+                routing_clearance_margin: float = 1.0,
                 hole_to_hole_clearance: float = 0.2,
                 board_edge_clearance: float = 0.0,
                 max_turn_angle: float = 180.0,
@@ -156,8 +156,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         direction_order: Direction search order - "forward" or "backward"
                         (None = use GridRouteConfig default)
         ordering_strategy: Net ordering strategy:
-            - "inside_out": Sort BGA nets by distance from BGA center (default)
-            - "mps": Use Maximum Planar Subset algorithm to minimize crossing conflicts
+            - "mps": Use Maximum Planar Subset algorithm to minimize crossing conflicts (default)
+            - "inside_out": Sort BGA nets by distance from BGA center
             - "original": Keep nets in original order
         track_width: Track width in mm (default: 0.1)
         clearance: Clearance between tracks in mm (default: 0.1)
@@ -166,10 +166,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         grid_step: Grid resolution in mm (default: 0.1)
         via_cost: Penalty for placing a via in grid steps (default: 50, doubled for diff pairs)
         max_iterations: Max A* iterations before giving up (default: 200000)
-        heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 2.0)
+        heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.9)
         stub_proximity_radius: Radius around stubs to penalize in mm (default: 2.0)
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 0.2)
-        bga_proximity_radius: Radius around BGA edges to penalize in mm (default: 10.0)
+        bga_proximity_radius: Radius around BGA edges to penalize in mm (default: 7.0)
         bga_proximity_cost: Cost penalty near BGA edges in mm equivalent (default: 0.2)
         diff_pair_patterns: Glob patterns for nets to route as differential pairs
         diff_pair_gap: Gap between P and N traces in differential pairs (default: 0.1mm)

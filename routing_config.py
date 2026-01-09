@@ -40,7 +40,7 @@ class GridRouteConfig:
     stub_proximity_radius: float = 2.0  # mm - radius around stubs to penalize
     stub_proximity_cost: float = 0.2  # mm equivalent cost at stub center
     via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = block vias)
-    bga_proximity_radius: float = 10.0  # mm - distance from BGA edges to penalize
+    bga_proximity_radius: float = 7.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
     # Direction search order: "forward" or "backward"
     direction_order: str = "forward"
@@ -58,13 +58,13 @@ class GridRouteConfig:
     track_proximity_cost: float = 0.2  # mm equivalent cost at track center
     target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap
     crossing_layer_check: bool = True  # Only count crossings when routes share a layer
-    routing_clearance_margin: float = 1.15  # Multiplier on track-via clearance (1.0 = minimum DRC, 1.15 = safe)
+    routing_clearance_margin: float = 1.0  # Multiplier on track-via clearance (1.0 = minimum DRC)
     hole_to_hole_clearance: float = 0.2  # mm - minimum clearance between drill holes (edge to edge)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
-    vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
+    vertical_attraction_radius: float = 1.0  # mm - radius for attraction lookup (0 = disabled)
     vertical_attraction_cost: float = 0.1  # mm equivalent bonus for aligned positions
     # Length matching for DDR4 signals
     length_match_groups: List[List[str]] = field(default_factory=list)  # Groups of net patterns to match
