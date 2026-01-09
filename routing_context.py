@@ -10,7 +10,8 @@ from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
     add_stub_proximity_costs, merge_track_proximity_costs,
-    add_cross_layer_tracks, compute_track_proximity_for_net
+    add_cross_layer_tracks, compute_track_proximity_for_net,
+    NetObstacleData, add_net_obstacles_from_cache, remove_net_obstacles_from_cache
 )
 from routing_utils import get_stub_endpoints, get_chip_pad_positions, add_route_to_pcb_data
 
@@ -28,7 +29,8 @@ def build_diff_pair_obstacles(
     track_proximity_cache: Dict,
     layer_map: Dict,
     extra_clearance: float,
-    add_own_stubs_func=None
+    add_own_stubs_func=None,
+    net_obstacles_cache: Optional[Dict[int, NetObstacleData]] = None
 ):
     """
     Build complete obstacle map for diff pair routing.
@@ -47,6 +49,7 @@ def build_diff_pair_obstacles(
         layer_map: Layer name to index mapping
         extra_clearance: Extra clearance for diff pair routing
         add_own_stubs_func: Optional function to add own stubs as obstacles
+        net_obstacles_cache: Optional pre-computed net obstacles for fast batch adding
 
     Returns:
         Tuple of (obstacles, unrouted_stubs)
@@ -54,6 +57,7 @@ def build_diff_pair_obstacles(
     obstacles = diff_pair_base_obstacles.clone()
 
     # Add previously routed nets as obstacles
+    # Note: Cannot use cache for routed nets because their segments have changed
     for routed_id in routed_net_ids:
         add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config, extra_clearance)
         add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, extra_clearance)
@@ -63,13 +67,16 @@ def build_diff_pair_obstacles(
     if gnd_net_id is not None:
         add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, extra_clearance)
 
-    # Add other unrouted nets as obstacles (excluding current pair)
+    # Add other unrouted nets as obstacles (can use cache since they haven't changed)
     other_unrouted = [nid for nid in remaining_net_ids
                      if nid != p_net_id and nid != n_net_id]
     for other_net_id in other_unrouted:
-        add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
-        add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
-        add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
+        if net_obstacles_cache and other_net_id in net_obstacles_cache:
+            add_net_obstacles_from_cache(obstacles, net_obstacles_cache[other_net_id])
+        else:
+            add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
+            add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
+            add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config, extra_clearance)
 
     # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
@@ -114,7 +121,8 @@ def build_single_ended_obstacles(
     gnd_net_id: Optional[int],
     track_proximity_cache: Dict,
     layer_map: Dict,
-    diagonal_margin: float = 0.25
+    diagonal_margin: float = 0.25,
+    net_obstacles_cache: Optional[Dict[int, NetObstacleData]] = None
 ):
     """
     Build complete obstacle map for single-ended routing.
@@ -131,6 +139,7 @@ def build_single_ended_obstacles(
         track_proximity_cache: Cache of track proximity costs
         layer_map: Layer name to index mapping
         diagonal_margin: Margin for diagonal segment clearance
+        net_obstacles_cache: Optional pre-computed net obstacles for fast batch adding
 
     Returns:
         Tuple of (obstacles, unrouted_stubs)
@@ -138,6 +147,7 @@ def build_single_ended_obstacles(
     obstacles = base_obstacles.clone()
 
     # Add previously routed nets as obstacles
+    # Note: Cannot use cache for routed nets because their segments have changed
     for routed_id in routed_net_ids:
         add_net_stubs_as_obstacles(obstacles, pcb_data, routed_id, config)
         add_net_vias_as_obstacles(obstacles, pcb_data, routed_id, config, diagonal_margin=diagonal_margin)
@@ -147,12 +157,82 @@ def build_single_ended_obstacles(
     if gnd_net_id is not None:
         add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diagonal_margin=diagonal_margin)
 
-    # Add other unrouted nets as obstacles
+    # Add other unrouted nets as obstacles (can use cache since they haven't changed)
     other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
     for other_net_id in other_unrouted:
-        add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
-        add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diagonal_margin=diagonal_margin)
-        add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
+        if net_obstacles_cache and other_net_id in net_obstacles_cache:
+            add_net_obstacles_from_cache(obstacles, net_obstacles_cache[other_net_id])
+        else:
+            add_net_stubs_as_obstacles(obstacles, pcb_data, other_net_id, config)
+            add_net_vias_as_obstacles(obstacles, pcb_data, other_net_id, config, diagonal_margin=diagonal_margin)
+            add_net_pads_as_obstacles(obstacles, pcb_data, other_net_id, config)
+
+    # Add stub proximity costs (includes chip pads as pseudo-stubs)
+    stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                               if nid != net_id and nid not in routed_net_ids]
+    unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+    chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+    all_stubs = unrouted_stubs + chip_pads
+    if all_stubs:
+        add_stub_proximity_costs(obstacles, all_stubs, config)
+
+    # Add track proximity costs
+    merge_track_proximity_costs(obstacles, track_proximity_cache)
+
+    # Add cross-layer track data
+    add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
+                           exclude_net_ids={net_id})
+
+    # Add same-net via clearance
+    add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
+
+    # Add same-net pad drill hole-to-hole clearance
+    add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
+
+    return obstacles, all_stubs
+
+
+def build_incremental_obstacles(
+    working_obstacles,
+    pcb_data,
+    config,
+    net_id: int,
+    all_unrouted_net_ids: List[int],
+    routed_net_ids: List[int],
+    track_proximity_cache: Dict,
+    layer_map: Dict,
+    net_obstacles_cache: Dict[int, NetObstacleData]
+):
+    """
+    Build obstacle map for single-ended routing using incremental approach.
+
+    This is MUCH faster than build_single_ended_obstacles because it:
+    1. Clones the working map (which already has all net obstacles)
+    2. Only removes the current net's obstacles
+    3. Adds dynamic costs (proximity, cross-layer tracks)
+
+    Per-route cost is O(current_net_size) instead of O(all_nets_size).
+
+    Args:
+        working_obstacles: Pre-built working map with all net obstacles
+        pcb_data: PCB data structure
+        config: Routing configuration
+        net_id: Current net ID being routed
+        all_unrouted_net_ids: All unrouted net IDs for stub proximity
+        routed_net_ids: List of already routed net IDs
+        track_proximity_cache: Cache of track proximity costs
+        layer_map: Layer name to index mapping
+        net_obstacles_cache: Pre-computed net obstacles for removal
+
+    Returns:
+        Tuple of (obstacles, unrouted_stubs)
+    """
+    # Clone the working map (has all net obstacles already)
+    obstacles = working_obstacles.clone()
+
+    # Remove current net's obstacles so we can route through our own stubs
+    if net_id in net_obstacles_cache:
+        remove_net_obstacles_from_cache(obstacles, net_obstacles_cache[net_id])
 
     # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids

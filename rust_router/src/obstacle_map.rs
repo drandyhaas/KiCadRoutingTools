@@ -5,13 +5,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::types::pack_xy;
 
-/// Grid-based obstacle map
+/// Grid-based obstacle map with reference counting for incremental updates.
+/// Reference counting allows cells blocked by multiple nets to be correctly
+/// managed when nets are added/removed.
 #[pyclass]
 pub struct GridObstacleMap {
-    /// Blocked cells per layer: layer -> set of (gx, gy) packed as u64
-    pub blocked_cells: Vec<FxHashSet<u64>>,
-    /// Blocked via positions
-    pub blocked_vias: FxHashSet<u64>,
+    /// Blocked cells per layer: layer -> map of (gx, gy) packed as u64 -> ref count
+    /// A cell is blocked if its ref count > 0
+    pub blocked_cells: Vec<FxHashMap<u64, u16>>,
+    /// Blocked via positions: packed (gx, gy) -> ref count
+    pub blocked_vias: FxHashMap<u64, u16>,
     /// Stub proximity costs: (gx, gy) -> cost
     pub stub_proximity: FxHashMap<u64, i32>,
     /// Layer-specific proximity costs (for track proximity on same layer)
@@ -43,8 +46,8 @@ impl GridObstacleMap {
     #[new]
     pub fn new(num_layers: usize) -> Self {
         Self {
-            blocked_cells: (0..num_layers).map(|_| FxHashSet::default()).collect(),
-            blocked_vias: FxHashSet::default(),
+            blocked_cells: (0..num_layers).map(|_| FxHashMap::default()).collect(),
+            blocked_vias: FxHashMap::default(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             num_layers,
@@ -129,16 +132,81 @@ impl GridObstacleMap {
         self.bga_zones.push((min_gx, min_gy, max_gx, max_gy));
     }
 
-    /// Add a blocked cell
+    /// Add a blocked cell (increments reference count)
     pub fn add_blocked_cell(&mut self, gx: i32, gy: i32, layer: usize) {
         if layer < self.num_layers {
-            self.blocked_cells[layer].insert(pack_xy(gx, gy));
+            let key = pack_xy(gx, gy);
+            *self.blocked_cells[layer].entry(key).or_insert(0) += 1;
         }
     }
 
-    /// Add a blocked via position
+    /// Add a blocked via position (increments reference count)
     pub fn add_blocked_via(&mut self, gx: i32, gy: i32) {
-        self.blocked_vias.insert(pack_xy(gx, gy));
+        let key = pack_xy(gx, gy);
+        *self.blocked_vias.entry(key).or_insert(0) += 1;
+    }
+
+    /// Batch add blocked cells (reduces Python-Rust FFI overhead)
+    pub fn add_blocked_cells_batch(&mut self, cells: Vec<(i32, i32, usize)>) {
+        for (gx, gy, layer) in cells {
+            if layer < self.num_layers {
+                let key = pack_xy(gx, gy);
+                *self.blocked_cells[layer].entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// Batch add blocked vias (reduces Python-Rust FFI overhead)
+    pub fn add_blocked_vias_batch(&mut self, vias: Vec<(i32, i32)>) {
+        for (gx, gy) in vias {
+            let key = pack_xy(gx, gy);
+            *self.blocked_vias.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    /// Merge blocked cells and vias from another obstacle map into this one
+    /// (Adds reference counts from other map to this one)
+    pub fn merge_blocked_from(&mut self, other: &GridObstacleMap) {
+        for (layer, other_cells) in other.blocked_cells.iter().enumerate() {
+            if layer < self.num_layers {
+                for (&key, &count) in other_cells.iter() {
+                    *self.blocked_cells[layer].entry(key).or_insert(0) += count;
+                }
+            }
+        }
+        for (&key, &count) in other.blocked_vias.iter() {
+            *self.blocked_vias.entry(key).or_insert(0) += count;
+        }
+    }
+
+    /// Remove blocked cells (decrements reference count, removes entry when count reaches 0)
+    pub fn remove_blocked_cells_batch(&mut self, cells: Vec<(i32, i32, usize)>) {
+        for (gx, gy, layer) in cells {
+            if layer < self.num_layers {
+                let key = pack_xy(gx, gy);
+                if let Some(count) = self.blocked_cells[layer].get_mut(&key) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        self.blocked_cells[layer].remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove blocked vias (decrements reference count, removes entry when count reaches 0)
+    pub fn remove_blocked_vias_batch(&mut self, vias: Vec<(i32, i32)>) {
+        for (gx, gy) in vias {
+            let key = pack_xy(gx, gy);
+            if let Some(count) = self.blocked_vias.get_mut(&key) {
+                if *count > 1 {
+                    *count -= 1;
+                } else {
+                    self.blocked_vias.remove(&key);
+                }
+            }
+        }
     }
 
     /// Set stub proximity cost
@@ -147,6 +215,46 @@ impl GridObstacleMap {
         let existing = self.stub_proximity.get(&key).copied().unwrap_or(0);
         if cost > existing {
             self.stub_proximity.insert(key, cost);
+        }
+    }
+
+    /// Batch compute and add stub proximity costs (much faster than Python iteration)
+    /// stubs: Vec of (gx, gy) grid positions
+    /// radius: proximity radius in grid units
+    /// max_cost: maximum cost at stub center
+    /// block_vias: if true, also block vias in proximity zones
+    pub fn add_stub_proximity_costs_batch(
+        &mut self,
+        stubs: Vec<(i32, i32)>,
+        radius: i32,
+        max_cost: i32,
+        block_vias: bool,
+    ) {
+        let radius_sq = radius * radius;
+        let radius_f = radius as f32;
+
+        for (gcx, gcy) in stubs {
+            for dx in -radius..=radius {
+                for dy in -radius..=radius {
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq <= radius_sq {
+                        let dist = (dist_sq as f32).sqrt();
+                        let proximity = 1.0 - (dist / radius_f);
+                        let cost = (proximity * max_cost as f32) as i32;
+
+                        let key = pack_xy(gcx + dx, gcy + dy);
+                        let existing = self.stub_proximity.get(&key).copied().unwrap_or(0);
+                        if cost > existing {
+                            self.stub_proximity.insert(key, cost);
+                        }
+
+                        if block_vias {
+                            // Increment ref count for blocked vias
+                            *self.blocked_vias.entry(key).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -165,7 +273,8 @@ impl GridObstacleMap {
         });
 
         // Check if cell is in blocked_cells (tracks, stubs, pads from other nets)
-        let in_blocked_cells = self.blocked_cells[layer].contains(&key);
+        // With ref counting, presence in the map means count > 0 (we remove entries at 0)
+        let in_blocked_cells = self.blocked_cells[layer].contains_key(&key);
 
         // If cell is blocked by other nets' obstacles, check if it's a source/target cell
         // source_target_cells can override blocking for exact endpoint positions only
@@ -194,8 +303,8 @@ impl GridObstacleMap {
     /// Check if via is blocked
     #[inline]
     pub fn is_via_blocked(&self, gx: i32, gy: i32) -> bool {
-        // Check explicit via blocks
-        if self.blocked_vias.contains(&pack_xy(gx, gy)) {
+        // Check explicit via blocks (with ref counting, presence means count > 0)
+        if self.blocked_vias.contains_key(&pack_xy(gx, gy)) {
             return true;
         }
         // Check BGA zones - vias blocked inside unless allowed

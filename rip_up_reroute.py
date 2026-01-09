@@ -5,12 +5,19 @@ This module handles removing routed nets from the PCB data and tracking structur
 as well as restoring them when needed (e.g., when a rip-up retry fails).
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
 from routing_utils import add_route_to_pcb_data, remove_route_from_pcb_data
-from obstacle_map import compute_track_proximity_for_net
+from obstacle_map import (
+    compute_track_proximity_for_net, precompute_net_obstacles,
+    add_net_obstacles_from_cache, remove_net_obstacles_from_cache
+)
+
+if TYPE_CHECKING:
+    from grid_router import GridObstacleMap
+    from obstacle_map import NetObstacleData
 
 
 def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
@@ -18,7 +25,9 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
                diff_pair_by_net_id: Dict[int, Tuple[str, DiffPairNet]],
                remaining_net_ids: List[int], results: List[dict],
                config: GridRouteConfig,
-               track_proximity_cache: Dict[int, dict] = None) -> Tuple[Optional[dict], List[int], bool]:
+               track_proximity_cache: Dict[int, dict] = None,
+               working_obstacles: 'GridObstacleMap' = None,
+               net_obstacles_cache: Dict[int, 'NetObstacleData'] = None) -> Tuple[Optional[dict], List[int], bool]:
     """Rip up a routed net (or diff pair), removing it from pcb_data and tracking structures.
 
     Args:
@@ -32,6 +41,8 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
         results: List of routing results
         config: Routing configuration
         track_proximity_cache: Optional cache for track proximity costs
+        working_obstacles: Optional working obstacle map for incremental updates
+        net_obstacles_cache: Optional cache of net obstacles for incremental updates
 
     Returns:
         tuple: (saved_result, ripped_net_ids, was_in_results) for later restoration
@@ -91,6 +102,16 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
         if net_id not in remaining_net_ids:
             remaining_net_ids.append(net_id)
 
+    # Update working_obstacles if provided (for incremental approach)
+    # Remove old cache (with route), recompute (stubs only), add new cache
+    if working_obstacles is not None and net_obstacles_cache is not None:
+        for rid in ripped_net_ids:
+            if rid in net_obstacles_cache:
+                remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
+            # Recompute cache - now only has stubs (route was removed from pcb_data)
+            net_obstacles_cache[rid] = precompute_net_obstacles(pcb_data, rid, config)
+            add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
+
     return saved_result, ripped_net_ids, was_in_results
 
 
@@ -101,7 +122,9 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 remaining_net_ids: List[int], results: List[dict],
                 config: GridRouteConfig,
                 track_proximity_cache: Dict[int, dict] = None,
-                layer_map: Dict[str, int] = None):
+                layer_map: Dict[str, int] = None,
+                working_obstacles: 'GridObstacleMap' = None,
+                net_obstacles_cache: Dict[int, 'NetObstacleData'] = None):
     """Restore a previously ripped net to pcb_data and tracking structures.
 
     Args:
@@ -119,6 +142,8 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
         config: Routing configuration
         track_proximity_cache: Optional cache for track proximity costs
         layer_map: Optional layer name to index mapping
+        working_obstacles: Optional working obstacle map for incremental updates
+        net_obstacles_cache: Optional cache of net obstacles for incremental updates
     """
     if saved_result is None:
         return
@@ -169,3 +194,13 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
         if track_proximity_cache is not None and layer_map is not None:
             track_proximity_cache[net_id] = compute_track_proximity_for_net(
                 pcb_data, net_id, config, layer_map)
+
+    # Update working_obstacles if provided (for incremental approach)
+    # Remove stubs-only cache, recompute (with route), add new cache
+    if working_obstacles is not None and net_obstacles_cache is not None:
+        for rid in ripped_net_ids:
+            if rid in net_obstacles_cache:
+                remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
+            # Recompute cache - now has route again (restored to pcb_data)
+            net_obstacles_cache[rid] = precompute_net_obstacles(pcb_data, rid, config)
+            add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])

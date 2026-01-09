@@ -14,7 +14,8 @@ from obstacle_map import (
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
     add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net, add_net_obstacles_with_vis,
-    VisualizationData
+    VisualizationData, update_net_obstacles_after_routing, add_net_obstacles_from_cache,
+    remove_net_obstacles_from_cache
 )
 from routing_utils import (
     get_stub_endpoints, get_chip_pad_positions, add_route_to_pcb_data, get_net_endpoints,
@@ -24,7 +25,7 @@ from single_ended_routing import route_net_with_obstacles, route_net_with_visual
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
-from routing_context import build_single_ended_obstacles
+from routing_context import build_single_ended_obstacles, build_incremental_obstacles
 
 # ANSI color codes
 RED = '\033[91m'
@@ -124,11 +125,20 @@ def route_single_ended_nets(
             add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
             add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
         else:
-            # Use helper for non-visualization case
-            obstacles, unrouted_stubs = build_single_ended_obstacles(
-                base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
-                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
-            )
+            # Use incremental approach if working map is available
+            if state.working_obstacles is not None and state.net_obstacles_cache:
+                obstacles, unrouted_stubs = build_incremental_obstacles(
+                    state.working_obstacles, pcb_data, config, net_id,
+                    all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
+                    state.net_obstacles_cache
+                )
+            else:
+                # Fallback to full rebuild (but use cache for unrouted nets)
+                obstacles, unrouted_stubs = build_single_ended_obstacles(
+                    base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                    all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
+                    net_obstacles_cache=state.net_obstacles_cache
+                )
 
         # Calculate stub length BEFORE routing (stubs are existing segments for this net)
         stub_length = calculate_stub_length(pcb_data, net_id)
@@ -194,6 +204,15 @@ def route_single_ended_nets(
             if result.get('path'):
                 routed_net_paths[net_id] = result['path']
             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+            # Update working obstacles with new route for incremental approach
+            if state.working_obstacles is not None and state.net_obstacles_cache is not None:
+                # Remove old cache (stubs only) before updating
+                if net_id in state.net_obstacles_cache:
+                    remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+                # Update cache with new route (recomputes from pcb_data)
+                update_net_obstacles_after_routing(pcb_data, net_id, result, config, state.net_obstacles_cache)
+                # Add new cache (stubs + new route) to working
+                add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
@@ -338,7 +357,8 @@ def route_single_ended_nets(
                             saved_result, ripped_ids, was_in_results = rip_up_net(
                                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                results, config, track_proximity_cache
+                                results, config, track_proximity_cache,
+                                state.working_obstacles, state.net_obstacles_cache
                             )
                             if saved_result is None:
                                 rip_successful = False
@@ -359,7 +379,8 @@ def route_single_ended_nets(
                                 restore_net(rid, saved_result, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                           results, config, track_proximity_cache, layer_map)
+                                           results, config, track_proximity_cache, layer_map,
+                                           state.working_obstacles, state.net_obstacles_cache)
                                 if was_in_results:
                                     successful += 1
                                 ripped_items.pop()
@@ -396,6 +417,15 @@ def route_single_ended_nets(
                             if retry_result.get('path'):
                                 routed_net_paths[net_id] = retry_result['path']
                             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+                            # Update working obstacles with new route for incremental approach
+                            if state.working_obstacles is not None and state.net_obstacles_cache is not None:
+                                # Remove old cache (stubs only) before updating
+                                if net_id in state.net_obstacles_cache:
+                                    remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+                                # Update cache with new route
+                                update_net_obstacles_after_routing(pcb_data, net_id, retry_result, config, state.net_obstacles_cache)
+                                # Add new cache (stubs + new route) to working
+                                add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
 
                             # Queue all ripped-up nets for rerouting and add to history
                             rip_and_retry_history.add((net_id, blocker_canonicals))
@@ -434,7 +464,8 @@ def route_single_ended_nets(
                             restore_net(rid, saved_result, ripped_ids, was_in_results,
                                        pcb_data, routed_net_ids, routed_net_paths,
                                        routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                       results, config, track_proximity_cache, layer_map)
+                                       results, config, track_proximity_cache, layer_map,
+                                       state.working_obstacles, state.net_obstacles_cache)
                             if was_in_results:
                                 successful += 1
 

@@ -43,7 +43,9 @@ from obstacle_map import (
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
     VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
     compute_track_proximity_for_net, merge_track_proximity_costs, add_cross_layer_tracks,
-    draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
+    draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles,
+    precompute_all_net_obstacles, build_working_obstacle_map, precompute_net_obstacles,
+    add_net_obstacles_from_cache, remove_net_obstacles_from_cache, update_net_obstacles_after_routing
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization, route_multipoint_taps
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_connector_regions
@@ -682,6 +684,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if gnd_net_id:
             print(f"GND net ID: {gnd_net_id} (GND vias will be added as obstacles)")
 
+    # Pre-compute net obstacles for caching (speeds up per-route setup)
+    print("Pre-computing net obstacle cache...")
+    cache_start = time.time()
+    net_obstacles_cache = precompute_all_net_obstacles(
+        pcb_data, list(all_unrouted_net_ids), config,
+        extra_clearance=0.0, diagonal_margin=0.25
+    )
+    cache_time = time.time() - cache_start
+    print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
+
+    # Build working obstacle map (base + all nets) for incremental updates
+    # Uses reference counting in Rust to correctly handle cells blocked by multiple nets
+    working_obstacles = build_working_obstacle_map(base_obstacles, net_obstacles_cache)
+
     # Create routing state object to hold all shared state
     state = create_routing_state(
         pcb_data=pcb_data,
@@ -702,6 +718,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         all_segment_modifications=all_segment_modifications,
         all_swap_vias=all_swap_vias,
         total_layer_swaps=total_layer_swaps,
+        net_obstacles_cache=net_obstacles_cache,
+        working_obstacles=working_obstacles,
     )
 
     # Create local aliases for frequently-used state fields (enables gradual migration)
@@ -853,6 +871,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 total_added += 1
         print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")
 
+        # Sync working_obstacles with the updated pcb_data
+        # This is needed because length matching may have modified segments
+        if state.working_obstacles is not None and state.net_obstacles_cache is not None:
+            for net_id in routed_net_ids_set:
+                # Remove old cache from working
+                if net_id in state.net_obstacles_cache:
+                    remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+                # Recompute cache from current pcb_data
+                state.net_obstacles_cache[net_id] = precompute_net_obstacles(pcb_data, net_id, config)
+                # Add new cache to working
+                add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+
     # Phase 3: Complete multi-point routing (tap connections)
     # This happens AFTER length matching so tap routes connect to meandered main routes
     if state.pending_multipoint_nets:
@@ -877,12 +907,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             lm_segments = lm_result.get('new_segments', main_result['new_segments'])
             lm_vias = lm_result.get('new_vias', main_result.get('new_vias', []))
 
-            # Rebuild obstacles - exclude current net so we can tap into our own main route
-            phase3_routed_ids = [rid for rid in routed_net_ids if rid != net_id]
-            obstacles, _ = build_single_ended_obstacles(
-                base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
-                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
-            )
+            # Check if length matching modified the segments (different object = modified)
+            length_matching_active = lm_segments is not main_result['new_segments']
+
+            # Build obstacles - use incremental approach if no length matching and working map available
+            if not length_matching_active and state.working_obstacles is not None and state.net_obstacles_cache:
+                from routing_context import build_incremental_obstacles
+                obstacles, _ = build_incremental_obstacles(
+                    state.working_obstacles, pcb_data, config, net_id,
+                    all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
+                    state.net_obstacles_cache
+                )
+            else:
+                # Full rebuild needed when length matching modified segments
+                phase3_routed_ids = [rid for rid in routed_net_ids if rid != net_id]
+                obstacles, _ = build_single_ended_obstacles(
+                    base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
+                    all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
+                    net_obstacles_cache=state.net_obstacles_cache
+                )
 
             # Build input - use LENGTH-MATCHED segments (so taps connect to actual final route)
             # The segment filtering in route_multipoint_taps will avoid meander regions
@@ -911,6 +954,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     add_route_to_pcb_data(pcb_data, tap_result, debug_lines=config.debug_lines)
                     results.append(tap_result)
                     print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
+
+                    # Update working obstacles with tap segments for subsequent nets
+                    if state.working_obstacles is not None and state.net_obstacles_cache is not None:
+                        # Remove old cache, update with new segments, add back
+                        if net_id in state.net_obstacles_cache:
+                            remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+                        update_net_obstacles_after_routing(pcb_data, net_id, completed_result, config, state.net_obstacles_cache)
+                        add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
 
                 routed_results[net_id] = completed_result
 

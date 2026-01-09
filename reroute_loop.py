@@ -225,7 +225,8 @@ def run_reroute_loop(
                                 saved_result_tmp, ripped_ids, was_in_results = rip_up_net(
                                     blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                     routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                    results, config, track_proximity_cache
+                                    results, config, track_proximity_cache,
+                                    state.working_obstacles, state.net_obstacles_cache
                                 )
                                 if saved_result_tmp is None:
                                     rip_successful = False
@@ -241,7 +242,8 @@ def run_reroute_loop(
                                     restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
                                                pcb_data, routed_net_ids, routed_net_paths,
                                                routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                               results, config, track_proximity_cache, layer_map)
+                                               results, config, track_proximity_cache, layer_map,
+                                               state.working_obstacles, state.net_obstacles_cache)
                                     if was_in_results:
                                         successful += 1
                                     ripped_items.pop()
@@ -306,7 +308,8 @@ def run_reroute_loop(
                                 restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                           results, config, track_proximity_cache, layer_map)
+                                           results, config, track_proximity_cache, layer_map,
+                                           state.working_obstacles, state.net_obstacles_cache)
                                 if was_in_results:
                                     successful += 1
 
@@ -489,7 +492,8 @@ def run_reroute_loop(
                                 saved_result_tmp, ripped_ids, was_in_results = rip_up_net(
                                     blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                     routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                    results, config, track_proximity_cache
+                                    results, config, track_proximity_cache,
+                                    state.working_obstacles, state.net_obstacles_cache
                                 )
                                 if saved_result_tmp is None:
                                     rip_successful = False
@@ -505,7 +509,8 @@ def run_reroute_loop(
                                     restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
                                                pcb_data, routed_net_ids, routed_net_paths,
                                                routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                               results, config, track_proximity_cache, layer_map)
+                                               results, config, track_proximity_cache, layer_map,
+                                               state.working_obstacles, state.net_obstacles_cache)
                                     if was_in_results:
                                         successful += 1
                                     ripped_items.pop()
@@ -585,7 +590,8 @@ def run_reroute_loop(
                                 restore_net(net_id_tmp, saved_result_tmp, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                           results, config, track_proximity_cache, layer_map)
+                                           results, config, track_proximity_cache, layer_map,
+                                           state.working_obstacles, state.net_obstacles_cache)
                                 if was_in_results:
                                     successful += 1
 

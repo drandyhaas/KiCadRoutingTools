@@ -39,6 +39,7 @@ class RoutingState:
     # Caches
     track_proximity_cache: Dict[int, Dict] = field(default_factory=dict)
     layer_map: Dict[str, int] = field(default_factory=dict)
+    net_obstacles_cache: Dict[int, Any] = field(default_factory=dict)  # Pre-computed net obstacles
 
     # Reroute queue for ripped-up nets
     reroute_queue: List[Tuple] = field(default_factory=list)
@@ -76,6 +77,7 @@ class RoutingState:
     base_obstacles: Any = None
     diff_pair_base_obstacles: Any = None
     diff_pair_extra_clearance: float = 0.0
+    working_obstacles: Any = None  # Incremental working map with all net obstacles
 
     # Configuration flags
     enable_layer_switch: bool = False
@@ -116,6 +118,8 @@ def create_routing_state(
     all_segment_modifications: Optional[List] = None,
     all_swap_vias: Optional[List] = None,
     total_layer_swaps: int = 0,
+    net_obstacles_cache: Optional[Dict] = None,
+    working_obstacles: Any = None,
 ) -> RoutingState:
     """
     Create and initialize a RoutingState object.
@@ -142,4 +146,6 @@ def create_routing_state(
         all_segment_modifications=all_segment_modifications or [],
         all_swap_vias=all_swap_vias or [],
         total_layer_swaps=total_layer_swaps,
+        net_obstacles_cache=net_obstacles_cache or {},
+        working_obstacles=working_obstacles,
     )

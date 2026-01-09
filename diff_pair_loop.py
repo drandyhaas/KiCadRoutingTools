@@ -214,7 +214,8 @@ def route_diff_pairs(
             saved_result, ripped_ids, was_in_results = rip_up_net(
                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                 routed_results, diff_pair_by_net_id, remaining_net_ids,
-                results, config, track_proximity_cache
+                results, config, track_proximity_cache,
+                state.working_obstacles, state.net_obstacles_cache
             )
             probe_ripped_items.append((blocker, saved_result, ripped_ids, was_in_results))
 
@@ -480,7 +481,8 @@ def route_diff_pairs(
                             saved_result, ripped_ids, was_in_results = rip_up_net(
                                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                results, config, track_proximity_cache
+                                results, config, track_proximity_cache,
+                                state.working_obstacles, state.net_obstacles_cache
                             )
                             if saved_result is None:
                                 rip_successful = False
@@ -501,7 +503,8 @@ def route_diff_pairs(
                                 restore_net(net_id, saved_result, ripped_ids, was_in_results,
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                           results, config, track_proximity_cache, layer_map)
+                                           results, config, track_proximity_cache, layer_map,
+                                           state.working_obstacles, state.net_obstacles_cache)
                                 if was_in_results:
                                     successful += 1
                                 ripped_items.pop()
@@ -623,7 +626,8 @@ def route_diff_pairs(
                             restore_net(net_id, saved_result, ripped_ids, was_in_results,
                                        pcb_data, routed_net_ids, routed_net_paths,
                                        routed_results, diff_pair_by_net_id, remaining_net_ids,
-                                       results, config, track_proximity_cache, layer_map)
+                                       results, config, track_proximity_cache, layer_map,
+                                       state.working_obstacles, state.net_obstacles_cache)
                             if was_in_results:
                                 successful += 1
 
