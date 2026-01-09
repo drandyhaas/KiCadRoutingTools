@@ -917,6 +917,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             routed_single.append(net_name)
         else:
             failed_single.append(net_name)
+
+    # Collect multi-point tap routing stats
+    tap_pads_connected = 0
+    tap_pads_total = 0
+    tap_edges_routed = 0
+    tap_edges_failed = 0
+    multipoint_nets = 0
+    for net_id, result in routed_results.items():
+        if result.get('is_multipoint'):
+            multipoint_nets += 1
+            tap_pads_connected += result.get('tap_pads_connected', 0)
+            tap_pads_total += result.get('tap_pads_total', 0)
+            tap_edges_routed += result.get('tap_edges_routed', 0)
+            tap_edges_failed += result.get('tap_edges_failed', 0)
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
@@ -934,6 +948,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"  {RED}Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed ({len(failed_single)} FAILED){RESET}")
         else:
             print(f"  Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed")
+    if multipoint_nets > 0:
+        tap_pads_failed = tap_pads_total - tap_pads_connected
+        if tap_pads_failed > 0:
+            print(f"  {RED}Multi-point:   {tap_pads_connected}/{tap_pads_total} pads connected ({tap_pads_failed} FAILED){RESET}")
+        else:
+            print(f"  Multi-point:   {tap_pads_connected}/{tap_pads_total} pads connected ({multipoint_nets} nets)")
     if ripup_success_pairs:
         print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
     if rerouted_pairs:
@@ -952,6 +972,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         'failed_diff_pairs': failed_diff_pairs,
         'routed_single': routed_single,
         'failed_single': failed_single,
+        'multipoint_nets': multipoint_nets,
+        'multipoint_pads_connected': tap_pads_connected,
+        'multipoint_pads_total': tap_pads_total,
+        'multipoint_edges_routed': tap_edges_routed,
+        'multipoint_edges_failed': tap_edges_failed,
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),

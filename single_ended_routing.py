@@ -7,13 +7,17 @@ Routes individual nets using A* pathfinding on a grid obstacle map.
 import random
 from typing import List, Optional, Tuple
 
+# ANSI color codes
+RED = '\033[91m'
+RESET = '\033[0m'
+
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import (
     get_net_endpoints,
     get_multipoint_net_pads,
-    find_farthest_pad_pair,
-    find_closest_point_on_segments
+    find_closest_point_on_segments,
+    compute_mst_edges
 )
 from obstacle_map import build_obstacle_map
 
@@ -602,14 +606,14 @@ def route_multipoint_main(
     pad_info: List[Tuple]
 ) -> Optional[dict]:
     """
-    Route only the main (farthest pair) connection of a multi-point net.
+    Route only the main (longest MST segment) connection of a multi-point net.
 
-    This is Phase 1 of multi-point routing. It routes the two pads that are
-    farthest apart by Manhattan distance, creating a clean 2-point route
+    This is Phase 1 of multi-point routing. It computes an MST between all pads
+    and routes the longest segment first, creating a clean 2-point route
     suitable for length matching.
 
     After length matching is applied, call route_multipoint_taps() to
-    complete the remaining connections.
+    complete the remaining connections using the remaining MST edges.
 
     Args:
         pcb_data: PCB data
@@ -623,7 +627,8 @@ def route_multipoint_main(
         - 'new_segments', 'new_vias', 'iterations', 'path_length', 'path'
         - 'is_multipoint': True (flag for Phase 3)
         - 'multipoint_pad_info': Full pad_info list for Phase 3
-        - 'routed_pad_indices': Set of indices already routed (the farthest pair)
+        - 'routed_pad_indices': Set of indices already routed (the longest MST edge)
+        - 'mst_edges': List of (idx_a, idx_b, length) for all MST edges
         Or {'failed': True, 'iterations': N} on failure
     """
     if GridRouter is None:
@@ -637,13 +642,19 @@ def route_multipoint_main(
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
 
-    # Extract pads from pad_info
-    pads = [info[5] for info in pad_info]
+    # Extract pad positions for MST computation
+    pad_positions = [(info[3], info[4]) for info in pad_info]  # (orig_x, orig_y)
 
-    # Find the two FARTHEST pads (for length matching compatibility)
-    idx_a, idx_b = find_farthest_pad_pair(pads)
+    # Compute MST with Manhattan distance (better for PCB routing)
+    mst_edges = compute_mst_edges(pad_positions, use_manhattan=True)
 
-    print(f"  Multi-point net Phase 1: routing farthest pair (pads {idx_a} and {idx_b})")
+    # Sort MST edges by length (longest first)
+    mst_edges = sorted(mst_edges, key=lambda e: -e[2])
+
+    # Route the longest MST edge first
+    idx_a, idx_b, longest_len = mst_edges[0]
+
+    print(f"  Multi-point net Phase 1: routing longest MST edge (pads {idx_a} and {idx_b}, length={longest_len:.2f}mm)")
 
     # Build source/target for farthest pair
     pad_a = pad_info[idx_a]
@@ -694,6 +705,13 @@ def route_multipoint_main(
         'main_pad_b': (pad_b[3], pad_b[4]),  # (orig_x, orig_y) of second main pad
         # Store original segments for identifying meanders in Phase 3
         'original_segments': segments,
+        # Store MST edges for Phase 3 (sorted longest first)
+        'mst_edges': mst_edges,
+        # Initial tap stats (Phase 1 connects 2 pads via 1 edge)
+        'tap_edges_routed': 1,
+        'tap_edges_failed': 0,
+        'tap_pads_connected': 2,
+        'tap_pads_total': len(pad_info),
     }
 
 
@@ -705,11 +723,12 @@ def route_multipoint_taps(
     main_result: dict
 ) -> Optional[dict]:
     """
-    Route the remaining tap connections for a multi-point net.
+    Route the remaining MST edges for a multi-point net.
 
     This is Phase 3 of multi-point routing - called AFTER length matching
-    has been applied to the main route. It finds tap points on the (now
-    meandered) segments and routes to remaining pads.
+    has been applied to the main route. It routes the remaining MST edges
+    in order of length (longest first), connecting unrouted pads to the
+    growing routed network.
 
     Args:
         pcb_data: PCB data
@@ -726,7 +745,8 @@ def route_multipoint_taps(
         return None
 
     pad_info = main_result['multipoint_pad_info']
-    routed_indices = main_result['routed_pad_indices']
+    routed_indices = set(main_result['routed_pad_indices'])
+    mst_edges = main_result.get('mst_edges', [])
 
     # Get the current segments (which may have meanders from length matching)
     all_segments = list(main_result['new_segments'])
@@ -735,165 +755,155 @@ def route_multipoint_taps(
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
 
-    # Extract pads from pad_info
-    pads = [info[5] for info in pad_info]
+    # Get remaining MST edges (skip the first one which was routed in Phase 1)
+    # MST edges are already sorted longest-first
+    remaining_edges = mst_edges[1:] if len(mst_edges) > 1 else []
 
-    remaining_indices = [i for i in range(len(pad_info)) if i not in routed_indices]
-
-    if not remaining_indices:
-        print(f"  No remaining pads to route in Phase 3")
+    if not remaining_edges:
+        print(f"  No remaining MST edges to route in Phase 3")
         return main_result
 
-    print(f"  Multi-point net Phase 3: routing {len(remaining_indices)} remaining pads")
+    print(f"  Multi-point net Phase 3: routing {len(remaining_edges)} remaining MST edges (longest first)")
 
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
     total_iterations = 0
 
-    def get_endpoint_info(endpoint):
-        """Get x, y, layers from Pad object or dict."""
-        if hasattr(endpoint, 'global_x'):
-            return endpoint.global_x, endpoint.global_y, endpoint.layers
-        elif isinstance(endpoint, dict):
-            return endpoint['x'], endpoint['y'], endpoint.get('layers', [endpoint.get('layer')])
+    # Route remaining MST edges in order (longest first)
+    # Each edge connects a routed pad to an unrouted pad
+    edges_routed = 0
+    failed_edges = set()  # Track edges that failed to route
+    max_passes = len(remaining_edges) * 2  # Safety limit
+
+    for pass_num in range(max_passes):
+        if len(routed_indices) == len(pad_info):
+            break  # All pads connected
+
+        # Find an edge that connects routed to unrouted (skip failed edges)
+        edge_to_route = None
+        for edge in remaining_edges:
+            idx_a, idx_b, length = edge
+            edge_key = (min(idx_a, idx_b), max(idx_a, idx_b))
+            if edge_key in failed_edges:
+                continue
+
+            a_routed = idx_a in routed_indices
+            b_routed = idx_b in routed_indices
+
+            if a_routed and not b_routed:
+                edge_to_route = (idx_a, idx_b, length)  # Route from a to b
+                break
+            elif b_routed and not a_routed:
+                edge_to_route = (idx_b, idx_a, length)  # Route from b to a
+                break
+
+        if edge_to_route is None:
+            unrouted_pads = len(pad_info) - len(routed_indices)
+            if unrouted_pads > 0:
+                print(f"  {RED}Warning: {unrouted_pads} pad(s) not connected ({len(failed_edges)} MST edge(s) failed){RESET}")
+            break
+
+        src_idx, tgt_idx, edge_len = edge_to_route
+
+        src_pad = pad_info[src_idx]
+        tgt_pad = pad_info[tgt_idx]
+
+        print(f"    Routing MST edge: pad {src_idx} -> pad {tgt_idx} (length={edge_len:.2f}mm)")
+
+        # Find tap point on existing segments near the source pad
+        src_x, src_y = src_pad[3], src_pad[4]  # Original coordinates
+        tgt_x, tgt_y = tgt_pad[3], tgt_pad[4]
+
+        # Get source pad layers for tap point search
+        src_endpoint = pad_info[src_idx][5]  # The pad object
+        if hasattr(src_endpoint, 'layers'):
+            src_layers = src_endpoint.layers
+        elif isinstance(src_endpoint, dict):
+            src_layers = src_endpoint.get('layers', [src_endpoint.get('layer')])
         else:
-            raise ValueError(f"Unknown endpoint type: {type(endpoint)}")
+            src_layers = [layer_names[src_pad[2]]]
 
-    # Get main pad positions for filtering tap segments
-    # Taps should connect to segments on the tap pad's side (past the meander)
-    main_pad_a = main_result.get('main_pad_a')
-    main_pad_b = main_result.get('main_pad_b')
-
-    for pad_idx in remaining_indices:
-        pad = pad_info[pad_idx]
-        target_endpoint = pads[pad_idx]
-
-        # Get endpoint coordinates and layers
-        target_x, target_y, target_layers = get_endpoint_info(target_endpoint)
-
-        # Filter segments to only those reachable from closer main pad before hitting meanders
-        # This ensures taps connect past the meander, not into it
-        segments_for_tap = all_segments
-        original_segments = main_result.get('original_segments', [])
-
-        if main_pad_a and main_pad_b and original_segments:
-            # Find which main pad is closer to this tap pad
-            dist_a = abs(target_x - main_pad_a[0]) + abs(target_y - main_pad_a[1])
-            dist_b = abs(target_x - main_pad_b[0]) + abs(target_y - main_pad_b[1])
-            closer_main_pad = main_pad_a if dist_a < dist_b else main_pad_b
-
-            # Build set of original segment signatures for comparison
-            def seg_sig(seg):
-                return (round(seg.start_x, 3), round(seg.start_y, 3),
-                        round(seg.end_x, 3), round(seg.end_y, 3), seg.layer)
-            original_sigs = set(seg_sig(s) for s in original_segments)
-
-            # Trace connected segments from closer main pad, stopping at meander segments
-            # Build adjacency: position -> list of segments touching that position
-            pos_to_segs = {}
-            for seg in all_segments:
-                for pos in [(round(seg.start_x, 3), round(seg.start_y, 3)),
-                            (round(seg.end_x, 3), round(seg.end_y, 3))]:
-                    if pos not in pos_to_segs:
-                        pos_to_segs[pos] = []
-                    pos_to_segs[pos].append(seg)
-
-            # Start from closer main pad position
-            start_pos = (round(closer_main_pad[0], 3), round(closer_main_pad[1], 3))
-
-            # BFS to find all original segments reachable from start without crossing meanders
-            visited_segs = set()
-            visited_pos = set()
-            queue = [start_pos]
-            valid_segments = []
-
-            while queue:
-                pos = queue.pop(0)
-                if pos in visited_pos:
-                    continue
-                visited_pos.add(pos)
-
-                for seg in pos_to_segs.get(pos, []):
-                    if id(seg) in visited_segs:
-                        continue
-
-                    # Check if this segment is an original (non-meander) segment
-                    if seg_sig(seg) not in original_sigs:
-                        # This is a meander segment - don't traverse through it
-                        continue
-
-                    visited_segs.add(id(seg))
-                    valid_segments.append(seg)
-
-                    # Add the other endpoint to continue traversal
-                    other_pos = (round(seg.end_x, 3), round(seg.end_y, 3))
-                    if other_pos == pos:
-                        other_pos = (round(seg.start_x, 3), round(seg.start_y, 3))
-                    queue.append(other_pos)
-
-            if valid_segments:
-                segments_for_tap = valid_segments
-                print(f"  Traced {len(valid_segments)}/{len(all_segments)} segments from main pad (before meander)")
-
-        # Find closest tap point on filtered segments
+        # Find closest tap point on existing segments near source pad
         tap_result = find_closest_point_on_segments(
-            segments_for_tap,
-            target_x,
-            target_y,
-            target_layers
+            all_segments,
+            src_x,
+            src_y,
+            src_layers
         )
 
         if tap_result is None:
-            print(f"  Could not find tap point for pad {pad_idx}")
-            continue
+            # Fall back to using source pad position directly
+            tap_x, tap_y = src_x, src_y
+            tap_layer = layer_names[src_pad[2]]
+            print(f"      No tap point found, using pad position directly")
+        else:
+            tap_x, tap_y, tap_layer, tap_dist = tap_result
 
-        tap_x, tap_y, tap_layer, tap_dist = tap_result
         tap_layer_idx = layer_names.index(tap_layer) if tap_layer in layer_names else 0
 
-        # Convert tap point to grid
+        # Convert to grid coordinates
         tap_gx, tap_gy = coord.to_grid(tap_x, tap_y)
 
-        # Build source (tap point) and target (pad)
+        # Build source (tap point) and target (new pad)
         sources = [(tap_gx, tap_gy, tap_layer_idx)]
-        targets = [(pad[0], pad[1], pad[2])]
+        targets = [(tgt_pad[0], tgt_pad[1], tgt_pad[2])]
 
         # Mark source/target cells
         for gx, gy, layer in sources + targets:
             obstacles.add_source_target_cell(gx, gy, layer)
 
         # Add allowed cells around tap point and target to escape blocked areas
-        # Use a smaller radius to avoid overriding blocking from other nets' segments
         allow_radius = 5
         for gx, gy, _ in sources + targets:
             for dx in range(-allow_radius, allow_radius + 1):
                 for dy in range(-allow_radius, allow_radius + 1):
                     obstacles.add_allowed_cell(gx + dx, gy + dy)
 
-        # Route to this pad
+        # Route this MST edge
         path, iterations = router.route_multi(obstacles, sources, targets, config.max_iterations)
         total_iterations += iterations
 
         if path is None:
-            print(f"  Failed to route to pad {pad_idx} after {iterations} iterations")
+            print(f"      {RED}Failed to route MST edge after {iterations} iterations{RESET}")
+            failed_edges.add((min(src_idx, tgt_idx), max(src_idx, tgt_idx)))
             continue
 
-        print(f"  Routed to pad {pad_idx} in {iterations} iterations")
+        print(f"      Routed in {iterations} iterations")
 
         # Convert path to segments/vias
         segments, vias = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
             (tap_x, tap_y, tap_layer),  # start_original (tap point)
-            (pad[3], pad[4], layer_names[pad[2]])  # end_original (pad)
+            (tgt_x, tgt_y, layer_names[tgt_pad[2]])  # end_original (target pad)
         )
         all_segments.extend(segments)
         all_vias.extend(vias)
 
-    print(f"  Phase 3 routing complete: {len(all_segments)} total segments, {len(all_vias)} total vias")
+        # Note: We don't add segments as obstacles since they're the same net
+        # and future tap routes can overlap with our own traces
+
+        # Mark target pad as routed and remove edge from remaining
+        routed_indices.add(tgt_idx)
+        remaining_edges = [e for e in remaining_edges if not (
+            (e[0] == src_idx and e[1] == tgt_idx) or (e[0] == tgt_idx and e[1] == src_idx)
+        )]
+        edges_routed += 1
+
+    pads_connected = len(routed_indices)
+    pads_total = len(pad_info)
+    pads_failed = pads_total - pads_connected
+    print(f"  Phase 3 routing complete: {edges_routed} edges, {len(all_segments)} total segments, {len(all_vias)} total vias")
 
     # Update result - preserve original fields, update segments/vias
     updated_result = dict(main_result)
     updated_result['new_segments'] = all_segments
     updated_result['new_vias'] = all_vias
     updated_result['iterations'] = main_result['iterations'] + total_iterations
+    updated_result['routed_pad_indices'] = routed_indices
+    # Tap routing stats (add Phase 3 to Phase 1 counts)
+    updated_result['tap_edges_routed'] = main_result.get('tap_edges_routed', 0) + edges_routed
+    updated_result['tap_edges_failed'] = main_result.get('tap_edges_failed', 0) + len(failed_edges)
+    updated_result['tap_pads_connected'] = pads_connected
+    updated_result['tap_pads_total'] = pads_total
 
     return updated_result
 

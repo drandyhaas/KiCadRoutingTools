@@ -33,7 +33,7 @@ def main():
     # Route some nets from pads (no fanout needed)
     options = "--track-width 0.2 --clearance 0.2 --via-size 0.5 --via-drill 0.4 --hole-to-hole-clearance 0.3"
     if quick:
-        run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb "/DDAT*" "/AN*" ' + options)
+        run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb "/IRQ*" "/AN*" ' + options)
     else:
         run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb --component U102 ' + options)
 
@@ -41,7 +41,7 @@ def main():
     run('python3 check_drc.py kicad_files/kit-out.kicad_pcb --clearance 0.15')
 
     if quick:
-        run('python3 check_connected.py kicad_files/kit-out.kicad_pcb --nets "/DDAT*" "/AN*" ')
+        run('python3 check_connected.py kicad_files/kit-out.kicad_pcb --nets "/IRQ*" "/AN*" ')
     else:
         run('python3 check_connected.py kicad_files/kit-out.kicad_pcb --component U102')
 

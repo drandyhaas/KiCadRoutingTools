@@ -279,7 +279,7 @@ for i in range(len(path) - 1):
 
 ## Multi-Point Routing
 
-Nets with 3+ pads require special handling to work correctly with length matching. The router uses a 3-phase approach:
+Nets with 3+ pads require special handling to work correctly with length matching. The router uses an MST-based 3-phase approach:
 
 ### The Problem
 
@@ -288,23 +288,27 @@ When a net has more than 2 pads (e.g., a signal that fans out to multiple destin
 - The length-matching algorithm can't cleanly add meanders to branching routes
 - Tap segments shouldn't be included in length-matched measurements
 
-### 3-Phase Solution
+### MST-Based 3-Phase Solution
+
+The router computes a Minimum Spanning Tree (MST) between all pad positions using Manhattan distance, then routes edges in length order (longest first):
 
 ```
-Phase 1: Route main path    Phase 2: Length match      Phase 3: Route taps
+Phase 1: Route longest MST edge    Phase 2: Length match      Phase 3: Route remaining MST edges
 
-    B                           B                           B
-    |                           |                           |
-A---+---C                   A~~~+~~~C                   A~~~+~~~C
-                               meanders                     |
-    D (unrouted)               D (unrouted)                 D (connected)
+    B                                  B                           B
+    |                                  |                           |
+A---+  (longest edge A-C)          A~~~+~~~C                   A~~~+~~~C
+    |                                 meanders                     |
+    C                                  D (unrouted)                D (connected via MST edge)
+    D (unrouted)
 ```
 
 #### Phase 1: Main Route
-- Find the two **farthest** pads by Manhattan distance (not closest)
-- Route only between this pair using standard A* routing
+- Compute MST between all pads using Manhattan distance
+- Sort MST edges by length (longest first)
+- Route the **longest** MST edge using standard A* routing
 - Track pending multi-point nets in `state.pending_multipoint_nets`
-- Result includes `multipoint_pad_info` with all pads and `routed_pad_indices` tracking which are connected
+- Result includes `mst_edges` (sorted longest-first) for Phase 3
 
 #### Phase 2: Length Matching
 - Apply meanders to the clean 2-point main routes
@@ -312,20 +316,20 @@ A---+---C                   A~~~+~~~C                   A~~~+~~~C
 - Meanders are added to the main route segments
 
 #### Phase 3: Tap Connections
-- For each remaining unrouted pad:
-  - Find the closest tap point on the (now-meandered) main route
-  - Route from the tap point to the remaining pad
+- Route remaining MST edges in length order (longest first)
+- Each edge must connect an already-routed pad to an unrouted pad
+- Find tap point on existing segments near the source pad
+- Route from tap point to the target pad
 - Uses `route_multipoint_taps()` in `single_ended_routing.py`
-- Must rebuild obstacles excluding the current net (so we can tap into our own route)
 
 ### Implementation Details
 
 Key functions in `single_ended_routing.py`:
-- `route_multipoint_main()` - Phase 1: Routes farthest pair only
-- `route_multipoint_taps()` - Phase 3: Completes remaining connections
+- `route_multipoint_main()` - Phase 1: Computes MST, routes longest edge
+- `route_multipoint_taps()` - Phase 3: Routes remaining MST edges by length
 
 Key utility in `routing_utils.py`:
-- `find_farthest_pad_pair()` - Finds two pads with maximum Manhattan distance
+- `compute_mst_edges()` - Computes MST edges with indices using Prim's algorithm (supports Manhattan or Euclidean distance)
 
 State tracking in `routing_state.py`:
 - `pending_multipoint_nets` - Dict mapping net_id to main_result for Phase 3

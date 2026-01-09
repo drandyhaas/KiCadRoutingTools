@@ -1176,15 +1176,25 @@ def segments_intersect(a1: Tuple[float, float], a2: Tuple[float, float],
     return (ccw(a1, b1, b2) != ccw(a2, b1, b2)) and (ccw(a1, a2, b1) != ccw(a1, a2, b2))
 
 
-def compute_mst_segments(points: List[Tuple[float, float]]) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
-    """Compute minimum spanning tree segments between points using Prim's algorithm.
+def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = False) -> List[Tuple[int, int, float]]:
+    """Compute minimum spanning tree edges between points using Prim's algorithm.
 
-    Returns list of (point1, point2) tuples representing MST edges.
+    Args:
+        points: List of (x, y) coordinates
+        use_manhattan: If True, use Manhattan distance; if False, use Euclidean
+
+    Returns:
+        List of (idx_a, idx_b, distance) tuples representing MST edges.
+        The edges are in the order they were added to the tree (not sorted by length).
     """
     if len(points) < 2:
         return []
     if len(points) == 2:
-        return [(points[0], points[1])]
+        if use_manhattan:
+            dist = abs(points[0][0] - points[1][0]) + abs(points[0][1] - points[1][1])
+        else:
+            dist = math.sqrt((points[0][0] - points[1][0])**2 + (points[0][1] - points[1][1])**2)
+        return [(0, 1, dist)]
 
     # Prim's algorithm
     in_tree = {0}  # Start with first point
@@ -1198,17 +1208,30 @@ def compute_mst_segments(points: List[Tuple[float, float]]) -> List[Tuple[Tuple[
             for j in range(len(points)):
                 if j in in_tree:
                     continue
-                dist = math.sqrt((points[i][0] - points[j][0])**2 +
-                                (points[i][1] - points[j][1])**2)
+                if use_manhattan:
+                    dist = abs(points[i][0] - points[j][0]) + abs(points[i][1] - points[j][1])
+                else:
+                    dist = math.sqrt((points[i][0] - points[j][0])**2 +
+                                    (points[i][1] - points[j][1])**2)
                 if dist < best_dist:
                     best_dist = dist
-                    best_edge = (i, j)
+                    best_edge = (i, j, dist)
 
         if best_edge:
             in_tree.add(best_edge[1])
-            edges.append((points[best_edge[0]], points[best_edge[1]]))
+            edges.append(best_edge)
 
     return edges
+
+
+def compute_mst_segments(points: List[Tuple[float, float]]) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Compute minimum spanning tree segments between points using Prim's algorithm.
+
+    Returns list of (point1, point2) tuples representing MST edges.
+    Uses Euclidean distance.
+    """
+    edges = compute_mst_edges(points, use_manhattan=False)
+    return [(points[e[0]], points[e[1]]) for e in edges]
 
 
 def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
