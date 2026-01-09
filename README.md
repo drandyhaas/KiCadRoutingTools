@@ -14,7 +14,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
 - **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations. Validates that stub endpoints won't be too close to other stubs on the destination layer.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
-- **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance), inside-out (BGA), or original order
+- **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance; uses segment intersection with MST for non-BGA boards), inside-out (BGA), or original order
 - **MPS layer swap** - When MPS detects crossing conflicts (nets in Round 2+), attempts layer swaps to eliminate same-layer crossings. Tries swapping both the conflicting Round 2 unit and Round 1 unit. Re-runs MPS after swaps to verify conflict resolution
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs
@@ -296,6 +296,7 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb "Net-*"
 --no-crossing-layer-check  # Count crossings regardless of layer (default: same-layer only)
 --mps-reverse-rounds     # Route most-conflicting MPS groups first (instead of least)
 --mps-layer-swap         # Try layer swaps to resolve MPS crossing conflicts
+--mps-segment-intersection  # Force segment intersection method for MPS (auto when no BGAs)
 
 # Length matching (for DDR4 DQ/DQS signals)
 --length-match-group auto       # Auto-group DDR4 nets by byte lane (DQ0-7+DQS0, DQ8-15+DQS1, etc)

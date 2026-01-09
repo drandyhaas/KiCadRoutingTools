@@ -1157,6 +1157,100 @@ def get_net_stub_centroids(pcb_data: PCBData, net_id: int) -> List[Tuple[float, 
     return centroids
 
 
+def segments_intersect(a1: Tuple[float, float], a2: Tuple[float, float],
+                       b1: Tuple[float, float], b2: Tuple[float, float]) -> bool:
+    """Check if line segment a1-a2 intersects line segment b1-b2.
+
+    Uses the counter-clockwise orientation test for robust intersection detection.
+    """
+    def ccw(A, B, C):
+        return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+
+    # Check if segments share an endpoint (not a real crossing)
+    eps = 0.001
+    for p1 in [a1, a2]:
+        for p2 in [b1, b2]:
+            if abs(p1[0] - p2[0]) < eps and abs(p1[1] - p2[1]) < eps:
+                return False
+
+    return (ccw(a1, b1, b2) != ccw(a2, b1, b2)) and (ccw(a1, a2, b1) != ccw(a1, a2, b2))
+
+
+def compute_mst_segments(points: List[Tuple[float, float]]) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Compute minimum spanning tree segments between points using Prim's algorithm.
+
+    Returns list of (point1, point2) tuples representing MST edges.
+    """
+    if len(points) < 2:
+        return []
+    if len(points) == 2:
+        return [(points[0], points[1])]
+
+    # Prim's algorithm
+    in_tree = {0}  # Start with first point
+    edges = []
+
+    while len(in_tree) < len(points):
+        best_edge = None
+        best_dist = float('inf')
+
+        for i in in_tree:
+            for j in range(len(points)):
+                if j in in_tree:
+                    continue
+                dist = math.sqrt((points[i][0] - points[j][0])**2 +
+                                (points[i][1] - points[j][1])**2)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_edge = (i, j)
+
+        if best_edge:
+            in_tree.add(best_edge[1])
+            edges.append((points[best_edge[0]], points[best_edge[1]]))
+
+    return edges
+
+
+def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Get MST segments representing the routing path for a net.
+
+    For 2-pad nets: returns single segment between pads.
+    For 3+ pad nets: returns MST segments connecting all pads.
+
+    Uses stub endpoints if available, otherwise pad positions.
+    """
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+    # Case 1: Has stubs - use stub free ends
+    if net_segments:
+        groups = find_connected_groups(net_segments)
+        if len(groups) >= 2:
+            # Multiple stub groups - get free end of each
+            points = []
+            for group in groups:
+                free_ends = find_stub_free_ends(group, net_pads)
+                if free_ends:
+                    points.append((free_ends[0][0], free_ends[0][1]))
+                else:
+                    # Fallback to centroid
+                    pts = []
+                    for seg in group:
+                        pts.append((seg.start_x, seg.start_y))
+                        pts.append((seg.end_x, seg.end_y))
+                    cx = sum(p[0] for p in pts) / len(pts)
+                    cy = sum(p[1] for p in pts) / len(pts)
+                    points.append((cx, cy))
+            return compute_mst_segments(points)
+
+    # Case 2: No stubs, just pads - use pad positions
+    if len(net_pads) >= 2:
+        points = [(pad.global_x, pad.global_y) for pad in net_pads]
+        return compute_mst_segments(points)
+
+    return []
+
+
 def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[float, float]]:
     """
     Get the two routing endpoints for a net, for MPS conflict detection.
@@ -1490,7 +1584,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               bga_exclusion_zones: List[Tuple[float, float, float, float]] = None,
                               reverse_rounds: bool = False,
                               crossing_layer_check: bool = True,
-                              return_extended_info: bool = False) -> Union[List[int], MPSResult]:
+                              return_extended_info: bool = False,
+                              use_segment_intersection: bool = None) -> Union[List[int], MPSResult]:
     """
     Compute optimal net routing order using Maximum Planar Subset (MPS) algorithm.
 
@@ -1520,6 +1615,9 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               through BGA chips. Default is False (use angular projection).
         return_extended_info: If True, return MPSResult with conflict and layer info
                              instead of just ordered IDs. Used for MPS-aware layer swaps.
+        use_segment_intersection: If True, use MST segment intersection for crossing detection.
+                                 If None (default), auto-detect: use segment intersection when
+                                 no net endpoints are on chips.
 
     Returns:
         If return_extended_info=False: Ordered list of net IDs, with least-conflicting nets first
@@ -1599,11 +1697,20 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             center = (0, 0)
 
     # Step 3: Compute positions for crossing detection
-    # If use_boundary_ordering is True, use chip boundary unrolling
-    # Otherwise, use angular projection from center (default)
+    # Methods: boundary ordering (BGA), segment intersection (non-BGA), or angular (fallback)
 
     unit_boundary_info = {}  # unit_id -> (src_pos, tgt_pos, src_chip, tgt_chip) or None
     unit_angles = {}  # unit_id -> (angle1, angle2)
+    unit_mst_segments = {}  # unit_id -> list of (p1, p2) segments
+
+    # Build MST segments for each unit (used for segment intersection method)
+    for unit_id in unit_ids:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+        all_segments = []
+        for net_id in unit_net_ids:
+            all_segments.extend(get_net_mst_segments(pcb_data, net_id))
+        if all_segments:
+            unit_mst_segments[unit_id] = all_segments
 
     if use_boundary_ordering:
         # Use chip boundary ordering - respects physical constraint that routes can't go through chips
@@ -1632,7 +1739,28 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                 tgt_pos = compute_boundary_position(tgt_chip, endpoints[1], tgt_far, clockwise=False)
                 unit_boundary_info[unit_id] = (src_pos, tgt_pos, src_chip, tgt_chip)
 
-    # Compute angular positions (used as fallback or as primary method)
+    # Auto-detect segment intersection mode if not specified
+    # Use segment intersection when no unit endpoints are inside BGA exclusion zones
+    if use_segment_intersection is None:
+        any_in_bga = False
+        if bga_exclusion_zones:
+            for unit_id, endpoints in unit_endpoints.items():
+                for ep in endpoints:
+                    for zone in bga_exclusion_zones:
+                        min_x, min_y, max_x, max_y = zone[:4]
+                        if min_x <= ep[0] <= max_x and min_y <= ep[1] <= max_y:
+                            any_in_bga = True
+                            break
+                    if any_in_bga:
+                        break
+                if any_in_bga:
+                    break
+
+        use_segment_intersection = not any_in_bga and len(unit_mst_segments) > 0
+        if use_segment_intersection:
+            print("MPS: Using segment intersection method (no nets on BGA chips)")
+
+    # Compute angular positions (used as fallback when neither boundary nor segment intersection)
     def angle_from_center(point: Tuple[float, float]) -> float:
         """Compute angle from center to point in radians [0, 2*pi)."""
         dx = point[0] - center[0]
@@ -1651,7 +1779,7 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                 a1, a2 = a2, a1
             unit_angles[unit_id] = (a1, a2)
 
-    # Build layer information for each unit from stub segments
+    # Build layer information for each unit from stub segments (or pad layers if no stubs)
     unit_layers = {}  # unit_id -> (source_layers: set, target_layers: set)
     for unit_id in unit_ids:
         unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
@@ -1671,20 +1799,39 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                     for seg in stub_groups[1]:
                         tgt_layers.add(seg.layer)
 
+        # If no stub layers found, use pad layers as fallback
+        if not src_layers and not tgt_layers:
+            for net_id in unit_net_ids:
+                net_pads = pcb_data.pads_by_net.get(net_id, [])
+                for pad in net_pads:
+                    for layer in pad.layers:
+                        if layer.endswith('.Cu') and not layer.startswith('*'):
+                            src_layers.add(layer)
+                            tgt_layers.add(layer)
+
         unit_layers[unit_id] = (src_layers, tgt_layers)
 
     # Step 4: Detect crossing conflicts
     def units_cross_geometric(unit_a: int, unit_b: int) -> bool:
         """Check if two units have crossing paths (geometric only, ignores layers)."""
+        # Use segment intersection method if enabled (takes priority)
+        if use_segment_intersection:
+            segs_a = unit_mst_segments.get(unit_a, [])
+            segs_b = unit_mst_segments.get(unit_b, [])
+            # Check if any segment from A crosses any segment from B
+            for seg_a in segs_a:
+                for seg_b in segs_b:
+                    if segments_intersect(seg_a[0], seg_a[1], seg_b[0], seg_b[1]):
+                        return True
+            return False
+
+        # Use boundary ordering for BGA chips
         info_a = unit_boundary_info.get(unit_a)
         info_b = unit_boundary_info.get(unit_b)
-
-        # If both have boundary info and boundary ordering is enabled, use it
         if use_boundary_ordering and info_a is not None and info_b is not None:
             # Only compare if same chip pair
             if (info_a[2], info_a[3]) != (info_b[2], info_b[3]):
                 return False  # Different chip pairs, can't directly cross
-
             # Check boundary order inversion
             return crossings_from_boundary_order(info_a[0], info_a[1], info_b[0], info_b[1])
 
@@ -1697,12 +1844,19 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         return False
 
     def units_share_layer(unit_a: int, unit_b: int) -> bool:
-        """Check if two units share at least one layer."""
+        """Check if two units share at least one layer.
+
+        If either unit has no layer info (no stubs/unrouted), assume they could
+        share any layer and return True.
+        """
         a_src, a_tgt = unit_layers.get(unit_a, (set(), set()))
         b_src, b_tgt = unit_layers.get(unit_b, (set(), set()))
         a_all = a_src | a_tgt
         b_all = b_src | b_tgt
-        return bool(a_all and b_all and (a_all & b_all))
+        # If either has no layer info, assume potential conflict on any layer
+        if not a_all or not b_all:
+            return True
+        return bool(a_all & b_all)
 
     # Build conflict graphs - both geometric (all crossings) and layer-filtered
     unit_list = list(unit_endpoints.keys())

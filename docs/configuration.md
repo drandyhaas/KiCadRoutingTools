@@ -87,6 +87,7 @@ python route.py in.kicad_pcb out.kicad_pcb "Net-(*CLK*)" "Net-(*DATA*)"
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
+| `--mps-segment-intersection` | auto | Force segment intersection method for MPS (auto-enabled when no nets on BGAs) |
 
 ### Layer Optimization Options
 

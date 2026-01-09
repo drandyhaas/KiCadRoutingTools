@@ -131,6 +131,24 @@ Order: [C, D, A, B]
 python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
 
+### Segment Intersection Method
+
+For boards without BGA chips (or when no nets being routed are on BGAs), the MPS algorithm uses a **segment intersection method** instead of boundary ordering:
+
+1. **MST segments**: For each net, compute a Minimum Spanning Tree (MST) between all pad locations. This approximates the actual routing path better than using a centroid
+2. **Segment intersection**: Two nets cross if any of their MST segments intersect (using CCW orientation test)
+3. **Auto-detection**: When no net endpoints are inside BGA exclusion zones, segment intersection is automatically enabled
+
+This method is more accurate for non-BGA boards where nets route directly between pads without needing to "escape" through chip boundaries.
+
+```bash
+# Force segment intersection method
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-segment-intersection
+
+# Auto-detection (default): uses segment intersection when no nets on BGAs
+python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
+```
+
 ### Reverse Round Order
 
 By default, MPS routes the least-conflicting groups first (fewest active conflicts). The `--mps-reverse-rounds` flag reverses this, routing the most-conflicting groups first:

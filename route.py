@@ -454,7 +454,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bga_exclusion_zones=bga_exclusion_zones,
                 reverse_rounds=args.mps_reverse_rounds,
                 crossing_layer_check=crossing_layer_check,
-                return_extended_info=True
+                return_extended_info=True,
+                use_segment_intersection=True if args.mps_segment_intersection else None
             )
 
             if mps_result.num_rounds > 1:
@@ -480,7 +481,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         use_boundary_ordering=mps_unroll,
                         bga_exclusion_zones=bga_exclusion_zones,
                         reverse_rounds=args.mps_reverse_rounds,
-                        crossing_layer_check=crossing_layer_check
+                        crossing_layer_check=crossing_layer_check,
+                        use_segment_intersection=True if args.mps_segment_intersection else None
                     )
                 else:
                     ordered_ids = mps_result.ordered_ids
@@ -492,7 +494,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 use_boundary_ordering=mps_unroll,
                 bga_exclusion_zones=bga_exclusion_zones,
                 reverse_rounds=args.mps_reverse_rounds,
-                crossing_layer_check=crossing_layer_check
+                crossing_layer_check=crossing_layer_check,
+                use_segment_intersection=True if args.mps_segment_intersection else None
             )
 
         # Rebuild net_ids in the new order
@@ -1285,6 +1288,8 @@ Differential pair routing:
                         help="Reverse MPS round order: route most-conflicting groups first instead of least-conflicting")
     parser.add_argument("--mps-layer-swap", action="store_true",
                         help="Enable MPS-aware layer swaps to reduce crossing conflicts by moving Round 2+ nets to different layers")
+    parser.add_argument("--mps-segment-intersection", action="store_true",
+                        help="Force MPS to use segment intersection for crossing detection (auto-enabled when no BGA chips)")
 
     # Length matching options
     parser.add_argument("--length-match-group", action="append", nargs="+", dest="length_match_groups",
