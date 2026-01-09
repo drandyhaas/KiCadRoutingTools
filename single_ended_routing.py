@@ -771,7 +771,10 @@ def route_multipoint_taps(
     net_id: int,
     config: GridRouteConfig,
     obstacles: 'GridObstacleMap',
-    main_result: dict
+    main_result: dict,
+    global_offset: int = 0,
+    global_total: int = 0,
+    global_failed: int = 0
 ) -> Optional[dict]:
     """
     Route the remaining MST edges for a multi-point net.
@@ -858,7 +861,11 @@ def route_multipoint_taps(
         src_pad = pad_info[src_idx]
         tgt_pad = pad_info[tgt_idx]
 
-        print(f"    Routing MST edge: pad {src_idx} -> pad {tgt_idx} (length={edge_len:.2f}mm)")
+        # Show progress: [current/total] with failure count (global across all nets)
+        current_global = global_offset + edges_routed + len(failed_edges) + 1
+        total_failed = global_failed + len(failed_edges)
+        fail_str = f" ({total_failed} failed)" if total_failed > 0 else ""
+        print(f"    [{current_global}/{global_total}]{fail_str} Routing MST edge: pad {src_idx} -> pad {tgt_idx} (length={edge_len:.2f}mm)")
 
         # Get target pad coordinates
         tgt_x, tgt_y = tgt_pad[3], tgt_pad[4]

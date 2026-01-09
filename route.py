@@ -856,8 +856,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Phase 3: Complete multi-point routing (tap connections)
     # This happens AFTER length matching so tap routes connect to meandered main routes
     if state.pending_multipoint_nets:
+        # Count total tap edges across all nets for progress display
+        total_tap_edges = sum(
+            len(result.get('mst_edges', [])) - 1  # -1 for the main edge routed in Phase 1
+            for result in state.pending_multipoint_nets.values()
+        )
+        global_tap_offset = 0
+        global_tap_failed = 0
+
         print("\n" + "=" * 60)
-        print("Multi-point Phase 3: Routing tap connections")
+        print(f"Multi-point Phase 3: Routing {total_tap_edges} tap connections")
         print("=" * 60)
 
         for net_id, main_result in state.pending_multipoint_nets.items():
@@ -884,10 +892,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
             # Route the tap connections
             completed_result = route_multipoint_taps(
-                pcb_data, net_id, config, obstacles, tap_input
+                pcb_data, net_id, config, obstacles, tap_input,
+                global_offset=global_tap_offset, global_total=total_tap_edges, global_failed=global_tap_failed
             )
 
             if completed_result:
+                # Update global progress counters
+                net_edges_attempted = completed_result.get('tap_edges_routed', 0) + completed_result.get('tap_edges_failed', 0) - 1  # -1 for Phase 1 edge
+                global_tap_offset += net_edges_attempted
+                global_tap_failed += completed_result.get('tap_edges_failed', 0)
+
                 # Extract only the NEW tap segments (after the length-matched main route)
                 tap_segments = completed_result['new_segments'][len(lm_segments):]
                 tap_vias = completed_result['new_vias'][len(lm_vias):]
