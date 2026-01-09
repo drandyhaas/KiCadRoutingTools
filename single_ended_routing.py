@@ -826,6 +826,7 @@ def route_multipoint_taps(
     # Each edge connects a routed pad to an unrouted pad
     edges_routed = 0
     failed_edges = set()  # Track edges that failed to route
+    failed_edge_blocking = {}  # Track blocking info for failed edges: edge_key -> (blocked_cells, tgt_xy)
     max_passes = len(remaining_edges) * 2  # Safety limit
 
     for pass_num in range(max_passes):
@@ -911,12 +912,19 @@ def route_multipoint_taps(
                 obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
 
         # Route from ANY tap point to target - router finds shortest path
-        path, iterations = router.route_multi(obstacles, sources, targets, config.max_iterations)
+        # Use route_with_frontier to get blocking info on failure
+        path, iterations, blocked_cells = router.route_with_frontier(
+            obstacles, sources, targets, config.max_iterations
+        )
         total_iterations += iterations
 
         if path is None:
             print(f"      {RED}Failed to route MST edge after {iterations} iterations{RESET}")
-            failed_edges.add((min(src_idx, tgt_idx), max(src_idx, tgt_idx)))
+            edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
+            failed_edges.add(edge_key)
+            # Store blocking info for potential rip-up analysis
+            if blocked_cells:
+                failed_edge_blocking[edge_key] = (blocked_cells, (tgt_x, tgt_y))
             continue
 
         print(f"      Routed in {iterations} iterations")
@@ -967,6 +975,8 @@ def route_multipoint_taps(
     updated_result['tap_edges_failed'] = main_result.get('tap_edges_failed', 0) + len(failed_edges)
     updated_result['tap_pads_connected'] = pads_connected
     updated_result['tap_pads_total'] = pads_total
+    # Blocking info for failed edges (for rip-up analysis)
+    updated_result['failed_edge_blocking'] = failed_edge_blocking
 
     return updated_result
 
