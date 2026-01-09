@@ -4,6 +4,7 @@ Single-ended net routing functions.
 Routes individual nets using A* pathfinding on a grid obstacle map.
 """
 
+import time
 from typing import List, Optional, Tuple
 
 # ANSI color codes
@@ -31,6 +32,160 @@ except ImportError:
     GridObstacleMap = None
     GridRouter = None
     VisualRouter = None
+
+
+def _probe_route_with_frontier(
+    router: 'GridRouter',
+    obstacles: 'GridObstacleMap',
+    forward_sources: List,
+    forward_targets: List,
+    config: 'GridRouteConfig',
+    print_prefix: str = "",
+    direction_labels: Tuple[str, str] = ("forward", "backward")
+) -> Tuple[Optional[List], int, List, List, bool]:
+    """
+    Probe routing with fail-fast on stuck directions.
+
+    Uses bidirectional probing to detect if either endpoint is blocked early,
+    avoiding expensive full searches that will fail anyway.
+
+    Args:
+        router: GridRouter instance
+        obstacles: Obstacle map
+        forward_sources: Source cells for forward direction
+        forward_targets: Target cells for forward direction
+        config: Routing configuration
+        print_prefix: Prefix for print messages (e.g., "  " or "      ")
+        direction_labels: Names for forward/backward directions
+
+    Returns:
+        (path, total_iterations, forward_blocked, backward_blocked, reversed_path)
+        - path: The found path or None
+        - total_iterations: Total iterations used
+        - forward_blocked: Blocked cells from forward direction (for rip-up analysis)
+        - backward_blocked: Blocked cells from backward direction (for rip-up analysis)
+        - reversed_path: Whether path was found going backwards
+    """
+    first_label, second_label = direction_labels
+    probe_iterations = config.max_probe_iterations
+    stuck_threshold = max(100, probe_iterations // 10)
+
+    # Probe forward direction
+    path, iterations, blocked_cells = router.route_with_frontier(
+        obstacles, forward_sources, forward_targets, probe_iterations)
+    first_probe_iters = iterations
+    first_blocked = blocked_cells
+    total_iterations = first_probe_iters
+    reversed_path = False
+
+    # Track blocked cells for both directions
+    forward_blocked = first_blocked
+    backward_blocked = []
+
+    if path is not None:
+        # Found in first probe
+        forward_blocked = []  # Success - clear blocked cells
+        return path, total_iterations, forward_blocked, backward_blocked, reversed_path
+
+    # Probe backward direction
+    path, iterations, blocked_cells = router.route_with_frontier(
+        obstacles, forward_targets, forward_sources, probe_iterations)
+    second_probe_iters = iterations
+    second_blocked = blocked_cells
+    total_iterations += second_probe_iters
+    backward_blocked = second_blocked
+
+    if path is not None:
+        # Found in second probe
+        backward_blocked = []  # Success - clear blocked cells
+        return path, total_iterations, forward_blocked, backward_blocked, True
+
+    # Both probes failed - check if either direction is stuck
+    first_stuck = first_probe_iters < stuck_threshold
+    second_stuck = second_probe_iters < stuck_threshold
+
+    if first_stuck or second_stuck:
+        # At least one direction is stuck early - fail fast
+        if first_stuck and second_stuck:
+            print(f"{print_prefix}Both directions stuck early ({first_label}: {first_probe_iters}, {second_label}: {second_probe_iters} iterations)")
+        elif first_stuck:
+            print(f"{print_prefix}{first_label} direction stuck early ({first_probe_iters} iterations), {second_label}={second_probe_iters} - failing fast")
+        else:
+            print(f"{print_prefix}{second_label} direction stuck early ({second_probe_iters} iterations), {first_label}={first_probe_iters} - failing fast")
+        return None, total_iterations, forward_blocked, backward_blocked, False
+
+    # Neither direction is stuck - do full search on the more promising one
+    first_reached_max = first_probe_iters >= probe_iterations
+    second_reached_max = second_probe_iters >= probe_iterations
+
+    if first_reached_max and second_reached_max:
+        prefer_first = True
+    elif first_probe_iters >= second_probe_iters:
+        prefer_first = True
+    else:
+        prefer_first = False
+
+    if prefer_first:
+        promising_sources, promising_targets = forward_sources, forward_targets
+        promising_label, fallback_label = first_label, second_label
+        fallback_sources, fallback_targets = forward_targets, forward_sources
+        fallback_probe_iters = second_probe_iters
+        promising_is_forward = True
+    else:
+        promising_sources, promising_targets = forward_targets, forward_sources
+        promising_label, fallback_label = second_label, first_label
+        fallback_sources, fallback_targets = forward_sources, forward_targets
+        fallback_probe_iters = first_probe_iters
+        promising_is_forward = False
+
+    print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {promising_label} with full iterations...")
+
+    # Full search on promising direction
+    path, full_iters, full_blocked = router.route_with_frontier(
+        obstacles, promising_sources, promising_targets, config.max_iterations)
+    total_iterations += full_iters
+
+    if path is not None:
+        reversed_path = not promising_is_forward
+        if promising_is_forward:
+            forward_blocked = []
+        else:
+            backward_blocked = []
+        return path, total_iterations, forward_blocked, backward_blocked, reversed_path
+
+    # Promising direction failed, try fallback if not stuck
+    fallback_stuck = fallback_probe_iters < stuck_threshold
+    if fallback_stuck:
+        print(f"{print_prefix}{fallback_label} direction stuck ({fallback_probe_iters} iterations), skipping full search")
+        # Update blocked cells from full search
+        if promising_is_forward:
+            forward_blocked = full_blocked
+        else:
+            backward_blocked = full_blocked
+        return None, total_iterations, forward_blocked, backward_blocked, False
+
+    print(f"{print_prefix}No route found after {full_iters} iterations ({promising_label}), trying {fallback_label}...")
+    path, fallback_full_iters, fallback_full_blocked = router.route_with_frontier(
+        obstacles, fallback_sources, fallback_targets, config.max_iterations)
+    total_iterations += fallback_full_iters
+
+    if path is not None:
+        reversed_path = promising_is_forward  # Fallback is opposite of promising
+        if promising_is_forward:
+            backward_blocked = []
+        else:
+            forward_blocked = []
+        return path, total_iterations, forward_blocked, backward_blocked, reversed_path
+
+    # Both full searches failed - return all blocked cells
+    if promising_is_forward:
+        forward_blocked = full_blocked
+        backward_blocked = fallback_full_blocked
+    else:
+        forward_blocked = fallback_full_blocked
+        backward_blocked = full_blocked
+
+    return None, total_iterations, forward_blocked, backward_blocked, False
 
 
 def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -88,19 +243,79 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         second_sources, second_targets = targets_grid, sources_grid
         first_label, second_label = "forward", "backward"
 
-    # Try first direction, then second if first fails
+    # Quick probe phase: test both directions with limited iterations to detect if stuck
     reversed_path = False
     total_iterations = 0
+    probe_iterations = config.max_probe_iterations
+    stuck_threshold = max(100, probe_iterations // 10)
 
-    path, iterations = router.route_multi(obstacles, first_sources, first_targets, config.max_iterations)
-    total_iterations += iterations
+    # Probe first direction
+    path, iterations = router.route_multi(obstacles, first_sources, first_targets, probe_iterations)
+    first_probe_iters = iterations
+    total_iterations = first_probe_iters
 
     if path is None:
-        print(f"No route found after {iterations} iterations ({first_label}), trying {second_label}...")
-        path, iterations = router.route_multi(obstacles, second_sources, second_targets, config.max_iterations)
-        total_iterations += iterations
+        # Probe second direction
+        path, iterations = router.route_multi(obstacles, second_sources, second_targets, probe_iterations)
+        second_probe_iters = iterations
+        total_iterations += second_probe_iters
+
         if path is not None:
-            reversed_path = not start_backwards  # True if we ended up going backwards
+            reversed_path = not start_backwards
+        else:
+            # Both probes failed - check if either direction is completely stuck
+            first_stuck = first_probe_iters < stuck_threshold
+            second_stuck = second_probe_iters < stuck_threshold
+
+            if first_stuck or second_stuck:
+                # At least one direction is stuck early - fail fast
+                if first_stuck and second_stuck:
+                    print(f"Both directions stuck early ({first_label}: {first_probe_iters}, {second_label}: {second_probe_iters} iterations)")
+                elif first_stuck:
+                    print(f"{first_label} direction stuck early ({first_probe_iters} iterations), {second_label}={second_probe_iters} - failing fast")
+                else:
+                    print(f"{second_label} direction stuck early ({second_probe_iters} iterations), {first_label}={first_probe_iters} - failing fast")
+            else:
+                # Both directions made progress - do full search on the more promising one
+                first_reached_max = first_probe_iters >= probe_iterations
+                second_reached_max = second_probe_iters >= probe_iterations
+
+                if first_reached_max and second_reached_max:
+                    prefer_first = True
+                elif first_probe_iters >= second_probe_iters:
+                    prefer_first = True
+                else:
+                    prefer_first = False
+
+                if prefer_first:
+                    promising_sources, promising_targets = first_sources, first_targets
+                    promising_label, fallback_label = first_label, second_label
+                    fallback_sources, fallback_targets = second_sources, second_targets
+                    fallback_probe_iters = second_probe_iters
+                else:
+                    promising_sources, promising_targets = second_sources, second_targets
+                    promising_label, fallback_label = second_label, first_label
+                    fallback_sources, fallback_targets = first_sources, first_targets
+                    fallback_probe_iters = first_probe_iters
+
+                print(f"Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {promising_label} with full iterations...")
+
+                path, full_iters = router.route_multi(obstacles, promising_sources, promising_targets, config.max_iterations)
+                total_iterations += full_iters
+
+                if path is not None:
+                    reversed_path = (promising_label == second_label)
+                else:
+                    # Promising direction failed, try fallback if not stuck
+                    fallback_stuck = fallback_probe_iters < stuck_threshold
+                    if not fallback_stuck:
+                        print(f"No route found after {full_iters} iterations ({promising_label}), trying {fallback_label}...")
+                        path, fallback_full_iters = router.route_multi(obstacles, fallback_sources, fallback_targets, config.max_iterations)
+                        total_iterations += fallback_full_iters
+                        if path is not None:
+                            reversed_path = (fallback_label == second_label)
+                    else:
+                        print(f"{fallback_label} direction stuck ({fallback_probe_iters} iterations), skipping full search")
 
     if path is None:
         print(f"No route found after {total_iterations} iterations (both directions)")
@@ -232,65 +447,35 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
 
     # Determine direction order (always deterministic)
-    if config.direction_order in ("backwards", "backward"):
-        start_backwards = True
-    else:
-        start_backwards = False
+    start_backwards = config.direction_order in ("backwards", "backward")
 
+    # Set up forward/backward based on direction preference
     if start_backwards:
-        first_sources, first_targets = targets_grid, sources_grid
-        second_sources, second_targets = sources_grid, targets_grid
-        first_label, second_label = "backward", "forward"
+        forward_sources, forward_targets = targets_grid, sources_grid
+        direction_labels = ("backward", "forward")
     else:
-        first_sources, first_targets = sources_grid, targets_grid
-        second_sources, second_targets = targets_grid, sources_grid
-        first_label, second_label = "forward", "backward"
+        forward_sources, forward_targets = sources_grid, targets_grid
+        direction_labels = ("forward", "backward")
 
-    reversed_path = False
-    total_iterations = 0
+    # Use probe routing helper
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path = _probe_route_with_frontier(
+        router, obstacles, forward_sources, forward_targets, config,
+        print_prefix="", direction_labels=direction_labels
+    )
 
-    # Track blocked cells from both directions for blocking analysis
-    first_blocked_cells = []
-    second_blocked_cells = []
-
-    path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, first_sources, first_targets, config.max_iterations)
-    total_iterations += iterations
-    first_blocked_cells = blocked_cells
-    first_iterations = iterations
-
-    if path is None:
-        print(f"No route found after {iterations} iterations ({first_label}), trying {second_label}...")
-        path, iterations, blocked_cells = router.route_with_frontier(
-            obstacles, second_sources, second_targets, config.max_iterations)
-        total_iterations += iterations
-        second_blocked_cells = blocked_cells
-        second_iterations = iterations
-        if path is not None:
-            reversed_path = not start_backwards
-    else:
-        second_iterations = 0
+    # Adjust reversed_path based on start direction
+    if start_backwards and path is not None:
+        reversed_path = not reversed_path
 
     if path is None:
         print(f"No route found after {total_iterations} iterations (both directions)")
-        # Return blocked cells for each direction (forward/backward labels may be swapped)
-        if first_label == "forward":
-            forward_blocked = first_blocked_cells
-            backward_blocked = second_blocked_cells
-            forward_iters = first_iterations
-            backward_iters = second_iterations
-        else:
-            forward_blocked = second_blocked_cells
-            backward_blocked = first_blocked_cells
-            forward_iters = second_iterations
-            backward_iters = first_iterations
         return {
             'failed': True,
             'iterations': total_iterations,
             'blocked_cells_forward': forward_blocked,
             'blocked_cells_backward': backward_blocked,
-            'iterations_forward': forward_iters,
-            'iterations_backward': backward_iters,
+            'iterations_forward': total_iterations // 2,  # Approximate
+            'iterations_backward': total_iterations - total_iterations // 2,
         }
 
     print(f"Route found in {total_iterations} iterations, path length: {len(path)}")
@@ -660,20 +845,30 @@ def route_multipoint_main(
     for gx, gy, layer in sources + targets:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    # Route farthest pair (use route_with_frontier to get blocked cells for analysis)
+    # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
-    path, iterations, blocked_cells = router.route_with_frontier(obstacles, sources, targets, config.max_iterations)
+
+    # Use probe routing helper
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path = _probe_route_with_frontier(
+        router, obstacles, sources, targets, config,
+        print_prefix="  ", direction_labels=("forward", "backward")
+    )
 
     if path is None:
-        print(f"  Failed to route farthest pair after {iterations} iterations")
+        print(f"  Failed to route farthest pair after {total_iterations} iterations")
         return {
             'failed': True,
-            'iterations': iterations,
-            'blocked_cells_forward': blocked_cells,
-            'blocked_cells_backward': [],
-            'iterations_forward': iterations,
-            'iterations_backward': 0,
+            'iterations': total_iterations,
+            'blocked_cells_forward': forward_blocked,
+            'blocked_cells_backward': backward_blocked,
+            'iterations_forward': total_iterations // 2,
+            'iterations_backward': total_iterations - total_iterations // 2,
         }
+
+    # If path was found in reverse direction, swap pad_a/pad_b for segment generation
+    if reversed_path:
+        pad_a, pad_b = pad_b, pad_a
+        idx_a, idx_b = idx_b, idx_a
 
     # Convert path to segments/vias
     segments, vias = _path_to_segments_vias(
@@ -682,12 +877,12 @@ def route_multipoint_main(
         (pad_b[3], pad_b[4], layer_names[pad_b[2]])   # end_original
     )
 
-    print(f"  Phase 1 routed in {iterations} iterations, {len(segments)} segments")
+    print(f"  Phase 1 routed in {total_iterations} iterations, {len(segments)} segments")
 
     return {
         'new_segments': segments,
         'new_vias': vias,
-        'iterations': iterations,
+        'iterations': total_iterations,
         'path_length': len(path),
         'path': path,
         'is_multipoint': True,
@@ -912,14 +1107,26 @@ def route_multipoint_taps(
                 obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
 
         # Route from ANY tap point to target - router finds shortest path
-        # Use route_with_frontier to get blocking info on failure
-        path, iterations, blocked_cells = router.route_with_frontier(
-            obstacles, sources, targets, config.max_iterations
+        # Use probe routing helper to detect stuck directions early
+        tap_start_time = time.time()
+
+        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path = _probe_route_with_frontier(
+            router, obstacles, sources, targets, config,
+            print_prefix="      ", direction_labels=("forward", "backward")
         )
-        total_iterations += iterations
+
+        # If path was found in reverse direction, reverse it so it goes sources -> targets
+        if path is not None and reversed_tap_path:
+            path = list(reversed(path))
+
+        # Combine blocked cells from both directions for rip-up analysis
+        blocked_cells = forward_blocked + backward_blocked
+
+        tap_elapsed = time.time() - tap_start_time
+        total_iterations += tap_iterations
 
         if path is None:
-            print(f"      {RED}Failed to route MST edge after {iterations} iterations{RESET}")
+            print(f"      {RED}Failed to route MST edge after {tap_iterations} iterations ({tap_elapsed:.2f}s){RESET}")
             edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
             failed_edges.add(edge_key)
             # Store blocking info for potential rip-up analysis
@@ -927,7 +1134,7 @@ def route_multipoint_taps(
                 failed_edge_blocking[edge_key] = (blocked_cells, (tgt_x, tgt_y))
             continue
 
-        print(f"      Routed in {iterations} iterations")
+        print(f"      Routed in {tap_iterations} iterations ({tap_elapsed:.2f}s)")
 
         # Get the actual tap point used (first point of path)
         path_start = path[0]  # (gx, gy, layer_idx)
