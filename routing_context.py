@@ -259,6 +259,130 @@ def build_incremental_obstacles(
     return obstacles, all_stubs
 
 
+def prepare_obstacles_inplace(
+    working_obstacles,
+    pcb_data,
+    config,
+    net_id: int,
+    all_unrouted_net_ids: List[int],
+    routed_net_ids: List[int],
+    track_proximity_cache: Dict,
+    layer_map: Dict,
+    net_obstacles_cache: Dict[int, NetObstacleData]
+) -> Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]:
+    """
+    Prepare working_obstacles IN-PLACE for routing a single-ended net.
+
+    This modifies working_obstacles directly instead of cloning, saving significant memory.
+    Returns data needed for restore_obstacles_inplace after routing.
+
+    Args:
+        working_obstacles: Working obstacle map (modified in place)
+        pcb_data: PCB data structure
+        config: Routing configuration
+        net_id: Current net ID being routed
+        all_unrouted_net_ids: All unrouted net IDs for stub proximity
+        routed_net_ids: List of already routed net IDs
+        track_proximity_cache: Cache of track proximity costs
+        layer_map: Layer name to index mapping
+        net_obstacles_cache: Pre-computed net obstacles
+
+    Returns:
+        Tuple of (unrouted_stubs, same_net_via_clearance_cells) for use by restore
+    """
+    from routing_config import GridCoord
+
+    # Clear per-route data from previous route
+    working_obstacles.clear_stub_proximity()
+    working_obstacles.clear_layer_proximity()
+    working_obstacles.clear_cross_layer_tracks()
+
+    # Remove current net's obstacles so we can route through our own stubs
+    if net_id in net_obstacles_cache:
+        remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[net_id])
+
+    # Add stub proximity costs (includes chip pads as pseudo-stubs)
+    stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
+                               if nid != net_id and nid not in routed_net_ids]
+    unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
+    chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
+    all_stubs = unrouted_stubs + chip_pads
+    if all_stubs:
+        add_stub_proximity_costs(working_obstacles, all_stubs, config)
+
+    # Add track proximity costs
+    merge_track_proximity_costs(working_obstacles, track_proximity_cache)
+
+    # Add cross-layer track data
+    add_cross_layer_tracks(working_obstacles, pcb_data, config, layer_map,
+                           exclude_net_ids={net_id})
+
+    # Add same-net via clearance and track which cells were added
+    coord = GridCoord(config.grid_step)
+    same_net_via_cells = []
+
+    # Via-via clearance
+    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+    for via in pcb_data.vias:
+        if via.net_id != net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+        for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
+            for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
+                if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
+                    same_net_via_cells.append((gx + ex, gy + ey))
+
+    # Pad drill hole clearance
+    if config.hole_to_hole_clearance > 0:
+        hole_clearance_grid = coord.to_grid_dist(config.hole_to_hole_clearance + config.via_drill / 2)
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            if pad.drill and pad.drill > 0:
+                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                for ex in range(-hole_clearance_grid, hole_clearance_grid + 1):
+                    for ey in range(-hole_clearance_grid, hole_clearance_grid + 1):
+                        if ex*ex + ey*ey <= hole_clearance_grid * hole_clearance_grid:
+                            same_net_via_cells.append((gx + ex, gy + ey))
+
+    # Batch add same-net via clearance
+    if same_net_via_cells:
+        working_obstacles.add_blocked_vias_batch(same_net_via_cells)
+
+    return all_stubs, same_net_via_cells
+
+
+def restore_obstacles_inplace(
+    working_obstacles,
+    net_id: int,
+    net_obstacles_cache: Dict[int, NetObstacleData],
+    same_net_via_cells: List[Tuple[int, int]]
+):
+    """
+    Restore working_obstacles after routing attempt.
+
+    This clears per-route data and restores the current net's obstacles.
+    Should be called after prepare_obstacles_inplace, whether routing succeeded or failed.
+
+    Args:
+        working_obstacles: Working obstacle map (modified in place)
+        net_id: Net ID that was routed
+        net_obstacles_cache: Pre-computed net obstacles (for restoring)
+        same_net_via_cells: Cells added for same-net via clearance (to remove)
+    """
+    # Clear per-route data
+    working_obstacles.clear_stub_proximity()
+    working_obstacles.clear_layer_proximity()
+    working_obstacles.clear_cross_layer_tracks()
+
+    # Remove same-net via clearance cells
+    if same_net_via_cells:
+        working_obstacles.remove_blocked_vias_batch(same_net_via_cells)
+
+    # Restore current net's obstacles (from cache - original stubs)
+    # Note: If routing succeeded, caller should update cache first with new route data
+    if net_id in net_obstacles_cache:
+        add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[net_id])
+
+
 def record_diff_pair_success(
     pcb_data,
     result: Dict,

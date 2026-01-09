@@ -838,8 +838,22 @@ def route_multipoint_main(
     pad_a = pad_info[idx_a]
     pad_b = pad_info[idx_b]
 
-    sources = [(pad_a[0], pad_a[1], pad_a[2])]  # (gx, gy, layer_idx)
-    targets = [(pad_b[0], pad_b[1], pad_b[2])]
+    # For through-hole pads, create sources/targets on ALL layers (router can reach any layer)
+    # This avoids unnecessary vias when connecting to through-hole pads
+    pad_a_obj = pad_a[5] if len(pad_a) > 5 else None
+    pad_b_obj = pad_b[5] if len(pad_b) > 5 else None
+
+    if pad_a_obj and hasattr(pad_a_obj, 'layers') and '*.Cu' in pad_a_obj.layers:
+        # Through-hole pad - can connect on any copper layer
+        sources = [(pad_a[0], pad_a[1], layer_idx) for layer_idx in range(len(layer_names))]
+    else:
+        sources = [(pad_a[0], pad_a[1], pad_a[2])]  # (gx, gy, layer_idx)
+
+    if pad_b_obj and hasattr(pad_b_obj, 'layers') and '*.Cu' in pad_b_obj.layers:
+        # Through-hole pad - can connect on any copper layer
+        targets = [(pad_b[0], pad_b[1], layer_idx) for layer_idx in range(len(layer_names))]
+    else:
+        targets = [(pad_b[0], pad_b[1], pad_b[2])]
 
     # Mark source/target cells
     for gx, gy, layer in sources + targets:

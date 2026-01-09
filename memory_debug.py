@@ -94,3 +94,21 @@ def estimate_routed_paths_mb(paths: Dict) -> float:
         if path:
             total += len(path) * 24  # tuple of 3 ints per coordinate
     return total / (1024 * 1024)
+
+
+def format_obstacle_map_stats(obstacles) -> str:
+    """Format Rust GridObstacleMap statistics."""
+    if obstacles is None or not hasattr(obstacles, 'get_stats'):
+        return "[MEMORY] Obstacle map: N/A (no get_stats method)"
+
+    stats = obstacles.get_stats()
+    blocked_cells, blocked_vias, stub_prox, layer_prox, cross_layer, source_target = stats
+
+    # Estimate memory: ~40 bytes per HashMap entry (key + value + overhead)
+    bytes_per_entry = 40
+    estimated_mb = (blocked_cells + blocked_vias + stub_prox + layer_prox + cross_layer + source_target) * bytes_per_entry / (1024 * 1024)
+
+    return (f"[MEMORY] Rust obstacle map: ~{estimated_mb:.1f} MB estimated\n"
+            f"         blocked_cells: {blocked_cells:,}, blocked_vias: {blocked_vias:,}\n"
+            f"         stub_proximity: {stub_prox:,}, layer_proximity: {layer_prox:,}\n"
+            f"         cross_layer: {cross_layer:,}, source_target: {source_target:,}")

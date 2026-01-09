@@ -112,6 +112,21 @@ impl GridObstacleMap {
         }
     }
 
+    /// Get memory statistics for this obstacle map
+    /// Returns (blocked_cells_count, blocked_vias_count, stub_proximity_count,
+    ///          layer_proximity_count, cross_layer_count, source_target_count)
+    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize) {
+        let blocked_cells_count: usize = self.blocked_cells.iter().map(|m| m.len()).sum();
+        let blocked_vias_count = self.blocked_vias.len();
+        let stub_proximity_count = self.stub_proximity.len();
+        let layer_proximity_count: usize = self.layer_proximity_costs.iter().map(|m| m.len()).sum();
+        let cross_layer_count = self.cross_layer_tracks.len();
+        let source_target_count: usize = self.source_target_cells.iter().map(|s| s.len()).sum();
+
+        (blocked_cells_count, blocked_vias_count, stub_proximity_count,
+         layer_proximity_count, cross_layer_count, source_target_count)
+    }
+
     /// Clear stub proximity costs (for reuse with different stubs)
     pub fn clear_stub_proximity(&mut self) {
         self.stub_proximity.clear();

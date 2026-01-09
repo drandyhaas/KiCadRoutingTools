@@ -43,6 +43,8 @@ class RoutingState:
 
     # Reroute queue for ripped-up nets
     reroute_queue: List[Tuple] = field(default_factory=list)
+    # Track which nets are already queued (to prevent duplicate entries)
+    queued_net_ids: Set[int] = field(default_factory=set)
 
     # Tracking sets
     polarity_swapped_pairs: Set[str] = field(default_factory=set)

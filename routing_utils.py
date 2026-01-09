@@ -2399,14 +2399,14 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 
 def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
                         max_appendix_length: float = 1.0, vias: List[Via] = None,
-                        debug_lines: bool = False) -> List[Segment]:
+                        pads: List = None, debug_lines: bool = False) -> List[Segment]:
     """Collapse short appendix segments by moving dead-end vertices to junction points.
 
     An appendix is a short segment where one endpoint is a dead-end (degree 1) and
     the other endpoint is a junction (degree >= 2). We collapse it by moving the
     dead-end to nearly coincide with the junction (offset by 0.001mm).
 
-    Only collapses segments where the dead-end doesn't connect to existing segments or vias.
+    Only collapses segments where the dead-end doesn't connect to existing segments, vias, or pads.
     Also fixes self-intersections where new segments cross existing segments.
 
     If debug_lines is True, endpoint degrees are counted across all layers.
@@ -2444,6 +2444,27 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
                     via_locations[layer] = []
                 via_locations[layer].append((via.x, via.y, via_size))
 
+    # Build map of pad locations by layer (store coordinates and size)
+    pad_locations = {}
+    if pads:
+        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
+        for pad in pads:
+            # Get pad position
+            pad_x = getattr(pad, 'global_x', getattr(pad, 'x', 0))
+            pad_y = getattr(pad, 'global_y', getattr(pad, 'y', 0))
+            # Get pad size for proximity check
+            pad_size_x = getattr(pad, 'size_x', 0.5)
+            pad_size_y = getattr(pad, 'size_y', 0.5)
+            pad_size = max(pad_size_x, pad_size_y)
+            # Expand wildcard layers like "*.Cu" to actual routing layers
+            pad_layers = getattr(pad, 'layers', [])
+            if any('*' in layer for layer in pad_layers):
+                pad_layers = all_copper_layers
+            for layer in pad_layers:
+                if layer not in pad_locations:
+                    pad_locations[layer] = []
+                pad_locations[layer].append((pad_x, pad_y, pad_size))
+
     # Process each layer separately
     layer_segments = {}
     for seg in segments:
@@ -2468,6 +2489,14 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
                 return True
         return False
 
+    def point_near_any_pad(px, py, pads_list):
+        """Check if point is within pad_size/4 of any pad in list."""
+        for pad_x, pad_y, pad_size in pads_list:
+            tolerance = pad_size / 4
+            if math.sqrt((px - pad_x)**2 + (py - pad_y)**2) < tolerance:
+                return True
+        return False
+
     # When debug_lines is enabled, build endpoint degree map across ALL layers
     # because debug_lines puts turn segments on different layers but they still connect
     global_endpoint_counts = None
@@ -2482,6 +2511,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     for layer, layer_segs in layer_segments.items():
         layer_existing = existing_endpoints.get(layer, [])
         layer_vias = via_locations.get(layer, [])
+        layer_pads = pad_locations.get(layer, [])
 
         # Build per-layer endpoint counts (used when not in debug_lines mode)
         layer_endpoint_counts = None
@@ -2507,14 +2537,18 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
             start_degree = endpoint_counts.get(start_key, 0)
             end_degree = endpoint_counts.get(end_key, 0)
 
-            # Check if endpoints connect to existing segments (with proximity tolerance) or vias
-            # Use track width / 4 as proximity tolerance for segments, via size / 4 for vias
+            # Check if endpoints connect to existing segments (with proximity tolerance), vias, or pads
+            # Use track width / 4 as proximity tolerance for segments, via/pad size / 4 for vias/pads
             proximity_tol = seg.width / 4
-            start_connects_existing = point_near_any(seg.start_x, seg.start_y, layer_existing, proximity_tol) or point_near_any_via(seg.start_x, seg.start_y, layer_vias)
-            end_connects_existing = point_near_any(seg.end_x, seg.end_y, layer_existing, proximity_tol) or point_near_any_via(seg.end_x, seg.end_y, layer_vias)
+            start_connects_existing = (point_near_any(seg.start_x, seg.start_y, layer_existing, proximity_tol) or
+                                       point_near_any_via(seg.start_x, seg.start_y, layer_vias) or
+                                       point_near_any_pad(seg.start_x, seg.start_y, layer_pads))
+            end_connects_existing = (point_near_any(seg.end_x, seg.end_y, layer_existing, proximity_tol) or
+                                     point_near_any_via(seg.end_x, seg.end_y, layer_vias) or
+                                     point_near_any_pad(seg.end_x, seg.end_y, layer_pads))
 
-            # Appendix: one end is dead-end (degree 1, not connected to existing/vias),
-            # other is junction (degree >= 2 OR connected to existing/vias)
+            # Appendix: one end is dead-end (degree 1, not connected to existing/vias/pads),
+            # other is junction (degree >= 2 OR connected to existing/vias/pads)
             if (start_degree == 1 and not start_connects_existing and
                 (end_degree >= 2 or end_connects_existing)):
                 # Collapse: move start to nearly coincide with end (junction point)
@@ -2568,7 +2602,9 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         # Include both new vias and existing vias for this net
         net_vias = [v for v in new_vias if v.net_id == net_id]
         net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
-        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias, debug_lines=debug_lines)
+        # Include pads for this net
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias, pads=net_pads, debug_lines=debug_lines)
         cleaned_segments.extend(cleaned)
 
     # Filter out very short (degenerate) segments

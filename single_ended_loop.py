@@ -26,7 +26,10 @@ from single_ended_routing import route_net_with_obstacles, route_net_with_visual
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
-from routing_context import build_single_ended_obstacles, build_incremental_obstacles
+from routing_context import (
+    build_single_ended_obstacles, build_incremental_obstacles,
+    prepare_obstacles_inplace, restore_obstacles_inplace
+)
 
 # ANSI color codes
 RED = '\033[91m'
@@ -66,6 +69,7 @@ def route_single_ended_nets(
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
     reroute_queue = state.reroute_queue
+    queued_net_ids = state.queued_net_ids
     rip_and_retry_history = state.rip_and_retry_history
     remaining_net_ids = state.remaining_net_ids
     results = state.results
@@ -133,13 +137,15 @@ def route_single_ended_nets(
             add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
             add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
         else:
-            # Use incremental approach if working map is available
+            # Use in-place approach if working map is available (saves memory by not cloning)
+            same_net_via_cells = None  # Track cells for restore
             if state.working_obstacles is not None and state.net_obstacles_cache:
-                obstacles, unrouted_stubs = build_incremental_obstacles(
+                unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
                     state.working_obstacles, pcb_data, config, net_id,
                     all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
                     state.net_obstacles_cache
                 )
+                obstacles = state.working_obstacles  # Use directly, no clone!
             else:
                 # Fallback to full rebuild (but use cache for unrouted nets)
                 obstacles, unrouted_stubs = build_single_ended_obstacles(
@@ -212,19 +218,27 @@ def route_single_ended_nets(
             if result.get('path'):
                 routed_net_paths[net_id] = result['path']
             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
-            # Update working obstacles with new route for incremental approach
+            # Update working obstacles with new route
             if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-                # Remove old cache (stubs only) before updating
-                if net_id in state.net_obstacles_cache:
-                    remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
                 # Update cache with new route (recomputes from pcb_data)
                 update_net_obstacles_after_routing(pcb_data, net_id, result, config, state.net_obstacles_cache)
-                # Add new cache (stubs + new route) to working
-                add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+                # Restore working obstacles (in-place approach): clears per-route data and adds updated cache
+                if same_net_via_cells is not None:
+                    restore_obstacles_inplace(state.working_obstacles, net_id,
+                                             state.net_obstacles_cache, same_net_via_cells)
+                else:
+                    # Fallback: directly add new cache (when not using in-place)
+                    add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             total_iterations += iterations
+
+            # Restore working obstacles before attempting rip-up (in-place approach)
+            if same_net_via_cells is not None and state.working_obstacles is not None:
+                restore_obstacles_inplace(state.working_obstacles, net_id,
+                                         state.net_obstacles_cache, same_net_via_cells)
+                same_net_via_cells = None  # Mark as restored
 
             # Try rip-up and reroute for single-ended nets (similar to diff pairs)
             ripped_up = False
@@ -394,11 +408,20 @@ def route_single_ended_nets(
                                 ripped_items.pop()
                             continue
 
-                        # Rebuild obstacles and retry the current route
-                        retry_obstacles, _ = build_single_ended_obstacles(
-                            base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
-                            all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
-                        )
+                        # Prepare obstacles in-place for retry (saves memory vs cloning)
+                        retry_via_cells = None
+                        if state.working_obstacles is not None and state.net_obstacles_cache:
+                            _, retry_via_cells = prepare_obstacles_inplace(
+                                state.working_obstacles, pcb_data, config, net_id,
+                                all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
+                                state.net_obstacles_cache
+                            )
+                            retry_obstacles = state.working_obstacles
+                        else:
+                            retry_obstacles, _ = build_single_ended_obstacles(
+                                base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
+                            )
 
                         # Check for multi-point net in retry as well
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
@@ -425,15 +448,16 @@ def route_single_ended_nets(
                             if retry_result.get('path'):
                                 routed_net_paths[net_id] = retry_result['path']
                             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
-                            # Update working obstacles with new route for incremental approach
+                            # Update working obstacles with new route
                             if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-                                # Remove old cache (stubs only) before updating
-                                if net_id in state.net_obstacles_cache:
-                                    remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
                                 # Update cache with new route
                                 update_net_obstacles_after_routing(pcb_data, net_id, retry_result, config, state.net_obstacles_cache)
-                                # Add new cache (stubs + new route) to working
-                                add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+                                # Restore working obstacles (in-place): clears per-route data, adds updated cache
+                                if retry_via_cells is not None:
+                                    restore_obstacles_inplace(state.working_obstacles, net_id,
+                                                             state.net_obstacles_cache, retry_via_cells)
+                                else:
+                                    add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
 
                             # Queue all ripped-up nets for rerouting and add to history
                             rip_and_retry_history.add((net_id, blocker_canonicals))
@@ -443,17 +467,28 @@ def route_single_ended_nets(
                                     successful -= 1
                                 if rid in diff_pair_by_net_id:
                                     ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[rid]
-                                    reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
+                                    canonical_id = ripped_pair_tmp.p_net_id
+                                    if canonical_id not in queued_net_ids:
+                                        reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
+                                        queued_net_ids.add(canonical_id)
                                 else:
-                                    ripped_net = pcb_data.nets.get(rid)
-                                    ripped_net_name = ripped_net.name if ripped_net else f"Net {rid}"
-                                    reroute_queue.append(('single', ripped_net_name, rid))
+                                    if rid not in queued_net_ids:
+                                        ripped_net = pcb_data.nets.get(rid)
+                                        ripped_net_name = ripped_net.name if ripped_net else f"Net {rid}"
+                                        reroute_queue.append(('single', ripped_net_name, rid))
+                                        queued_net_ids.add(rid)
 
                             ripped_up = True
                             retry_succeeded = True
                             break  # Success! Exit the N loop
                         else:
                             print(f"  RETRY FAILED (N={N})")
+
+                            # Restore working obstacles after failed retry (in-place approach)
+                            if retry_via_cells is not None and state.working_obstacles is not None:
+                                restore_obstacles_inplace(state.working_obstacles, net_id,
+                                                         state.net_obstacles_cache, retry_via_cells)
+                                retry_via_cells = None
 
                             # Store blocked cells from retry for next iteration's analysis
                             if retry_result:

@@ -63,7 +63,7 @@ from routing_state import RoutingState, create_routing_state
 from memory_debug import (
     get_process_memory_mb, format_memory_stats,
     estimate_net_obstacles_cache_mb, estimate_track_proximity_cache_mb,
-    estimate_routed_paths_mb
+    estimate_routed_paths_mb, format_obstacle_map_stats
 )
 from diff_pair_loop import route_diff_pairs
 from single_ended_loop import route_single_ended_nets
@@ -358,6 +358,14 @@ def _reroute_phase3_ripped_nets(
             )
             print(f"    Re-routed main path: {len(result['new_segments'])} segments, {len(main_vias)} vias")
 
+            # CRITICAL: Update pending_multipoint_nets to point to the NEW result
+            # This ensures that if tap routing fails, the later Phase 3 loop will have
+            # the correct reference to remove from results[] before adding completed_result.
+            # Without this, the old result reference in pending_multipoint_nets won't be
+            # found in results[], leading to duplicate segments being written to output.
+            if ripped_net_id in state.pending_multipoint_nets:
+                state.pending_multipoint_nets[ripped_net_id] = result
+
             # Update working obstacles
             if state.working_obstacles is not None and state.net_obstacles_cache is not None:
                 if ripped_net_id in state.net_obstacles_cache:
@@ -391,6 +399,14 @@ def _reroute_phase3_ripped_nets(
                         add_route_to_pcb_data(pcb_data, tap_result_data, debug_lines=config.debug_lines)
                         print(f"    Re-routed {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
+                        # IMPORTANT: Update tap_result['new_segments'] to match what's in pcb_data
+                        # add_route_to_pcb_data cleans segments via collapse_appendices, updating
+                        # tap_result_data['new_segments']. We need tap_result to have the cleaned
+                        # segments for correct rip-up later. Combine cleaned main (from result)
+                        # with cleaned tap (from tap_result_data).
+                        tap_result['new_segments'] = result['new_segments'] + tap_result_data['new_segments']
+                        tap_result['new_vias'] = result.get('new_vias', []) + tap_result_data['new_vias']
+
                         # Update working obstacles with tap segments
                         if state.working_obstacles is not None and state.net_obstacles_cache is not None:
                             if ripped_net_id in state.net_obstacles_cache:
@@ -405,8 +421,18 @@ def _reroute_phase3_ripped_nets(
                         results.remove(result)
                     results.append(tap_result)
                     routed_results[ripped_net_id] = tap_result
+
+                    # Remove from pending_multipoint_nets since Phase 3 is now complete
+                    if ripped_net_id in state.pending_multipoint_nets:
+                        del state.pending_multipoint_nets[ripped_net_id]
         else:
             print(f"    {RED}Failed to re-route{RESET}")
+            # CRITICAL: Remove from pending_multipoint_nets when re-route fails
+            # If we don't remove it, Phase 3 will later process this net and start with
+            # the OLD stale segments from the pending result (which were ripped and are
+            # no longer in pcb_data), leading to duplicate/stale segments in the output.
+            if ripped_net_id in state.pending_multipoint_nets:
+                del state.pending_multipoint_nets[ripped_net_id]
 
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
@@ -591,6 +617,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         meander_amplitude=meander_amplitude,
         diff_chamfer_extra=diff_chamfer_extra,
         diff_pair_intra_match=diff_pair_intra_match,
+        debug_memory=debug_memory,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -1238,7 +1265,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Track nets that were ripped during Phase 3 tap routing
         phase3_ripped_nets = []  # List of (net_id, saved_result, ripped_ids, was_in_results)
 
-        for net_id, main_result in state.pending_multipoint_nets.items():
+        for net_id, main_result in list(state.pending_multipoint_nets.items()):
+            # Skip if already processed (removed during a Phase 3 rip-up reroute of another net)
+            if net_id not in state.pending_multipoint_nets:
+                continue
+
             net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
             print(f"\n{net_name} (net {net_id}):")
             net_start_time = time.time()
@@ -1309,6 +1340,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     tap_result = {'new_segments': tap_segments, 'new_vias': tap_vias}
                     add_route_to_pcb_data(pcb_data, tap_result, debug_lines=config.debug_lines)
                     print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
+
+                    # IMPORTANT: Update completed_result['new_segments'] to match what's in pcb_data
+                    # add_route_to_pcb_data cleans segments via collapse_appendices, updating
+                    # tap_result['new_segments']. We need completed_result to have the cleaned
+                    # segments for correct rip-up later. Combine cleaned main (lm_segments)
+                    # with cleaned tap (tap_result['new_segments']).
+                    completed_result['new_segments'] = list(lm_segments) + tap_result['new_segments']
+                    completed_result['new_vias'] = list(lm_vias) + tap_result['new_vias']
 
                     # Update working obstacles with tap segments for subsequent nets
                     if state.working_obstacles is not None and state.net_obstacles_cache is not None:
@@ -1648,15 +1687,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Final memory summary
     if debug_memory:
         final_mem = get_process_memory_mb()
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 60)
         print("[MEMORY] Final Memory Summary")
-        print("=" * 50)
+        print("=" * 60)
         print(f"  Process RSS: {final_mem:.1f} MB (delta: {final_mem - mem_start:+.1f} MB)")
         print(f"  Net obstacles cache: {estimate_net_obstacles_cache_mb(state.net_obstacles_cache):.1f} MB ({len(state.net_obstacles_cache)} nets)")
         print(f"  Track proximity cache: {estimate_track_proximity_cache_mb(state.track_proximity_cache):.1f} MB ({len(state.track_proximity_cache)} nets)")
         print(f"  Routed paths: {estimate_routed_paths_mb(state.routed_net_paths):.1f} MB ({len(state.routed_net_paths)} nets)")
         print(f"  Routed results: {len(state.routed_results)} nets")
-        print("=" * 50)
+        print(format_obstacle_map_stats(state.working_obstacles))
+        print("=" * 60)
 
     return successful, failed, total_time
 

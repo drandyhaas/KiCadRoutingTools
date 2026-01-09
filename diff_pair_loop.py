@@ -55,6 +55,7 @@ def route_diff_pairs(
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
     reroute_queue = state.reroute_queue
+    queued_net_ids = state.queued_net_ids
     polarity_swapped_pairs = state.polarity_swapped_pairs
     rip_and_retry_history = state.rip_and_retry_history
     ripup_success_pairs = state.ripup_success_pairs
@@ -246,9 +247,14 @@ def route_diff_pairs(
                         successful -= 1
                     if ripped_blocker.net_id in diff_pair_by_net_id:
                         ripped_pair_name, ripped_pair = diff_pair_by_net_id[ripped_blocker.net_id]
-                        reroute_queue.append(('diff_pair', ripped_pair_name, ripped_pair))
+                        canonical_id = ripped_pair.p_net_id
+                        if canonical_id not in queued_net_ids:
+                            reroute_queue.append(('diff_pair', ripped_pair_name, ripped_pair))
+                            queued_net_ids.add(canonical_id)
                     else:
-                        reroute_queue.append(('single', ripped_blocker.net_name, ripped_blocker.net_id))
+                        if ripped_blocker.net_id not in queued_net_ids:
+                            reroute_queue.append(('single', ripped_blocker.net_name, ripped_blocker.net_id))
+                            queued_net_ids.add(ripped_blocker.net_id)
                 ripup_success_pairs.add(pair_name)
                 print(f"    Probe rip-up succeeded, {len(probe_ripped_items)} net(s) queued for re-routing")
             elif result and result.get('probe_blocked'):
@@ -602,11 +608,16 @@ def route_diff_pairs(
                                     successful -= 1
                                 if net_id in diff_pair_by_net_id:
                                     ripped_pair_name_tmp, ripped_pair_tmp = diff_pair_by_net_id[net_id]
-                                    reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
+                                    canonical_id = ripped_pair_tmp.p_net_id
+                                    if canonical_id not in queued_net_ids:
+                                        reroute_queue.append(('diff_pair', ripped_pair_name_tmp, ripped_pair_tmp))
+                                        queued_net_ids.add(canonical_id)
                                 else:
-                                    net = pcb_data.nets.get(net_id)
-                                    net_name = net.name if net else f"Net {net_id}"
-                                    reroute_queue.append(('single', net_name, net_id))
+                                    if net_id not in queued_net_ids:
+                                        net = pcb_data.nets.get(net_id)
+                                        net_name = net.name if net else f"Net {net_id}"
+                                        reroute_queue.append(('single', net_name, net_id))
+                                        queued_net_ids.add(net_id)
 
                             ripped_up = True
                             retry_succeeded = True
