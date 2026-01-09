@@ -159,6 +159,7 @@ Groups nets by byte lane: DQ0-7 + DQS0, DQ8-15 + DQS1, etc.
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
 | `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, etc.) |
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
+| `--debug-memory` | false | Print memory usage statistics at key points during routing |
 
 ## GridRouteConfig Class
 
@@ -235,6 +236,7 @@ class GridRouteConfig:
     # Debug
     debug_lines: bool = False
     verbose: bool = False
+    debug_memory: bool = False
 ```
 
 ## Parameter Guidelines

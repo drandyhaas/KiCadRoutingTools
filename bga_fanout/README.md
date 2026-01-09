@@ -46,6 +46,7 @@ python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_f
 | `--force-escape-direction` | Only use primary direction | False |
 | `--rebalance-escape` | Rebalance escape directions | False |
 | `--check-for-previous` | Skip existing fanouts | False |
+| `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
 
 ## Module Structure
 

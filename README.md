@@ -81,6 +81,9 @@ python test_fanout_and_route.py
 
 # Quick mode (reduced scope)
 python test_fanout_and_route.py --quick
+
+# Unbuffered output (useful for real-time logging)
+python test_fanout_and_route.py -u
 ```
 
 This script demonstrates a real-world workflow:
@@ -98,8 +101,11 @@ Route directly between pads without fanout (for boards with standard through-hol
 ```bash
 python test_kit_route.py
 
-# Quick mode (only /DDAT* nets)
+# Quick mode (only /IRQ* and /AN* nets)
 python test_kit_route.py --quick
+
+# Unbuffered output (useful for real-time logging)
+python test_kit_route.py -u
 ```
 
 This script routes nets on the kit-dev-coldfire-xilinx board directly from pads, demonstrating routing without BGA fanout.
@@ -312,6 +318,8 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 # Debug
 --verbose               # Print detailed diagnostic output
 --debug-lines           # Output debug geometry on User layers
+--skip-routing          # Skip routing, only do swaps and write debug info
+--debug-memory          # Print memory usage statistics during routing
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.

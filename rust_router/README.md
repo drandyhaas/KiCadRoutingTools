@@ -143,10 +143,13 @@ obstacles = GridObstacleMap(num_layers: int)
 
 Methods:
 - `add_blocked_cell(gx, gy, layer)` - Mark a cell as blocked on a specific layer
+- `add_blocked_cells_batch(cells)` - Add multiple blocked cells at once. `cells` is a list of `(gx, gy, layer)` tuples. Uses reference counting for correct incremental updates.
+- `remove_blocked_cells_batch(cells)` - Remove multiple blocked cells at once. `cells` is a list of `(gx, gy, layer)` tuples. Decrements reference counts and only unblocks when count reaches 0.
 - `add_blocked_via(gx, gy)` - Mark a position as blocked for vias
 - `set_bga_zone(min_gx, min_gy, max_gx, max_gy)` - Set BGA exclusion zone
 - `add_allowed_cell(gx, gy)` - Override BGA zone blocking for a cell
 - `set_stub_proximity(gx, gy, cost)` - Set proximity cost for a cell
+- `add_stub_proximity_costs_batch(costs)` - Set multiple stub proximity costs at once. `costs` is a list of `(gx, gy, cost)` tuples.
 - `is_blocked(gx, gy, layer)` - Check if cell is blocked
 - `is_via_blocked(gx, gy)` - Check if via position is blocked
 - `get_stub_proximity_cost(gx, gy)` - Get proximity cost for a cell
@@ -231,7 +234,7 @@ src/
 
 ### Key Components
 
-- **GridObstacleMap**: Pre-computed obstacle data using FxHashSet for O(1) lookups
+- **GridObstacleMap**: Pre-computed obstacle data using reference-counted FxHashMap for O(1) lookups and correct incremental updates
 - **GridRouter**: A* implementation with binary heap and packed state keys
 - **PoseRouter**: Orientation-aware A* with Dubins path heuristic
 - **DubinsCalculator**: Computes shortest Dubins path length (LSL, RSR, LSR, RSL, RLR, LRL)
@@ -241,7 +244,7 @@ src/
 
 ## Version History
 
-- **0.8.3**: Added `via_proximity_cost` parameter to GridRouter (was only in PoseRouter). Multiplies stub proximity cost when placing vias - higher values discourage vias near stubs, 0 blocks vias entirely in stub proximity zones. Now both single-ended and diff pair routing respect via proximity costs.
+- **0.8.3**: Added `via_proximity_cost` parameter to GridRouter (was only in PoseRouter). Multiplies stub proximity cost when placing vias - higher values discourage vias near stubs, 0 blocks vias entirely in stub proximity zones. Now both single-ended and diff pair routing respect via proximity costs. Added batch FFI operations (`add_blocked_cells_batch`, `remove_blocked_cells_batch`, `add_stub_proximity_costs_batch`) to reduce Python-Rust call overhead. Changed obstacle map to use reference-counted `HashMap<u64, u16>` instead of `HashSet<u64>` for correct incremental updates when nets share blocked cells.
 - **0.8.2**: Added `turn_cost` parameter to GridRouter - penalizes direction changes to encourage straighter paths with fewer wiggles. Default is 1000 (same as ORTHO_COST). Configurable via `--turn-cost` CLI option.
 - **0.8.1**: Added cross-layer track attraction for vertical alignment. New `vertical_attraction_radius` and `vertical_attraction_bonus` parameters to PoseRouter. New GridObstacleMap methods: `add_cross_layer_track()`, `get_cross_layer_attraction()`, `clear_cross_layer_tracks()`. Attracts routes to stack on top of tracks on other layers, consolidating routing corridors and leaving more room for through-hole vias.
 - **0.8.0**: Added `via_proximity_cost` parameter to PoseRouter - allows vias near stubs with cost penalty instead of blocking (default: 10, set to 0 for old blocking behavior). Improved turn radius enforcement: minimum turn radius is now enforced for ALL route steps (not just near vias), ensuring smooth paths throughout. `straight_after_via` is based on `min_radius_grid + 1` instead of hardcoded 2 steps, preventing DRC violations where P/N tracks turn too sharply after vias. Added `route_pose_with_frontier()` method that returns blocked cells on failure for blocking analysis.
