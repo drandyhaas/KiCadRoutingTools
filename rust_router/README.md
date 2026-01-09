@@ -158,13 +158,14 @@ Methods:
 ### GridRouter
 
 ```python
-router = GridRouter(via_cost: int, h_weight: float, turn_cost: int = 1000)
+router = GridRouter(via_cost: int, h_weight: float, turn_cost: int = 1000, via_proximity_cost: int = 1)
 ```
 
 Parameters:
 - `via_cost`: Cost for layer transitions (scaled by 1000)
 - `h_weight`: Heuristic weight (>1 for faster but less optimal routes)
 - `turn_cost`: Cost for direction changes (encourages straighter paths, default 1000)
+- `via_proximity_cost`: Multiplier for stub proximity cost when placing vias. Higher values discourage vias near stubs. Use 0 to block vias entirely in stub proximity zones.
 
 Methods:
 - `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0)` - Find path from any source to any target
@@ -240,6 +241,7 @@ src/
 
 ## Version History
 
+- **0.8.3**: Added `via_proximity_cost` parameter to GridRouter (was only in PoseRouter). Multiplies stub proximity cost when placing vias - higher values discourage vias near stubs, 0 blocks vias entirely in stub proximity zones. Now both single-ended and diff pair routing respect via proximity costs.
 - **0.8.2**: Added `turn_cost` parameter to GridRouter - penalizes direction changes to encourage straighter paths with fewer wiggles. Default is 1000 (same as ORTHO_COST). Configurable via `--turn-cost` CLI option.
 - **0.8.1**: Added cross-layer track attraction for vertical alignment. New `vertical_attraction_radius` and `vertical_attraction_bonus` parameters to PoseRouter. New GridObstacleMap methods: `add_cross_layer_track()`, `get_cross_layer_attraction()`, `clear_cross_layer_tracks()`. Attracts routes to stack on top of tracks on other layers, consolidating routing corridors and leaving more room for through-hole vias.
 - **0.8.0**: Added `via_proximity_cost` parameter to PoseRouter - allows vias near stubs with cost penalty instead of blocking (default: 10, set to 0 for old blocking behavior). Improved turn radius enforcement: minimum turn radius is now enforced for ALL route steps (not just near vias), ensuring smooth paths throughout. `straight_after_via` is based on `min_radius_grid + 1` instead of hardcoded 2 steps, preventing DRC violations where P/N tracks turn too sharply after vias. Added `route_pose_with_frontier()` method that returns blocked cells on failure for blocking analysis.

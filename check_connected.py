@@ -201,9 +201,14 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     main_root = max(root_counts.keys(), key=lambda r: root_counts[r])
 
     disconnected = []
+    seen_pads = set()  # Track (x, y, component_ref) to avoid duplicates for through-hole pads
     for pid, loc in zip(pad_ids, pad_locations):
         if uf.find(pid) != main_root:
-            disconnected.append(loc)
+            # For through-hole pads, only report once (not per layer)
+            pad_key = (round(loc[0], 4), round(loc[1], 4), loc[3])  # (x, y, component_ref)
+            if pad_key not in seen_pads:
+                seen_pads.add(pad_key)
+                disconnected.append(loc)
 
     # Build debug info if verbose
     debug_info = None

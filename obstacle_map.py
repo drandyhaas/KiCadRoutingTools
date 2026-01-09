@@ -681,10 +681,14 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
 
 def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tuple[float, float]],
                               config: GridRouteConfig):
-    """Add stub proximity costs to the obstacle map."""
+    """Add stub proximity costs to the obstacle map.
+
+    When via_proximity_cost == 0, vias are blocked within stub proximity radius.
+    """
     coord = GridCoord(config.grid_step)
     stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
     stub_cost_grid = int(config.stub_proximity_cost * 1000 / config.grid_step)
+    block_vias = (config.via_proximity_cost == 0)
 
     for stub in unrouted_stubs:
         # Handle both (x, y) and (x, y, layer) tuple formats
@@ -698,6 +702,9 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
                     proximity = 1.0 - (dist / stub_radius_grid) if stub_radius_grid > 0 else 1.0
                     cost = int(proximity * stub_cost_grid)
                     obstacles.set_stub_proximity(gcx + dx, gcy + dy, cost)
+                    # Block vias in stub proximity zones when via_proximity_cost == 0
+                    if block_vias:
+                        obstacles.add_blocked_via(gcx + dx, gcy + dy)
 
 
 def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig):

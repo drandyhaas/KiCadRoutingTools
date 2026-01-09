@@ -13,17 +13,19 @@ pub struct GridRouter {
     via_cost: i32,
     h_weight: f32,
     turn_cost: i32,
+    via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>) -> Self {
         Self {
             via_cost,
             h_weight,
             turn_cost: turn_cost.unwrap_or(DEFAULT_TURN_COST),
+            via_proximity_cost: via_proximity_cost.unwrap_or(1),
         }
     }
 
@@ -394,8 +396,10 @@ impl GridRouter {
                         continue;
                     }
 
+                    // Multiply stub proximity cost by via_proximity_cost for vias
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
-                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize)) * 2;
+                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
+                        * self.via_proximity_cost;
                     let new_g = g + self.via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -661,8 +665,10 @@ impl GridRouter {
 
                     if closed.contains(&neighbor_key) { continue; }
 
+                    // Multiply stub proximity cost by via_proximity_cost for vias
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
-                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize)) * 2;
+                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
+                        * self.via_proximity_cost;
                     let new_g = g + self.via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);

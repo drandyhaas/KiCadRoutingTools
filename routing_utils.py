@@ -1002,11 +1002,17 @@ def get_multipoint_net_pads(
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
             # Expand wildcard layers like "*.Cu" to actual routing layers
             expanded_layers = expand_pad_layers(pad.layers, config.layers)
+            # Use FIRST layer for MST calculation (one entry per physical pad)
+            # The tap routing will create targets on ALL layers for through-hole pads
             for layer in expanded_layers:
                 layer_idx = layer_map.get(layer)
                 if layer_idx is not None:
                     pad_info.append((gx, gy, layer_idx, pad.global_x, pad.global_y, pad))
-                    break
+                    break  # Only one entry per physical pad for MST
+            else:
+                # Fallback: if no layers matched, use first routing layer
+                if config.layers:
+                    pad_info.append((gx, gy, 0, pad.global_x, pad.global_y, pad))
         return pad_info if len(pad_info) >= 3 else None
 
     # Case 2: Check for 3+ disconnected segment groups

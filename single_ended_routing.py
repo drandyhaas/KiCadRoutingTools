@@ -70,7 +70,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
 
     # Determine direction order (always deterministic)
     if config.direction_order in ("backwards", "backward"):
@@ -229,7 +229,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
 
     # Determine direction order (always deterministic)
     if config.direction_order in ("backwards", "backward"):
@@ -661,7 +661,7 @@ def route_multipoint_main(
         obstacles.add_source_target_cell(gx, gy, layer)
 
     # Route farthest pair (use route_with_frontier to get blocked cells for analysis)
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
     path, iterations, blocked_cells = router.route_with_frontier(obstacles, sources, targets, config.max_iterations)
 
     if path is None:
@@ -711,13 +711,15 @@ def route_multipoint_main(
 def get_all_segment_tap_points(
     segments: List[Segment],
     coord: GridCoord,
-    layer_names: List[str]
+    layer_names: List[str],
+    vias: List = None
 ) -> List[Tuple[int, int, int, float, float]]:
     """
-    Get all grid points along existing segments as potential tap sources.
+    Get all grid points along existing segments and vias as potential tap sources.
 
     Returns list of (gx, gy, layer_idx, orig_x, orig_y) for each point.
     Points are sampled at grid resolution along each segment.
+    Vias are added on ALL layers (they connect all copper layers).
     Sorted by grid coordinates for deterministic iteration.
     """
     # Use dict keyed by (gx, gy, layer_idx) to deduplicate while keeping original coords
@@ -749,6 +751,15 @@ def get_all_segment_tap_points(
                 key = (gx, gy, layer_idx)
                 if key not in tap_points:
                     tap_points[key] = (x, y)
+
+    # Add vias on ALL layers (vias connect all copper layers)
+    if vias:
+        for via in vias:
+            gx, gy = coord.to_grid(via.x, via.y)
+            for layer_idx in range(len(layer_names)):
+                key = (gx, gy, layer_idx)
+                if key not in tap_points:
+                    tap_points[key] = (via.x, via.y)
 
     # Return sorted list for deterministic iteration
     return sorted([(gx, gy, layer_idx, ox, oy)
@@ -805,7 +816,7 @@ def route_multipoint_taps(
 
     print(f"  Multi-point net Phase 3: routing {len(remaining_edges)} remaining MST edges (longest first)")
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost)
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
     total_iterations = 0
 
     # Route remaining MST edges in order (longest first)
@@ -852,9 +863,10 @@ def route_multipoint_taps(
         # Get target pad coordinates
         tgt_x, tgt_y = tgt_pad[3], tgt_pad[4]
 
-        # Get ALL points along existing segments as potential tap sources
+        # Get ALL points along existing segments and vias as potential tap sources
         # The router will find the shortest path from ANY of these points
-        all_tap_points = get_all_segment_tap_points(all_segments, coord, layer_names)
+        # Vias are included on ALL layers since they connect all copper layers
+        all_tap_points = get_all_segment_tap_points(all_segments, coord, layer_names, vias=all_vias)
 
         if not all_tap_points:
             # Fall back to using source pad position directly
@@ -870,7 +882,15 @@ def route_multipoint_taps(
             tap_point_map = {(gx, gy, layer_idx): (ox, oy, layer_names[layer_idx])
                             for gx, gy, layer_idx, ox, oy in all_tap_points}
 
-        targets = [(tgt_pad[0], tgt_pad[1], tgt_pad[2])]
+        # For through-hole pads, create targets on ALL layers (router can reach any layer)
+        tgt_gx, tgt_gy = tgt_pad[0], tgt_pad[1]
+        tgt_pad_obj = tgt_pad[5]
+        if hasattr(tgt_pad_obj, 'layers') and '*.Cu' in tgt_pad_obj.layers:
+            # Through-hole pad - can connect on any copper layer
+            targets = [(tgt_gx, tgt_gy, layer_idx) for layer_idx in range(len(layer_names))]
+        else:
+            # SMD pad or specific layer - use the layer from pad_info
+            targets = [(tgt_gx, tgt_gy, tgt_pad[2])]
 
         # Mark source/target cells
         for gx, gy, layer in sources + targets:
@@ -904,10 +924,12 @@ def route_multipoint_taps(
             tap_layer = layer_names[path_start[2]]
 
         # Convert path to segments/vias
+        # Use the actual end layer from the path (router may reach through-hole pad on any layer)
+        path_end_layer = layer_names[path[-1][2]]
         segments, vias = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
             (tap_x, tap_y, tap_layer),  # start_original (actual tap point used)
-            (tgt_x, tgt_y, layer_names[tgt_pad[2]])  # end_original (target pad)
+            (tgt_x, tgt_y, path_end_layer)  # end_original (target pad on actual reached layer)
         )
         all_segments.extend(segments)
         all_vias.extend(vias)
