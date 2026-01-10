@@ -9,7 +9,7 @@ import math
 from typing import List, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via
-from routing_utils import pos_key
+from routing_utils import pos_key, POSITION_DECIMALS
 
 
 def get_copper_layers_from_segments(segments: List[Segment], existing_segments: List[Segment] = None) -> List[str]:
@@ -81,8 +81,8 @@ def _build_layer_context(
                 existing_by_layer[seg.layer] = []
                 existing_endpoints_by_layer[seg.layer] = set()
             existing_by_layer[seg.layer].append(seg)
-            existing_endpoints_by_layer[seg.layer].add((round(seg.start_x, 3), round(seg.start_y, 3)))
-            existing_endpoints_by_layer[seg.layer].add((round(seg.end_x, 3), round(seg.end_y, 3)))
+            existing_endpoints_by_layer[seg.layer].add((round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)))
+            existing_endpoints_by_layer[seg.layer].add((round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS)))
 
     via_locations_by_layer = {}
     if vias:
@@ -146,9 +146,9 @@ def _find_short_segment_crossings(
                 dist_end_to_cross = math.sqrt((seg.end_x - cross_pt[0])**2 +
                                               (seg.end_y - cross_pt[1])**2)
                 if dist_start_to_cross < dist_end_to_cross:
-                    trim_endpoint = (round(seg.start_x, 3), round(seg.start_y, 3))
+                    trim_endpoint = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
                 else:
-                    trim_endpoint = (round(seg.end_x, 3), round(seg.end_y, 3))
+                    trim_endpoint = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
 
                 segments_to_trim[i] = (existing, cross_pt, (snap_x, snap_y), trim_endpoint)
                 break
@@ -180,7 +180,7 @@ def _process_layer_crossings(
 
     for crossing_idx, (existing, cross_pt, snap_pt, trim_endpoint) in segments_to_trim.items():
         crossing_seg = layer_segs[crossing_idx]
-        snap_pt_rounded = (round(snap_pt[0], 3), round(snap_pt[1], 3))
+        snap_pt_rounded = (round(snap_pt[0], POSITION_DECIMALS), round(snap_pt[1], POSITION_DECIMALS))
 
         # Find the upstream segment that connects at trim_endpoint
         upstream_idx = None
@@ -191,8 +191,8 @@ def _process_layer_crossings(
 
         if upstream_idx is not None:
             upstream_seg = layer_segs[upstream_idx]
-            up_start = (round(upstream_seg.start_x, 3), round(upstream_seg.start_y, 3))
-            up_end = (round(upstream_seg.end_x, 3), round(upstream_seg.end_y, 3))
+            up_start = (round(upstream_seg.start_x, POSITION_DECIMALS), round(upstream_seg.start_y, POSITION_DECIMALS))
+            up_end = (round(upstream_seg.end_x, POSITION_DECIMALS), round(upstream_seg.end_y, POSITION_DECIMALS))
             up_other_end = up_end if up_start == trim_endpoint else up_start
 
             if up_other_end == snap_pt_rounded:
@@ -201,8 +201,8 @@ def _process_layer_crossings(
                 segments_to_remove.add(crossing_idx)
 
                 # Find the real upstream at the OTHER endpoint of crossing_seg
-                crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
-                crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
+                crossing_start = (round(crossing_seg.start_x, POSITION_DECIMALS), round(crossing_seg.start_y, POSITION_DECIMALS))
+                crossing_end = (round(crossing_seg.end_x, POSITION_DECIMALS), round(crossing_seg.end_y, POSITION_DECIMALS))
                 source_endpoint = crossing_end if trim_endpoint == crossing_start else crossing_start
 
                 real_upstream_idx = None
@@ -213,8 +213,8 @@ def _process_layer_crossings(
 
                 if real_upstream_idx is not None:
                     real_up_seg = layer_segs[real_upstream_idx]
-                    ru_start = (round(real_up_seg.start_x, 3), round(real_up_seg.start_y, 3))
-                    ru_end = (round(real_up_seg.end_x, 3), round(real_up_seg.end_y, 3))
+                    ru_start = (round(real_up_seg.start_x, POSITION_DECIMALS), round(real_up_seg.start_y, POSITION_DECIMALS))
+                    ru_end = (round(real_up_seg.end_x, POSITION_DECIMALS), round(real_up_seg.end_y, POSITION_DECIMALS))
 
                     if ru_end == source_endpoint:
                         segment_modifications[real_upstream_idx] = ('end', snap_pt[0], snap_pt[1])
@@ -230,8 +230,8 @@ def _process_layer_crossings(
                 segments_to_remove.add(crossing_idx)
 
                 # Find and remove orphaned downstream segments
-                crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
-                crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
+                crossing_start = (round(crossing_seg.start_x, POSITION_DECIMALS), round(crossing_seg.start_y, POSITION_DECIMALS))
+                crossing_end = (round(crossing_seg.end_x, POSITION_DECIMALS), round(crossing_seg.end_y, POSITION_DECIMALS))
                 downstream_endpoint = crossing_end if trim_endpoint == crossing_start else crossing_start
 
                 visited_endpoints = {trim_endpoint, downstream_endpoint}
@@ -243,8 +243,8 @@ def _process_layer_crossings(
                         if idx in segments_to_remove or idx == crossing_idx:
                             continue
                         seg = layer_segs[idx]
-                        seg_start = (round(seg.start_x, 3), round(seg.start_y, 3))
-                        seg_end = (round(seg.end_x, 3), round(seg.end_y, 3))
+                        seg_start = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
+                        seg_end = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
                         other_end = seg_end if seg_start == pt else seg_start
 
                         if other_end == snap_pt_rounded:
@@ -267,8 +267,8 @@ def _process_layer_crossings(
                                 segment_modifications[idx] = ('start', snap_pt[0], snap_pt[1])
         else:
             # No upstream segment found - check the other endpoint
-            crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
-            crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
+            crossing_start = (round(crossing_seg.start_x, POSITION_DECIMALS), round(crossing_seg.start_y, POSITION_DECIMALS))
+            crossing_end = (round(crossing_seg.end_x, POSITION_DECIMALS), round(crossing_seg.end_y, POSITION_DECIMALS))
             other_endpoint = crossing_end if crossing_start == trim_endpoint else crossing_start
 
             downstream_idx = None
@@ -279,8 +279,8 @@ def _process_layer_crossings(
 
             if downstream_idx is not None:
                 downstream_seg = layer_segs[downstream_idx]
-                ds_start = (round(downstream_seg.start_x, 3), round(downstream_seg.start_y, 3))
-                ds_end = (round(downstream_seg.end_x, 3), round(downstream_seg.end_y, 3))
+                ds_start = (round(downstream_seg.start_x, POSITION_DECIMALS), round(downstream_seg.start_y, POSITION_DECIMALS))
+                ds_end = (round(downstream_seg.end_x, POSITION_DECIMALS), round(downstream_seg.end_y, POSITION_DECIMALS))
 
                 if ds_end == other_endpoint:
                     segment_modifications[downstream_idx] = ('end', snap_pt[0], snap_pt[1])
@@ -356,8 +356,8 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
         # Build connectivity map: endpoint -> list of segment indices
         endpoint_to_segs = {}
         for i, seg in enumerate(layer_segs):
-            for pt in [(round(seg.start_x, 3), round(seg.start_y, 3)),
-                       (round(seg.end_x, 3), round(seg.end_y, 3))]:
+            for pt in [(round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)),
+                       (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))]:
                 if pt not in endpoint_to_segs:
                     endpoint_to_segs[pt] = []
                 endpoint_to_segs[pt].append(i)
@@ -612,8 +612,8 @@ def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
     seg_signatures = set()
     for seg in segments_to_remove:
         # Normalize segment direction (smaller point first)
-        p1 = (round(seg.start_x, 3), round(seg.start_y, 3))
-        p2 = (round(seg.end_x, 3), round(seg.end_y, 3))
+        p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
+        p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
         if p1 > p2:
             p1, p2 = p2, p1
         sig = (p1, p2, seg.layer, seg.net_id)
@@ -622,15 +622,15 @@ def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
     # Build set of via signatures (x, y, net_id) for fast lookup
     via_signatures = set()
     for via in vias_to_remove:
-        sig = (round(via.x, 3), round(via.y, 3), via.net_id)
+        sig = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
         via_signatures.add(sig)
 
     # Remove matching segments
     new_segments = []
     removed_seg_count = 0
     for seg in pcb_data.segments:
-        p1 = (round(seg.start_x, 3), round(seg.start_y, 3))
-        p2 = (round(seg.end_x, 3), round(seg.end_y, 3))
+        p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
+        p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
         if p1 > p2:
             p1, p2 = p2, p1
         sig = (p1, p2, seg.layer, seg.net_id)
@@ -644,7 +644,7 @@ def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
     new_vias = []
     removed_via_count = 0
     for via in pcb_data.vias:
-        sig = (round(via.x, 3), round(via.y, 3), via.net_id)
+        sig = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
         if sig in via_signatures:
             removed_via_count += 1
         else:

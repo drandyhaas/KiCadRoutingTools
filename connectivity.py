@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import pos_key, segment_length
+from routing_utils import pos_key, segment_length, POSITION_DECIMALS
 
 
 def _get_pad_coords(p) -> Tuple[float, float]:
@@ -230,13 +230,13 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: flo
     # Count how many times each endpoint appears
     endpoint_counts: Dict[Tuple[float, float, str], int] = {}
     for seg in segments:
-        key_start = (round(seg.start_x, 3), round(seg.start_y, 3), seg.layer)
-        key_end = (round(seg.end_x, 3), round(seg.end_y, 3), seg.layer)
+        key_start = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS), seg.layer)
+        key_end = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS), seg.layer)
         endpoint_counts[key_start] = endpoint_counts.get(key_start, 0) + 1
         endpoint_counts[key_end] = endpoint_counts.get(key_end, 0) + 1
 
     # Get pad positions
-    pad_positions = [(round(p.global_x, 3), round(p.global_y, 3)) for p in pads]
+    pad_positions = [(round(p.global_x, POSITION_DECIMALS), round(p.global_y, POSITION_DECIMALS)) for p in pads]
 
     # Free ends are endpoints that appear only once AND are not near a pad
     free_ends = []
@@ -534,12 +534,12 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             seg_group = groups[0]
             seg_points = set()
             for seg in seg_group:
-                seg_points.add((round(seg.start_x, 3), round(seg.start_y, 3)))
-                seg_points.add((round(seg.end_x, 3), round(seg.end_y, 3)))
+                seg_points.add((round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)))
+                seg_points.add((round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS)))
 
             unconnected_pads = []
             for pad in net_pads:
-                pad_pos = (round(pad.global_x, 3), round(pad.global_y, 3))
+                pad_pos = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
                 # Check if pad is near any segment point
                 connected = False
                 for sp in seg_points:
@@ -968,8 +968,8 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
             group = groups[0]
             seg_points = set()
             for seg in group:
-                seg_points.add((round(seg.start_x, 3), round(seg.start_y, 3)))
-                seg_points.add((round(seg.end_x, 3), round(seg.end_y, 3)))
+                seg_points.add((round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)))
+                seg_points.add((round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS)))
 
             stub_pts = []
             for seg in group:
@@ -981,7 +981,7 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
             # Find unconnected pads
             unconnected_pads = []
             for pad in net_pads:
-                pad_pos = (round(pad.global_x, 3), round(pad.global_y, 3))
+                pad_pos = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
                 connected = False
                 for sp in seg_points:
                     if abs(pad_pos[0] - sp[0]) < 0.05 and abs(pad_pos[1] - sp[1]) < 0.05:

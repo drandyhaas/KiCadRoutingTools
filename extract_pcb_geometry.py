@@ -24,7 +24,7 @@ from typing import Dict, List, Any, Optional
 # Add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from kicad_parser import parse_kicad_pcb, PCBData
+from kicad_parser import parse_kicad_pcb, PCBData, POSITION_DECIMALS
 
 
 def extract_geometry(pcb: PCBData, net_patterns: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -147,8 +147,8 @@ def extract_geometry(pcb: PCBData, net_patterns: Optional[List[str]] = None) -> 
         # Find endpoints
         endpoints = defaultdict(int)
         for seg in segs:
-            p1 = (round(seg["start"]["x"], 3), round(seg["start"]["y"], 3))
-            p2 = (round(seg["end"]["x"], 3), round(seg["end"]["y"], 3))
+            p1 = (round(seg["start"]["x"], POSITION_DECIMALS), round(seg["start"]["y"], POSITION_DECIMALS))
+            p2 = (round(seg["end"]["x"], POSITION_DECIMALS), round(seg["end"]["y"], POSITION_DECIMALS))
             endpoints[p1] += 1
             endpoints[p2] += 1
 

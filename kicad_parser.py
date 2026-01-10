@@ -10,6 +10,11 @@ from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
 
+# Position rounding precision for coordinate comparisons
+# All position-based lookups must use this to ensure consistency
+POSITION_DECIMALS = 3
+
+
 @dataclass
 class Pad:
     """Represents a component pad with global board coordinates."""
@@ -668,8 +673,8 @@ def detect_package_type(footprint: Footprint) -> str:
         return 'OTHER'
 
     # Get unique X and Y positions
-    x_positions = sorted(set(round(p.global_x, 3) for p in pads))
-    y_positions = sorted(set(round(p.global_y, 3) for p in pads))
+    x_positions = sorted(set(round(p.global_x, POSITION_DECIMALS) for p in pads))
+    y_positions = sorted(set(round(p.global_y, POSITION_DECIMALS) for p in pads))
 
     # BGA: grid arrangement (multiple rows AND columns of pads)
     # QFN/QFP: perimeter arrangement (pads mostly on edges)

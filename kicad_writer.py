@@ -7,7 +7,7 @@ import uuid
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import Pad
-from routing_utils import pos_key
+from routing_utils import pos_key, POSITION_DECIMALS
 
 
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
@@ -254,7 +254,7 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
 
     # Build a lookup for segment modifications
     def coord_key(x, y):
-        return (round(x, 3), round(y, 3))
+        return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS))
 
     mod_lookup = {}
     # Secondary lookup by coordinates only (for fallback when net_id doesn't match due to swaps)

@@ -11,12 +11,7 @@ The bulk of routing functionality has been split into:
 import math
 from typing import Tuple
 
-from kicad_parser import Segment
-
-
-# Position rounding precision for coordinate comparisons
-# All position-based lookups must use this to ensure consistency
-POSITION_DECIMALS = 3
+from kicad_parser import Segment, POSITION_DECIMALS
 
 
 def pos_key(x: float, y: float) -> Tuple[float, float]:
