@@ -63,7 +63,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             diff_pair_by_net_id: dict = None,
                             layer_map: dict = None,
                             target_swaps: dict = None,
-                            results: list = None):
+                            results: list = None,
+                            obstacle_cache: dict = None):
     """
     Try to swap the blocked side's stubs to another layer as a fallback when routing fails.
     After applying the swap, attempts rip-up and reroute if the initial route fails.
@@ -243,7 +244,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
                         exclude_net_ids={pair.p_net_id, pair.n_net_id},
-                        extra_clearance=diff_pair_extra_clearance
+                        extra_clearance=diff_pair_extra_clearance,
+                        obstacle_cache=obstacle_cache
                     )
 
                     # Filter to rippable blockers

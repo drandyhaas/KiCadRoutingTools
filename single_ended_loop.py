@@ -29,7 +29,7 @@ from connectivity import (
 from net_queries import get_chip_pad_positions, calculate_route_length
 from route_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
 from routing_context import (
@@ -91,6 +91,9 @@ def route_single_ended_nets(
     total_iterations = 0
     route_index = route_index_start
     user_quit = False
+
+    # Cache for obstacle cells - persists across retry iterations for performance
+    obstacle_cache = {}
 
     for net_name, net_id in single_ended_nets:
         if user_quit:
@@ -235,6 +238,8 @@ def route_single_ended_nets(
                 else:
                     # Fallback: directly add new cache (when not using in-place)
                     add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+            # Invalidate blocking analysis cache since we added segments
+            invalidate_obstacle_cache(obstacle_cache, net_id)
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
@@ -285,7 +290,8 @@ def route_single_ended_nets(
                         blocked_cells, pcb_data, config, routed_net_paths,
                         exclude_net_ids={net_id},
                         target_xy=single_target_xy,
-                        source_xy=single_source_xy
+                        source_xy=single_source_xy,
+                        obstacle_cache=obstacle_cache
                     )
                     print_blocking_analysis(blockers)
 
@@ -310,7 +316,8 @@ def route_single_ended_nets(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                 exclude_net_ids={net_id},
                                 target_xy=single_target_xy,
-                                source_xy=single_source_xy
+                                source_xy=single_source_xy,
+                                obstacle_cache=obstacle_cache
                             )
                             print_blocking_analysis(fresh_blockers, prefix="    ")
                             # Find the most-blocking net that isn't already ripped
@@ -391,6 +398,9 @@ def route_single_ended_nets(
                             if saved_result is None:
                                 rip_successful = False
                                 break
+                            # Invalidate cache for ripped nets
+                            for rid in ripped_ids:
+                                invalidate_obstacle_cache(obstacle_cache, rid)
                             ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                             new_ripped_this_level.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                             ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
@@ -466,6 +476,8 @@ def route_single_ended_nets(
                                                              state.net_obstacles_cache, retry_via_cells)
                                 else:
                                     add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+                            # Invalidate blocking analysis cache since we added segments
+                            invalidate_obstacle_cache(obstacle_cache, net_id)
 
                             # Queue all ripped-up nets for rerouting and add to history
                             rip_and_retry_history.add((net_id, blocker_canonicals))

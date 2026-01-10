@@ -15,7 +15,7 @@ from net_queries import calculate_route_length
 from route_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_multipoint_main, route_multipoint_taps
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
@@ -80,6 +80,9 @@ def run_reroute_loop(
     total_iterations = 0
     route_index = route_index_start
     reroute_index = 0
+
+    # Cache for obstacle cells - persists across retry iterations for performance
+    obstacle_cache = {}
 
     # Get the queued_net_ids tracking set from state
     queued_net_ids = state.queued_net_ids
@@ -200,7 +203,8 @@ def run_reroute_loop(
                             blocked_cells, pcb_data, config, routed_net_paths,
                             exclude_net_ids={ripped_net_id},
                             target_xy=reroute_target_xy,
-                            source_xy=reroute_source_xy
+                            source_xy=reroute_source_xy,
+                            obstacle_cache=obstacle_cache
                         )
                         print_blocking_analysis(blockers)
 
@@ -218,7 +222,8 @@ def run_reroute_loop(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                                     exclude_net_ids={ripped_net_id},
                                     target_xy=reroute_target_xy,
-                                    source_xy=reroute_source_xy
+                                    source_xy=reroute_source_xy,
+                                    obstacle_cache=obstacle_cache
                                 )
                                 print_blocking_analysis(fresh_blockers, prefix="    ")
                                 next_blocker = None
@@ -285,6 +290,9 @@ def run_reroute_loop(
                                 ripped_items.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 new_ripped_this_level.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+                                # Invalidate obstacle cache for ripped nets
+                                for rid in ripped_ids:
+                                    invalidate_obstacle_cache(obstacle_cache, rid)
                                 if was_in_results:
                                     successful -= 1
 
@@ -355,6 +363,8 @@ def run_reroute_loop(
                                     restore_obstacles_inplace(state.working_obstacles, ripped_net_id,
                                                              state.net_obstacles_cache, retry_via_cells)
                                     retry_via_cells = None
+                                # Invalidate blocking analysis cache since we added segments
+                                invalidate_obstacle_cache(obstacle_cache, ripped_net_id)
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((ripped_net_id, blocker_canonicals))
@@ -496,7 +506,8 @@ def run_reroute_loop(
                             exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
                             extra_clearance=diff_pair_extra_clearance,
                             target_xy=reroute_target_xy,
-                            source_xy=reroute_source_xy
+                            source_xy=reroute_source_xy,
+                            obstacle_cache=obstacle_cache
                         )
                         print_blocking_analysis(blockers)
 
@@ -525,7 +536,8 @@ def run_reroute_loop(
                                     exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
                                     extra_clearance=diff_pair_extra_clearance,
                                     target_xy=reroute_target_xy,
-                                    source_xy=reroute_source_xy
+                                    source_xy=reroute_source_xy,
+                                    obstacle_cache=obstacle_cache
                                 )
                                 print_blocking_analysis(fresh_blockers, prefix="    ")
                                 next_blocker = None
@@ -601,6 +613,9 @@ def run_reroute_loop(
                                 ripped_items.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 new_ripped_this_level.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+                                # Invalidate obstacle cache for ripped nets
+                                for rid in ripped_ids:
+                                    invalidate_obstacle_cache(obstacle_cache, rid)
                                 if was_in_results:
                                     successful -= 1
 
@@ -653,6 +668,9 @@ def run_reroute_loop(
                                 # Allow re-queuing if this pair gets ripped again later
                                 queued_net_ids.discard(ripped_pair.p_net_id)
                                 queued_net_ids.discard(ripped_pair.n_net_id)
+                                # Invalidate blocking analysis cache since we added segments
+                                invalidate_obstacle_cache(obstacle_cache, ripped_pair.p_net_id)
+                                invalidate_obstacle_cache(obstacle_cache, ripped_pair.n_net_id)
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))
@@ -723,7 +741,7 @@ def run_reroute_loop(
                             all_swap_vias, all_segment_modifications,
                             None, None,  # all_stubs_by_layer, stub_endpoints_by_layer
                             routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
-                            target_swaps, results=results)
+                            target_swaps, results=results, obstacle_cache=obstacle_cache)
 
                         if swap_success and swap_result:
                             print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
@@ -750,6 +768,9 @@ def run_reroute_loop(
                             routed_results[ripped_pair.n_net_id] = swap_result
                             diff_pair_by_net_id[ripped_pair.p_net_id] = (ripped_pair_name, ripped_pair)
                             diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
+                            # Invalidate blocking analysis cache since we added segments
+                            invalidate_obstacle_cache(obstacle_cache, ripped_pair.p_net_id)
+                            invalidate_obstacle_cache(obstacle_cache, ripped_pair.n_net_id)
                             reroute_succeeded = True
 
                 if not reroute_succeeded:

@@ -30,6 +30,17 @@ from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map
 
 
+def invalidate_obstacle_cache(cache: Dict, net_id: int) -> None:
+    """Remove all cache entries for a net_id.
+
+    Cache keys are (net_id, extra_clearance) tuples, so we need to remove
+    all entries where the first element matches.
+    """
+    keys_to_remove = [k for k in cache if k[0] == net_id]
+    for k in keys_to_remove:
+        del cache[k]
+
+
 @dataclass
 class BlockingInfo:
     """Information about how much a net blocks a route."""
@@ -162,6 +173,7 @@ def analyze_frontier_blocking(
     extra_clearance: float = 0.0,
     target_xy: Optional[Tuple[float, float]] = None,
     source_xy: Optional[Tuple[float, float]] = None,
+    obstacle_cache: Optional[Dict[int, Tuple[Set, Set]]] = None,
 ) -> List[BlockingInfo]:
     """
     Analyze which nets are blocking based on frontier data.
@@ -176,6 +188,8 @@ def analyze_frontier_blocking(
         extra_clearance: Extra clearance for diff pair centerline routing
         target_xy: Optional (x, y) target coordinates in mm for proximity analysis
         source_xy: Optional (x, y) source coordinates in mm for proximity analysis
+        obstacle_cache: Optional cache of net_id -> (track_cells, via_cells) to avoid
+                       recomputing obstacle cells. Pass same dict across retry iterations.
 
     Returns:
         List of BlockingInfo sorted by blocking priority
@@ -201,14 +215,25 @@ def analyze_frontier_blocking(
     cell_to_blockers: Dict[Tuple[int, int, int], Set[int]] = defaultdict(set)
     net_blocking_data = {}  # net_id -> (track_cells, via_cells, blocking_track, blocking_via, blocking_total)
 
+    # Use provided cache or create local one
+    local_cache = obstacle_cache if obstacle_cache is not None else {}
+
     for net_id, path in routed_net_paths.items():
         if net_id in exclude_net_ids:
             continue
 
-        # Get all obstacle cells for this net
-        track_cells, via_cells = compute_net_obstacle_cells(
-            pcb_data, net_id, path, config, extra_clearance
-        )
+        # Get obstacle cells from cache or compute
+        # Cache key includes extra_clearance since it affects expansion radius
+        cache_key = (net_id, extra_clearance)
+        if cache_key in local_cache:
+            track_cells, via_cells = local_cache[cache_key]
+        else:
+            track_cells, via_cells = compute_net_obstacle_cells(
+                pcb_data, net_id, path, config, extra_clearance
+            )
+            # Store in cache for future calls
+            local_cache[cache_key] = (track_cells, via_cells)
+
         all_cells = track_cells | via_cells
 
         # Count how many blocked frontier cells this net is responsible for

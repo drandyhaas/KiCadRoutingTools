@@ -15,7 +15,7 @@ from obstacle_costs import compute_track_proximity_for_net
 from net_queries import calculate_route_length
 from route_modification import add_route_to_pcb_data
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
@@ -76,6 +76,9 @@ def route_diff_pairs(
     total_iterations = 0
     route_index = 0
 
+    # Cache for obstacle cells - persists across retry iterations for performance
+    obstacle_cache = {}
+
     for pair_name, pair in diff_pair_ids_to_route:
         route_index += 1
         failed_str = f" ({failed} failed)" if failed > 0 else ""
@@ -134,7 +137,8 @@ def route_diff_pairs(
                 exclude_net_ids={pair.p_net_id, pair.n_net_id},
                 extra_clearance=config.diff_pair_gap / 2,
                 target_xy=target_xy,
-                source_xy=source_xy
+                source_xy=source_xy,
+                obstacle_cache=obstacle_cache
             )
 
             # Filter to rippable blockers (only those we've routed)
@@ -315,6 +319,9 @@ def route_diff_pairs(
             routed_results[pair.n_net_id] = result
             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
             diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+            # Invalidate cache entries since we added segments
+            invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
+            invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
         else:
             iterations = result['iterations'] if result else 0
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
@@ -356,7 +363,8 @@ def route_diff_pairs(
                         exclude_net_ids={pair.p_net_id, pair.n_net_id},
                         extra_clearance=diff_pair_extra_clearance,
                         target_xy=target_xy,
-                        source_xy=source_xy
+                        source_xy=source_xy,
+                        obstacle_cache=obstacle_cache
                     )
                     print_blocking_analysis(blockers)
 
@@ -379,7 +387,8 @@ def route_diff_pairs(
                                 exclude_net_ids={pair.p_net_id, pair.n_net_id},
                                 extra_clearance=diff_pair_extra_clearance,
                                 target_xy=target_xy,
-                                source_xy=source_xy
+                                source_xy=source_xy,
+                                obstacle_cache=obstacle_cache
                             )
                             print_blocking_analysis(fresh_blockers, prefix="    ")
                             next_blocker = None
@@ -458,6 +467,9 @@ def route_diff_pairs(
                             ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                             new_ripped_this_level.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                             ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+                            # Invalidate obstacle cache for ripped nets
+                            for rid in ripped_ids:
+                                invalidate_obstacle_cache(obstacle_cache, rid)
                             if was_in_results:
                                 successful -= 1
                             if blocker.net_id in diff_pair_by_net_id:
@@ -557,6 +569,9 @@ def route_diff_pairs(
                             # Allow re-queuing if this pair gets ripped again later
                             queued_net_ids.discard(pair.p_net_id)
                             queued_net_ids.discard(pair.n_net_id)
+                            # Invalidate cache entries since we added segments
+                            invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
+                            invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
 
                             rip_and_retry_history.add((current_canonical, blocker_canonicals))
 
@@ -621,7 +636,7 @@ def route_diff_pairs(
                         all_swap_vias, all_segment_modifications,
                         None, None,
                         routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
-                        target_swaps, results=results)
+                        target_swaps, results=results, obstacle_cache=obstacle_cache)
 
                     if swap_success and swap_result:
                         # Calculate actual routed length from segments (includes connectors and via barrels)
@@ -691,6 +706,9 @@ def route_diff_pairs(
                         # Allow re-queuing if this pair gets ripped again later
                         queued_net_ids.discard(pair.p_net_id)
                         queued_net_ids.discard(pair.n_net_id)
+                        # Invalidate cache entries since we added segments
+                        invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
+                        invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
                         ripped_up = True
 
             if not ripped_up:

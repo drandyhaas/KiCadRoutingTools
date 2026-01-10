@@ -19,7 +19,7 @@ from routing_state import RoutingState
 from routing_context import build_single_ended_obstacles, build_incremental_obstacles
 from single_ended_routing import route_multipoint_taps, route_net_with_obstacles, route_multipoint_main
 from connectivity import get_multipoint_net_pads
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
 from route_modification import add_route_to_pcb_data
@@ -106,6 +106,9 @@ def run_phase3_tap_routing(
     # Track nets that were ripped during Phase 3 tap routing
     phase3_ripped_nets = []  # List of (net_id, saved_result, ripped_ids, was_in_results)
 
+    # Cache for obstacle cells - persists across retry iterations for performance
+    obstacle_cache = {}
+
     for net_id, main_result in list(state.pending_multipoint_nets.items()):
         # Skip if already processed (removed during a Phase 3 rip-up reroute of another net)
         if net_id not in state.pending_multipoint_nets:
@@ -167,7 +170,8 @@ def run_phase3_tap_routing(
                     all_unrouted_net_ids, routed_net_paths, routed_results,
                     diff_pair_by_net_id, results, track_proximity_cache, layer_map,
                     base_obstacles, gnd_net_id, phase3_ripped_nets,
-                    global_tap_offset, total_tap_edges, global_tap_failed
+                    global_tap_offset, total_tap_edges, global_tap_failed,
+                    obstacle_cache=obstacle_cache
                 )
                 if retry_result is not None:
                     completed_result = retry_result
@@ -208,6 +212,10 @@ def run_phase3_tap_routing(
 
             routed_results[net_id] = completed_result
 
+            # Invalidate this net's cache entry since we added tap segments
+            # Otherwise subsequent nets would use stale obstacle cells
+            invalidate_obstacle_cache(obstacle_cache, net_id)
+
             stats.tap_edges_routed += completed_result.get('tap_edges_routed', 0) - 1  # -1 for Phase 1
             stats.tap_edges_failed += completed_result.get('tap_edges_failed', 0)
 
@@ -234,7 +242,8 @@ def _try_phase3_ripup(
     all_unrouted_net_ids, routed_net_paths, routed_results,
     diff_pair_by_net_id, results, track_proximity_cache, layer_map,
     base_obstacles, gnd_net_id, phase3_ripped_nets,
-    global_tap_offset=0, global_tap_total=0, global_tap_failed=0
+    global_tap_offset=0, global_tap_total=0, global_tap_failed=0,
+    obstacle_cache=None
 ):
     """
     Try progressive rip-up and retry for failed Phase 3 tap routes.
@@ -254,7 +263,8 @@ def _try_phase3_ripup(
     # Analyze blocking
     blockers = analyze_frontier_blocking(
         all_blocked_cells, pcb_data, config, routed_net_paths,
-        exclude_net_ids={net_id}
+        exclude_net_ids={net_id},
+        obstacle_cache=obstacle_cache
     )
 
     if not blockers:
@@ -280,7 +290,8 @@ def _try_phase3_ripup(
             print(f"    Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
             fresh_blockers = analyze_frontier_blocking(
                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                exclude_net_ids={net_id}
+                exclude_net_ids={net_id},
+                obstacle_cache=obstacle_cache
             )
             print_blocking_analysis(fresh_blockers, prefix="      ")
 
@@ -328,6 +339,10 @@ def _try_phase3_ripup(
 
         ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
         ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+        # Invalidate obstacle cache for ripped nets
+        if obstacle_cache is not None:
+            for rid in ripped_ids:
+                invalidate_obstacle_cache(obstacle_cache, rid)
 
         # Rebuild obstacles after rip-up
         if state.working_obstacles is not None and state.net_obstacles_cache:
