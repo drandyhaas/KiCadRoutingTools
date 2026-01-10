@@ -832,29 +832,35 @@ def segments_intersect(a1: Tuple[float, float], a2: Tuple[float, float],
     """Check if line segment a1-a2 intersects line segment b1-b2.
 
     Uses the counter-clockwise orientation test for robust intersection detection.
-    Uses tolerance for deterministic cross-platform results.
+    Uses integer arithmetic for cross-platform determinism.
     """
+    # Convert to integers for exact arithmetic (scale by 1000 for 0.001 precision)
+    scale = 1000
+    def to_int(p):
+        return (int(round(p[0] * scale)), int(round(p[1] * scale)))
+
+    a1i, a2i, b1i, b2i = to_int(a1), to_int(a2), to_int(b1), to_int(b2)
+
     def ccw(A, B, C):
-        """Returns 1 for CCW, -1 for CW, 0 for collinear."""
+        """Returns 1 for CCW, -1 for CW, 0 for collinear. Uses integer arithmetic."""
         cross = (C[1] - A[1]) * (B[0] - A[0]) - (B[1] - A[1]) * (C[0] - A[0])
-        eps = 1e-9
-        if cross > eps:
+        if cross > 0:
             return 1
-        elif cross < -eps:
+        elif cross < 0:
             return -1
         return 0
 
     # Check if segments share an endpoint (not a real crossing)
-    eps = 0.001
-    for p1 in [a1, a2]:
-        for p2 in [b1, b2]:
-            if abs(p1[0] - p2[0]) < eps and abs(p1[1] - p2[1]) < eps:
+    # Using integer coordinates, check within 1 unit (0.001 mm)
+    for p1 in [a1i, a2i]:
+        for p2 in [b1i, b2i]:
+            if abs(p1[0] - p2[0]) <= 1 and abs(p1[1] - p2[1]) <= 1:
                 return False
 
-    d1 = ccw(a1, b1, b2)
-    d2 = ccw(a2, b1, b2)
-    d3 = ccw(a1, a2, b1)
-    d4 = ccw(a1, a2, b2)
+    d1 = ccw(a1i, b1i, b2i)
+    d2 = ccw(a2i, b1i, b2i)
+    d3 = ccw(a1i, a2i, b1i)
+    d4 = ccw(a1i, a2i, b2i)
 
     # Collinear cases treated as non-intersecting for determinism
     if d1 == 0 or d2 == 0 or d3 == 0 or d4 == 0:

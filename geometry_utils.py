@@ -71,16 +71,20 @@ def ccw(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> int
     Returns:
         1 if counter-clockwise
         -1 if clockwise
-        0 if collinear (within tolerance)
+        0 if collinear
 
-    Uses a tolerance to ensure deterministic results across platforms.
+    Uses integer arithmetic for cross-platform determinism.
     """
-    cross = (cy - ay) * (bx - ax) - (by - ay) * (cx - ax)
-    # Use tolerance based on coordinate magnitudes for numerical stability
-    eps = 1e-9
-    if cross > eps:
+    # Convert to integers for exact arithmetic (scale by 1000 for 0.001 precision)
+    scale = 1000
+    axi, ayi = int(round(ax * scale)), int(round(ay * scale))
+    bxi, byi = int(round(bx * scale)), int(round(by * scale))
+    cxi, cyi = int(round(cx * scale)), int(round(cy * scale))
+
+    cross = (cyi - ayi) * (bxi - axi) - (byi - ayi) * (cxi - axi)
+    if cross > 0:
         return 1
-    elif cross < -eps:
+    elif cross < 0:
         return -1
     return 0
 
