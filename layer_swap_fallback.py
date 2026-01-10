@@ -15,9 +15,11 @@ from net_queries import get_chip_pad_positions
 from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
-    add_stub_proximity_costs, merge_track_proximity_costs, add_same_net_via_clearance,
-    add_same_net_pad_drill_via_clearance, add_diff_pair_own_stubs_as_obstacles,
-    compute_track_proximity_for_net, add_vias_list_as_obstacles, add_segments_list_as_obstacles
+    add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
+    add_diff_pair_own_stubs_as_obstacles, add_vias_list_as_obstacles, add_segments_list_as_obstacles
+)
+from obstacle_costs import (
+    add_stub_proximity_costs, merge_track_proximity_costs, compute_track_proximity_for_net
 )
 from blocking_analysis import analyze_frontier_blocking
 from polarity_swap import get_canonical_net_id

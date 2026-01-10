@@ -42,11 +42,16 @@ from net_queries import (
 from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
-    add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
+    add_net_vias_as_obstacles, add_same_net_via_clearance,
     build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
     VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
-    compute_track_proximity_for_net, merge_track_proximity_costs, add_cross_layer_tracks,
-    draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles,
+    draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
+)
+from obstacle_costs import (
+    add_stub_proximity_costs, compute_track_proximity_for_net,
+    merge_track_proximity_costs, add_cross_layer_tracks
+)
+from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, precompute_net_obstacles,
     add_net_obstacles_from_cache, remove_net_obstacles_from_cache, update_net_obstacles_after_routing
 )

@@ -9,7 +9,7 @@ import time
 from typing import List, Tuple
 
 from routing_state import RoutingState
-from obstacle_map import compute_track_proximity_for_net
+from obstacle_costs import compute_track_proximity_for_net
 from connectivity import get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
 from net_queries import calculate_route_length
 from route_modification import add_route_to_pcb_data
@@ -24,7 +24,7 @@ from routing_context import (
     record_single_ended_success, record_diff_pair_success,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
-from obstacle_map import update_net_obstacles_after_routing
+from obstacle_cache import update_net_obstacles_after_routing
 
 # ANSI color codes
 RED = '\033[91m'
