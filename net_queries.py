@@ -10,7 +10,7 @@ import fnmatch
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Set, Union
 
-from kicad_parser import PCBData, Segment, Via, Pad, POSITION_DECIMALS
+from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from chip_boundary import (
     build_chip_list, identify_chip_for_point, compute_far_side,
@@ -869,10 +869,9 @@ def _greedy_order_mps_units(
 
         round_remaining = set(remaining)
         while round_remaining:
-            # Round distances for deterministic tie-breaking across platforms
             best_unit = min(
                 round_remaining,
-                key=lambda uid: (len(conflicts[uid] & round_remaining), round(unit_distances.get(uid, 0), POSITION_DECIMALS), uid)
+                key=lambda uid: (len(conflicts[uid] & round_remaining), unit_distances.get(uid, 0), uid)
             )
 
             round_winners.append(best_unit)
@@ -890,10 +889,10 @@ def _greedy_order_mps_units(
         all_rounds = list(reversed(all_rounds))
         print("MPS: Reversing round order (routing most-conflicting groups first)")
 
-    # Build ordered list, sort each round by distance (rounded for cross-platform determinism)
+    # Build ordered list, sort each round by distance
     ordered_units = []
     for round_winners, orig_round_num in all_rounds:
-        sorted_winners = sorted(round_winners, key=lambda uid: (round(unit_distances.get(uid, 0), POSITION_DECIMALS), uid))
+        sorted_winners = sorted(round_winners, key=lambda uid: unit_distances.get(uid, 0))
         ordered_units.extend(sorted_winners)
         if sorted_winners:
             winner_names = [unit_names.get(uid, f"Net {uid}") for uid in sorted_winners]

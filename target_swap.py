@@ -19,7 +19,7 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
-from kicad_parser import PCBData, Pad, POSITION_DECIMALS
+from kicad_parser import PCBData, Pad
 from routing_config import DiffPairNet, GridRouteConfig
 from routing_utils import pos_key
 from connectivity import find_connected_segment_positions, find_connected_segments
@@ -505,8 +505,7 @@ def compute_optimal_assignment(
                 swap_savings.append((savings, i, j))
 
     # Sort by savings (highest first) and greedily select non-overlapping swaps
-    # Round savings for deterministic tie-breaking across platforms, use (i, j) as secondary key
-    swap_savings.sort(key=lambda x: (-round(x[0], POSITION_DECIMALS), x[1], x[2]))
+    swap_savings.sort(reverse=True)
     selected_swaps = []
     used = set()
     for savings, i, j in swap_savings:
