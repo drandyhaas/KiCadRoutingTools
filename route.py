@@ -26,6 +26,7 @@ from kicad_writer import (
     swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content,
     modify_segment_layers
 )
+from output_writer import write_routed_output
 
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
@@ -80,6 +81,8 @@ from length_matching import (
     apply_length_matching_to_group, find_nets_matching_patterns, auto_group_ddr4_nets,
     apply_intra_pair_length_matching
 )
+from phase3_routing import run_phase3_tap_routing
+from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 import re
 
 # ANSI color codes for terminal output
@@ -104,343 +107,6 @@ except ImportError as e:
     print("  cp target/release/grid_router.dll grid_router.pyd  # Windows")
     print("  cp target/release/libgrid_router.so grid_router.so  # Linux")
     sys.exit(1)
-
-
-def _try_phase3_ripup(
-    net_id, completed_result, failed_edge_blocking, lm_segments, lm_vias,
-    pcb_data, config, state, routed_net_ids, remaining_net_ids,
-    all_unrouted_net_ids, routed_net_paths, routed_results,
-    diff_pair_by_net_id, results, track_proximity_cache, layer_map,
-    base_obstacles, gnd_net_id, phase3_ripped_nets,
-    global_tap_offset=0, global_tap_total=0, global_tap_failed=0
-):
-    """
-    Try progressive rip-up and retry for failed Phase 3 tap routes.
-
-    Tries N=1, then N=2, etc up to max_rip_up_count blockers.
-    Returns updated completed_result if retry succeeded, None otherwise.
-    Appends ripped nets to phase3_ripped_nets for later re-routing.
-    """
-    from routing_context import build_incremental_obstacles
-    from single_ended_routing import route_multipoint_taps
-
-    # Collect all blocked cells from failed edges
-    all_blocked_cells = []
-    for edge_key, (blocked_cells, tgt_xy) in failed_edge_blocking.items():
-        all_blocked_cells.extend(blocked_cells)
-
-    if not all_blocked_cells:
-        return None
-
-    # Analyze blocking
-    blockers = analyze_frontier_blocking(
-        all_blocked_cells, pcb_data, config, routed_net_paths,
-        exclude_net_ids={net_id}
-    )
-
-    if not blockers:
-        return None
-
-    # Filter to rippable blockers
-    rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
-        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
-    )
-
-    if not rippable_blockers:
-        return None
-
-    # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
-    ripped_items = []  # Track nets ripped in this attempt
-    ripped_canonical_ids = set()
-    last_retry_blocked_cells = all_blocked_cells
-    original_failed_count = completed_result.get('tap_edges_failed', 0)
-
-    for N in range(1, config.max_rip_up_count + 1):
-        # For N > 1, re-analyze from the last retry's blocked cells
-        if N > 1 and last_retry_blocked_cells:
-            print(f"    Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
-            fresh_blockers = analyze_frontier_blocking(
-                last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                exclude_net_ids={net_id}
-            )
-            print_blocking_analysis(fresh_blockers, prefix="      ")
-
-            # Find the most-blocking net that isn't already ripped
-            next_blocker = None
-            for b in fresh_blockers:
-                if b.net_id in routed_results:
-                    canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
-                    if canonical not in ripped_canonical_ids:
-                        next_blocker = b
-                        break
-
-            if next_blocker is None:
-                print(f"    No additional rippable blockers from retry analysis")
-                break
-
-            # Add to rippable list if not already there
-            next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
-            if next_canonical not in seen_canonical_ids:
-                seen_canonical_ids.add(next_canonical)
-                rippable_blockers.append(next_blocker)
-
-        if N > len(rippable_blockers):
-            break  # Not enough blockers to rip
-
-        # Rip up the Nth blocker
-        blocker = rippable_blockers[N - 1]
-        blocker_name = pcb_data.nets[blocker.net_id].name if blocker.net_id in pcb_data.nets else f"net_{blocker.net_id}"
-
-        if N == 1:
-            print(f"    Ripping {blocker_name} (net {blocker.net_id}) to retry tap route...")
-        else:
-            print(f"    Extending to N={N}: ripping {blocker_name} (net {blocker.net_id})...")
-
-        saved_result, ripped_ids, was_in_results = rip_up_net(
-            blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
-            routed_results, diff_pair_by_net_id, remaining_net_ids,
-            results, config, track_proximity_cache,
-            state.working_obstacles, state.net_obstacles_cache
-        )
-
-        if saved_result is None:
-            print(f"    Failed to rip up {blocker_name}")
-            break
-
-        ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
-        ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
-
-        # Rebuild obstacles after rip-up
-        if state.working_obstacles is not None and state.net_obstacles_cache:
-            obstacles, _ = build_incremental_obstacles(
-                state.working_obstacles, pcb_data, config, net_id,
-                all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                state.net_obstacles_cache
-            )
-        else:
-            phase3_routed_ids = [rid for rid in routed_net_ids if rid != net_id]
-            obstacles, _ = build_single_ended_obstacles(
-                base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
-                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                net_obstacles_cache=state.net_obstacles_cache
-            )
-
-        # Retry tap routing
-        tap_input = dict(completed_result)
-        tap_input['new_segments'] = list(lm_segments)
-        tap_input['new_vias'] = list(lm_vias)
-        tap_input.pop('failed_edge_blocking', None)
-        # Reset routed_pad_indices to just the main route pads (Phase 1)
-        # Otherwise retry thinks other pads are connected but their segments are missing
-        mst_edges = completed_result.get('mst_edges', [])
-        if mst_edges:
-            idx_a, idx_b, _ = mst_edges[0]  # Main route connects these two pads
-            tap_input['routed_pad_indices'] = {idx_a, idx_b}
-        # Reset tap stats to Phase 1 values (route_multipoint_taps adds to these)
-        tap_input['tap_edges_routed'] = 1  # Phase 1 routed 1 edge
-        tap_input['tap_edges_failed'] = 0  # Reset failures for retry
-
-        retry_result = route_multipoint_taps(
-            pcb_data, net_id, config, obstacles, tap_input,
-            global_offset=global_tap_offset, global_total=global_tap_total, global_failed=global_tap_failed
-        )
-
-        if retry_result:
-            retry_failed = retry_result.get('tap_edges_failed', 0)
-            if retry_failed < original_failed_count:
-                print(f"    Retry SUCCESS (N={N}): {original_failed_count} -> {retry_failed} failed edges")
-
-                # IMPORTANT: Add retry result's NEW tap segments to obstacles BEFORE re-routing ripped nets
-                # Otherwise, ripped nets might route through the same area as our new taps
-                # Note: We add directly to working_obstacles since PCB hasn't been updated yet
-                if state.working_obstacles is not None:
-                    tap_segments = retry_result['new_segments'][len(lm_segments):]
-                    tap_vias = retry_result['new_vias'][len(lm_vias):]
-                    if tap_segments or tap_vias:
-                        print(f"    Adding {len(tap_segments)} tap segments, {len(tap_vias)} tap vias to obstacles before re-routing...")
-                        add_segments_list_as_obstacles(state.working_obstacles, tap_segments, config)
-                        add_vias_list_as_obstacles(state.working_obstacles, tap_vias, config)
-
-                # Re-route ripped nets IMMEDIATELY (not deferred) to prevent subsequent
-                # Phase 3 nets from routing through the ripped area
-                if ripped_items:
-                    print(f"    Re-routing {len(ripped_items)} ripped net(s)...")
-                    _reroute_phase3_ripped_nets(
-                        ripped_items, pcb_data, config, state, routed_net_ids, remaining_net_ids,
-                        all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
-                        results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id
-                    )
-                return retry_result
-            else:
-                print(f"    Retry FAILED (N={N}): still {retry_failed} failed edges")
-                # Store blocked cells from retry for next iteration's analysis
-                retry_blocking = retry_result.get('failed_edge_blocking', {})
-                if retry_blocking:
-                    last_retry_blocked_cells = []
-                    for edge_key, (blocked_cells, tgt_xy) in retry_blocking.items():
-                        last_retry_blocked_cells.extend(blocked_cells)
-                    if last_retry_blocked_cells:
-                        print(f"      Retry had {len(last_retry_blocked_cells)} blocked cells")
-        else:
-            print(f"    Retry FAILED (N={N}): no result")
-            break
-
-    # All attempts failed - restore ripped nets
-    if ripped_items:
-        print(f"    All rip-up attempts failed, restoring {len(ripped_items)} net(s)...")
-        for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
-            restore_net(
-                rid, saved_result, ripped_ids, was_in_results,
-                pcb_data, routed_net_ids, routed_net_paths,
-                routed_results, diff_pair_by_net_id, remaining_net_ids,
-                results, config, track_proximity_cache, layer_map,
-                state.working_obstacles, state.net_obstacles_cache
-            )
-
-    return None
-
-
-def _reroute_phase3_ripped_nets(
-    phase3_ripped_nets, pcb_data, config, state, routed_net_ids, remaining_net_ids,
-    all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
-    results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id
-):
-    """
-    Re-route nets that were ripped during Phase 3 tap routing.
-
-    This includes routing their main route and any tap connections.
-    """
-    from routing_context import build_incremental_obstacles
-    from single_ended_routing import route_net_with_obstacles, route_multipoint_taps, route_multipoint_main
-    from connectivity import get_multipoint_net_pads
-
-    for ripped_net_id, saved_result, ripped_ids, was_in_results in phase3_ripped_nets:
-        net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"net_{ripped_net_id}"
-        print(f"\n  Re-routing {net_name} (net {ripped_net_id})...")
-
-        # Skip if already re-routed (by another rip-up)
-        if ripped_net_id in routed_results:
-            print(f"    Already routed, skipping")
-            continue
-
-        # Build obstacles
-        if state.working_obstacles is not None and state.net_obstacles_cache:
-            obstacles, _ = build_incremental_obstacles(
-                state.working_obstacles, pcb_data, config, ripped_net_id,
-                all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                state.net_obstacles_cache
-            )
-        else:
-            phase3_routed_ids = [rid for rid in routed_net_ids if rid != ripped_net_id]
-            obstacles, _ = build_single_ended_obstacles(
-                base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
-                all_unrouted_net_ids, ripped_net_id, gnd_net_id, track_proximity_cache, layer_map,
-                net_obstacles_cache=state.net_obstacles_cache
-            )
-
-        # Check if this was originally a multi-point net (from saved_result)
-        was_multipoint = saved_result and saved_result.get('mst_edges') and len(saved_result.get('mst_edges', [])) > 1
-
-        if was_multipoint:
-            # Use multipoint routing for multi-point nets
-            multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
-            if multipoint_pads:
-                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads)
-            else:
-                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
-        else:
-            # Route the main path for simple nets
-            result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
-
-        if result and not result.get('failed') and result.get('path'):
-            main_vias = result.get('new_vias', [])
-            add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-            results.append(result)
-            routed_net_ids.append(ripped_net_id)
-            if ripped_net_id in remaining_net_ids:
-                remaining_net_ids.remove(ripped_net_id)
-            routed_net_paths[ripped_net_id] = result['path']
-            routed_results[ripped_net_id] = result
-            track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(
-                pcb_data, ripped_net_id, config, layer_map
-            )
-            print(f"    Re-routed main path: {len(result['new_segments'])} segments, {len(main_vias)} vias")
-
-            # CRITICAL: Update pending_multipoint_nets to point to the NEW result
-            # This ensures that if tap routing fails, the later Phase 3 loop will have
-            # the correct reference to remove from results[] before adding completed_result.
-            # Without this, the old result reference in pending_multipoint_nets won't be
-            # found in results[], leading to duplicate segments being written to output.
-            if ripped_net_id in state.pending_multipoint_nets:
-                state.pending_multipoint_nets[ripped_net_id] = result
-
-            # Update working obstacles
-            if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-                if ripped_net_id in state.net_obstacles_cache:
-                    remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
-                update_net_obstacles_after_routing(pcb_data, ripped_net_id, result, config, state.net_obstacles_cache)
-                add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
-
-            # Check if this was a multi-point net that needs tap routing (check saved_result)
-            if was_multipoint and result.get('mst_edges') and len(result.get('mst_edges', [])) > 1:
-                # Rebuild obstacles for tap routing
-                if state.working_obstacles is not None and state.net_obstacles_cache:
-                    tap_obstacles, _ = build_incremental_obstacles(
-                        state.working_obstacles, pcb_data, config, ripped_net_id,
-                        all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                        state.net_obstacles_cache
-                    )
-                else:
-                    tap_obstacles = obstacles
-
-                tap_result = route_multipoint_taps(
-                    pcb_data, ripped_net_id, config, tap_obstacles, result,
-                    global_offset=0, global_total=0, global_failed=0
-                )
-
-                if tap_result:
-                    tap_segments = tap_result['new_segments'][len(result['new_segments']):]
-                    tap_vias = tap_result['new_vias'][len(result.get('new_vias', [])):]
-
-                    if tap_segments or tap_vias:
-                        tap_result_data = {'new_segments': tap_segments, 'new_vias': tap_vias}
-                        add_route_to_pcb_data(pcb_data, tap_result_data, debug_lines=config.debug_lines)
-                        print(f"    Re-routed {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
-
-                        # IMPORTANT: Update tap_result['new_segments'] to match what's in pcb_data
-                        # add_route_to_pcb_data cleans segments via collapse_appendices, updating
-                        # tap_result_data['new_segments']. We need tap_result to have the cleaned
-                        # segments for correct rip-up later. Combine cleaned main (from result)
-                        # with cleaned tap (from tap_result_data).
-                        tap_result['new_segments'] = result['new_segments'] + tap_result_data['new_segments']
-                        tap_result['new_vias'] = result.get('new_vias', []) + tap_result_data['new_vias']
-
-                        # Update working obstacles with tap segments
-                        if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-                            if ripped_net_id in state.net_obstacles_cache:
-                                remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
-                            update_net_obstacles_after_routing(pcb_data, ripped_net_id, tap_result, config, state.net_obstacles_cache)
-                            add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
-
-                    # IMPORTANT: Replace the main route result with tap_result in results
-                    # The main route result was added above. We need routed_results[net_id] to
-                    # point to something that's actually in results for rip_up_net to work correctly.
-                    if result in results:
-                        results.remove(result)
-                    results.append(tap_result)
-                    routed_results[ripped_net_id] = tap_result
-
-                    # Remove from pending_multipoint_nets since Phase 3 is now complete
-                    if ripped_net_id in state.pending_multipoint_nets:
-                        del state.pending_multipoint_nets[ripped_net_id]
-        else:
-            print(f"    {RED}Failed to re-route{RESET}")
-            # CRITICAL: Remove from pending_multipoint_nets when re-route fails
-            # If we don't remove it, Phase 3 will later process this net and start with
-            # the OLD stale segments from the pending result (which were ripped and are
-            # no longer in pcb_data), leading to duplicate/stale segments in the output.
-            if ripped_net_id in state.pending_multipoint_nets:
-                del state.pending_multipoint_nets[ripped_net_id]
 
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
@@ -800,132 +466,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Apply net ordering strategy
     if ordering_strategy == "mps":
-        # Use Maximum Planar Subset algorithm to minimize crossing conflicts
-        print(f"\nUsing MPS ordering strategy...")
-        all_net_ids = [nid for _, nid in net_ids]
-
-        # If MPS layer swap is enabled, get extended info for conflict analysis
-        if args.mps_layer_swap and enable_layer_switch:
-            from mps_layer_swap import try_mps_aware_layer_swaps
-
-            mps_result = compute_mps_net_ordering(
-                pcb_data, all_net_ids, diff_pairs=diff_pairs,
-                use_boundary_ordering=mps_unroll,
-                bga_exclusion_zones=bga_exclusion_zones,
-                reverse_rounds=args.mps_reverse_rounds,
-                crossing_layer_check=crossing_layer_check,
-                return_extended_info=True,
-                use_segment_intersection=True if args.mps_segment_intersection else None
-            )
-
-            if mps_result.num_rounds > 1:
-                print(f"\nMPS detected {mps_result.num_rounds} rounds - attempting layer swaps to reduce crossings...")
-
-                swap_result = try_mps_aware_layer_swaps(
-                    pcb_data, config, mps_result, diff_pairs,
-                    available_layers=config.layers,
-                    can_swap_to_top_layer=can_swap_to_top_layer,
-                    all_segment_modifications=all_segment_modifications,
-                    all_swap_vias=all_swap_vias,
-                    all_stubs_by_layer=all_stubs_by_layer,
-                    stub_endpoints_by_layer=stub_endpoints_by_layer,
-                    verbose=args.verbose
-                )
-
-                if swap_result.swaps_applied > 0:
-                    total_layer_swaps += swap_result.swaps_applied
-                    # Re-run MPS ordering with updated layer assignments
-                    print("Re-running MPS ordering after layer swaps...")
-                    ordered_ids = compute_mps_net_ordering(
-                        pcb_data, all_net_ids, diff_pairs=diff_pairs,
-                        use_boundary_ordering=mps_unroll,
-                        bga_exclusion_zones=bga_exclusion_zones,
-                        reverse_rounds=args.mps_reverse_rounds,
-                        crossing_layer_check=crossing_layer_check,
-                        use_segment_intersection=True if args.mps_segment_intersection else None
-                    )
-                else:
-                    ordered_ids = mps_result.ordered_ids
-            else:
-                ordered_ids = mps_result.ordered_ids
-        else:
-            ordered_ids = compute_mps_net_ordering(
-                pcb_data, all_net_ids, diff_pairs=diff_pairs,
-                use_boundary_ordering=mps_unroll,
-                bga_exclusion_zones=bga_exclusion_zones,
-                reverse_rounds=args.mps_reverse_rounds,
-                crossing_layer_check=crossing_layer_check,
-                use_segment_intersection=True if args.mps_segment_intersection else None
-            )
-
-        # Rebuild net_ids in the new order
-        id_to_name = {nid: name for name, nid in net_ids}
-        net_ids = [(id_to_name[nid], nid) for nid in ordered_ids if nid in id_to_name]
+        net_ids, mps_layer_swaps = order_nets_mps(
+            pcb_data=pcb_data,
+            net_ids=net_ids,
+            diff_pairs=diff_pairs,
+            mps_unroll=mps_unroll,
+            bga_exclusion_zones=bga_exclusion_zones,
+            mps_reverse_rounds=args.mps_reverse_rounds,
+            crossing_layer_check=crossing_layer_check,
+            mps_segment_intersection=args.mps_segment_intersection,
+            mps_layer_swap=args.mps_layer_swap,
+            enable_layer_switch=enable_layer_switch,
+            config=config,
+            can_swap_to_top_layer=can_swap_to_top_layer,
+            all_segment_modifications=all_segment_modifications,
+            all_swap_vias=all_swap_vias,
+            all_stubs_by_layer=all_stubs_by_layer,
+            stub_endpoints_by_layer=stub_endpoints_by_layer,
+            verbose=args.verbose
+        )
+        total_layer_swaps += mps_layer_swaps
 
     elif ordering_strategy == "inside_out" and bga_exclusion_zones:
-        # Sort nets inside-out from BGA center(s) for better escape routing
-        # Only applies to nets that have pads inside a BGA zone
-        def pad_in_bga_zone(pad):
-            """Check if a pad is inside any BGA zone."""
-            for zone in bga_exclusion_zones:
-                if zone[0] <= pad.global_x <= zone[2] and zone[1] <= pad.global_y <= zone[3]:
-                    return True
-            return False
-
-        def get_min_distance_to_bga_center(net_id):
-            """Get minimum distance from any BGA pad of this net to its BGA center."""
-            pads = pcb_data.pads_by_net.get(net_id, [])
-            if not pads:
-                return float('inf')
-
-            min_dist = float('inf')
-            for zone in bga_exclusion_zones:
-                center_x = (zone[0] + zone[2]) / 2
-                center_y = (zone[1] + zone[3]) / 2
-                for pad in pads:
-                    # Only consider pads that are inside this BGA zone
-                    if zone[0] <= pad.global_x <= zone[2] and zone[1] <= pad.global_y <= zone[3]:
-                        dist = ((pad.global_x - center_x) ** 2 + (pad.global_y - center_y) ** 2) ** 0.5
-                        min_dist = min(min_dist, dist)
-            return min_dist
-
-        # Separate BGA nets from non-BGA nets
-        bga_nets = []
-        non_bga_nets = []
-        for net_name, net_id in net_ids:
-            pads = pcb_data.pads_by_net.get(net_id, [])
-            has_bga_pad = any(pad_in_bga_zone(pad) for pad in pads)
-            if has_bga_pad:
-                bga_nets.append((net_name, net_id))
-            else:
-                non_bga_nets.append((net_name, net_id))
-
-        # Sort BGA nets inside-out, keep non-BGA nets in original order
-        bga_nets.sort(key=lambda x: get_min_distance_to_bga_center(x[1]))
-        net_ids = bga_nets + non_bga_nets
-
-        if bga_nets:
-            print(f"\nSorted {len(bga_nets)} BGA nets inside-out ({len(non_bga_nets)} non-BGA nets unchanged)")
+        net_ids = order_nets_inside_out(pcb_data, net_ids, bga_exclusion_zones)
 
     elif ordering_strategy == "original":
-        print(f"\nUsing original net order (no sorting)")
+        print("\nUsing original net order (no sorting)")
 
     # Separate single-ended nets from differential pairs
-    single_ended_nets = []
-    diff_pair_ids_to_route = []  # (pair_name, pair) tuples
-    processed_pair_net_ids = set()
-
-    for net_name, net_id in net_ids:
-        if net_id in diff_pair_net_ids and net_id not in processed_pair_net_ids:
-            # Find the differential pair this net belongs to
-            for pair_name, pair in diff_pairs.items():
-                if pair.p_net_id == net_id or pair.n_net_id == net_id:
-                    diff_pair_ids_to_route.append((pair_name, pair))
-                    processed_pair_net_ids.add(pair.p_net_id)
-                    processed_pair_net_ids.add(pair.n_net_id)
-                    break
-        elif net_id not in diff_pair_net_ids:
-            single_ended_nets.append((net_name, net_id))
+    diff_pair_ids_to_route, single_ended_nets = separate_nets_by_type(
+        net_ids, diff_pairs, diff_pair_net_ids
+    )
 
     total_routes = len(single_ended_nets) + len(diff_pair_ids_to_route)
 
@@ -1259,137 +830,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Phase 3: Complete multi-point routing (tap connections)
     # This happens AFTER length matching so tap routes connect to meandered main routes
-    if state.pending_multipoint_nets:
-        # Count total tap edges across all nets for progress display
-        total_tap_edges = sum(
-            len(result.get('mst_edges', [])) - 1  # -1 for the main edge routed in Phase 1
-            for result in state.pending_multipoint_nets.values()
-        )
-        global_tap_offset = 0
-        global_tap_failed = 0
-
-        print("\n" + "=" * 60)
-        print(f"Multi-point Phase 3: Routing {total_tap_edges} tap connections")
-        print("=" * 60)
-
-        # Track nets that were ripped during Phase 3 tap routing
-        phase3_ripped_nets = []  # List of (net_id, saved_result, ripped_ids, was_in_results)
-
-        for net_id, main_result in list(state.pending_multipoint_nets.items()):
-            # Skip if already processed (removed during a Phase 3 rip-up reroute of another net)
-            if net_id not in state.pending_multipoint_nets:
-                continue
-
-            net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
-            print(f"\n{net_name} (net {net_id}):")
-            net_start_time = time.time()
-
-            # Get the length-matched result (with meanders applied)
-            lm_result = routed_results.get(net_id, main_result)
-            lm_segments = lm_result.get('new_segments', main_result['new_segments'])
-            lm_vias = lm_result.get('new_vias', main_result.get('new_vias', []))
-
-            # Check if length matching modified the segments (different object = modified)
-            length_matching_active = lm_segments is not main_result['new_segments']
-
-            # Build obstacles - use incremental approach if no length matching and working map available
-            if not length_matching_active and state.working_obstacles is not None and state.net_obstacles_cache:
-                from routing_context import build_incremental_obstacles
-                obstacles, _ = build_incremental_obstacles(
-                    state.working_obstacles, pcb_data, config, net_id,
-                    all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                    state.net_obstacles_cache
-                )
-            else:
-                # Full rebuild needed when length matching modified segments
-                phase3_routed_ids = [rid for rid in routed_net_ids if rid != net_id]
-                obstacles, _ = build_single_ended_obstacles(
-                    base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
-                    all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                    net_obstacles_cache=state.net_obstacles_cache
-                )
-
-            # Build input - use LENGTH-MATCHED segments (so taps connect to actual final route)
-            # The segment filtering in route_multipoint_taps will avoid meander regions
-            tap_input = dict(main_result)
-            tap_input['new_segments'] = lm_segments
-            tap_input['new_vias'] = lm_vias
-
-            # Route the tap connections
-            completed_result = route_multipoint_taps(
-                pcb_data, net_id, config, obstacles, tap_input,
-                global_offset=global_tap_offset, global_total=total_tap_edges, global_failed=global_tap_failed
-            )
-
-            if completed_result:
-                # Update global progress counters
-                net_edges_attempted = completed_result.get('tap_edges_routed', 0) + completed_result.get('tap_edges_failed', 0) - 1  # -1 for Phase 1 edge
-                global_tap_offset += net_edges_attempted
-                global_tap_failed += completed_result.get('tap_edges_failed', 0)
-
-                # Check for failed edges and attempt rip-up if no length matching
-                failed_edge_blocking = completed_result.get('failed_edge_blocking', {})
-                if failed_edge_blocking and not length_matching_active and config.max_rip_up_count > 0:
-                    # Try rip-up for failed tap routes
-                    retry_result = _try_phase3_ripup(
-                        net_id, completed_result, failed_edge_blocking, lm_segments, lm_vias,
-                        pcb_data, config, state, routed_net_ids, remaining_net_ids,
-                        all_unrouted_net_ids, routed_net_paths, routed_results,
-                        diff_pair_by_net_id, results, track_proximity_cache, layer_map,
-                        base_obstacles, gnd_net_id, phase3_ripped_nets,
-                        global_tap_offset, total_tap_edges, global_tap_failed
-                    )
-                    if retry_result is not None:
-                        completed_result = retry_result
-
-                # Extract only the NEW tap segments (after the length-matched main route)
-                tap_segments = completed_result['new_segments'][len(lm_segments):]
-                tap_vias = completed_result['new_vias'][len(lm_vias):]
-
-                if tap_segments or tap_vias:
-                    tap_result = {'new_segments': tap_segments, 'new_vias': tap_vias}
-                    add_route_to_pcb_data(pcb_data, tap_result, debug_lines=config.debug_lines)
-                    print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
-
-                    # IMPORTANT: Update completed_result['new_segments'] to match what's in pcb_data
-                    # add_route_to_pcb_data cleans segments via collapse_appendices, updating
-                    # tap_result['new_segments']. We need completed_result to have the cleaned
-                    # segments for correct rip-up later. Combine cleaned main (lm_segments)
-                    # with cleaned tap (tap_result['new_segments']).
-                    completed_result['new_segments'] = list(lm_segments) + tap_result['new_segments']
-                    completed_result['new_vias'] = list(lm_vias) + tap_result['new_vias']
-
-                    # Update working obstacles with tap segments for subsequent nets
-                    if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-                        # Remove old cache, update with new segments, add back
-                        if net_id in state.net_obstacles_cache:
-                            remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
-                        update_net_obstacles_after_routing(pcb_data, net_id, completed_result, config, state.net_obstacles_cache)
-                        add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
-
-                # IMPORTANT: Replace the Phase 1 result in results list with completed_result
-                # The Phase 1 result (main_result) was added to results during Phase 1 routing.
-                # We need to remove it and add completed_result so that:
-                # 1. The output file contains the combined result (not duplicates)
-                # 2. rip_up_net can find routed_results[net_id] in the results list
-                if main_result in results:
-                    results.remove(main_result)
-                results.append(completed_result)
-
-                routed_results[net_id] = completed_result
-
-            net_elapsed = time.time() - net_start_time
-            net_iterations = completed_result.get('iterations', 0) if completed_result else 0
-            print(f"  Net total time: {net_elapsed:.2f}s, {net_iterations} iterations")
-
-        # Re-route nets that were ripped during Phase 3
-        if phase3_ripped_nets:
-            print(f"\n  Re-routing {len(phase3_ripped_nets)} nets ripped during Phase 3...")
-            _reroute_phase3_ripped_nets(
-                phase3_ripped_nets, pcb_data, config, state, routed_net_ids, remaining_net_ids,
-                all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
-                results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id
-            )
+    run_phase3_tap_routing(
+        state=state,
+        pcb_data=pcb_data,
+        config=config,
+        base_obstacles=base_obstacles,
+        gnd_net_id=gnd_net_id,
+        all_unrouted_net_ids=all_unrouted_net_ids,
+        routed_net_ids=routed_net_ids,
+        remaining_net_ids=remaining_net_ids,
+        routed_net_paths=routed_net_paths,
+        routed_results=routed_results,
+        diff_pair_by_net_id=diff_pair_by_net_id,
+        results=results,
+        track_proximity_cache=track_proximity_cache,
+        layer_map=layer_map
+    )
 
     # Notify visualization callback that all routing is complete
     if visualize:
@@ -1485,214 +941,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     }
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
-    # Write output if we have results OR if we have layer swap/target swap modifications to show
-    # Also write if skip_routing (to output debug labels even without routing)
-    if results or all_segment_modifications or all_swap_vias or target_swap_info or single_ended_target_swap_info or skip_routing:
-        print(f"\nWriting output to {output_file}...")
-        with open(input_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        # Apply target swaps FIRST - layer modifications were recorded with post-swap net IDs,
-        # so we need to swap the file content to match before applying layer modifications
-        if target_swap_info:
-            print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
-            for swap in target_swap_info:
-                # Get layer info for filtering (prevents swapping stubs that share XY on different layers)
-                p1_layer = swap.get('p1_layer')
-                p2_layer = swap.get('p2_layer')
-
-                # Swap segments at p1's target: p1 net -> p2 net
-                content, p1_p_seg = swap_segment_nets_at_positions(
-                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'], layer=p1_layer)
-                content, p1_n_seg = swap_segment_nets_at_positions(
-                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'], layer=p1_layer)
-                # Swap segments at p2's target: p2 net -> p1 net
-                content, p2_p_seg = swap_segment_nets_at_positions(
-                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'], layer=p2_layer)
-                content, p2_n_seg = swap_segment_nets_at_positions(
-                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'], layer=p2_layer)
-
-                # Swap vias at p1's target
-                content, p1_p_via = swap_via_nets_at_positions(
-                    content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'])
-                content, p1_n_via = swap_via_nets_at_positions(
-                    content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'])
-                # Swap vias at p2's target
-                content, p2_p_via = swap_via_nets_at_positions(
-                    content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'])
-                content, p2_n_via = swap_via_nets_at_positions(
-                    content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'])
-
-                # Swap pads if they exist
-                if swap['p1_p_pad'] and swap['p2_p_pad']:
-                    print(f"    Swapping P pads in output: {swap['p1_p_pad'].component_ref}:{swap['p1_p_pad'].pad_number} <-> {swap['p2_p_pad'].component_ref}:{swap['p2_p_pad'].pad_number}")
-                    content = swap_pad_nets_in_content(content, swap['p1_p_pad'], swap['p2_p_pad'])
-                else:
-                    print(f"    WARNING: Missing P pads for swap: p1={swap['p1_p_pad']}, p2={swap['p2_p_pad']}")
-                if swap['p1_n_pad'] and swap['p2_n_pad']:
-                    print(f"    Swapping N pads in output: {swap['p1_n_pad'].component_ref}:{swap['p1_n_pad'].pad_number} <-> {swap['p2_n_pad'].component_ref}:{swap['p2_n_pad'].pad_number}")
-                    content = swap_pad_nets_in_content(content, swap['p1_n_pad'], swap['p2_n_pad'])
-                else:
-                    print(f"    WARNING: Missing N pads for swap: p1={swap['p1_n_pad']}, p2={swap['p2_n_pad']}")
-
-                total_seg = p1_p_seg + p1_n_seg + p2_p_seg + p2_n_seg
-                total_via = p1_p_via + p1_n_via + p2_p_via + p2_n_via
-                print(f"  {swap['p1_name']} <-> {swap['p2_name']}: {total_seg} segments, {total_via} vias")
-
-        # Apply single-ended target swaps
-        if single_ended_target_swap_info:
-            print(f"Applying {len(single_ended_target_swap_info)} single-ended target swap(s) to output file...")
-            for swap in single_ended_target_swap_info:
-                # Swap segments at n1's target: n1 net -> n2 net
-                content, n1_seg = swap_segment_nets_at_positions(
-                    content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'])
-                # Swap segments at n2's target: n2 net -> n1 net
-                content, n2_seg = swap_segment_nets_at_positions(
-                    content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'])
-
-                # Swap vias at n1's target
-                content, n1_via = swap_via_nets_at_positions(
-                    content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'])
-                # Swap vias at n2's target
-                content, n2_via = swap_via_nets_at_positions(
-                    content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'])
-
-                # Swap pads if they exist
-                if swap['n1_pad'] and swap['n2_pad']:
-                    print(f"    Swapping pads in output: {swap['n1_pad'].component_ref}:{swap['n1_pad'].pad_number} <-> {swap['n2_pad'].component_ref}:{swap['n2_pad'].pad_number}")
-                    content = swap_pad_nets_in_content(content, swap['n1_pad'], swap['n2_pad'])
-
-                total_seg = n1_seg + n2_seg
-                total_via = n1_via + n2_via
-                print(f"  {swap['n1_name']} <-> {swap['n2_name']}: {total_seg} segments, {total_via} vias")
-
-        # Apply segment layer modifications from stub layer switching AFTER target swaps
-        # (layer mods were recorded with post-swap net IDs, so file must be swapped first)
-        if all_segment_modifications:
-            content, mod_count = modify_segment_layers(content, all_segment_modifications)
-            print(f"Applied {mod_count} segment layer modifications (layer switching)")
-
-        # Apply pad and stub net swaps for polarity fixes
-        if pad_swaps:
-            print(f"Applying {len(pad_swaps)} polarity fix(es) (swapping target pads and stubs)...")
-            for swap in pad_swaps:
-                pad_p = swap['pad_p']
-                pad_n = swap['pad_n']
-                p_net_id = swap['p_net_id']
-                n_net_id = swap['n_net_id']
-
-                # Swap pad nets
-                content = swap_pad_nets_in_content(content, pad_p, pad_n)
-                print(f"  Pads: {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
-
-                # Use pre-computed stub positions (saved before pcb_data was modified)
-                p_positions = swap.get('p_stub_positions')
-                n_positions = swap.get('n_stub_positions')
-
-                # Fallback to computing if not stored (for backward compatibility)
-                if p_positions is None:
-                    p_positions = find_connected_segment_positions(pcb_data, pad_p.global_x, pad_p.global_y, p_net_id)
-                if n_positions is None:
-                    n_positions = find_connected_segment_positions(pcb_data, pad_n.global_x, pad_n.global_y, n_net_id)
-
-                # Swap entire stub chains - all segments connected to each pad
-                content, p_seg_count = swap_segment_nets_at_positions(content, p_positions, p_net_id, n_net_id)
-                content, n_seg_count = swap_segment_nets_at_positions(content, n_positions, n_net_id, p_net_id)
-
-                # Also swap vias at the same positions
-                content, p_via_count = swap_via_nets_at_positions(content, p_positions, p_net_id, n_net_id)
-                content, n_via_count = swap_via_nets_at_positions(content, n_positions, n_net_id, p_net_id)
-                print(f"  Stubs: swapped {p_seg_count}+{n_seg_count} segments, {p_via_count}+{n_via_count} vias")
-
-        routing_text = ""
-        for result in results:
-            for seg in result['new_segments']:
-                routing_text += generate_segment_sexpr(
-                    (seg.start_x, seg.start_y), (seg.end_x, seg.end_y),
-                    seg.width, seg.layer, seg.net_id
-                ) + "\n"
-            for via in result['new_vias']:
-                routing_text += generate_via_sexpr(
-                    via.x, via.y, via.size, via.drill,
-                    via.layers, via.net_id, getattr(via, 'free', False)
-                ) + "\n"
-
-        # Add vias from stub layer swapping
-        if all_swap_vias:
-            print(f"Adding {len(all_swap_vias)} via(s) from stub layer swapping")
-            for via in all_swap_vias:
-                routing_text += generate_via_sexpr(
-                    via.x, via.y, via.size, via.drill,
-                    via.layers, via.net_id, getattr(via, 'free', False)
-                ) + "\n"
-
-        # Add debug paths if enabled (using gr_line for User layers)
-        if debug_lines:
-            print("Adding debug paths to User.3 (connectors), User.4 (stub dirs), User.5 (exclusion zones), User.8 (simplified), User.9 (raw A*)")
-            for result in results:
-                # Raw A* path on User.9
-                raw_path = result.get('raw_astar_path', [])
-                if len(raw_path) >= 2:
-                    for i in range(len(raw_path) - 1):
-                        x1, y1, _ = raw_path[i]
-                        x2, y2, _ = raw_path[i + 1]
-                        if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
-                            routing_text += generate_gr_line_sexpr(
-                                (x1, y1), (x2, y2),
-                                0.05, "User.9"  # Thin line
-                            ) + "\n"
-
-                # Simplified path on User.8
-                simplified_path = result.get('simplified_path', [])
-                if len(simplified_path) >= 2:
-                    for i in range(len(simplified_path) - 1):
-                        x1, y1, _ = simplified_path[i]
-                        x2, y2, _ = simplified_path[i + 1]
-                        if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
-                            routing_text += generate_gr_line_sexpr(
-                                (x1, y1), (x2, y2),
-                                0.05, "User.8"
-                            ) + "\n"
-
-                # Connector segments on User.3
-                connector_lines = result.get('debug_connector_lines', [])
-                for start, end in connector_lines:
-                    routing_text += generate_gr_line_sexpr(
-                        start, end,
-                        0.05, "User.3"
-                    ) + "\n"
-
-                # Stub direction arrows on User.4
-                stub_arrows = result.get('debug_stub_arrows', [])
-                for start, end in stub_arrows:
-                    routing_text += generate_gr_line_sexpr(
-                        start, end,
-                        0.05, "User.4"
-                    ) + "\n"
-
-            # Exclusion zones on User.5 (BGA zones + proximity, stub proximity circles)
-            for start, end in exclusion_zone_lines:
-                routing_text += generate_gr_line_sexpr(
-                    start, end,
-                    0.05, "User.5"
-                ) + "\n"
-
-            # Boundary position labels on User.6 (from mps-unroll)
-            if boundary_debug_labels:
-                print(f"Adding {len(boundary_debug_labels)} boundary position labels to User.6")
-                for label in boundary_debug_labels:
-                    routing_text += generate_gr_text_sexpr(
-                        label['text'], label['x'], label['y'], label['layer'],
-                        size=0.1, angle=label.get('angle', 0)
-                    ) + "\n"
-
-        last_paren = content.rfind(')')
-        new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
-
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-
-        print(f"Successfully wrote {output_file}")
+    # Write output file using extracted output_writer module
+    write_routed_output(
+        input_file=input_file,
+        output_file=output_file,
+        results=results,
+        all_segment_modifications=all_segment_modifications,
+        all_swap_vias=all_swap_vias,
+        target_swap_info=target_swap_info,
+        single_ended_target_swap_info=single_ended_target_swap_info,
+        pad_swaps=pad_swaps,
+        pcb_data=pcb_data,
+        debug_lines=debug_lines,
+        exclusion_zone_lines=exclusion_zone_lines,
+        boundary_debug_labels=boundary_debug_labels,
+        skip_routing=skip_routing
+    )
 
     # Final memory summary
     if debug_memory:
