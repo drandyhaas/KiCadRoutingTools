@@ -967,10 +967,6 @@ def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[flo
                     cx = round(sum(p[0] for p in pts) / len(pts), POSITION_DECIMALS)
                     cy = round(sum(p[1] for p in pts) / len(pts), POSITION_DECIMALS)
                     points.append((cx, cy))
-            # DEBUG: Print points for nets that seem to differ
-            net_name = pcb_data.nets.get(net_id)
-            if net_name and ('DATA_28' in net_name.name or 'DATA_29' in net_name.name):
-                print(f"DEBUG MST points for {net_name.name}: {points}")
             return compute_mst_segments(points)
 
     # Case 2: No stubs, just pads - use pad positions (rounded for cross-platform determinism)
