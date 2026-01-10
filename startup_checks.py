@@ -89,6 +89,14 @@ def check_rust_library():
         needs_rebuild = True
 
     if needs_rebuild:
+        # On Windows, the DLL is locked once imported, so we can't rebuild in-process
+        if sys.platform == 'win32' and installed_version is not None:
+            print("\nERROR: Cannot rebuild while the library is loaded (Windows limitation).")
+            print("Please run the build manually in a new terminal:")
+            print("  python build_router.py")
+            print("\nThen re-run your command.")
+            sys.exit(1)
+
         # Run build_router.py to rebuild
         build_script = os.path.join(script_dir, 'build_router.py')
         if not os.path.exists(build_script):
