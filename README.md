@@ -134,15 +134,21 @@ KiCadRoutingTools/
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building
-├── routing_utils.py          # Shared utilities (connectivity, MPS, cleanup)
+├── routing_utils.py          # Shared utilities (pos_key, etc.)
 ├── obstacle_map.py           # Obstacle map building functions
+├── obstacle_cache.py         # Net obstacle caching for incremental builds
+├── obstacle_costs.py         # Stub/track proximity cost calculations
 │
 ├── diff_pair_loop.py         # Differential pair routing loop
 ├── single_ended_loop.py      # Single-ended routing loop
 ├── reroute_loop.py           # Reroute queue processing
+├── phase3_routing.py         # Phase 3 multi-point tap routing
 ├── diff_pair_routing.py      # Diff pair A* routing implementation
 ├── single_ended_routing.py   # Single-ended A* routing implementation
 │
+├── net_ordering.py           # MPS, inside-out, and original ordering
+├── net_queries.py            # Net queries (diff pairs, MPS, endpoints)
+├── connectivity.py           # Stub endpoints, connected groups
 ├── layer_swap_optimization.py # Upfront layer swap optimization
 ├── layer_swap_fallback.py    # Fallback layer swap on failure
 ├── stub_layer_switching.py   # Stub layer swap utilities
@@ -155,9 +161,11 @@ KiCadRoutingTools/
 │
 ├── kicad_parser.py           # KiCad .kicad_pcb file parser
 ├── kicad_writer.py           # KiCad S-expression generator
-├── output_writer.py          # Route output and debug geometry
+├── output_writer.py          # Route output and swap application
+├── route_modification.py     # Add/remove routes from PCB data
 ├── chip_boundary.py          # Chip boundary detection
 ├── geometry_utils.py         # Shared geometry calculations
+├── memory_debug.py           # Memory usage statistics
 │
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
@@ -202,8 +210,10 @@ KiCadRoutingTools/
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
-| `routing_utils.py` | Shared utilities: connectivity, endpoint finding, MPS ordering, segment cleanup |
+| `routing_utils.py` | Shared utilities (pos_key) |
 | `obstacle_map.py` | Obstacle map building from PCB data |
+| `obstacle_cache.py` | Net obstacle caching for incremental obstacle map builds |
+| `obstacle_costs.py` | Stub and track proximity cost calculations |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection) |
 
 ### Routing Loops
@@ -213,8 +223,17 @@ KiCadRoutingTools/
 | `diff_pair_loop.py` | Main loop for routing differential pairs |
 | `single_ended_loop.py` | Main loop for routing single-ended nets |
 | `reroute_loop.py` | Processes reroute queue for failed routes |
+| `phase3_routing.py` | Phase 3 multi-point tap routing (connects remaining pads after length matching) |
 | `diff_pair_routing.py` | Differential pair A* with centerline + offset and GND vias |
 | `single_ended_routing.py` | Single-ended net A* routing |
+
+### Net Analysis
+
+| Module | Purpose |
+|--------|---------|
+| `net_ordering.py` | MPS, inside-out, and original net ordering strategies |
+| `net_queries.py` | Net queries (diff pair detection, MPS ordering, chip pad positions) |
+| `connectivity.py` | Stub endpoints, connected groups, multi-point net detection |
 
 ### Optimization
 
@@ -229,6 +248,16 @@ KiCadRoutingTools/
 | `rip_up_reroute.py` | Rip-up blocking routes and retry |
 | `blocking_analysis.py` | Analyze which nets are blocking |
 | `length_matching.py` | Length matching with trombone-style meanders |
+
+### I/O and Utilities
+
+| Module | Purpose |
+|--------|---------|
+| `kicad_parser.py` | KiCad .kicad_pcb file parser |
+| `kicad_writer.py` | KiCad S-expression generator |
+| `output_writer.py` | Write routed output with swaps and debug geometry |
+| `route_modification.py` | Add/remove routes from PCB data structure |
+| `memory_debug.py` | Memory usage statistics and debugging |
 
 ## Performance
 
