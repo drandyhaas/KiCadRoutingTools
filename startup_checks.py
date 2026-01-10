@@ -23,6 +23,12 @@ def check_python_dependencies():
     except ImportError:
         missing.append('numpy')
 
+    # Check scipy (required for optimal target assignment)
+    try:
+        from scipy.optimize import linear_sum_assignment
+    except ImportError:
+        missing.append('scipy')
+
     if missing:
         print("ERROR: Missing required Python libraries:")
         for lib in missing:
