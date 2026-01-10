@@ -209,12 +209,7 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
             groups[root] = []
         groups[root].append(segments[i])
 
-    # Sort groups for deterministic order - use first segment's start position as key
-    result = list(groups.values())
-    result.sort(key=lambda g: (round(g[0].start_x, POSITION_DECIMALS),
-                                round(g[0].start_y, POSITION_DECIMALS),
-                                g[0].layer) if g else (0, 0, ''))
-    return result
+    return list(groups.values())
 
 
 def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: float = 0.05) -> List[Tuple[float, float, str]]:
@@ -256,8 +251,6 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: flo
             if not near_pad:
                 free_ends.append((x, y, layer))
 
-    # Sort for deterministic order across platforms
-    free_ends.sort(key=lambda e: (e[0], e[1], e[2]))
     return free_ends
 
 
