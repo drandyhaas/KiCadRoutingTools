@@ -479,13 +479,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     if len(net_segments) >= 2:
         groups = find_connected_groups(net_segments)
         if len(groups) >= 2:
-            # Sort by length (descending), with deterministic tie-breaker using first segment position
-            def group_sort_key(g):
-                first_seg = g[0] if g else None
-                if first_seg:
-                    return (-len(g), round(first_seg.start_x, POSITION_DECIMALS), round(first_seg.start_y, POSITION_DECIMALS))
-                return (-len(g), 0, 0)
-            groups.sort(key=group_sort_key)
+            groups.sort(key=len, reverse=True)
             source_segs = groups[0]
             target_segs = groups[1]
 
@@ -813,9 +807,8 @@ def get_net_stub_centroids(pcb_data: PCBData, net_id: int) -> List[Tuple[float, 
             points.append((seg.start_x, seg.start_y))
             points.append((seg.end_x, seg.end_y))
         if points:
-            # Round for cross-platform determinism
-            cx = round(sum(p[0] for p in points) / len(points), POSITION_DECIMALS)
-            cy = round(sum(p[1] for p in points) / len(points), POSITION_DECIMALS)
+            cx = sum(p[0] for p in points) / len(points)
+            cy = sum(p[1] for p in points) / len(points)
             centroids.append((cx, cy))
     return centroids
 
@@ -882,7 +875,6 @@ def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = F
     while len(in_tree) < len(points):
         best_edge = None
         best_dist = float('inf')
-        best_j = float('inf')  # For deterministic tie-breaking
 
         for i in in_tree:
             for j in range(len(points)):
@@ -893,13 +885,9 @@ def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = F
                 else:
                     dist = math.sqrt((points[i][0] - points[j][0])**2 +
                                     (points[i][1] - points[j][1])**2)
-                # Round for cross-platform determinism, use j as tie-breaker
-                rounded_dist = round(dist, POSITION_DECIMALS)
-                rounded_best = round(best_dist, POSITION_DECIMALS)
-                if rounded_dist < rounded_best or (rounded_dist == rounded_best and j < best_j):
+                if dist < best_dist:
                     best_dist = dist
                     best_edge = (i, j, dist)
-                    best_j = j
 
         if best_edge:
             in_tree.add(best_edge[1])
@@ -938,24 +926,21 @@ def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[flo
             for group in groups:
                 free_ends = find_stub_free_ends(group, net_pads)
                 if free_ends:
-                    # Round for cross-platform determinism
-                    points.append((round(free_ends[0][0], POSITION_DECIMALS),
-                                   round(free_ends[0][1], POSITION_DECIMALS)))
+                    points.append((free_ends[0][0], free_ends[0][1]))
                 else:
-                    # Fallback to centroid - round for cross-platform determinism
+                    # Fallback to centroid
                     pts = []
                     for seg in group:
                         pts.append((seg.start_x, seg.start_y))
                         pts.append((seg.end_x, seg.end_y))
-                    cx = round(sum(p[0] for p in pts) / len(pts), POSITION_DECIMALS)
-                    cy = round(sum(p[1] for p in pts) / len(pts), POSITION_DECIMALS)
+                    cx = sum(p[0] for p in pts) / len(pts)
+                    cy = sum(p[1] for p in pts) / len(pts)
                     points.append((cx, cy))
             return compute_mst_segments(points)
 
-    # Case 2: No stubs, just pads - use pad positions (rounded for cross-platform determinism)
+    # Case 2: No stubs, just pads - use pad positions
     if len(net_pads) >= 2:
-        points = [(round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
-                  for pad in net_pads]
+        points = [(pad.global_x, pad.global_y) for pad in net_pads]
         return compute_mst_segments(points)
 
     return []
@@ -986,9 +971,8 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
                     points.append((seg.start_x, seg.start_y))
                     points.append((seg.end_x, seg.end_y))
                 if points:
-                    # Round for cross-platform determinism
-                    cx = round(sum(p[0] for p in points) / len(points), POSITION_DECIMALS)
-                    cy = round(sum(p[1] for p in points) / len(points), POSITION_DECIMALS)
+                    cx = sum(p[0] for p in points) / len(points)
+                    cy = sum(p[1] for p in points) / len(points)
                     centroids.append((cx, cy))
             return centroids[:2]
 
@@ -1007,9 +991,8 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
             for seg in group:
                 stub_pts.append((seg.start_x, seg.start_y))
                 stub_pts.append((seg.end_x, seg.end_y))
-            # Round for cross-platform determinism
-            stub_cx = round(sum(p[0] for p in stub_pts) / len(stub_pts), POSITION_DECIMALS)
-            stub_cy = round(sum(p[1] for p in stub_pts) / len(stub_pts), POSITION_DECIMALS)
+            stub_cx = sum(p[0] for p in stub_pts) / len(stub_pts)
+            stub_cy = sum(p[1] for p in stub_pts) / len(stub_pts)
 
             # Find unconnected pads
             unconnected_pads = []
@@ -1024,20 +1007,18 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
                     unconnected_pads.append(pad)
 
             if unconnected_pads:
-                # Compute centroid of unconnected pads - round for cross-platform determinism
-                pad_cx = round(sum(p.global_x for p in unconnected_pads) / len(unconnected_pads), POSITION_DECIMALS)
-                pad_cy = round(sum(p.global_y for p in unconnected_pads) / len(unconnected_pads), POSITION_DECIMALS)
+                # Compute centroid of unconnected pads
+                pad_cx = sum(p.global_x for p in unconnected_pads) / len(unconnected_pads)
+                pad_cy = sum(p.global_y for p in unconnected_pads) / len(unconnected_pads)
                 return [(stub_cx, stub_cy), (pad_cx, pad_cy)]
 
     # Case 3: No stubs, just pads - use first pad and centroid of rest
     if len(net_segments) == 0 and len(net_pads) >= 2:
         first_pad = net_pads[0]
         other_pads = net_pads[1:]
-        # Round for cross-platform determinism
-        other_cx = round(sum(p.global_x for p in other_pads) / len(other_pads), POSITION_DECIMALS)
-        other_cy = round(sum(p.global_y for p in other_pads) / len(other_pads), POSITION_DECIMALS)
-        return [(round(first_pad.global_x, POSITION_DECIMALS), round(first_pad.global_y, POSITION_DECIMALS)),
-                (other_cx, other_cy)]
+        other_cx = sum(p.global_x for p in other_pads) / len(other_pads)
+        other_cy = sum(p.global_y for p in other_pads) / len(other_pads)
+        return [(first_pad.global_x, first_pad.global_y), (other_cx, other_cy)]
 
     return []
 
