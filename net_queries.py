@@ -1098,7 +1098,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         return bool(a_all & b_all)
 
     # Build conflict graphs - both geometric (all crossings) and layer-filtered
-    unit_list = list(unit_endpoints.keys())
+    # Sort unit_list for deterministic cross-platform iteration order
+    unit_list = sorted(unit_endpoints.keys())
     geometric_conflicts = {unit_id: set() for unit_id in unit_list}
     conflicts = {unit_id: set() for unit_id in unit_list}
 
