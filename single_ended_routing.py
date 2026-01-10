@@ -68,7 +68,6 @@ def _probe_route_with_frontier(
     """
     first_label, second_label = direction_labels
     probe_iterations = config.max_probe_iterations
-    stuck_threshold = max(100, probe_iterations // 10)
 
     # Probe forward direction
     path, iterations, blocked_cells = router.route_with_frontier(
@@ -100,91 +99,45 @@ def _probe_route_with_frontier(
         backward_blocked = []  # Success - clear blocked cells
         return path, total_iterations, forward_blocked, backward_blocked, True
 
-    # Both probes failed - check if either direction is stuck
-    first_stuck = first_probe_iters < stuck_threshold
-    second_stuck = second_probe_iters < stuck_threshold
-
-    if first_stuck or second_stuck:
-        # At least one direction is stuck early - fail fast
-        if first_stuck and second_stuck:
-            print(f"{print_prefix}Both directions stuck early ({first_label}: {first_probe_iters}, {second_label}: {second_probe_iters} iterations)")
-        elif first_stuck:
-            print(f"{print_prefix}{first_label} direction stuck early ({first_probe_iters} iterations), {second_label}={second_probe_iters} - failing fast")
-        else:
-            print(f"{print_prefix}{second_label} direction stuck early ({second_probe_iters} iterations), {first_label}={first_probe_iters} - failing fast")
-        return None, total_iterations, forward_blocked, backward_blocked, False
-
-    # Neither direction is stuck - do full search on the more promising one
+    # Both probes failed to find a path - check if both reached max iterations
+    # Only try full search if BOTH probes reached max-probe-iterations (meaning both directions are worth exploring)
     first_reached_max = first_probe_iters >= probe_iterations
     second_reached_max = second_probe_iters >= probe_iterations
 
-    if first_reached_max and second_reached_max:
-        prefer_first = True
-    elif first_probe_iters >= second_probe_iters:
-        prefer_first = True
-    else:
-        prefer_first = False
+    if not (first_reached_max and second_reached_max):
+        # At least one probe didn't reach max - that direction is stuck, skip full search
+        if not first_reached_max and not second_reached_max:
+            print(f"{print_prefix}Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
+        elif not first_reached_max:
+            print(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
+        else:
+            print(f"{print_prefix}{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
+        return None, total_iterations, forward_blocked, backward_blocked, False
 
-    if prefer_first:
-        promising_sources, promising_targets = forward_sources, forward_targets
-        promising_label, fallback_label = first_label, second_label
-        fallback_sources, fallback_targets = forward_targets, forward_sources
-        fallback_probe_iters = second_probe_iters
-        promising_is_forward = True
-    else:
-        promising_sources, promising_targets = forward_targets, forward_sources
-        promising_label, fallback_label = second_label, first_label
-        fallback_sources, fallback_targets = forward_sources, forward_targets
-        fallback_probe_iters = first_probe_iters
-        promising_is_forward = False
+    # Both probes reached max iterations - do full search on forward direction
+    print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
-    print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {promising_label} with full iterations...")
-
-    # Full search on promising direction
     path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, promising_sources, promising_targets, config.max_iterations)
+        obstacles, forward_sources, forward_targets, config.max_iterations)
     total_iterations += full_iters
 
     if path is not None:
-        reversed_path = not promising_is_forward
-        if promising_is_forward:
-            forward_blocked = []
-        else:
-            backward_blocked = []
-        return path, total_iterations, forward_blocked, backward_blocked, reversed_path
+        forward_blocked = []
+        return path, total_iterations, forward_blocked, backward_blocked, False
 
-    # Promising direction failed, try fallback if not stuck
-    fallback_stuck = fallback_probe_iters < stuck_threshold
-    if fallback_stuck:
-        print(f"{print_prefix}{fallback_label} direction stuck ({fallback_probe_iters} iterations), skipping full search")
-        # Update blocked cells from full search
-        if promising_is_forward:
-            forward_blocked = full_blocked
-        else:
-            backward_blocked = full_blocked
-        return None, total_iterations, forward_blocked, backward_blocked, False
+    # Forward failed, try backward
+    print(f"{print_prefix}No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
+    forward_blocked = full_blocked
 
-    print(f"{print_prefix}No route found after {full_iters} iterations ({promising_label}), trying {fallback_label}...")
-    path, fallback_full_iters, fallback_full_blocked = router.route_with_frontier(
-        obstacles, fallback_sources, fallback_targets, config.max_iterations)
-    total_iterations += fallback_full_iters
+    path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
+        obstacles, forward_targets, forward_sources, config.max_iterations)
+    total_iterations += backward_full_iters
 
     if path is not None:
-        reversed_path = promising_is_forward  # Fallback is opposite of promising
-        if promising_is_forward:
-            backward_blocked = []
-        else:
-            forward_blocked = []
-        return path, total_iterations, forward_blocked, backward_blocked, reversed_path
+        backward_blocked = []
+        return path, total_iterations, forward_blocked, backward_blocked, True
 
-    # Both full searches failed - return all blocked cells
-    if promising_is_forward:
-        forward_blocked = full_blocked
-        backward_blocked = fallback_full_blocked
-    else:
-        forward_blocked = fallback_full_blocked
-        backward_blocked = full_blocked
-
+    backward_blocked = backward_full_blocked
     return None, total_iterations, forward_blocked, backward_blocked, False
 
 
@@ -247,7 +200,6 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     reversed_path = False
     total_iterations = 0
     probe_iterations = config.max_probe_iterations
-    stuck_threshold = max(100, probe_iterations // 10)
 
     # Probe first direction
     path, iterations = router.route_multi(obstacles, first_sources, first_targets, probe_iterations)
@@ -263,59 +215,34 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         if path is not None:
             reversed_path = not start_backwards
         else:
-            # Both probes failed - check if either direction is completely stuck
-            first_stuck = first_probe_iters < stuck_threshold
-            second_stuck = second_probe_iters < stuck_threshold
+            # Both probes failed - only try full search if BOTH reached max iterations
+            first_reached_max = first_probe_iters >= probe_iterations
+            second_reached_max = second_probe_iters >= probe_iterations
 
-            if first_stuck or second_stuck:
-                # At least one direction is stuck early - fail fast
-                if first_stuck and second_stuck:
-                    print(f"Both directions stuck early ({first_label}: {first_probe_iters}, {second_label}: {second_probe_iters} iterations)")
-                elif first_stuck:
-                    print(f"{first_label} direction stuck early ({first_probe_iters} iterations), {second_label}={second_probe_iters} - failing fast")
+            if not (first_reached_max and second_reached_max):
+                # At least one probe didn't reach max - that direction is stuck, skip full search
+                if not first_reached_max and not second_reached_max:
+                    print(f"Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
+                elif not first_reached_max:
+                    print(f"{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
                 else:
-                    print(f"{second_label} direction stuck early ({second_probe_iters} iterations), {first_label}={first_probe_iters} - failing fast")
+                    print(f"{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
             else:
-                # Both directions made progress - do full search on the more promising one
-                first_reached_max = first_probe_iters >= probe_iterations
-                second_reached_max = second_probe_iters >= probe_iterations
+                # Both probes reached max - do full search on first direction
+                print(f"Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
-                if first_reached_max and second_reached_max:
-                    prefer_first = True
-                elif first_probe_iters >= second_probe_iters:
-                    prefer_first = True
-                else:
-                    prefer_first = False
-
-                if prefer_first:
-                    promising_sources, promising_targets = first_sources, first_targets
-                    promising_label, fallback_label = first_label, second_label
-                    fallback_sources, fallback_targets = second_sources, second_targets
-                    fallback_probe_iters = second_probe_iters
-                else:
-                    promising_sources, promising_targets = second_sources, second_targets
-                    promising_label, fallback_label = second_label, first_label
-                    fallback_sources, fallback_targets = first_sources, first_targets
-                    fallback_probe_iters = first_probe_iters
-
-                print(f"Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {promising_label} with full iterations...")
-
-                path, full_iters = router.route_multi(obstacles, promising_sources, promising_targets, config.max_iterations)
+                path, full_iters = router.route_multi(obstacles, first_sources, first_targets, config.max_iterations)
                 total_iterations += full_iters
 
                 if path is not None:
-                    reversed_path = (promising_label == second_label)
+                    reversed_path = not start_backwards
                 else:
-                    # Promising direction failed, try fallback if not stuck
-                    fallback_stuck = fallback_probe_iters < stuck_threshold
-                    if not fallback_stuck:
-                        print(f"No route found after {full_iters} iterations ({promising_label}), trying {fallback_label}...")
-                        path, fallback_full_iters = router.route_multi(obstacles, fallback_sources, fallback_targets, config.max_iterations)
-                        total_iterations += fallback_full_iters
-                        if path is not None:
-                            reversed_path = (fallback_label == second_label)
-                    else:
-                        print(f"{fallback_label} direction stuck ({fallback_probe_iters} iterations), skipping full search")
+                    # First direction failed, try second
+                    print(f"No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
+                    path, fallback_full_iters = router.route_multi(obstacles, second_sources, second_targets, config.max_iterations)
+                    total_iterations += fallback_full_iters
+                    if path is not None:
+                        reversed_path = start_backwards
 
     if path is None:
         print(f"No route found after {total_iterations} iterations (both directions)")
