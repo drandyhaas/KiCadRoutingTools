@@ -75,18 +75,19 @@ def estimate_net_obstacles_cache_mb(cache: Dict) -> float:
 
 
 def estimate_track_proximity_cache_mb(cache: Dict) -> float:
-    """Estimate memory size of track_proximity_cache."""
+    """Estimate memory size of track_proximity_cache (numpy arrays)."""
     if not cache:
         return 0.0
 
     total = sys.getsizeof(cache)
-    for net_id, layer_dict in cache.items():
-        total += sys.getsizeof(net_id) + sys.getsizeof(layer_dict)
-        if isinstance(layer_dict, dict):
-            for layer_idx, cell_dict in layer_dict.items():
-                total += sys.getsizeof(layer_idx) + sys.getsizeof(cell_dict)
-                if isinstance(cell_dict, dict):
-                    total += len(cell_dict) * 32  # (tuple of 2 ints) -> int
+    for net_id, arr in cache.items():
+        total += sys.getsizeof(net_id)
+        if hasattr(arr, 'nbytes'):
+            # numpy array: 4 columns * 4 bytes (int32) = 16 bytes per row
+            total += arr.nbytes + 128  # array overhead
+        else:
+            # Fallback for old dict format
+            total += sys.getsizeof(arr)
     return total / (1024 * 1024)
 
 

@@ -1058,6 +1058,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Build working obstacle map (base + all nets) for incremental updates
     # Uses reference counting in Rust to correctly handle cells blocked by multiple nets
     working_obstacles = build_working_obstacle_map(base_obstacles, net_obstacles_cache)
+    # Shrink internal allocations to reduce memory footprint
+    working_obstacles.shrink_to_fit()
     if debug_memory:
         mem_after_working = get_process_memory_mb()
         print(format_memory_stats("After working obstacle map", mem_after_working, mem_after_working - mem_start))

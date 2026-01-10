@@ -17,6 +17,22 @@ pub use router::GridRouter;
 pub use visual_router::{VisualRouter, SearchSnapshot};
 pub use pose_router::PoseRouter;
 
+/// Try to release unused memory back to the OS.
+/// This is a hint to the allocator and may not have immediate effect.
+#[pyfunction]
+fn release_memory() {
+    // On most platforms, dropping collections and calling shrink_to_fit
+    // is the main way to release memory. The Rust allocator will
+    // eventually return memory to the OS when possible.
+    //
+    // For more aggressive memory release on Linux, one could use:
+    // unsafe { libc::malloc_trim(0); }
+    // But this requires the libc crate and is platform-specific.
+    //
+    // For now, this function serves as a documentation point and
+    // placeholder for future platform-specific optimizations.
+}
+
 /// Python module
 #[pymodule]
 fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -26,5 +42,6 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PoseRouter>()?;
     m.add_class::<VisualRouter>()?;
     m.add_class::<SearchSnapshot>()?;
+    m.add_function(wrap_pyfunction!(release_memory, m)?)?;
     Ok(())
 }

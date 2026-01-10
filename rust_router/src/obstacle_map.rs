@@ -133,6 +133,24 @@ impl GridObstacleMap {
         self.stub_proximity.clear();
     }
 
+    /// Shrink all internal collections to fit their contents.
+    /// Call this after bulk operations to release excess memory.
+    pub fn shrink_to_fit(&mut self) {
+        for layer_map in &mut self.blocked_cells {
+            layer_map.shrink_to_fit();
+        }
+        self.blocked_vias.shrink_to_fit();
+        self.stub_proximity.shrink_to_fit();
+        for layer_map in &mut self.layer_proximity_costs {
+            layer_map.shrink_to_fit();
+        }
+        self.allowed_cells.shrink_to_fit();
+        for layer_set in &mut self.source_target_cells {
+            layer_set.shrink_to_fit();
+        }
+        self.cross_layer_tracks.shrink_to_fit();
+    }
+
     /// Clear allowed cells (for reuse with different source/target)
     pub fn clear_allowed_cells(&mut self) {
         self.allowed_cells.clear();
@@ -391,6 +409,23 @@ impl GridObstacleMap {
             let key = pack_xy(gx, gy);
             let entry = self.layer_proximity_costs[layer].entry(key).or_insert(0);
             *entry = (*entry).max(cost);
+        }
+    }
+
+    /// Batch set layer proximity costs from numpy array
+    /// Array should have shape (N, 4) with columns [layer, gx, gy, cost]
+    pub fn set_layer_proximity_batch(&mut self, costs: PyReadonlyArray2<i32>) {
+        let arr = costs.as_array();
+        for row in arr.rows() {
+            let layer = row[0] as usize;
+            let gx = row[1];
+            let gy = row[2];
+            let cost = row[3];
+            if layer < self.num_layers && cost > 0 {
+                let key = pack_xy(gx, gy);
+                let entry = self.layer_proximity_costs[layer].entry(key).or_insert(0);
+                *entry = (*entry).max(cost);
+            }
         }
     }
 

@@ -746,10 +746,10 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
 
 
 def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
-                                     layer_map: Dict[str, int]) -> Dict[int, Dict[Tuple[int, int], int]]:
+                                     layer_map: Dict[str, int]) -> np.ndarray:
     """Compute track proximity costs for a single net's segments.
 
-    Returns a dict of layer_idx -> {(gx, gy) -> cost} that can be stored and merged later.
+    Returns a numpy array with columns [layer, gx, gy, cost] for efficient storage and batch merge.
     This allows incremental updates: compute once when route succeeds, remove when ripped up.
 
     Args:
@@ -759,12 +759,13 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
         layer_map: Mapping of layer names to layer indices
 
     Returns:
-        Dict mapping layer_idx -> {(gx, gy) -> cost}
+        numpy array of shape (N, 4) with columns [layer, gx, gy, cost], dtype int32
     """
-    result: Dict[int, Dict[Tuple[int, int], int]] = {}
+    # Use dict internally for efficient max tracking, convert to numpy at end
+    result: Dict[Tuple[int, int, int], int] = {}  # (layer, gx, gy) -> cost
 
     if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
-        return result  # Feature disabled
+        return np.empty((0, 4), dtype=np.int32)  # Feature disabled
 
     coord = GridCoord(config.grid_step)
     radius_grid = coord.to_grid_dist(config.track_proximity_distance)
@@ -780,10 +781,6 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-
-        if layer_idx not in result:
-            result[layer_idx] = {}
-        layer_costs = result[layer_idx]
 
         # Walk along segment using Bresenham, sampling every sample_interval points
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -809,10 +806,10 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
                             dist = dist_sq ** 0.5
                             proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
                             cost = int(proximity * cost_grid)
-                            cell = (gx + ex, gy + ey)
+                            key = (layer_idx, gx + ex, gy + ey)
                             # Store max cost at each cell
-                            if cell not in layer_costs or cost > layer_costs[cell]:
-                                layer_costs[cell] = cost
+                            if key not in result or cost > result[key]:
+                                result[key] = cost
 
             if gx == gx2 and gy == gy2:
                 break
@@ -826,21 +823,29 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
                 gy += sy
             step_count += 1
 
-    return result
+    # Convert to numpy array
+    if not result:
+        return np.empty((0, 4), dtype=np.int32)
+
+    arr = np.array([[layer, gx, gy, cost] for (layer, gx, gy), cost in result.items()], dtype=np.int32)
+    return arr
 
 
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
-                                 per_net_costs: Dict[int, Dict[int, Dict[Tuple[int, int], int]]]):
+                                 per_net_costs: Dict[int, np.ndarray]):
     """Merge pre-computed per-net track proximity costs into the obstacle map.
 
     Args:
         obstacles: The obstacle map to add costs to
-        per_net_costs: Dict of net_id -> layer_idx -> {(gx, gy) -> cost}
+        per_net_costs: Dict of net_id -> numpy array with columns [layer, gx, gy, cost]
     """
-    for net_id, layer_costs in per_net_costs.items():
-        for layer_idx, cells in layer_costs.items():
-            for (gx, gy), cost in cells.items():
-                obstacles.set_layer_proximity(gx, gy, layer_idx, cost)
+    # Concatenate all arrays for efficient batch processing
+    arrays_to_merge = [arr for arr in per_net_costs.values() if len(arr) > 0]
+    if not arrays_to_merge:
+        return
+
+    all_costs = np.vstack(arrays_to_merge)
+    obstacles.set_layer_proximity_batch(all_costs)
 
 
 def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,
