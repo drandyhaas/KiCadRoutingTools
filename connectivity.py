@@ -946,13 +946,6 @@ def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[flo
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
     net_pads = pcb_data.pads_by_net.get(net_id, [])
 
-    # DEBUG: Print segment info for key nets
-    net_name = pcb_data.nets.get(net_id)
-    if net_name and ('DATA_28' in net_name.name or 'DATA_29' in net_name.name):
-        print(f"DEBUG {net_name.name} has {len(net_segments)} segments, {len(net_pads)} pads")
-        for i, seg in enumerate(net_segments[:4]):  # First 4 segments
-            print(f"  seg[{i}]: ({round(seg.start_x,3)},{round(seg.start_y,3)})->({round(seg.end_x,3)},{round(seg.end_y,3)}) {seg.layer}")
-
     # Case 1: Has stubs - use stub free ends
     if net_segments:
         groups = find_connected_groups(net_segments)
