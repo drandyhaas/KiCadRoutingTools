@@ -818,17 +818,9 @@ def segments_intersect(a1: Tuple[float, float], a2: Tuple[float, float],
     """Check if line segment a1-a2 intersects line segment b1-b2.
 
     Uses the counter-clockwise orientation test for robust intersection detection.
-    Uses tolerance for deterministic cross-platform results.
     """
     def ccw(A, B, C):
-        """Returns 1 for CCW, -1 for CW, 0 for collinear."""
-        cross = (C[1] - A[1]) * (B[0] - A[0]) - (B[1] - A[1]) * (C[0] - A[0])
-        eps = 1e-9
-        if cross > eps:
-            return 1
-        elif cross < -eps:
-            return -1
-        return 0
+        return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
 
     # Check if segments share an endpoint (not a real crossing)
     eps = 0.001
@@ -837,15 +829,7 @@ def segments_intersect(a1: Tuple[float, float], a2: Tuple[float, float],
             if abs(p1[0] - p2[0]) < eps and abs(p1[1] - p2[1]) < eps:
                 return False
 
-    d1 = ccw(a1, b1, b2)
-    d2 = ccw(a2, b1, b2)
-    d3 = ccw(a1, a2, b1)
-    d4 = ccw(a1, a2, b2)
-
-    # Collinear cases treated as non-intersecting for determinism
-    if d1 == 0 or d2 == 0 or d3 == 0 or d4 == 0:
-        return False
-    return (d1 != d2) and (d3 != d4)
+    return (ccw(a1, b1, b2) != ccw(a2, b1, b2)) and (ccw(a1, a2, b1) != ccw(a1, a2, b2))
 
 
 def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = False) -> List[Tuple[int, int, float]]:
