@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 RED = '\033[91m'
 RESET = '\033[0m'
 
-from kicad_parser import PCBData, Segment, Via
+from kicad_parser import PCBData, Segment, Via, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map
 from connectivity import (
@@ -755,7 +755,8 @@ def route_multipoint_main(
     mst_edges = compute_mst_edges(pad_positions, use_manhattan=True)
 
     # Sort MST edges by length (longest first)
-    mst_edges = sorted(mst_edges, key=lambda e: -e[2])
+    # Round for deterministic tie-breaking, use edge indices as secondary key
+    mst_edges = sorted(mst_edges, key=lambda e: (-round(e[2], POSITION_DECIMALS), e[0], e[1]))
 
     # Route the longest MST edge first
     idx_a, idx_b, longest_len = mst_edges[0]

@@ -7,7 +7,7 @@ including MPS (Maximum Planar Subset), inside-out BGA ordering, and original ord
 
 from typing import List, Tuple, Dict, Optional, Set
 
-from kicad_parser import PCBData
+from kicad_parser import PCBData, POSITION_DECIMALS
 from routing_config import DiffPairNet
 
 
@@ -177,7 +177,8 @@ def order_nets_inside_out(
             non_bga_nets.append((net_name, net_id))
 
     # Sort BGA nets inside-out, keep non-BGA nets in original order
-    bga_nets.sort(key=lambda x: get_min_distance_to_bga_center(x[1]))
+    # Round distances for deterministic tie-breaking across platforms
+    bga_nets.sort(key=lambda x: (round(get_min_distance_to_bga_center(x[1]), POSITION_DECIMALS), x[0]))
     ordered_net_ids = bga_nets + non_bga_nets
 
     if bga_nets:
