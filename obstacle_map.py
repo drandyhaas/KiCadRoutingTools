@@ -5,8 +5,9 @@ Builds GridObstacleMap objects from PCB data, adding obstacles for segments,
 vias, pads, BGA exclusion zones, and routed paths.
 """
 
-from typing import List, Optional, Tuple, Dict, Set
+from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass, field
+import numpy as np
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
@@ -1367,11 +1368,13 @@ class NetObstacleData:
     """Cached obstacle data for a single net.
 
     Pre-computed blocked cells and vias for fast batch adding.
+    Uses numpy arrays for memory efficiency (12 bytes per cell vs 72+ for tuples).
     """
-    # Blocked cells as list of (gx, gy, layer_idx) tuples
-    blocked_cells: List[Tuple[int, int, int]] = field(default_factory=list)
-    # Blocked via positions as list of (gx, gy) tuples
-    blocked_vias: List[Tuple[int, int]] = field(default_factory=list)
+    # Blocked cells as numpy array of shape (N, 3) with columns [gx, gy, layer_idx]
+    # dtype=int32 for efficient storage
+    blocked_cells: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.int32))
+    # Blocked via positions as numpy array of shape (M, 2) with columns [gx, gy]
+    blocked_vias: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.int32))
 
 
 def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -1432,9 +1435,20 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         _collect_pad_obstacles(pad, coord, layer_map, config, extra_clearance,
                                 blocked_cells_set, blocked_vias_set)
 
+    # Convert sets to numpy arrays for memory efficiency
+    if blocked_cells_set:
+        blocked_cells_arr = np.array(list(blocked_cells_set), dtype=np.int32)
+    else:
+        blocked_cells_arr = np.empty((0, 3), dtype=np.int32)
+
+    if blocked_vias_set:
+        blocked_vias_arr = np.array(list(blocked_vias_set), dtype=np.int32)
+    else:
+        blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
+
     return NetObstacleData(
-        blocked_cells=list(blocked_cells_set),
-        blocked_vias=list(blocked_vias_set)
+        blocked_cells=blocked_cells_arr,
+        blocked_vias=blocked_vias_arr
     )
 
 
@@ -1565,9 +1579,10 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
         obstacles: The obstacle map to add to
         cache_data: Pre-computed NetObstacleData for the net
     """
-    if cache_data.blocked_cells:
+    if len(cache_data.blocked_cells) > 0:
+        # Pass numpy array directly to Rust (no conversion needed)
         obstacles.add_blocked_cells_batch(cache_data.blocked_cells)
-    if cache_data.blocked_vias:
+    if len(cache_data.blocked_vias) > 0:
         obstacles.add_blocked_vias_batch(cache_data.blocked_vias)
 
 
@@ -1581,9 +1596,9 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
         obstacles: The obstacle map to remove from
         cache_data: Pre-computed NetObstacleData for the net
     """
-    if cache_data.blocked_cells:
+    if len(cache_data.blocked_cells) > 0:
         obstacles.remove_blocked_cells_batch(cache_data.blocked_cells)
-    if cache_data.blocked_vias:
+    if len(cache_data.blocked_vias) > 0:
         obstacles.remove_blocked_vias_batch(cache_data.blocked_vias)
 
 

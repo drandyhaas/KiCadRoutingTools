@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+numpy = "0.23"  # NumPy support for PyO3
 rustc-hash = "2.1"  # Fast hash for integer keys
 
 [profile.release]

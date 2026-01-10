@@ -1,6 +1,7 @@
 //! Grid-based obstacle map for PCB routing.
 
 use pyo3::prelude::*;
+use numpy::PyReadonlyArray2;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::types::pack_xy;
@@ -161,9 +162,13 @@ impl GridObstacleMap {
         *self.blocked_vias.entry(key).or_insert(0) += 1;
     }
 
-    /// Batch add blocked cells (reduces Python-Rust FFI overhead)
-    pub fn add_blocked_cells_batch(&mut self, cells: Vec<(i32, i32, usize)>) {
-        for (gx, gy, layer) in cells {
+    /// Batch add blocked cells from numpy array (shape: N x 3, columns: gx, gy, layer)
+    pub fn add_blocked_cells_batch(&mut self, cells: PyReadonlyArray2<i32>) {
+        let arr = cells.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
+            let layer = row[2] as usize;
             if layer < self.num_layers {
                 let key = pack_xy(gx, gy);
                 *self.blocked_cells[layer].entry(key).or_insert(0) += 1;
@@ -171,9 +176,12 @@ impl GridObstacleMap {
         }
     }
 
-    /// Batch add blocked vias (reduces Python-Rust FFI overhead)
-    pub fn add_blocked_vias_batch(&mut self, vias: Vec<(i32, i32)>) {
-        for (gx, gy) in vias {
+    /// Batch add blocked vias from numpy array (shape: N x 2, columns: gx, gy)
+    pub fn add_blocked_vias_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
             let key = pack_xy(gx, gy);
             *self.blocked_vias.entry(key).or_insert(0) += 1;
         }
@@ -194,9 +202,13 @@ impl GridObstacleMap {
         }
     }
 
-    /// Remove blocked cells (decrements reference count, removes entry when count reaches 0)
-    pub fn remove_blocked_cells_batch(&mut self, cells: Vec<(i32, i32, usize)>) {
-        for (gx, gy, layer) in cells {
+    /// Remove blocked cells from numpy array (decrements reference count, removes entry when count reaches 0)
+    pub fn remove_blocked_cells_batch(&mut self, cells: PyReadonlyArray2<i32>) {
+        let arr = cells.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
+            let layer = row[2] as usize;
             if layer < self.num_layers {
                 let key = pack_xy(gx, gy);
                 if let Some(count) = self.blocked_cells[layer].get_mut(&key) {
@@ -210,9 +222,12 @@ impl GridObstacleMap {
         }
     }
 
-    /// Remove blocked vias (decrements reference count, removes entry when count reaches 0)
-    pub fn remove_blocked_vias_batch(&mut self, vias: Vec<(i32, i32)>) {
-        for (gx, gy) in vias {
+    /// Remove blocked vias from numpy array (decrements reference count, removes entry when count reaches 0)
+    pub fn remove_blocked_vias_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
             let key = pack_xy(gx, gy);
             if let Some(count) = self.blocked_vias.get_mut(&key) {
                 if *count > 1 {

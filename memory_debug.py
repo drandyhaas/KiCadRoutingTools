@@ -59,11 +59,18 @@ def estimate_net_obstacles_cache_mb(cache: Dict) -> float:
         total += sys.getsizeof(net_id)
         total += sys.getsizeof(data)
         if hasattr(data, 'blocked_cells'):
-            total += sys.getsizeof(data.blocked_cells)
-            total += len(data.blocked_cells) * 24  # tuple of 3 ints
+            # numpy arrays: use nbytes for actual memory usage
+            if hasattr(data.blocked_cells, 'nbytes'):
+                total += data.blocked_cells.nbytes
+            else:
+                total += sys.getsizeof(data.blocked_cells)
+                total += len(data.blocked_cells) * 24  # tuple of 3 ints (legacy)
         if hasattr(data, 'blocked_vias'):
-            total += sys.getsizeof(data.blocked_vias)
-            total += len(data.blocked_vias) * 16  # tuple of 2 ints
+            if hasattr(data.blocked_vias, 'nbytes'):
+                total += data.blocked_vias.nbytes
+            else:
+                total += sys.getsizeof(data.blocked_vias)
+                total += len(data.blocked_vias) * 16  # tuple of 2 ints (legacy)
     return total / (1024 * 1024)
 
 

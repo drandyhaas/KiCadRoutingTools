@@ -164,20 +164,45 @@ impl BlockedCellTracker {
         self.blocked.insert(key);
     }
 
-    /// Get all blocked cells as (gx, gy, layer) tuples
+    /// Get blocked cells as (gx, gy, layer) tuples.
+    /// Returns at most MAX_BLOCKED_CELLS (10000), evenly sampled for determinism.
     pub fn get_blocked(&self) -> Vec<(i32, i32, u8)> {
-        self.blocked
-            .iter()
-            .map(|&key| {
-                let layer = (key & 0xFF) as u8;
-                let y = ((key >> 8) & 0xFFFFF) as i32;
-                let x = ((key >> 28) & 0xFFFFF) as i32;
-                // Sign extension for negative coordinates
-                let x = if x & 0x80000 != 0 { x | !0xFFFFF_i32 } else { x };
-                let y = if y & 0x80000 != 0 { y | !0xFFFFF_i32 } else { y };
-                (x, y, layer)
-            })
-            .collect()
+        const MAX_BLOCKED_CELLS: usize = 10000;
+
+        let total = self.blocked.len();
+        if total <= MAX_BLOCKED_CELLS {
+            // Return all cells, sorted for determinism
+            let mut keys: Vec<u64> = self.blocked.iter().copied().collect();
+            keys.sort_unstable();
+            keys.iter()
+                .map(|&key| Self::unpack_key(key))
+                .collect()
+        } else {
+            // Evenly sample MAX_BLOCKED_CELLS from sorted keys
+            let mut keys: Vec<u64> = self.blocked.iter().copied().collect();
+            keys.sort_unstable();
+
+            // Sample every Nth element to get exactly MAX_BLOCKED_CELLS
+            let step = total as f64 / MAX_BLOCKED_CELLS as f64;
+            (0..MAX_BLOCKED_CELLS)
+                .map(|i| {
+                    let idx = (i as f64 * step) as usize;
+                    Self::unpack_key(keys[idx])
+                })
+                .collect()
+        }
+    }
+
+    /// Unpack a key back to (gx, gy, layer)
+    #[inline]
+    fn unpack_key(key: u64) -> (i32, i32, u8) {
+        let layer = (key & 0xFF) as u8;
+        let y = ((key >> 8) & 0xFFFFF) as i32;
+        let x = ((key >> 28) & 0xFFFFF) as i32;
+        // Sign extension for negative coordinates
+        let x = if x & 0x80000 != 0 { x | !0xFFFFF_i32 } else { x };
+        let y = if y & 0x80000 != 0 { y | !0xFFFFF_i32 } else { y };
+        (x, y, layer)
     }
 
 }

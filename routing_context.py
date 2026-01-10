@@ -6,6 +6,7 @@ like building obstacle maps and recording route results.
 """
 
 from typing import List, Set, Dict, Optional, Tuple
+import numpy as np
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
@@ -343,18 +344,21 @@ def prepare_obstacles_inplace(
                         if ex*ex + ey*ey <= hole_clearance_grid * hole_clearance_grid:
                             same_net_via_cells.append((gx + ex, gy + ey))
 
-    # Batch add same-net via clearance
+    # Batch add same-net via clearance (convert to numpy for Rust FFI)
     if same_net_via_cells:
-        working_obstacles.add_blocked_vias_batch(same_net_via_cells)
+        same_net_via_arr = np.array(same_net_via_cells, dtype=np.int32)
+        working_obstacles.add_blocked_vias_batch(same_net_via_arr)
+    else:
+        same_net_via_arr = np.empty((0, 2), dtype=np.int32)
 
-    return all_stubs, same_net_via_cells
+    return all_stubs, same_net_via_arr
 
 
 def restore_obstacles_inplace(
     working_obstacles,
     net_id: int,
     net_obstacles_cache: Dict[int, NetObstacleData],
-    same_net_via_cells: List[Tuple[int, int]]
+    same_net_via_cells: np.ndarray
 ):
     """
     Restore working_obstacles after routing attempt.
@@ -366,7 +370,7 @@ def restore_obstacles_inplace(
         working_obstacles: Working obstacle map (modified in place)
         net_id: Net ID that was routed
         net_obstacles_cache: Pre-computed net obstacles (for restoring)
-        same_net_via_cells: Cells added for same-net via clearance (to remove)
+        same_net_via_cells: Numpy array of cells added for same-net via clearance (to remove)
     """
     # Clear per-route data
     working_obstacles.clear_stub_proximity()
@@ -374,7 +378,7 @@ def restore_obstacles_inplace(
     working_obstacles.clear_cross_layer_tracks()
 
     # Remove same-net via clearance cells
-    if same_net_via_cells:
+    if len(same_net_via_cells) > 0:
         working_obstacles.remove_blocked_vias_batch(same_net_via_cells)
 
     # Restore current net's obstacles (from cache - original stubs)
