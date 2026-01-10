@@ -245,11 +245,10 @@ def try_mps_aware_layer_swaps(
         return MPSLayerSwapResult(swaps_applied=0, nets_swapped=set())
 
     # Find Round 2+ units and their Round 1 conflicts
-    # Sort for deterministic cross-platform iteration order
-    round2_plus_units = sorted([
+    round2_plus_units = [
         uid for uid, rnd in mps_result.round_assignments.items()
         if rnd > 1
-    ])
+    ]
 
     if verbose:
         print(f"MPS layer swap: Found {len(round2_plus_units)} Round 2+ unit(s)")
@@ -262,11 +261,10 @@ def try_mps_aware_layer_swaps(
                 continue
 
             # Find Round 1 units this conflicts with
-            # Sort for deterministic cross-platform iteration order
-            r1_conflicts = sorted([
+            r1_conflicts = [
                 uid for uid in mps_result.conflicts.get(r2_unit, set())
                 if mps_result.round_assignments.get(uid, 1) == 1
-            ])
+            ]
 
             if not r1_conflicts:
                 continue
