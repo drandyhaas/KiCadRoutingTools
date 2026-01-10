@@ -17,7 +17,9 @@ from obstacle_map import (
     add_stub_proximity_costs, merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
-from routing_utils import get_stub_endpoints, get_chip_pad_positions, add_route_to_pcb_data, calculate_route_length
+from connectivity import get_stub_endpoints
+from net_queries import get_chip_pad_positions, calculate_route_length
+from route_modification import add_route_to_pcb_data
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net

@@ -14,7 +14,7 @@ from geometry_utils import (
     closest_point_on_segment,
     segment_to_segment_closest_points,
 )
-from routing_utils import expand_pad_layers
+from net_queries import expand_pad_layers
 
 
 class SpatialIndex:

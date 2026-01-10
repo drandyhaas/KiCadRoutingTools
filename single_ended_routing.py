@@ -13,7 +13,7 @@ RESET = '\033[0m'
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import (
+from connectivity import (
     get_net_endpoints,
     get_multipoint_net_pads,
     find_closest_point_on_segments,

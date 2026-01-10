@@ -9,9 +9,10 @@ from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
-from routing_utils import (
+from routing_utils import segment_length
+from connectivity import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints,
-    get_stub_segments, get_stub_vias, segment_length, calculate_stub_via_barrel_length
+    get_stub_segments, get_stub_vias, calculate_stub_via_barrel_length
 )
 from obstacle_map import check_line_clearance
 # Note: Layer switching is now done upfront in route.py, not during routing

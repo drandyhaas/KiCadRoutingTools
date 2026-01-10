@@ -9,7 +9,9 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from kicad_parser import PCBData, Pad
 from routing_config import DiffPairNet
-from routing_utils import find_pad_nearest_to_position, find_connected_segment_positions, pos_key
+from routing_utils import pos_key
+from connectivity import find_connected_segment_positions
+from net_queries import find_pad_nearest_to_position
 
 
 def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig
-from routing_utils import get_stub_segments, get_stub_direction
+from connectivity import get_stub_segments, get_stub_direction
 from geometry_utils import segments_intersect_2d, point_to_segment_distance_seg
 from typing import Set
 

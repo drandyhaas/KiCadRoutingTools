@@ -9,7 +9,7 @@ import fnmatch
 from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 from kicad_parser import parse_kicad_pcb, Segment, Via, Pad, PCBData
-from routing_utils import expand_pad_layers
+from net_queries import expand_pad_layers
 
 
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:

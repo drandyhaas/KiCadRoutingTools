@@ -21,10 +21,9 @@ except ImportError:
 
 from kicad_parser import PCBData, Pad
 from routing_config import DiffPairNet, GridRouteConfig
-from routing_utils import (
-    find_connected_segment_positions, find_connected_segments, pos_key,
-    compute_routing_aware_distance, find_containing_or_nearest_bga_zone
-)
+from routing_utils import pos_key
+from connectivity import find_connected_segment_positions, find_connected_segments
+from net_queries import compute_routing_aware_distance, find_containing_or_nearest_bga_zone
 from chip_boundary import (
     ChipBoundary, build_chip_list, identify_chip_for_point,
     compute_far_side, compute_boundary_position, crossings_from_boundary_order,

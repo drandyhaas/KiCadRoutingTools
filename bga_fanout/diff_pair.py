@@ -8,7 +8,7 @@ from typing import Dict, List
 import fnmatch
 
 from kicad_parser import Footprint
-from routing_utils import extract_diff_pair_base
+from net_queries import extract_diff_pair_base
 from bga_fanout.types import DiffPairPads
 
 

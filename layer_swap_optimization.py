@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
-from routing_utils import is_edge_stub
+from connectivity import is_edge_stub
 from stub_layer_switching import (
     get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer,
     collect_stub_endpoints_by_layer, validate_swap, validate_single_swap,
@@ -22,7 +22,7 @@ from stub_layer_switching import (
     STUB_OVERLAP_Y_TOLERANCE
 )
 from diff_pair_routing import get_diff_pair_endpoints
-from routing_utils import get_net_endpoints, get_multipoint_net_pads
+from connectivity import get_net_endpoints, get_multipoint_net_pads
 
 
 def _find_blocking_single_ended_nets(

@@ -13,7 +13,8 @@ from dataclasses import dataclass
 
 from kicad_parser import Segment, PCBData
 from routing_config import GridRouteConfig
-from routing_utils import segment_length, calculate_route_length, expand_pad_layers
+from routing_utils import segment_length
+from net_queries import calculate_route_length, expand_pad_layers
 from geometry_utils import (
     point_to_segment_distance,
     segments_intersect,
@@ -1059,7 +1060,7 @@ def apply_length_matching_to_group(
             already_processed_vias.extend(result['new_vias'])
 
     # Apply meanders to shorter routes
-    from routing_utils import calculate_route_length
+    from net_queries import calculate_route_length
 
     for net_name, result in group_results.items():
         current_length = result['route_length']
@@ -2011,7 +2012,7 @@ def apply_meanders_to_diff_pair(
 
         # Calculate actual routed length from P segments (includes connectors and via barrels)
         # This is more accurate than centerline length which misses connector segments
-        from routing_utils import calculate_route_length
+        from net_queries import calculate_route_length
         p_routed_length = calculate_route_length(p_segs, p_vias_new, pcb_data)
         n_routed_length = calculate_route_length(n_segs, n_vias_new, pcb_data)
         avg_routed_length = (p_routed_length + n_routed_length) / 2
@@ -2111,7 +2112,7 @@ def apply_intra_pair_length_matching(
 
     # Debug: show length breakdown
     if config.verbose:
-        from routing_utils import calculate_via_barrel_length
+        from net_queries import calculate_via_barrel_length
         p_seg_only = sum(segment_length(s) for s in p_segments)
         n_seg_only = sum(segment_length(s) for s in n_segments)
         p_via_barrel = calculate_via_barrel_length(p_vias, pcb_data)

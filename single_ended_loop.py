@@ -18,10 +18,11 @@ from obstacle_map import (
     VisualizationData, update_net_obstacles_after_routing, add_net_obstacles_from_cache,
     remove_net_obstacles_from_cache
 )
-from routing_utils import (
-    get_stub_endpoints, get_chip_pad_positions, add_route_to_pcb_data, get_net_endpoints,
-    calculate_route_length, calculate_stub_length, get_multipoint_net_pads
+from connectivity import (
+    get_stub_endpoints, get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
 )
+from net_queries import get_chip_pad_positions, calculate_route_length
+from route_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net

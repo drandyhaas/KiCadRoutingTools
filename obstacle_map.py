@@ -11,7 +11,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import expand_pad_layers
+from net_queries import expand_pad_layers
 
 # Import Rust router
 import sys

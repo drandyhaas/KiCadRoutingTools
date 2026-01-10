@@ -29,14 +29,17 @@ from kicad_writer import (
 
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
-from routing_utils import (
-    find_differential_pairs, get_all_unrouted_net_ids, get_stub_endpoints, get_chip_pad_positions,
-    compute_mps_net_ordering, add_route_to_pcb_data, remove_route_from_pcb_data,
-    find_pad_nearest_to_position, find_connected_segment_positions,
-    find_stub_free_ends, find_connected_groups, pos_key,
-    is_edge_stub, find_pad_at_position, expand_net_patterns,
-    get_net_endpoints, find_single_ended_nets
+from routing_utils import pos_key
+from connectivity import (
+    get_stub_endpoints, find_stub_free_ends, find_connected_groups,
+    is_edge_stub, get_net_endpoints, find_connected_segment_positions
 )
+from net_queries import (
+    find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
+    compute_mps_net_ordering, find_pad_nearest_to_position, find_pad_at_position,
+    expand_net_patterns, find_single_ended_nets
+)
+from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance, add_stub_proximity_costs,
@@ -304,7 +307,7 @@ def _reroute_phase3_ripped_nets(
     """
     from routing_context import build_incremental_obstacles
     from single_ended_routing import route_net_with_obstacles, route_multipoint_taps, route_multipoint_main
-    from routing_utils import get_multipoint_net_pads
+    from connectivity import get_multipoint_net_pads
 
     for ripped_net_id, saved_result, ripped_ids, was_in_results in phase3_ripped_nets:
         net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"net_{ripped_net_id}"

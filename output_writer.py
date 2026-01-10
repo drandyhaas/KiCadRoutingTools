@@ -15,7 +15,7 @@ from kicad_writer import (
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
     swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers
 )
-from routing_utils import find_connected_segment_positions
+from connectivity import find_connected_segment_positions
 
 
 def write_routed_output(

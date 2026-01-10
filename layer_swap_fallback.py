@@ -10,10 +10,9 @@ from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
-from routing_utils import (
-    add_route_to_pcb_data, remove_route_from_pcb_data, get_stub_endpoints,
-    get_chip_pad_positions, find_stub_free_ends
-)
+from connectivity import get_stub_endpoints, find_stub_free_ends
+from net_queries import get_chip_pad_positions
+from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_stub_proximity_costs, merge_track_proximity_costs, add_same_net_via_clearance,

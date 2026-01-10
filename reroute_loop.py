@@ -10,7 +10,9 @@ from typing import List, Tuple
 
 from routing_state import RoutingState
 from obstacle_map import compute_track_proximity_for_net
-from routing_utils import add_route_to_pcb_data, get_net_endpoints, calculate_route_length, calculate_stub_length, get_multipoint_net_pads
+from connectivity import get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
+from net_queries import calculate_route_length
+from route_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_multipoint_main, route_multipoint_taps
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
