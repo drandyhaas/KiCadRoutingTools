@@ -702,7 +702,7 @@ impl PoseRouter {
             h += self.via_cost;
         }
 
-        (h as f32 * self.h_weight).round() as i32
+        (h as f32 * self.h_weight) as i32
     }
 
     /// Compute GND via directions for each layer change in the path.

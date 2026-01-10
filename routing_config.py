@@ -75,20 +75,6 @@ class GridRouteConfig:
     debug_memory: bool = False  # Print memory usage statistics at key points
 
 
-def _round_half_up(x: float) -> int:
-    """Round to nearest integer, with .5 always rounding up (away from zero for positive).
-
-    This provides consistent cross-platform behavior, unlike Python's round() which
-    uses banker's rounding (round half to even) and can give different results
-    when floating point representation differs slightly between platforms.
-    """
-    import math
-    if x >= 0:
-        return int(math.floor(x + 0.5))
-    else:
-        return int(math.ceil(x - 0.5))
-
-
 class GridCoord:
     """Utilities for converting between float (mm) and integer grid coordinates."""
     def __init__(self, grid_step: float = 0.1):
@@ -97,7 +83,7 @@ class GridCoord:
 
     def to_grid(self, x: float, y: float) -> Tuple[int, int]:
         """Convert float mm coordinates to integer grid coordinates."""
-        return (_round_half_up(x * self.inv_step), _round_half_up(y * self.inv_step))
+        return (round(x * self.inv_step), round(y * self.inv_step))
 
     def to_float(self, gx: int, gy: int) -> Tuple[float, float]:
         """Convert integer grid coordinates to float mm coordinates."""
@@ -105,7 +91,7 @@ class GridCoord:
 
     def to_grid_dist(self, dist_mm: float) -> int:
         """Convert a distance in mm to grid units."""
-        return _round_half_up(dist_mm * self.inv_step)
+        return round(dist_mm * self.inv_step)
 
     def to_grid_dist_safe(self, dist_mm: float) -> int:
         """Convert a distance in mm to grid units with a small safety margin.
@@ -113,4 +99,4 @@ class GridCoord:
         Adds half a grid step to the distance before rounding to account for
         discretization effects that can cause minor DRC violations.
         """
-        return _round_half_up((dist_mm + self.grid_step * 0.5) * self.inv_step)
+        return round((dist_mm + self.grid_step * 0.5) * self.inv_step)

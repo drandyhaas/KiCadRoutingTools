@@ -269,7 +269,7 @@ impl VisualRouter {
             }
             min_h = min_h.min(h);
         }
-        (min_h as f32 * self.h_weight).round() as i32
+        (min_h as f32 * self.h_weight) as i32
     }
 
     fn reconstruct_path(&self, goal_key: u64) -> Vec<(i32, i32, u8)> {

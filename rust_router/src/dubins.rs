@@ -31,7 +31,7 @@ impl DubinsCalculator {
         if d < 0.001 {
             // Just need to turn in place - approximate as arc
             let dtheta = Self::normalize_angle(theta2 - theta1).abs();
-            return (dtheta * r * 1000.0).round() as i32;
+            return (dtheta * r * 1000.0) as i32;
         }
 
         // Normalize by turning radius
@@ -76,7 +76,7 @@ impl DubinsCalculator {
         }
 
         // Scale back by radius and convert to integer (x1000)
-        (min_len * r * 1000.0).round() as i32
+        (min_len * r * 1000.0) as i32
     }
 
     #[inline]
