@@ -62,6 +62,266 @@ def _segments_cross(seg1: Segment, seg2: Segment) -> Optional[Tuple[float, float
     return None
 
 
+def _build_layer_context(
+    segments: List[Segment],
+    existing_segments: List[Segment],
+    vias: List[Via]
+) -> Tuple[dict, dict, dict, dict]:
+    """
+    Build per-layer data structures for crossing detection.
+
+    Returns:
+        Tuple of (existing_by_layer, existing_endpoints_by_layer, via_locations_by_layer, layer_segments)
+    """
+    existing_by_layer = {}
+    existing_endpoints_by_layer = {}
+    if existing_segments:
+        for seg in existing_segments:
+            if seg.layer not in existing_by_layer:
+                existing_by_layer[seg.layer] = []
+                existing_endpoints_by_layer[seg.layer] = set()
+            existing_by_layer[seg.layer].append(seg)
+            existing_endpoints_by_layer[seg.layer].add((round(seg.start_x, 3), round(seg.start_y, 3)))
+            existing_endpoints_by_layer[seg.layer].add((round(seg.end_x, 3), round(seg.end_y, 3)))
+
+    via_locations_by_layer = {}
+    if vias:
+        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
+        for via in vias:
+            if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
+                via_layers = all_copper_layers
+            elif via.layers:
+                via_layers = via.layers
+            else:
+                via_layers = all_copper_layers
+            via_size = getattr(via, 'size', 0.6)
+            for layer in via_layers:
+                if layer not in via_locations_by_layer:
+                    via_locations_by_layer[layer] = []
+                via_locations_by_layer[layer].append((via.x, via.y, via_size))
+
+    layer_segments = {}
+    for seg in segments:
+        if seg.layer not in layer_segments:
+            layer_segments[seg.layer] = []
+        layer_segments[seg.layer].append(seg)
+
+    return existing_by_layer, existing_endpoints_by_layer, via_locations_by_layer, layer_segments
+
+
+def _find_short_segment_crossings(
+    layer_segs: List[Segment],
+    existing_on_layer: List[Segment],
+    max_short_length: float
+) -> dict:
+    """
+    Find all crossings involving short new segments crossing existing segments.
+
+    Returns:
+        Dict mapping segment index -> (existing_seg, cross_pt, snap_pt, trim_endpoint)
+    """
+    segments_to_trim = {}
+
+    for i, seg in enumerate(layer_segs):
+        seg_len = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
+        if seg_len > max_short_length:
+            continue
+
+        for existing in existing_on_layer:
+            cross_pt = _segments_cross(seg, existing)
+            if cross_pt:
+                # Choose the existing endpoint closest to the crossing point
+                dist_to_ex_start = math.sqrt((cross_pt[0] - existing.start_x)**2 +
+                                             (cross_pt[1] - existing.start_y)**2)
+                dist_to_ex_end = math.sqrt((cross_pt[0] - existing.end_x)**2 +
+                                           (cross_pt[1] - existing.end_y)**2)
+                if dist_to_ex_end < dist_to_ex_start:
+                    snap_x, snap_y = existing.end_x, existing.end_y
+                else:
+                    snap_x, snap_y = existing.start_x, existing.start_y
+
+                # Determine which endpoint of the short seg is closer to crossing
+                dist_start_to_cross = math.sqrt((seg.start_x - cross_pt[0])**2 +
+                                                (seg.start_y - cross_pt[1])**2)
+                dist_end_to_cross = math.sqrt((seg.end_x - cross_pt[0])**2 +
+                                              (seg.end_y - cross_pt[1])**2)
+                if dist_start_to_cross < dist_end_to_cross:
+                    trim_endpoint = (round(seg.start_x, 3), round(seg.start_y, 3))
+                else:
+                    trim_endpoint = (round(seg.end_x, 3), round(seg.end_y, 3))
+
+                segments_to_trim[i] = (existing, cross_pt, (snap_x, snap_y), trim_endpoint)
+                break
+
+    return segments_to_trim
+
+
+def _process_layer_crossings(
+    layer_segs: List[Segment],
+    segments_to_trim: dict,
+    endpoint_to_segs: dict,
+    layer_vias: List[Tuple[float, float, float]],
+    layer_existing_endpoints: set
+) -> Tuple[set, dict]:
+    """
+    Process all crossings for a layer and determine segments to remove/modify.
+
+    Returns:
+        Tuple of (segments_to_remove, segment_modifications)
+    """
+    def point_near_via(px, py, via_list):
+        for vx, vy, via_size in via_list:
+            if math.sqrt((px - vx)**2 + (py - vy)**2) < via_size / 4:
+                return True
+        return False
+
+    segments_to_remove = set()
+    segment_modifications = {}
+
+    for crossing_idx, (existing, cross_pt, snap_pt, trim_endpoint) in segments_to_trim.items():
+        crossing_seg = layer_segs[crossing_idx]
+        snap_pt_rounded = (round(snap_pt[0], 3), round(snap_pt[1], 3))
+
+        # Find the upstream segment that connects at trim_endpoint
+        upstream_idx = None
+        for idx in endpoint_to_segs.get(trim_endpoint, []):
+            if idx != crossing_idx and idx not in segments_to_remove:
+                upstream_idx = idx
+                break
+
+        if upstream_idx is not None:
+            upstream_seg = layer_segs[upstream_idx]
+            up_start = (round(upstream_seg.start_x, 3), round(upstream_seg.start_y, 3))
+            up_end = (round(upstream_seg.end_x, 3), round(upstream_seg.end_y, 3))
+            up_other_end = up_end if up_start == trim_endpoint else up_start
+
+            if up_other_end == snap_pt_rounded:
+                # The "upstream" is actually the stub connector - remove it as redundant
+                segments_to_remove.add(upstream_idx)
+                segments_to_remove.add(crossing_idx)
+
+                # Find the real upstream at the OTHER endpoint of crossing_seg
+                crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
+                crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
+                source_endpoint = crossing_end if trim_endpoint == crossing_start else crossing_start
+
+                real_upstream_idx = None
+                for idx in endpoint_to_segs.get(source_endpoint, []):
+                    if idx != crossing_idx and idx not in segments_to_remove:
+                        real_upstream_idx = idx
+                        break
+
+                if real_upstream_idx is not None:
+                    real_up_seg = layer_segs[real_upstream_idx]
+                    ru_start = (round(real_up_seg.start_x, 3), round(real_up_seg.start_y, 3))
+                    ru_end = (round(real_up_seg.end_x, 3), round(real_up_seg.end_y, 3))
+
+                    if ru_end == source_endpoint:
+                        segment_modifications[real_upstream_idx] = ('end', snap_pt[0], snap_pt[1])
+                    elif ru_start == source_endpoint:
+                        segment_modifications[real_upstream_idx] = ('start', snap_pt[0], snap_pt[1])
+            else:
+                # Normal case: extend upstream to snap_pt
+                if up_end == trim_endpoint:
+                    segment_modifications[upstream_idx] = ('end', snap_pt[0], snap_pt[1])
+                elif up_start == trim_endpoint:
+                    segment_modifications[upstream_idx] = ('start', snap_pt[0], snap_pt[1])
+
+                segments_to_remove.add(crossing_idx)
+
+                # Find and remove orphaned downstream segments
+                crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
+                crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
+                downstream_endpoint = crossing_end if trim_endpoint == crossing_start else crossing_start
+
+                visited_endpoints = {trim_endpoint, downstream_endpoint}
+                to_check = [downstream_endpoint]
+
+                while to_check:
+                    pt = to_check.pop()
+                    for idx in endpoint_to_segs.get(pt, []):
+                        if idx in segments_to_remove or idx == crossing_idx:
+                            continue
+                        seg = layer_segs[idx]
+                        seg_start = (round(seg.start_x, 3), round(seg.start_y, 3))
+                        seg_end = (round(seg.end_x, 3), round(seg.end_y, 3))
+                        other_end = seg_end if seg_start == pt else seg_start
+
+                        if other_end == snap_pt_rounded:
+                            segments_to_remove.add(idx)
+                            continue
+
+                        other_connections = [j for j in endpoint_to_segs.get(other_end, [])
+                                             if j != idx and j not in segments_to_remove and j != crossing_idx]
+                        connects_to_via = point_near_via(other_end[0], other_end[1], layer_vias)
+                        connects_to_existing = other_end in layer_existing_endpoints
+                        if not other_connections and not connects_to_via and not connects_to_existing:
+                            segments_to_remove.add(idx)
+                            if other_end not in visited_endpoints:
+                                visited_endpoints.add(other_end)
+                                to_check.append(other_end)
+                        else:
+                            if seg_end == pt:
+                                segment_modifications[idx] = ('end', snap_pt[0], snap_pt[1])
+                            else:
+                                segment_modifications[idx] = ('start', snap_pt[0], snap_pt[1])
+        else:
+            # No upstream segment found - check the other endpoint
+            crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
+            crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
+            other_endpoint = crossing_end if crossing_start == trim_endpoint else crossing_start
+
+            downstream_idx = None
+            for idx in endpoint_to_segs.get(other_endpoint, []):
+                if idx != crossing_idx and idx not in segments_to_remove:
+                    downstream_idx = idx
+                    break
+
+            if downstream_idx is not None:
+                downstream_seg = layer_segs[downstream_idx]
+                ds_start = (round(downstream_seg.start_x, 3), round(downstream_seg.start_y, 3))
+                ds_end = (round(downstream_seg.end_x, 3), round(downstream_seg.end_y, 3))
+
+                if ds_end == other_endpoint:
+                    segment_modifications[downstream_idx] = ('end', snap_pt[0], snap_pt[1])
+                elif ds_start == other_endpoint:
+                    segment_modifications[downstream_idx] = ('start', snap_pt[0], snap_pt[1])
+
+                segments_to_remove.add(crossing_idx)
+
+    return segments_to_remove, segment_modifications
+
+
+def _apply_segment_modifications(
+    layer_segs: List[Segment],
+    segments_to_remove: set,
+    segment_modifications: dict
+) -> List[Segment]:
+    """Apply modifications and build result for a layer."""
+    result = []
+    for i, seg in enumerate(layer_segs):
+        if i in segments_to_remove:
+            continue
+        if i in segment_modifications:
+            mod = segment_modifications[i]
+            if mod[0] == 'end':
+                new_seg = Segment(
+                    start_x=seg.start_x, start_y=seg.start_y,
+                    end_x=mod[1], end_y=mod[2],
+                    width=seg.width, layer=seg.layer, net_id=seg.net_id
+                )
+            else:  # 'start'
+                new_seg = Segment(
+                    start_x=mod[1], start_y=mod[2],
+                    end_x=seg.end_x, end_y=seg.end_y,
+                    width=seg.width, layer=seg.layer, net_id=seg.net_id
+                )
+            result.append(new_seg)
+        else:
+            result.append(seg)
+    return result
+
+
 def fix_self_intersections(segments: List[Segment], existing_segments: List[Segment] = None,
                            max_short_length: float = 1.0, vias: List[Via] = None) -> List[Segment]:
     """Fix self-intersections by trimming short connector segments that cross existing segments.
@@ -82,59 +342,18 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
     if not segments:
         return segments
 
-    # Combine existing segments by layer for cross-checking
-    existing_by_layer = {}
-    existing_endpoints_by_layer = {}
-    if existing_segments:
-        for seg in existing_segments:
-            if seg.layer not in existing_by_layer:
-                existing_by_layer[seg.layer] = []
-                existing_endpoints_by_layer[seg.layer] = set()
-            existing_by_layer[seg.layer].append(seg)
-            existing_endpoints_by_layer[seg.layer].add((round(seg.start_x, 3), round(seg.start_y, 3)))
-            existing_endpoints_by_layer[seg.layer].add((round(seg.end_x, 3), round(seg.end_y, 3)))
-
-    # Build via locations by layer for connectivity checking
-    via_locations_by_layer = {}
-    if vias:
-        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
-        for via in vias:
-            if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
-                via_layers = all_copper_layers
-            elif via.layers:
-                via_layers = via.layers
-            else:
-                via_layers = all_copper_layers
-            via_size = getattr(via, 'size', 0.6)
-            for layer in via_layers:
-                if layer not in via_locations_by_layer:
-                    via_locations_by_layer[layer] = []
-                via_locations_by_layer[layer].append((via.x, via.y, via_size))
-
-    # Process each layer separately
-    layer_segments = {}
-    for seg in segments:
-        if seg.layer not in layer_segments:
-            layer_segments[seg.layer] = []
-        layer_segments[seg.layer].append(seg)
+    # Build per-layer context
+    existing_by_layer, existing_endpoints_by_layer, via_locations_by_layer, layer_segments = \
+        _build_layer_context(segments, existing_segments, vias)
 
     result_segments = []
 
-    def point_near_via(px, py, via_list):
-        """Check if point is within via_size/4 of any via in list."""
-        for vx, vy, via_size in via_list:
-            if math.sqrt((px - vx)**2 + (py - vy)**2) < via_size / 4:
-                return True
-        return False
-
     for layer, layer_segs in layer_segments.items():
-        # Get existing segments on this layer
         existing_on_layer = existing_by_layer.get(layer, [])
         layer_vias = via_locations_by_layer.get(layer, [])
         layer_existing_endpoints = existing_endpoints_by_layer.get(layer, set())
 
-        # Build connectivity map for new segments on this layer
-        # endpoint -> list of segment indices that have this endpoint
+        # Build connectivity map: endpoint -> list of segment indices
         endpoint_to_segs = {}
         for i, seg in enumerate(layer_segs):
             for pt in [(round(seg.start_x, 3), round(seg.start_y, 3)),
@@ -143,205 +362,17 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
                     endpoint_to_segs[pt] = []
                 endpoint_to_segs[pt].append(i)
 
-        # Find all crossings involving short NEW segments crossing EXISTING segments
-        # Map: new segment index -> (existing segment, crossing point, snap point, endpoint to trim)
-        segments_to_trim = {}
+        # Find crossings
+        segments_to_trim = _find_short_segment_crossings(layer_segs, existing_on_layer, max_short_length)
 
-        for i, seg in enumerate(layer_segs):
-            seg_len = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
-            if seg_len > max_short_length:
-                continue
+        # Process crossings
+        segments_to_remove, segment_modifications = _process_layer_crossings(
+            layer_segs, segments_to_trim, endpoint_to_segs, layer_vias, layer_existing_endpoints
+        )
 
-            # This is a short new segment - check if it crosses any EXISTING segment
-            for existing in existing_on_layer:
-                cross_pt = _segments_cross(seg, existing)
-                if cross_pt:
-                    # Choose the existing endpoint closest to the crossing point
-                    dist_cross_to_ex_start = math.sqrt((cross_pt[0] - existing.start_x)**2 +
-                                                        (cross_pt[1] - existing.start_y)**2)
-                    dist_cross_to_ex_end = math.sqrt((cross_pt[0] - existing.end_x)**2 +
-                                                      (cross_pt[1] - existing.end_y)**2)
-                    if dist_cross_to_ex_end < dist_cross_to_ex_start:
-                        snap_x, snap_y = existing.end_x, existing.end_y
-                    else:
-                        snap_x, snap_y = existing.start_x, existing.start_y
-
-                    # Determine which endpoint of the short seg is closer to crossing
-                    # This is the "trim point" - the upstream segment should connect here
-                    dist_start_to_cross = math.sqrt((seg.start_x - cross_pt[0])**2 +
-                                                     (seg.start_y - cross_pt[1])**2)
-                    dist_end_to_cross = math.sqrt((seg.end_x - cross_pt[0])**2 +
-                                                   (seg.end_y - cross_pt[1])**2)
-                    if dist_start_to_cross < dist_end_to_cross:
-                        trim_endpoint = (round(seg.start_x, 3), round(seg.start_y, 3))
-                    else:
-                        trim_endpoint = (round(seg.end_x, 3), round(seg.end_y, 3))
-
-                    segments_to_trim[i] = (existing, cross_pt, (snap_x, snap_y), trim_endpoint)
-                    break
-
-        # For each crossing segment, find segments to modify and segments to remove
-        segments_to_remove = set()
-        segment_modifications = {}  # index -> (new_end_x, new_end_y) or (new_start_x, new_start_y, 'start')
-
-        for crossing_idx, (existing, cross_pt, snap_pt, trim_endpoint) in segments_to_trim.items():
-            crossing_seg = layer_segs[crossing_idx]
-
-            # Find the upstream segment that connects at trim_endpoint
-            upstream_idx = None
-            for idx in endpoint_to_segs.get(trim_endpoint, []):
-                if idx != crossing_idx and idx not in segments_to_remove:
-                    upstream_idx = idx
-                    break
-
-            if upstream_idx is not None:
-                # Check if this "upstream" segment actually connects to the snap point
-                # (i.e., it's the connector to the stub, not an upstream toward the source)
-                upstream_seg = layer_segs[upstream_idx]
-                up_start = (round(upstream_seg.start_x, 3), round(upstream_seg.start_y, 3))
-                up_end = (round(upstream_seg.end_x, 3), round(upstream_seg.end_y, 3))
-                snap_pt_rounded = (round(snap_pt[0], 3), round(snap_pt[1], 3))
-
-                # The endpoint of upstream_seg that's NOT at trim_endpoint
-                up_other_end = up_end if up_start == trim_endpoint else up_start
-
-                # If the upstream segment's other end is at/near snap_pt, it's actually
-                # the connector to the stub. We should look at the OTHER endpoint of
-                # the crossing segment for the real upstream.
-                if up_other_end == snap_pt_rounded:
-                    # The "upstream" is actually the stub connector - remove it as redundant
-                    segments_to_remove.add(upstream_idx)
-                    segments_to_remove.add(crossing_idx)
-
-                    # Now look for the real upstream at the OTHER endpoint of crossing_seg
-                    crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
-                    crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
-                    source_endpoint = crossing_end if trim_endpoint == crossing_start else crossing_start
-
-                    real_upstream_idx = None
-                    for idx in endpoint_to_segs.get(source_endpoint, []):
-                        if idx != crossing_idx and idx not in segments_to_remove:
-                            real_upstream_idx = idx
-                            break
-
-                    if real_upstream_idx is not None:
-                        # Modify real upstream to connect to snap_pt
-                        real_up_seg = layer_segs[real_upstream_idx]
-                        ru_start = (round(real_up_seg.start_x, 3), round(real_up_seg.start_y, 3))
-                        ru_end = (round(real_up_seg.end_x, 3), round(real_up_seg.end_y, 3))
-
-                        if ru_end == source_endpoint:
-                            segment_modifications[real_upstream_idx] = ('end', snap_pt[0], snap_pt[1])
-                        elif ru_start == source_endpoint:
-                            segment_modifications[real_upstream_idx] = ('start', snap_pt[0], snap_pt[1])
-                    # else: no real upstream found, can't fix without breaking connectivity
-                else:
-                    # Normal case: upstream segment leads toward source, extend it to snap_pt
-                    if up_end == trim_endpoint:
-                        segment_modifications[upstream_idx] = ('end', snap_pt[0], snap_pt[1])
-                    elif up_start == trim_endpoint:
-                        segment_modifications[upstream_idx] = ('start', snap_pt[0], snap_pt[1])
-
-                    # Remove the crossing segment
-                    segments_to_remove.add(crossing_idx)
-
-                    # Find and remove downstream segments (segments only reachable through crossing seg)
-                    crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
-                    crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
-                    downstream_endpoint = crossing_end if trim_endpoint == crossing_start else crossing_start
-
-                    # BFS to find all segments reachable only from downstream_endpoint
-                    # that don't connect back to the snap point or other parts of the network
-                    visited_endpoints = {trim_endpoint, downstream_endpoint}
-                    to_check = [downstream_endpoint]
-
-                    while to_check:
-                        pt = to_check.pop()
-                        for idx in endpoint_to_segs.get(pt, []):
-                            if idx in segments_to_remove or idx == crossing_idx:
-                                continue
-                            seg = layer_segs[idx]
-                            seg_start = (round(seg.start_x, 3), round(seg.start_y, 3))
-                            seg_end = (round(seg.end_x, 3), round(seg.end_y, 3))
-                            other_end = seg_end if seg_start == pt else seg_start
-
-                            # If this segment connects to the snap point, it's not orphaned
-                            if other_end == snap_pt_rounded:
-                                segments_to_remove.add(idx)  # But it's redundant now
-                                continue
-
-                            # If other_end only connects to segments we're removing, this seg is orphaned
-                            # But also check if other_end connects to a via or existing segment endpoint
-                            other_connections = [j for j in endpoint_to_segs.get(other_end, [])
-                                                 if j != idx and j not in segments_to_remove and j != crossing_idx]
-                            connects_to_via = point_near_via(other_end[0], other_end[1], layer_vias)
-                            connects_to_existing = other_end in layer_existing_endpoints
-                            if not other_connections and not connects_to_via and not connects_to_existing:
-                                segments_to_remove.add(idx)
-                                if other_end not in visited_endpoints:
-                                    visited_endpoints.add(other_end)
-                                    to_check.append(other_end)
-                            else:
-                                # This segment connects to something important at other_end,
-                                # but is dangling at pt (the abandoned junction).
-                                # Extend it to snap_pt instead of leaving it dangling.
-                                if seg_end == pt:
-                                    segment_modifications[idx] = ('end', snap_pt[0], snap_pt[1])
-                                else:
-                                    segment_modifications[idx] = ('start', snap_pt[0], snap_pt[1])
-            else:
-                # No upstream segment found at trim_endpoint - it's connected to a via/pad.
-                # We can't extend a non-existent upstream segment, so we need to check the
-                # OTHER endpoint of the crossing segment.
-                crossing_start = (round(crossing_seg.start_x, 3), round(crossing_seg.start_y, 3))
-                crossing_end = (round(crossing_seg.end_x, 3), round(crossing_seg.end_y, 3))
-                other_endpoint = crossing_end if crossing_start == trim_endpoint else crossing_start
-
-                # Check if there's a downstream segment at the other endpoint
-                downstream_idx = None
-                for idx in endpoint_to_segs.get(other_endpoint, []):
-                    if idx != crossing_idx and idx not in segments_to_remove:
-                        downstream_idx = idx
-                        break
-
-                if downstream_idx is not None:
-                    # There's a downstream segment - modify ITS endpoint to snap point
-                    # and remove the crossing segment
-                    downstream_seg = layer_segs[downstream_idx]
-                    ds_start = (round(downstream_seg.start_x, 3), round(downstream_seg.start_y, 3))
-                    ds_end = (round(downstream_seg.end_x, 3), round(downstream_seg.end_y, 3))
-
-                    if ds_end == other_endpoint:
-                        segment_modifications[downstream_idx] = ('end', snap_pt[0], snap_pt[1])
-                    elif ds_start == other_endpoint:
-                        segment_modifications[downstream_idx] = ('start', snap_pt[0], snap_pt[1])
-
-                    segments_to_remove.add(crossing_idx)
-                # else: No upstream or downstream segment - this crossing segment is isolated
-                # (both ends at via/pad). We can't fix this without breaking connectivity.
-                # Leave it as-is for now.
-
-        # Build result: apply modifications and skip removed segments
-        for i, seg in enumerate(layer_segs):
-            if i in segments_to_remove:
-                continue
-            if i in segment_modifications:
-                mod = segment_modifications[i]
-                if mod[0] == 'end':
-                    new_seg = Segment(
-                        start_x=seg.start_x, start_y=seg.start_y,
-                        end_x=mod[1], end_y=mod[2],
-                        width=seg.width, layer=seg.layer, net_id=seg.net_id
-                    )
-                else:  # 'start'
-                    new_seg = Segment(
-                        start_x=mod[1], start_y=mod[2],
-                        end_x=seg.end_x, end_y=seg.end_y,
-                        width=seg.width, layer=seg.layer, net_id=seg.net_id
-                    )
-                result_segments.append(new_seg)
-            else:
-                result_segments.append(seg)
+        # Apply modifications and build result
+        layer_result = _apply_segment_modifications(layer_segs, segments_to_remove, segment_modifications)
+        result_segments.extend(layer_result)
 
     return result_segments
 

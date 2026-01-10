@@ -657,6 +657,251 @@ def get_unit_routing_info(
     return (avg_target, avg_source)
 
 
+def _build_mps_unit_mappings(
+    pcb_data: PCBData,
+    net_ids: List[int],
+    diff_pairs: Dict
+) -> Tuple[Dict[int, int], Dict[int, List[int]], Dict[int, str], List[int]]:
+    """
+    Build mapping from net_id to unit_id for MPS ordering.
+
+    Diff pair P/N nets are grouped into a single unit.
+
+    Returns:
+        Tuple of (net_to_unit, unit_to_nets, unit_names, unit_ids)
+    """
+    net_to_unit = {}  # net_id -> unit_id
+    unit_to_nets = {}  # unit_id -> [net_ids]
+    unit_names = {}  # unit_id -> display name
+
+    if diff_pairs:
+        for pair_name, pair in diff_pairs.items():
+            if pair.p_net_id in net_ids or pair.n_net_id in net_ids:
+                # Use P net ID as the canonical unit ID
+                unit_id = pair.p_net_id
+                net_to_unit[pair.p_net_id] = unit_id
+                net_to_unit[pair.n_net_id] = unit_id
+                unit_to_nets[unit_id] = [pair.p_net_id, pair.n_net_id]
+                unit_names[unit_id] = pair_name
+
+    # Add single nets (not part of any diff pair)
+    for net_id in net_ids:
+        if net_id not in net_to_unit:
+            net_to_unit[net_id] = net_id
+            unit_to_nets[net_id] = [net_id]
+            unit_names[net_id] = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+
+    # Get unique unit IDs from the net_ids list
+    unit_ids = []
+    seen_units = set()
+    for net_id in net_ids:
+        unit_id = net_to_unit.get(net_id, net_id)
+        if unit_id not in seen_units:
+            seen_units.add(unit_id)
+            unit_ids.append(unit_id)
+
+    return net_to_unit, unit_to_nets, unit_names, unit_ids
+
+
+def _compute_mps_unit_endpoints(
+    pcb_data: PCBData,
+    unit_ids: List[int],
+    unit_to_nets: Dict[int, List[int]]
+) -> Dict[int, List[Tuple[float, float]]]:
+    """
+    Compute routing endpoints for each unit.
+
+    For diff pairs, averages P and N endpoints.
+
+    Returns:
+        Dict mapping unit_id to [source_endpoint, target_endpoint]
+    """
+    unit_endpoints = {}
+    for unit_id in unit_ids:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+
+        if len(unit_net_ids) == 2:
+            # Diff pair: combine P and N endpoints
+            p_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[0])
+            n_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[1])
+            if len(p_endpoints) >= 2 and len(n_endpoints) >= 2:
+                src = ((p_endpoints[0][0] + n_endpoints[0][0]) / 2,
+                       (p_endpoints[0][1] + n_endpoints[0][1]) / 2)
+                tgt = ((p_endpoints[1][0] + n_endpoints[1][0]) / 2,
+                       (p_endpoints[1][1] + n_endpoints[1][1]) / 2)
+                unit_endpoints[unit_id] = [src, tgt]
+        else:
+            # Single net
+            endpoints = get_net_routing_endpoints(pcb_data, unit_id)
+            if len(endpoints) >= 2:
+                unit_endpoints[unit_id] = endpoints[:2]
+
+    return unit_endpoints
+
+
+def _compute_mps_center(
+    unit_endpoints: Dict[int, List[Tuple[float, float]]],
+    center: Tuple[float, float] = None
+) -> Tuple[float, float]:
+    """Compute center point for angular projection if not provided."""
+    if center is not None:
+        return center
+
+    all_points = []
+    for endpoints in unit_endpoints.values():
+        all_points.extend(endpoints)
+    if all_points:
+        return (
+            sum(p[0] for p in all_points) / len(all_points),
+            sum(p[1] for p in all_points) / len(all_points)
+        )
+    return (0, 0)
+
+
+def _compute_mps_unit_layers(
+    pcb_data: PCBData,
+    unit_ids: List[int],
+    unit_to_nets: Dict[int, List[int]]
+) -> Dict[int, Tuple[Set[str], Set[str]]]:
+    """
+    Build layer information for each unit from stub segments.
+
+    Returns:
+        Dict mapping unit_id to (source_layers, target_layers)
+    """
+    unit_layers = {}
+    for unit_id in unit_ids:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+        src_layers = set()
+        tgt_layers = set()
+
+        for net_id in unit_net_ids:
+            net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+            if net_segments:
+                stub_groups = find_connected_groups(net_segments)
+                if len(stub_groups) >= 2:
+                    for seg in stub_groups[0]:
+                        src_layers.add(seg.layer)
+                    for seg in stub_groups[1]:
+                        tgt_layers.add(seg.layer)
+
+        # If no stub layers found, use pad layers as fallback
+        if not src_layers and not tgt_layers:
+            for net_id in unit_net_ids:
+                net_pads = pcb_data.pads_by_net.get(net_id, [])
+                for pad in net_pads:
+                    for layer in pad.layers:
+                        if layer.endswith('.Cu') and not layer.startswith('*'):
+                            src_layers.add(layer)
+                            tgt_layers.add(layer)
+
+        unit_layers[unit_id] = (src_layers, tgt_layers)
+
+    return unit_layers
+
+
+def _compute_mps_unit_distances(
+    pcb_data: PCBData,
+    unit_list: List[int],
+    unit_to_nets: Dict[int, List[int]],
+    unit_endpoints: Dict[int, List[Tuple[float, float]]],
+    bga_exclusion_zones: List[Tuple[float, float, float, float]]
+) -> Dict[int, float]:
+    """
+    Compute routing-aware distances for each unit.
+
+    Used as secondary ordering: shorter routes first within same conflict count.
+
+    Returns:
+        Dict mapping unit_id to distance
+    """
+    unit_distances = {}
+    for unit_id in unit_list:
+        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+        routing_info = get_unit_routing_info(pcb_data, unit_net_ids)
+
+        if routing_info and bga_exclusion_zones:
+            target_free_end, source_chip_center = routing_info
+            bga_zone = find_containing_or_nearest_bga_zone(target_free_end, bga_exclusion_zones)
+
+            if bga_zone:
+                unit_distances[unit_id] = compute_routing_aware_distance(
+                    target_free_end, source_chip_center, bga_zone
+                )
+            else:
+                dx = source_chip_center[0] - target_free_end[0]
+                dy = source_chip_center[1] - target_free_end[1]
+                unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
+        else:
+            if unit_id in unit_endpoints:
+                endpoints = unit_endpoints[unit_id]
+                dx = endpoints[1][0] - endpoints[0][0]
+                dy = endpoints[1][1] - endpoints[0][1]
+                unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
+            else:
+                unit_distances[unit_id] = float('inf')
+
+    return unit_distances
+
+
+def _greedy_order_mps_units(
+    unit_list: List[int],
+    conflicts: Dict[int, Set[int]],
+    unit_distances: Dict[int, float],
+    unit_names: Dict[int, str],
+    reverse_rounds: bool
+) -> Tuple[List[int], Dict[int, int], int]:
+    """
+    Order units using greedy algorithm: pick unit with fewest conflicts.
+
+    Returns:
+        Tuple of (ordered_units, round_assignments, num_rounds)
+    """
+    all_rounds = []
+    round_assignments = {}
+    remaining = set(unit_list)
+    round_num = 0
+
+    while remaining:
+        round_num += 1
+        round_winners = []
+        round_losers = set()
+
+        round_remaining = set(remaining)
+        while round_remaining:
+            best_unit = min(
+                round_remaining,
+                key=lambda uid: (len(conflicts[uid] & round_remaining), unit_distances.get(uid, 0), uid)
+            )
+
+            round_winners.append(best_unit)
+            round_remaining.discard(best_unit)
+            round_assignments[best_unit] = round_num
+
+            for loser in conflicts[best_unit] & round_remaining:
+                round_losers.add(loser)
+                round_remaining.discard(loser)
+
+        all_rounds.append((round_winners, round_num))
+        remaining = round_losers
+
+    if reverse_rounds:
+        all_rounds = list(reversed(all_rounds))
+        print("MPS: Reversing round order (routing most-conflicting groups first)")
+
+    # Build ordered list, sort each round by distance
+    ordered_units = []
+    for round_winners, orig_round_num in all_rounds:
+        sorted_winners = sorted(round_winners, key=lambda uid: unit_distances.get(uid, 0))
+        ordered_units.extend(sorted_winners)
+        if sorted_winners:
+            winner_names = [unit_names.get(uid, f"Net {uid}") for uid in sorted_winners]
+            names_str = ", ".join(winner_names)
+            print(f"MPS Round {orig_round_num}: {len(sorted_winners)} units: {names_str}")
+
+    return ordered_units, round_assignments, round_num
+
+
 def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                               center: Tuple[float, float] = None,
                               diff_pairs: Dict = None,
@@ -703,82 +948,23 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         If return_extended_info=False: Ordered list of net IDs, with least-conflicting nets first
         If return_extended_info=True: MPSResult with full conflict/layer/round info
     """
-    # Build mapping from net_id to unit_id (for grouping diff pair P/N nets)
-    # unit_id is the canonical ID for the routing unit
-    net_to_unit = {}  # net_id -> unit_id
-    unit_to_nets = {}  # unit_id -> [net_ids]
-    unit_names = {}  # unit_id -> display name
+    # Step 1: Build unit mappings (group diff pair P/N nets)
+    net_to_unit, unit_to_nets, unit_names, unit_ids = _build_mps_unit_mappings(
+        pcb_data, net_ids, diff_pairs
+    )
 
-    if diff_pairs:
-        for pair_name, pair in diff_pairs.items():
-            if pair.p_net_id in net_ids or pair.n_net_id in net_ids:
-                # Use P net ID as the canonical unit ID
-                unit_id = pair.p_net_id
-                net_to_unit[pair.p_net_id] = unit_id
-                net_to_unit[pair.n_net_id] = unit_id
-                unit_to_nets[unit_id] = [pair.p_net_id, pair.n_net_id]
-                unit_names[unit_id] = pair_name
-
-    # Add single nets (not part of any diff pair)
-    for net_id in net_ids:
-        if net_id not in net_to_unit:
-            net_to_unit[net_id] = net_id
-            unit_to_nets[net_id] = [net_id]
-            unit_names[net_id] = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
-
-    # Get unique unit IDs from the net_ids list
-    unit_ids = []
-    seen_units = set()
-    for net_id in net_ids:
-        unit_id = net_to_unit.get(net_id, net_id)
-        if unit_id not in seen_units:
-            seen_units.add(unit_id)
-            unit_ids.append(unit_id)
-
-    # Step 1: Get routing endpoints for each unit
-    # For diff pairs, average the P and N endpoints to get unit endpoints
-    unit_endpoints = {}  # unit_id -> [(x1, y1), (x2, y2)]
-    for unit_id in unit_ids:
-        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
-
-        if len(unit_net_ids) == 2:
-            # Diff pair: combine P and N endpoints
-            p_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[0])
-            n_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[1])
-            if len(p_endpoints) >= 2 and len(n_endpoints) >= 2:
-                # Average source endpoints (P and N) and target endpoints
-                src = ((p_endpoints[0][0] + n_endpoints[0][0]) / 2,
-                       (p_endpoints[0][1] + n_endpoints[0][1]) / 2)
-                tgt = ((p_endpoints[1][0] + n_endpoints[1][0]) / 2,
-                       (p_endpoints[1][1] + n_endpoints[1][1]) / 2)
-                unit_endpoints[unit_id] = [src, tgt]
-        else:
-            # Single net
-            endpoints = get_net_routing_endpoints(pcb_data, unit_id)
-            if len(endpoints) >= 2:
-                unit_endpoints[unit_id] = endpoints[:2]
+    # Step 2: Get routing endpoints for each unit
+    unit_endpoints = _compute_mps_unit_endpoints(pcb_data, unit_ids, unit_to_nets)
 
     if not unit_endpoints:
         print("MPS: No units with valid routing endpoints found")
-        # Return all net_ids in original order
         return list(net_ids)
 
-    # Step 2: Compute center if not provided (centroid of all endpoints)
-    if center is None:
-        all_points = []
-        for endpoints in unit_endpoints.values():
-            all_points.extend(endpoints)
-        if all_points:
-            center = (
-                sum(p[0] for p in all_points) / len(all_points),
-                sum(p[1] for p in all_points) / len(all_points)
-            )
-        else:
-            center = (0, 0)
+    # Step 3: Compute center if not provided
+    center = _compute_mps_center(unit_endpoints, center)
 
-    # Step 3: Compute positions for crossing detection
+    # Step 4: Compute positions for crossing detection
     # Methods: boundary ordering (BGA), segment intersection (non-BGA), or angular (fallback)
-
     unit_boundary_info = {}  # unit_id -> (src_pos, tgt_pos, src_chip, tgt_chip) or None
     unit_angles = {}  # unit_id -> (angle1, angle2)
     unit_mst_segments = {}  # unit_id -> list of (p1, p2) segments
@@ -802,25 +988,17 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
 
             if src_chip and tgt_chip and src_chip != tgt_chip:
                 # Normalize source/target by component reference (alphabetically)
-                # This ensures consistent ordering across all units for crossing detection
-                # (same normalization as used in target_swap and debug labels)
                 if src_chip.reference > tgt_chip.reference:
-                    # Swap endpoints so alphabetically-first chip is always source
                     endpoints = [endpoints[1], endpoints[0]]
                     src_chip, tgt_chip = tgt_chip, src_chip
                     unit_endpoints[unit_id] = endpoints
 
                 src_far, tgt_far = compute_far_side(src_chip, tgt_chip)
-                # Use OPPOSITE traversal directions: source clockwise, target counter-clockwise
-                # This makes the two chips "face each other" when unrolled.
-                # With opposite directions, the crossing check works correctly:
-                # same geometric order → opposite boundary order → crossing detected
                 src_pos = compute_boundary_position(src_chip, endpoints[0], src_far, clockwise=True)
                 tgt_pos = compute_boundary_position(tgt_chip, endpoints[1], tgt_far, clockwise=False)
                 unit_boundary_info[unit_id] = (src_pos, tgt_pos, src_chip, tgt_chip)
 
     # Auto-detect segment intersection mode if not specified
-    # Use segment intersection when no unit endpoints are inside BGA exclusion zones
     if use_segment_intersection is None:
         any_in_bga = False
         if bga_exclusion_zones:
@@ -840,9 +1018,8 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         if use_segment_intersection:
             print("MPS: Using segment intersection method (no nets on BGA chips)")
 
-    # Compute angular positions (used as fallback when neither boundary nor segment intersection)
+    # Compute angular positions (fallback method)
     def angle_from_center(point: Tuple[float, float]) -> float:
-        """Compute angle from center to point in radians [0, 2*pi)."""
         dx = point[0] - center[0]
         dy = point[1] - center[1]
         ang = math.atan2(dy, dx)
@@ -851,7 +1028,6 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
         return ang
 
     for unit_id, endpoints in unit_endpoints.items():
-        # Use angular method for all units (primary or fallback)
         if not use_boundary_ordering or unit_boundary_info.get(unit_id) is None:
             a1 = angle_from_center(endpoints[0])
             a2 = angle_from_center(endpoints[1])
@@ -859,39 +1035,10 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
                 a1, a2 = a2, a1
             unit_angles[unit_id] = (a1, a2)
 
-    # Build layer information for each unit from stub segments (or pad layers if no stubs)
-    unit_layers = {}  # unit_id -> (source_layers: set, target_layers: set)
-    for unit_id in unit_ids:
-        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
-        src_layers = set()
-        tgt_layers = set()
+    # Step 5: Build layer information for each unit
+    unit_layers = _compute_mps_unit_layers(pcb_data, unit_ids, unit_to_nets)
 
-        for net_id in unit_net_ids:
-            # Get segments for this net
-            net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-            if net_segments:
-                stub_groups = find_connected_groups(net_segments)
-                if len(stub_groups) >= 2:
-                    # Source stub layers (first group)
-                    for seg in stub_groups[0]:
-                        src_layers.add(seg.layer)
-                    # Target stub layers (second group)
-                    for seg in stub_groups[1]:
-                        tgt_layers.add(seg.layer)
-
-        # If no stub layers found, use pad layers as fallback
-        if not src_layers and not tgt_layers:
-            for net_id in unit_net_ids:
-                net_pads = pcb_data.pads_by_net.get(net_id, [])
-                for pad in net_pads:
-                    for layer in pad.layers:
-                        if layer.endswith('.Cu') and not layer.startswith('*'):
-                            src_layers.add(layer)
-                            tgt_layers.add(layer)
-
-        unit_layers[unit_id] = (src_layers, tgt_layers)
-
-    # Step 4: Detect crossing conflicts
+    # Step 6: Detect crossing conflicts
     def units_cross_geometric(unit_a: int, unit_b: int) -> bool:
         """Check if two units have crossing paths (geometric only, ignores layers)."""
         # Use segment intersection method if enabled (takes priority)
@@ -963,93 +1110,15 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
     else:
         print(f"MPS: {len(unit_list)} nets with {total_conflicts} crossing conflicts detected")
 
-    # Compute route distances for each unit (routing-aware distance around BGA)
-    # Used as secondary ordering: shorter routes first within same conflict count
-    unit_distances = {}
-    for unit_id in unit_list:
-        unit_net_ids = unit_to_nets.get(unit_id, [unit_id])
+    # Step 7: Compute route distances for each unit
+    unit_distances = _compute_mps_unit_distances(
+        pcb_data, unit_list, unit_to_nets, unit_endpoints, bga_exclusion_zones
+    )
 
-        # Try to get routing-aware distance
-        routing_info = get_unit_routing_info(pcb_data, unit_net_ids)
-
-        if routing_info and bga_exclusion_zones:
-            target_free_end, source_chip_center = routing_info
-
-            # Find which BGA zone the target stub is in/near
-            bga_zone = find_containing_or_nearest_bga_zone(target_free_end, bga_exclusion_zones)
-
-            if bga_zone:
-                # Compute routing-aware distance around BGA
-                unit_distances[unit_id] = compute_routing_aware_distance(
-                    target_free_end, source_chip_center, bga_zone
-                )
-            else:
-                # No BGA zone found - use straight line from target to source
-                dx = source_chip_center[0] - target_free_end[0]
-                dy = source_chip_center[1] - target_free_end[1]
-                unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
-        else:
-            # Fall back to straight-line distance between endpoints
-            if unit_id in unit_endpoints:
-                endpoints = unit_endpoints[unit_id]
-                dx = endpoints[1][0] - endpoints[0][0]
-                dy = endpoints[1][1] - endpoints[0][1]
-                unit_distances[unit_id] = math.sqrt(dx * dx + dy * dy)
-            else:
-                unit_distances[unit_id] = float('inf')
-
-    # Step 5: Greedy ordering - repeatedly pick unit with fewest active conflicts
-    # Secondary: pick shorter routes first (easier routes done first, leaving space for longer ones)
-    all_rounds = []  # List of (round_winners, round_num) tuples
-    round_assignments = {}  # unit_id -> round_number (1-indexed, before any reversal)
-    remaining = set(unit_list)
-    round_num = 0
-
-    while remaining:
-        round_num += 1
-        round_winners = []
-        round_losers = set()
-
-        # Process this round: pick units with minimal conflicts
-        round_remaining = set(remaining)
-        while round_remaining:
-            # Find unit with minimum active conflicts among round_remaining
-            # Tiebreaker: shorter route distance first, then unit ID for determinism
-            best_unit = min(
-                round_remaining,
-                key=lambda uid: (len(conflicts[uid] & round_remaining), unit_distances.get(uid, 0), uid)
-            )
-
-            # This unit wins this round
-            round_winners.append(best_unit)
-            round_remaining.discard(best_unit)
-            # Track which round this unit was assigned to (before reversal)
-            round_assignments[best_unit] = round_num
-
-            # All its conflicting neighbors in round_remaining become losers
-            for loser in conflicts[best_unit] & round_remaining:
-                round_losers.add(loser)
-                round_remaining.discard(loser)
-
-        # Collect this round
-        all_rounds.append((round_winners, round_num))
-        remaining = round_losers
-
-    # Optionally reverse round order (route smallest/most-conflicting groups first)
-    if reverse_rounds:
-        all_rounds = list(reversed(all_rounds))
-        print("MPS: Reversing round order (routing most-conflicting groups first)")
-
-    # Build ordered list and print round info
-    # Sort each round by distance (shortest routes first within each round)
-    ordered_units = []
-    for round_winners, orig_round_num in all_rounds:
-        sorted_winners = sorted(round_winners, key=lambda uid: unit_distances.get(uid, 0))
-        ordered_units.extend(sorted_winners)
-        if sorted_winners:
-            winner_names = [unit_names.get(uid, f"Net {uid}") for uid in sorted_winners]
-            names_str = ", ".join(winner_names)
-            print(f"MPS Round {orig_round_num}: {len(sorted_winners)} units: {names_str}")
+    # Step 8: Greedy ordering - pick units with fewest conflicts
+    ordered_units, round_assignments, round_num = _greedy_order_mps_units(
+        unit_list, conflicts, unit_distances, unit_names, reverse_rounds
+    )
 
     # Expand ordered units back to net IDs
     ordered = []
