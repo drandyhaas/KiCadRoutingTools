@@ -1020,13 +1020,14 @@ def compute_mps_net_ordering(pcb_data: PCBData, net_ids: List[int],
             print("MPS: Using segment intersection method (no nets on BGA chips)")
 
     # Compute angular positions (fallback method)
+    # Round to POSITION_DECIMALS for cross-platform determinism
     def angle_from_center(point: Tuple[float, float]) -> float:
         dx = point[0] - center[0]
         dy = point[1] - center[1]
         ang = math.atan2(dy, dx)
         if ang < 0:
             ang += 2 * math.pi
-        return ang
+        return round(ang, POSITION_DECIMALS)
 
     for unit_id, endpoints in unit_endpoints.items():
         if not use_boundary_ordering or unit_boundary_info.get(unit_id) is None:

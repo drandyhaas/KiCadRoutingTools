@@ -64,13 +64,25 @@ def closest_point_on_segment(px: float, py: float,
     return x1 + t * dx, y1 + t * dy
 
 
-def ccw(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> bool:
+def ccw(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> int:
     """
-    Check if three points are in counter-clockwise order.
+    Check orientation of three points.
 
-    Used by segment intersection algorithms.
+    Returns:
+        1 if counter-clockwise
+        -1 if clockwise
+        0 if collinear (within tolerance)
+
+    Uses a tolerance to ensure deterministic results across platforms.
     """
-    return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
+    cross = (cy - ay) * (bx - ax) - (by - ay) * (cx - ax)
+    # Use tolerance based on coordinate magnitudes for numerical stability
+    eps = 1e-9
+    if cross > eps:
+        return 1
+    elif cross < -eps:
+        return -1
+    return 0
 
 
 def segments_intersect(seg1_x1: float, seg1_y1: float, seg1_x2: float, seg1_y2: float,
@@ -79,12 +91,18 @@ def segments_intersect(seg1_x1: float, seg1_y1: float, seg1_x2: float, seg1_y2: 
     Check if two line segments intersect (cross each other).
 
     Uses the CCW (counter-clockwise) orientation test. Returns True only for
-    proper intersection, not endpoint touching.
+    proper intersection, not endpoint touching. Collinear cases return False.
     """
-    return (ccw(seg1_x1, seg1_y1, seg2_x1, seg2_y1, seg2_x2, seg2_y2) !=
-            ccw(seg1_x2, seg1_y2, seg2_x1, seg2_y1, seg2_x2, seg2_y2) and
-            ccw(seg1_x1, seg1_y1, seg1_x2, seg1_y2, seg2_x1, seg2_y1) !=
-            ccw(seg1_x1, seg1_y1, seg1_x2, seg1_y2, seg2_x2, seg2_y2))
+    d1 = ccw(seg1_x1, seg1_y1, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
+    d2 = ccw(seg1_x2, seg1_y2, seg2_x1, seg2_y1, seg2_x2, seg2_y2)
+    d3 = ccw(seg1_x1, seg1_y1, seg1_x2, seg1_y2, seg2_x1, seg2_y1)
+    d4 = ccw(seg1_x1, seg1_y1, seg1_x2, seg1_y2, seg2_x2, seg2_y2)
+
+    # For proper intersection, orientations must be opposite (non-zero and different)
+    # If any is 0 (collinear), treat as non-intersecting for determinism
+    if d1 == 0 or d2 == 0 or d3 == 0 or d4 == 0:
+        return False
+    return (d1 != d2) and (d3 != d4)
 
 
 def segments_intersect_tuple(p1: Tuple[float, float], p2: Tuple[float, float],

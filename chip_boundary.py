@@ -12,7 +12,7 @@ if their source ordering is inverted relative to their target ordering.
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from kicad_parser import PCBData, Footprint
+from kicad_parser import PCBData, Footprint, POSITION_DECIMALS
 
 
 @dataclass
@@ -363,7 +363,8 @@ def compute_boundary_position(
     if distance < 0:
         distance += perimeter  # Wrap around
 
-    return distance / perimeter
+    # Round for deterministic cross-platform comparisons
+    return round(distance / perimeter, POSITION_DECIMALS)
 
 
 def crossings_from_boundary_order(
