@@ -4,6 +4,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 
 <img src="docs/routed_all.png" alt="Routed PCB example" style="max-width: 800px; height: auto;">
 
+<img src="docs/routed_kit.png" alt="Routed PCB example 2" style="max-width: 800px; height: auto;">
+
 ## Features
 
 - **Grid-based A* pathfinding** with Rust acceleration (~10x faster than Python)
