@@ -725,19 +725,16 @@ def _compute_mps_unit_endpoints(
             p_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[0])
             n_endpoints = get_net_routing_endpoints(pcb_data, unit_net_ids[1])
             if len(p_endpoints) >= 2 and len(n_endpoints) >= 2:
-                # Round for cross-platform determinism
-                src = (round((p_endpoints[0][0] + n_endpoints[0][0]) / 2, POSITION_DECIMALS),
-                       round((p_endpoints[0][1] + n_endpoints[0][1]) / 2, POSITION_DECIMALS))
-                tgt = (round((p_endpoints[1][0] + n_endpoints[1][0]) / 2, POSITION_DECIMALS),
-                       round((p_endpoints[1][1] + n_endpoints[1][1]) / 2, POSITION_DECIMALS))
+                src = ((p_endpoints[0][0] + n_endpoints[0][0]) / 2,
+                       (p_endpoints[0][1] + n_endpoints[0][1]) / 2)
+                tgt = ((p_endpoints[1][0] + n_endpoints[1][0]) / 2,
+                       (p_endpoints[1][1] + n_endpoints[1][1]) / 2)
                 unit_endpoints[unit_id] = [src, tgt]
         else:
-            # Single net - round endpoints for cross-platform determinism
+            # Single net
             endpoints = get_net_routing_endpoints(pcb_data, unit_id)
             if len(endpoints) >= 2:
-                rounded = [(round(ep[0], POSITION_DECIMALS), round(ep[1], POSITION_DECIMALS))
-                          for ep in endpoints[:2]]
-                unit_endpoints[unit_id] = rounded
+                unit_endpoints[unit_id] = endpoints[:2]
 
     return unit_endpoints
 
@@ -754,12 +751,11 @@ def _compute_mps_center(
     for endpoints in unit_endpoints.values():
         all_points.extend(endpoints)
     if all_points:
-        # Round for cross-platform determinism
         return (
-            round(sum(p[0] for p in all_points) / len(all_points), POSITION_DECIMALS),
-            round(sum(p[1] for p in all_points) / len(all_points), POSITION_DECIMALS)
+            sum(p[0] for p in all_points) / len(all_points),
+            sum(p[1] for p in all_points) / len(all_points)
         )
-    return (0.0, 0.0)
+    return (0, 0)
 
 
 def _compute_mps_unit_layers(
