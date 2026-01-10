@@ -401,7 +401,10 @@ def find_pad_nearest_to_position(pcb_data: PCBData, net_id: int, x: float, y: fl
     best_dist = float('inf')
     for pad in pads:
         dist = (pad.global_x - x) ** 2 + (pad.global_y - y) ** 2
-        if dist < best_dist:
+        # Round for cross-platform determinism
+        rounded_dist = round(dist, POSITION_DECIMALS)
+        rounded_best = round(best_dist, POSITION_DECIMALS)
+        if rounded_dist < rounded_best:
             best_dist = dist
             best_pad = pad
 
@@ -444,7 +447,10 @@ def find_containing_or_nearest_bga_zone(
         dy = max(min_y - y, 0, y - max_y)
         dist = math.sqrt(dx * dx + dy * dy)
 
-        if dist < best_dist:
+        # Round for cross-platform determinism
+        rounded_dist = round(dist, POSITION_DECIMALS)
+        rounded_best = round(best_dist, POSITION_DECIMALS)
+        if rounded_dist < rounded_best:
             best_dist = dist
             best_zone = zone
 
@@ -471,24 +477,24 @@ def get_source_chip_center(
     # Get component reference from the first pad
     component_ref = source_pads[0].component_ref
     if not component_ref:
-        # Fall back to centroid of pads if no component_ref
-        cx = sum(p.global_x for p in source_pads) / len(source_pads)
-        cy = sum(p.global_y for p in source_pads) / len(source_pads)
+        # Fall back to centroid of pads if no component_ref - round for cross-platform determinism
+        cx = round(sum(p.global_x for p in source_pads) / len(source_pads), POSITION_DECIMALS)
+        cy = round(sum(p.global_y for p in source_pads) / len(source_pads), POSITION_DECIMALS)
         return (cx, cy)
 
     # Look up footprint bounds
     footprint = pcb_data.footprints.get(component_ref)
     if footprint and footprint.pads:
-        # Calculate center from pad extents
+        # Calculate center from pad extents - round for cross-platform determinism
         pad_xs = [p.global_x for p in footprint.pads]
         pad_ys = [p.global_y for p in footprint.pads]
-        center_x = (min(pad_xs) + max(pad_xs)) / 2
-        center_y = (min(pad_ys) + max(pad_ys)) / 2
+        center_x = round((min(pad_xs) + max(pad_xs)) / 2, POSITION_DECIMALS)
+        center_y = round((min(pad_ys) + max(pad_ys)) / 2, POSITION_DECIMALS)
         return (center_x, center_y)
 
-    # Fall back to pad centroid
-    cx = sum(p.global_x for p in source_pads) / len(source_pads)
-    cy = sum(p.global_y for p in source_pads) / len(source_pads)
+    # Fall back to pad centroid - round for cross-platform determinism
+    cx = round(sum(p.global_x for p in source_pads) / len(source_pads), POSITION_DECIMALS)
+    cy = round(sum(p.global_y for p in source_pads) / len(source_pads), POSITION_DECIMALS)
     return (cx, cy)
 
 
@@ -644,14 +650,14 @@ def get_unit_routing_info(
     if not target_free_ends or not source_chip_centers:
         return None
 
-    # Average for diff pairs
+    # Average for diff pairs - round for cross-platform determinism
     avg_target = (
-        sum(p[0] for p in target_free_ends) / len(target_free_ends),
-        sum(p[1] for p in target_free_ends) / len(target_free_ends)
+        round(sum(p[0] for p in target_free_ends) / len(target_free_ends), POSITION_DECIMALS),
+        round(sum(p[1] for p in target_free_ends) / len(target_free_ends), POSITION_DECIMALS)
     )
     avg_source = (
-        sum(p[0] for p in source_chip_centers) / len(source_chip_centers),
-        sum(p[1] for p in source_chip_centers) / len(source_chip_centers)
+        round(sum(p[0] for p in source_chip_centers) / len(source_chip_centers), POSITION_DECIMALS),
+        round(sum(p[1] for p in source_chip_centers) / len(source_chip_centers), POSITION_DECIMALS)
     )
 
     return (avg_target, avg_source)
