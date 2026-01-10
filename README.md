@@ -366,9 +366,10 @@ See [Configuration](docs/configuration.md) for complete option reference.
 ## Requirements
 
 - Python 3.7+
-- numpy (`pip install numpy` or `pip3 install numpy`)
+- numpy (`pip3 install numpy`)
+- scipy (`pip3 install scipy`) - used for optimal target assignment
 - Rust toolchain (for building the router module)
-- pygame-ce (optional, for visualizer: `pip install pygame-ce`)
+- pygame-ce (optional, for visualizer: `pip3 install pygame-ce`)
 
 ## Limitations
 
