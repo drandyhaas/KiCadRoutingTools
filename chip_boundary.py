@@ -58,7 +58,9 @@ def build_chip_list(pcb_data: PCBData, min_pads: int = 4) -> List[ChipBoundary]:
         min_y -= margin
         max_y += margin
 
-        center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+        # Round for cross-platform determinism
+        center = (round((min_x + max_x) / 2, POSITION_DECIMALS),
+                  round((min_y + max_y) / 2, POSITION_DECIMALS))
 
         chips.append(ChipBoundary(
             reference=ref,
@@ -109,7 +111,10 @@ def identify_chip_for_point(
         dy = max(min_y - y, 0, y - max_y)
         dist = (dx * dx + dy * dy) ** 0.5
 
-        if dist < best_dist and dist <= tolerance:
+        # Round for cross-platform determinism
+        rounded_dist = round(dist, POSITION_DECIMALS)
+        rounded_best = round(best_dist, POSITION_DECIMALS)
+        if rounded_dist < rounded_best and dist <= tolerance:
             best_dist = dist
             best_chip = chip
 
