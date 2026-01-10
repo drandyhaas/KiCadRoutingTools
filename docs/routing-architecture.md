@@ -45,7 +45,7 @@ KiCadRoutingTools/
 | `routing_config.py` | `GridRouteConfig`, `GridCoord`, `DiffPair` dataclasses |
 | `routing_state.py` | `RoutingState` class tracking routing progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording route success |
-| `routing_utils.py` | Connectivity analysis, endpoint finding, MPS ordering, segment cleanup |
+| `routing_utils.py` | Core utilities: `pos_key()`, `segment_length()`, `build_layer_map()`, `POSITION_DECIMALS` |
 | `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones) |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, closest points) |
 
@@ -347,4 +347,4 @@ After routing, segments undergo cleanup:
 2. **Appendix collapsing** - Removes short dead-end segments created by grid snapping
 3. **Degenerate segment removal** - Filters segments shorter than 0.01mm
 
-See `routing_utils.py` for implementation details.
+See `route_modification.py` for implementation details.

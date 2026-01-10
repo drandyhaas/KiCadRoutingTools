@@ -317,28 +317,32 @@ Options:
 - Rust toolchain installed (`rustup`)
 - PyO3 and maturin for Python bindings
 
-## Board Data Extractor (`extract_board_data.py`)
+## PCB Geometry Extractor (`extract_pcb_geometry.py`)
 
-Extracts board data for analysis or debugging.
+Extracts PCB geometry data into a simple JSON format for analysis or debugging.
 
 ### Usage
 
 ```bash
-python extract_board_data.py input.kicad_pcb [OPTIONS]
+python extract_pcb_geometry.py input.kicad_pcb [output.json] [OPTIONS]
 
 Options:
   --output FILE    Output JSON file
   --nets PATTERN   Filter nets by pattern
+  --summary        Print summary statistics only
 ```
 
 ### Example
 
 ```bash
-# Extract all board data
-python extract_board_data.py board.kicad_pcb --output board_data.json
+# Extract all geometry to JSON
+python extract_pcb_geometry.py board.kicad_pcb geometry.json
 
 # Extract specific nets
-python extract_board_data.py board.kicad_pcb --nets "*DATA*" --output data_nets.json
+python extract_pcb_geometry.py board.kicad_pcb --nets "*lvds*" --output lvds.json
+
+# Print summary without writing file
+python extract_pcb_geometry.py board.kicad_pcb --summary
 ```
 
 ### Output Format
