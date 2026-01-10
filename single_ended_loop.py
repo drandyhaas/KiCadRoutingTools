@@ -448,6 +448,8 @@ def route_single_ended_nets(
                             if retry_result.get('path'):
                                 routed_net_paths[net_id] = retry_result['path']
                             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
+                            # Allow re-queuing if this net gets ripped again later
+                            queued_net_ids.discard(net_id)
                             # Update working obstacles with new route
                             if state.working_obstacles is not None and state.net_obstacles_cache is not None:
                                 # Update cache with new route

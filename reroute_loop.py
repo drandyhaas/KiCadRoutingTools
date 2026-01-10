@@ -156,6 +156,8 @@ def run_reroute_loop(
                     remaining_net_ids, routed_net_ids, routed_net_paths,
                     routed_results, track_proximity_cache, layer_map
                 )
+                # Allow re-queuing if this net gets ripped again later
+                queued_net_ids.discard(ripped_net_id)
                 # Update net obstacles cache with new route, then restore working obstacles
                 if reroute_via_cells is not None and state.working_obstacles is not None:
                     update_net_obstacles_after_routing(pcb_data, ripped_net_id, result, config, state.net_obstacles_cache)
@@ -342,6 +344,8 @@ def run_reroute_loop(
                                 if retry_result.get('path'):
                                     routed_net_paths[ripped_net_id] = retry_result['path']
                                 track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(pcb_data, ripped_net_id, config, layer_map)
+                                # Allow re-queuing if this net gets ripped again later
+                                queued_net_ids.discard(ripped_net_id)
 
                                 # Update net obstacles cache with new route, then restore working obstacles
                                 if retry_via_cells is not None and state.working_obstacles is not None:
@@ -455,6 +459,9 @@ def run_reroute_loop(
                     remaining_net_ids, routed_net_ids, routed_net_paths, routed_results,
                     diff_pair_by_net_id, track_proximity_cache, layer_map
                 )
+                # Allow re-queuing if this pair gets ripped again later
+                queued_net_ids.discard(ripped_pair.p_net_id)
+                queued_net_ids.discard(ripped_pair.n_net_id)
             else:
                 # Reroute failed - try rip-up and retry
                 iterations = result['iterations'] if result else 0
@@ -641,6 +648,9 @@ def run_reroute_loop(
                                 diff_pair_by_net_id[ripped_pair.n_net_id] = (ripped_pair_name, ripped_pair)
                                 track_proximity_cache[ripped_pair.p_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.p_net_id, config, layer_map)
                                 track_proximity_cache[ripped_pair.n_net_id] = compute_track_proximity_for_net(pcb_data, ripped_pair.n_net_id, config, layer_map)
+                                # Allow re-queuing if this pair gets ripped again later
+                                queued_net_ids.discard(ripped_pair.p_net_id)
+                                queued_net_ids.discard(ripped_pair.n_net_id)
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))

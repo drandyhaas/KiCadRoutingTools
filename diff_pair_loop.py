@@ -600,6 +600,9 @@ def route_diff_pairs(
                             routed_results[pair.n_net_id] = retry_result
                             diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
                             diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+                            # Allow re-queuing if this pair gets ripped again later
+                            queued_net_ids.discard(pair.p_net_id)
+                            queued_net_ids.discard(pair.n_net_id)
 
                             rip_and_retry_history.add((current_canonical, blocker_canonicals))
 
@@ -731,6 +734,9 @@ def route_diff_pairs(
                         routed_results[pair.n_net_id] = swap_result
                         diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
                         diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+                        # Allow re-queuing if this pair gets ripped again later
+                        queued_net_ids.discard(pair.p_net_id)
+                        queued_net_ids.discard(pair.n_net_id)
                         ripped_up = True
 
             if not ripped_up:
