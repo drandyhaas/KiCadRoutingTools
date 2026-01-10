@@ -709,7 +709,7 @@ impl GridRouter {
             }
             min_h = min_h.min(h);
         }
-        (min_h as f32 * self.h_weight) as i32
+        (min_h as f32 * self.h_weight).round() as i32
     }
 
     /// Reconstruct path from parents map

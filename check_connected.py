@@ -45,9 +45,21 @@ class UnionFind:
             self.rank[px] += 1
 
 
+def _round_half_up(x: float) -> int:
+    """Round to nearest integer, with .5 always rounding up.
+
+    Provides consistent cross-platform behavior unlike Python's banker's rounding.
+    """
+    import math
+    if x >= 0:
+        return int(math.floor(x + 0.5))
+    else:
+        return int(math.ceil(x - 0.5))
+
+
 def point_key(x: float, y: float, layer: str, tolerance: float = 0.02) -> Tuple[int, int, str]:
     """Create a hashable key for a point, quantized to tolerance."""
-    return (round(x / tolerance), round(y / tolerance), layer)
+    return (_round_half_up(x / tolerance), _round_half_up(y / tolerance), layer)
 
 
 def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:

@@ -288,7 +288,7 @@ impl GridObstacleMap {
                     if dist_sq <= radius_sq {
                         let dist = (dist_sq as f32).sqrt();
                         let proximity = 1.0 - (dist / radius_f);
-                        let cost = (proximity * max_cost as f32) as i32;
+                        let cost = (proximity * max_cost as f32).round() as i32;
 
                         let key = pack_xy(gcx + dx, gcy + dy);
                         let existing = self.stub_proximity.get(&key).copied().unwrap_or(0);
@@ -506,7 +506,7 @@ impl GridObstacleMap {
                         // Linear falloff: full bonus at center, zero at radius edge
                         let dist = (dist_sq as f32).sqrt();
                         let falloff = 1.0 - (dist / attraction_radius as f32);
-                        let bonus = (falloff * attraction_bonus as f32) as i32;
+                        let bonus = (falloff * attraction_bonus as f32).round() as i32;
                         max_bonus = max_bonus.max(bonus);
                     }
                 }
