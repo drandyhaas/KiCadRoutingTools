@@ -228,11 +228,12 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
             if routed_net_paths is not None and routed_results is not None and diff_pair_by_net_id is not None:
                 # Get blocked cells from the failed result (diff pair has forward/backward)
                 if retry_result:
-                    fwd_cells_rip = retry_result.get('blocked_cells_forward', [])
-                    bwd_cells_rip = retry_result.get('blocked_cells_backward', [])
+                    fwd_cells_rip = retry_result.pop('blocked_cells_forward', [])
+                    bwd_cells_rip = retry_result.pop('blocked_cells_backward', [])
                     # Also check plain blocked_cells (for probe_blocked cases)
-                    plain_cells = retry_result.get('blocked_cells', [])
+                    plain_cells = retry_result.pop('blocked_cells', [])
                     blocked_cells = list(set(fwd_cells_rip + bwd_cells_rip + plain_cells))
+                    del fwd_cells_rip, bwd_cells_rip, plain_cells  # Free memory immediately
                 else:
                     blocked_cells = []
 

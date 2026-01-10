@@ -177,9 +177,10 @@ def run_reroute_loop(
                 reroute_succeeded = False
                 ripped_items = []
                 if routed_net_paths and result:
-                    fwd_cells = result.get('blocked_cells_forward', [])
-                    bwd_cells = result.get('blocked_cells_backward', [])
+                    fwd_cells = result.pop('blocked_cells_forward', [])
+                    bwd_cells = result.pop('blocked_cells_backward', [])
                     blocked_cells = list(set(fwd_cells + bwd_cells))
+                    del fwd_cells, bwd_cells  # Free memory immediately
 
                     if blocked_cells:
                         # Get source/target coordinates for blocking analysis
@@ -379,9 +380,10 @@ def run_reroute_loop(
                                     retry_via_cells = None
 
                                 if retry_result:
-                                    retry_fwd = retry_result.get('blocked_cells_forward', [])
-                                    retry_bwd = retry_result.get('blocked_cells_backward', [])
+                                    retry_fwd = retry_result.pop('blocked_cells_forward', [])
+                                    retry_bwd = retry_result.pop('blocked_cells_backward', [])
                                     last_retry_blocked_cells = list(set(retry_fwd + retry_bwd))
+                                    del retry_fwd, retry_bwd  # Free memory immediately
                                     if last_retry_blocked_cells:
                                         print(f"    Retry had {len(last_retry_blocked_cells)} blocked cells")
                                     else:
@@ -463,15 +465,18 @@ def run_reroute_loop(
                 ripped_items = []
                 if routed_net_paths and result:
                     # Find blocked cells from the failed route
+                    # Pop to free memory from result dict (cells kept in local vars for fallback)
+                    fwd_cells = result.pop('blocked_cells_forward', [])
+                    bwd_cells = result.pop('blocked_cells_backward', [])
                     if result.get('probe_blocked'):
-                        blocked_cells = result.get('blocked_cells', [])
+                        blocked_cells = result.pop('blocked_cells', [])
                     else:
                         fwd_iters = result.get('iterations_forward', 0)
                         bwd_iters = result.get('iterations_backward', 0)
                         if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
-                            blocked_cells = result.get('blocked_cells_forward', [])
+                            blocked_cells = fwd_cells
                         else:
-                            blocked_cells = result.get('blocked_cells_backward', [])
+                            blocked_cells = bwd_cells
 
                     if not blocked_cells:
                         print(f"  No blocked cells from router - cannot analyze blockers")
@@ -661,11 +666,12 @@ def run_reroute_loop(
                                 print(f"  REROUTE RETRY FAILED (N={N})")
                                 if retry_result:
                                     if retry_result.get('probe_blocked'):
-                                        last_retry_blocked_cells = retry_result.get('blocked_cells', [])
+                                        last_retry_blocked_cells = retry_result.pop('blocked_cells', [])
                                     else:
-                                        retry_fwd = retry_result.get('blocked_cells_forward', [])
-                                        retry_bwd = retry_result.get('blocked_cells_backward', [])
+                                        retry_fwd = retry_result.pop('blocked_cells_forward', [])
+                                        retry_bwd = retry_result.pop('blocked_cells_backward', [])
                                         last_retry_blocked_cells = list(set(retry_fwd + retry_bwd))
+                                        del retry_fwd, retry_bwd  # Free memory immediately
                                     if last_retry_blocked_cells:
                                         print(f"    Retry had {len(last_retry_blocked_cells)} blocked cells")
                                     else:
@@ -687,11 +693,10 @@ def run_reroute_loop(
                                     successful += 1
 
                 # Fallback layer swap for setback failures in reroute (after rip-up fails)
+                # Note: fwd_cells and bwd_cells already extracted above
                 if not reroute_succeeded and enable_layer_switch and result:
                     fwd_iters = result.get('iterations_forward', 0)
                     bwd_iters = result.get('iterations_backward', 0)
-                    fwd_cells = result.get('blocked_cells_forward', [])
-                    bwd_cells = result.get('blocked_cells_backward', [])
                     is_setback_failure = (fwd_iters == 0 and bwd_iters == 0 and (fwd_cells or bwd_cells))
 
                     if is_setback_failure:

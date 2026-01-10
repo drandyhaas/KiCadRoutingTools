@@ -167,7 +167,7 @@ def route_diff_pairs(
         probe_ripped_items = []
         while result and result.get('probe_blocked') and probe_ripup_attempts < config.max_rip_up_count:
             blocked_at = result.get('blocked_at', 'unknown')
-            blocked_cells = result.get('blocked_cells', [])
+            blocked_cells = result.pop('blocked_cells', [])
             probe_direction = result.get('direction', 'unknown')
 
             if not blocked_cells:
@@ -372,8 +372,8 @@ def route_diff_pairs(
                 # Find the direction that failed faster
                 fwd_iters = result.get('iterations_forward', 0)
                 bwd_iters = result.get('iterations_backward', 0)
-                fwd_cells = result.get('blocked_cells_forward', [])
-                bwd_cells = result.get('blocked_cells_backward', [])
+                fwd_cells = result.pop('blocked_cells_forward', [])
+                bwd_cells = result.pop('blocked_cells_backward', [])
 
                 # Check for setback failure
                 is_setback_failure = (fwd_iters == 0 and bwd_iters == 0 and (fwd_cells or bwd_cells))
@@ -628,11 +628,12 @@ def route_diff_pairs(
 
                             if retry_result:
                                 if retry_result.get('probe_blocked'):
-                                    last_retry_blocked_cells = retry_result.get('blocked_cells', [])
+                                    last_retry_blocked_cells = retry_result.pop('blocked_cells', [])
                                 else:
-                                    retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
-                                    retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                    retry_fwd_cells = retry_result.pop('blocked_cells_forward', [])
+                                    retry_bwd_cells = retry_result.pop('blocked_cells_backward', [])
                                     last_retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+                                    del retry_fwd_cells, retry_bwd_cells  # Free memory immediately
                                 if last_retry_blocked_cells:
                                     print(f"    Retry had {len(last_retry_blocked_cells)} blocked cells")
                                 else:

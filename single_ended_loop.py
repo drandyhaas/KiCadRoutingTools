@@ -246,8 +246,8 @@ def route_single_ended_nets(
                 # Find the direction that failed faster (likely more constrained)
                 fwd_iters = result.get('iterations_forward', 0)
                 bwd_iters = result.get('iterations_backward', 0)
-                fwd_cells = result.get('blocked_cells_forward', [])
-                bwd_cells = result.get('blocked_cells_backward', [])
+                fwd_cells = result.pop('blocked_cells_forward', [])
+                bwd_cells = result.pop('blocked_cells_backward', [])
 
                 if fwd_iters > 0 and (bwd_iters == 0 or fwd_iters <= bwd_iters):
                     fastest_dir = 'forward'
@@ -492,9 +492,10 @@ def route_single_ended_nets(
 
                             # Store blocked cells from retry for next iteration's analysis
                             if retry_result:
-                                retry_fwd_cells = retry_result.get('blocked_cells_forward', [])
-                                retry_bwd_cells = retry_result.get('blocked_cells_backward', [])
+                                retry_fwd_cells = retry_result.pop('blocked_cells_forward', [])
+                                retry_bwd_cells = retry_result.pop('blocked_cells_backward', [])
                                 last_retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+                                del retry_fwd_cells, retry_bwd_cells  # Free memory immediately
                                 if last_retry_blocked_cells:
                                     print(f"    Retry had {len(last_retry_blocked_cells)} blocked cells")
                                 else:
