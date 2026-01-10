@@ -27,6 +27,7 @@ from collections import defaultdict
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import build_layer_map
 
 
 @dataclass
@@ -56,7 +57,7 @@ def compute_net_obstacle_cells(
     Returns (track_cells, via_cells) where each cell is (gx, gy, layer).
     """
     coord = GridCoord(config.grid_step)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
     num_layers = len(config.layers)
 
     # Match the expansion used in obstacle_map.py add_net_stubs_as_obstacles

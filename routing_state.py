@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig
+from routing_utils import build_layer_map
 
 
 @dataclass
@@ -98,7 +99,7 @@ class RoutingState:
     def __post_init__(self):
         """Initialize layer_map if not provided."""
         if not self.layer_map and self.config:
-            self.layer_map = {name: idx for idx, name in enumerate(self.config.layers)}
+            self.layer_map = build_layer_map(self.config.layers)
 
 
 def create_routing_state(

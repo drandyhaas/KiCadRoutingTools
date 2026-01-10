@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import pos_key, segment_length, POSITION_DECIMALS
+from routing_utils import pos_key, segment_length, POSITION_DECIMALS, build_layer_map
 
 
 def _get_pad_coords(p) -> Tuple[float, float]:
@@ -469,7 +469,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     from net_queries import expand_pad_layers
 
     coord = GridCoord(config.grid_step)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
     net_pads = pcb_data.pads_by_net.get(net_id, [])
@@ -665,7 +665,7 @@ def get_multipoint_net_pads(
     from net_queries import expand_pad_layers
 
     coord = GridCoord(config.grid_step)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
     net_pads = pcb_data.pads_by_net.get(net_id, [])

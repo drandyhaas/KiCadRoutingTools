@@ -11,6 +11,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import build_layer_map
 from net_queries import expand_pad_layers
 from obstacle_costs import add_bga_proximity_costs
 
@@ -39,7 +40,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
     nets_to_route_set = set(nets_to_route)
 
     obstacles = GridObstacleMap(num_layers)
@@ -217,7 +218,7 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 extra_clearance: float = 0.0):
     """Add a net's stub segments as obstacles to the map."""
     coord = GridCoord(config.grid_step)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
@@ -254,7 +255,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         extra_clearance: Additional clearance to add
     """
     coord = GridCoord(config.grid_step)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
@@ -337,7 +338,7 @@ def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                extra_clearance: float = 0.0):
     """Add a net's pads as obstacles to the map."""
     coord = GridCoord(config.grid_step)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     pads = pcb_data.pads_by_net.get(net_id, [])
     for pad in pads:
@@ -405,7 +406,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
         extra_clearance: Additional clearance to add (for diff pairs)
     """
     coord = GridCoord(config.grid_step)
-    layer_map = {name: i for i, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     expansion_grid = max(1, coord.to_grid_dist(config.track_width / 2 + config.clearance + extra_clearance))
     via_block_grid = max(1, coord.to_grid_dist(config.track_width / 2 + config.via_size / 2 + config.clearance))
@@ -723,7 +724,7 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
     nets_to_route_set = set(nets_to_route)
 
     obstacles = GridObstacleMap(num_layers)
@@ -812,7 +813,7 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
     """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))

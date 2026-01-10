@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
-from routing_utils import segment_length
+from routing_utils import segment_length, build_layer_map
 from connectivity import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints,
     get_stub_segments, get_stub_vias, calculate_stub_via_barrel_length
@@ -754,7 +754,7 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
         - error_message: None if successful, otherwise describes why routing can't proceed
     """
     coord = GridCoord(config.grid_step)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     # Get endpoints for P and N nets separately
     # Use stub free ends for diff pairs to get the actual stub tips

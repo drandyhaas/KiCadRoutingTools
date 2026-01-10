@@ -9,9 +9,22 @@ The bulk of routing functionality has been split into:
 """
 
 import math
-from typing import Tuple
+from typing import Dict, List, Tuple
 
 from kicad_parser import Segment, POSITION_DECIMALS
+
+
+def build_layer_map(layers: List[str]) -> Dict[str, int]:
+    """
+    Build a mapping from layer names to indices.
+
+    Args:
+        layers: List of layer names (e.g., ['F.Cu', 'In1.Cu', 'B.Cu'])
+
+    Returns:
+        Dict mapping layer name to its index in the list
+    """
+    return {name: idx for idx, name in enumerate(layers)}
 
 
 def pos_key(x: float, y: float) -> Tuple[float, float]:

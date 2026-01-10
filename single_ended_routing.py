@@ -13,6 +13,7 @@ RESET = '\033[0m'
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import build_layer_map
 from connectivity import (
     get_net_endpoints,
     get_multipoint_net_pads,
@@ -860,7 +861,7 @@ def get_all_segment_tap_points(
     """
     # Use dict keyed by (gx, gy, layer_idx) to deduplicate while keeping original coords
     tap_points = {}  # (gx, gy, layer_idx) -> (orig_x, orig_y)
-    layer_map = {name: i for i, name in enumerate(layer_names)}
+    layer_map = build_layer_map(layer_names)
 
     for seg in segments:
         layer_idx = layer_map.get(seg.layer, 0)

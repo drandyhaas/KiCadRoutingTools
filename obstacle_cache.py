@@ -11,6 +11,7 @@ import numpy as np
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import build_layer_map
 from net_queries import expand_pad_layers
 
 # Import Rust router
@@ -57,7 +58,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
-    layer_map = {name: idx for idx, name in enumerate(config.layers)}
+    layer_map = build_layer_map(config.layers)
 
     # Collect cells/vias into sets to deduplicate
     blocked_cells_set: Set[Tuple[int, int, int]] = set()
