@@ -12,6 +12,11 @@ Requires the Rust router module. Build it with:
 
 import sys
 import os
+
+# Run startup checks before other imports
+from startup_checks import run_all_checks
+run_all_checks()
+
 import time
 import fnmatch
 from typing import List, Optional, Tuple, Dict, Set
@@ -91,22 +96,9 @@ GREEN = '\033[92m'
 YELLOW = '\033[93m'
 RESET = '\033[0m'
 
-# Add rust_router directory to path for importing the compiled module
+# Import Rust router (startup_checks ensures it's available and up-to-date)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
-
-# Import Rust router
-try:
-    import grid_router
-    from grid_router import GridObstacleMap, GridRouter
-    version = getattr(grid_router, '__version__', 'unknown')
-    print(f"Using Rust router v{version}")
-except ImportError as e:
-    print("ERROR: Rust router module not found!")
-    print("Build it with:")
-    print("  cd rust_router && cargo build --release")
-    print("  cp target/release/grid_router.dll grid_router.pyd  # Windows")
-    print("  cp target/release/libgrid_router.so grid_router.so  # Linux")
-    sys.exit(1)
+from grid_router import GridObstacleMap, GridRouter
 
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],

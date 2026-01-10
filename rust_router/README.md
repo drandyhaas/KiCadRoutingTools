@@ -36,6 +36,19 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 
 ### Build Commands
 
+**Recommended: Use the build script from the parent directory:**
+```bash
+python build_router.py
+```
+
+This builds the Rust module, copies the library to the correct location, and verifies the version.
+
+To clean all build artifacts and compiled libraries:
+```bash
+python build_router.py --clean
+```
+
+**Manual build (alternative):**
 ```bash
 cd rust_router
 cargo build --release
@@ -61,6 +74,15 @@ cp target/release/libgrid_router.dylib grid_router.so
 ```
 
 The `route.py` script automatically adds this directory to the Python path.
+
+### Automatic Version Checking
+
+When `route.py` starts, it automatically:
+1. Checks that numpy is installed
+2. Verifies the Rust library version matches `Cargo.toml`
+3. Rebuilds automatically if there's a version mismatch
+
+This ensures you're always running the correct version of the Rust router.
 
 ### Using maturin (alternative)
 

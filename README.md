@@ -39,6 +39,13 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 python build_router.py
 ```
 
+To clean all build artifacts and compiled libraries:
+```bash
+python build_router.py --clean
+```
+
+**Note:** The router automatically checks that the Rust library version matches `Cargo.toml` on startup. If there's a version mismatch, it rebuilds automatically.
+
 ### 2. Route Nets
 
 ```bash
@@ -191,7 +198,8 @@ KiCadRoutingTools/
 │   └── types.py              # QFNLayout, PadInfo, FanoutStub
 ├── switch_to_layer.py        # Move net segments to a different layer
 ├── list_nets.py              # List nets on a component
-├── build_router.py           # Rust module build script
+├── build_router.py           # Rust module build script (--clean to remove artifacts)
+├── startup_checks.py         # Startup checks (Python deps, Rust library version)
 ├── test_fanout_and_route.py  # Full integration test (fanout + route)
 ├── test_kit_route.py         # Pad-to-pad routing test (no fanout)
 │
@@ -358,8 +366,9 @@ See [Configuration](docs/configuration.md) for complete option reference.
 ## Requirements
 
 - Python 3.7+
+- numpy (`pip install numpy` or `pip3 install numpy`)
 - Rust toolchain (for building the router module)
-- pygame-ce (optional, for visualizer)
+- pygame-ce (optional, for visualizer: `pip install pygame-ce`)
 
 ## Limitations
 
