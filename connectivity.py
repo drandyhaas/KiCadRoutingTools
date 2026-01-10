@@ -882,11 +882,9 @@ def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = F
     while len(in_tree) < len(points):
         best_edge = None
         best_dist = float('inf')
-        best_i = float('inf')  # For deterministic tie-breaking
         best_j = float('inf')  # For deterministic tie-breaking
 
-        # Sort in_tree for deterministic iteration order
-        for i in sorted(in_tree):
+        for i in in_tree:
             for j in range(len(points)):
                 if j in in_tree:
                     continue
@@ -895,14 +893,12 @@ def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = F
                 else:
                     dist = math.sqrt((points[i][0] - points[j][0])**2 +
                                     (points[i][1] - points[j][1])**2)
-                # Round for cross-platform determinism, use (i, j) as tie-breaker
+                # Round for cross-platform determinism, use j as tie-breaker
                 rounded_dist = round(dist, POSITION_DECIMALS)
                 rounded_best = round(best_dist, POSITION_DECIMALS)
-                if (rounded_dist < rounded_best or
-                    (rounded_dist == rounded_best and (i, j) < (best_i, best_j))):
+                if rounded_dist < rounded_best or (rounded_dist == rounded_best and j < best_j):
                     best_dist = dist
                     best_edge = (i, j, dist)
-                    best_i = i
                     best_j = j
 
         if best_edge:
