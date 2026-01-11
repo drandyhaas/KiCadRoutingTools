@@ -142,6 +142,7 @@ KiCadRoutingTools/
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building
+├── routing_common.py         # Shared utilities for route.py and route_diff.py
 ├── routing_utils.py          # Shared utilities (pos_key, etc.)
 ├── obstacle_map.py           # Obstacle map building functions
 ├── obstacle_cache.py         # Net obstacle caching for incremental builds
@@ -220,6 +221,7 @@ KiCadRoutingTools/
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
+| `routing_common.py` | Shared utilities for route.py and route_diff.py (BGA zones, net resolution, length matching) |
 | `routing_utils.py` | Shared utilities (`pos_key`, `build_layer_map`, `POSITION_DECIMALS`) |
 | `obstacle_map.py` | Obstacle map building from PCB data |
 | `obstacle_cache.py` | Net obstacle caching for incremental obstacle map builds |

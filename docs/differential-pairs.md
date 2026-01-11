@@ -27,23 +27,24 @@ The router recognizes common differential pair naming conventions:
 
 ## Usage
 
+Use `route_diff.py` for differential pair routing. All nets specified are treated as differential pairs:
+
 ```bash
 # Route a specific diff pair
-python route.py input.kicad_pcb output.kicad_pcb "*lvds_rx1_11*" \
-    --diff-pairs "*lvds*" --stub-proximity-radius 4
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
+    --stub-proximity-radius 4
 
 # Route with debug visualization
-python route.py input.kicad_pcb output.kicad_pcb "*lvds_rx1_11*" \
-    --diff-pairs "*lvds*" --stub-proximity-radius 4 --debug-lines
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
+    --stub-proximity-radius 4 --debug-lines
 
 # Route all LVDS nets with custom gap
-python route.py input.kicad_pcb output.kicad_pcb "*lvds*" \
-    --diff-pairs "*lvds*" \
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --diff-pair-gap 0.1 \
     --diff-pair-centerline-setback 1.5
 ```
 
-The `--diff-pairs` pattern identifies which nets should be routed as pairs. Both P and N nets must match the pattern.
+Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
 
 ## Centerline Routing
 
@@ -329,8 +330,7 @@ For swappable diff pairs (e.g., memory data lanes where any source can connect t
 ### Usage
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "*rx*" \
-    --diff-pairs "*rx*" \
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*rx*" \
     --swappable-nets "*rx*"
 ```
 
@@ -368,13 +368,11 @@ When enabled:
 
 ```bash
 # Enable intra-pair matching
-python route.py input.kicad_pcb output.kicad_pcb "*DQS*" \
-    --diff-pairs "*DQS*" \
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
     --diff-pair-intra-match
 
 # Combine with inter-pair matching
-python route.py input.kicad_pcb output.kicad_pcb "*DQS*" "*CK*" \
-    --diff-pairs "*DQS*" "*CK*" \
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" "*CK*" \
     --length-match-group auto \
     --diff-pair-intra-match
 ```

@@ -23,11 +23,7 @@ import time
 import fnmatch
 from typing import List, Optional, Tuple, Dict, Set
 
-from kicad_parser import (
-    parse_kicad_pcb, PCBData, Pad,
-    auto_detect_bga_exclusion_zones, find_components_by_type,
-    get_footprint_bounds, detect_bga_pitch
-)
+from kicad_parser import parse_kicad_pcb, PCBData, Pad
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, generate_gr_text_sexpr,
     swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content,
@@ -59,8 +55,7 @@ from obstacle_costs import (
     merge_track_proximity_costs, add_cross_layer_tracks
 )
 from obstacle_cache import (
-    precompute_all_net_obstacles, build_working_obstacle_map, precompute_net_obstacles,
-    add_net_obstacles_from_cache, remove_net_obstacles_from_cache, update_net_obstacles_after_routing
+    precompute_all_net_obstacles, build_working_obstacle_map, update_net_obstacles_after_routing
 )
 from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization, route_multipoint_taps
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
@@ -79,11 +74,13 @@ from memory_debug import (
 )
 from single_ended_loop import route_single_ended_nets
 from reroute_loop import run_reroute_loop
-from length_matching import (
-    apply_length_matching_to_group, find_nets_matching_patterns, auto_group_ddr4_nets
-)
 from phase3_routing import run_phase3_tap_routing
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
+from routing_common import (
+    setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
+    build_obstacle_infrastructure, run_length_matching, sync_pcb_data_segments,
+    get_common_config_kwargs
+)
 import re
 
 # ANSI color codes for terminal output
@@ -195,124 +192,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # Auto-detect BGA exclusion zones if not specified
-    if disable_bga_zones is not None:
-        if len(disable_bga_zones) == 0:
-            # --no-bga-zones with no args: disable all
-            bga_exclusion_zones = []
-            print("BGA exclusion zones disabled (all)")
-        else:
-            # --no-bga-zones U1 U3: disable only those components
-            bga_components = find_components_by_type(pcb_data, 'BGA')
-            bga_exclusion_zones = []
-            disabled_refs = set(disable_bga_zones)
-            for fp in bga_components:
-                if fp.reference not in disabled_refs:
-                    bounds = get_footprint_bounds(fp, margin=0.5)
-                    pitch = detect_bga_pitch(fp)
-                    edge_tolerance = 0.5 + pitch * 1.1
-                    bga_exclusion_zones.append((*bounds, edge_tolerance))
-            if bga_exclusion_zones:
-                print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s) (excluding {', '.join(disable_bga_zones)}):")
-                enabled_fps = [fp for fp in bga_components if fp.reference not in disabled_refs]
-                for fp, zone in zip(enabled_fps, bga_exclusion_zones):
-                    edge_tol = zone[4] if len(zone) > 4 else 1.6
-                    print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
-            else:
-                print(f"BGA exclusion zones disabled for: {', '.join(disable_bga_zones)}")
-    elif bga_exclusion_zones is None:
-        bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.5)
-        if bga_exclusion_zones:
-            bga_components = find_components_by_type(pcb_data, 'BGA')
-            print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")
-            for i, (fp, zone) in enumerate(zip(bga_components, bga_exclusion_zones)):
-                edge_tol = zone[4] if len(zone) > 4 else 1.6
-                print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
-        else:
-            print("No BGA components detected - no exclusion zones needed")
+    bga_exclusion_zones = setup_bga_exclusion_zones(pcb_data, disable_bga_zones, bga_exclusion_zones)
 
-    config_kwargs = dict(
-        track_width=track_width,
-        clearance=clearance,
-        via_size=via_size,
-        via_drill=via_drill,
-        grid_step=grid_step,
-        via_cost=via_cost,
-        layers=layers,
-        max_iterations=max_iterations,
-        max_probe_iterations=max_probe_iterations,
-        heuristic_weight=heuristic_weight,
-        turn_cost=turn_cost,
-        bga_exclusion_zones=bga_exclusion_zones,
-        stub_proximity_radius=stub_proximity_radius,
-        stub_proximity_cost=stub_proximity_cost,
-        via_proximity_cost=via_proximity_cost,
-        bga_proximity_radius=bga_proximity_radius,
-        bga_proximity_cost=bga_proximity_cost,
-        track_proximity_distance=track_proximity_distance,
-        track_proximity_cost=track_proximity_cost,
-        debug_lines=debug_lines,
-        verbose=verbose,
-        max_rip_up_count=max_rip_up_count,
-        target_swap_crossing_penalty=crossing_penalty,
-        crossing_layer_check=crossing_layer_check,
-        routing_clearance_margin=routing_clearance_margin,
-        hole_to_hole_clearance=hole_to_hole_clearance,
-        board_edge_clearance=board_edge_clearance,
+    config_kwargs = get_common_config_kwargs(
+        track_width=track_width, clearance=clearance, via_size=via_size,
+        via_drill=via_drill, grid_step=grid_step, via_cost=via_cost,
+        layers=layers, max_iterations=max_iterations,
+        max_probe_iterations=max_probe_iterations, heuristic_weight=heuristic_weight,
+        turn_cost=turn_cost, bga_exclusion_zones=bga_exclusion_zones,
+        stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
+        via_proximity_cost=via_proximity_cost, bga_proximity_radius=bga_proximity_radius,
+        bga_proximity_cost=bga_proximity_cost, track_proximity_distance=track_proximity_distance,
+        track_proximity_cost=track_proximity_cost, debug_lines=debug_lines, verbose=verbose,
+        max_rip_up_count=max_rip_up_count, crossing_penalty=crossing_penalty,
+        crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
+        hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
         vertical_attraction_radius=vertical_attraction_radius,
-        vertical_attraction_cost=vertical_attraction_cost,
-        length_match_groups=length_match_groups,
-        length_match_tolerance=length_match_tolerance,
-        meander_amplitude=meander_amplitude,
-        debug_memory=debug_memory,
+        vertical_attraction_cost=vertical_attraction_cost, length_match_groups=length_match_groups,
+        length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
+        debug_memory=debug_memory
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
     config = GridRouteConfig(**config_kwargs)
 
-    # Find net IDs - check both pcb.nets and pads_by_net
-    net_ids = []
-    for net_name in net_names:
-        net_id = None
-        # First check pcb.nets
-        for nid, net in pcb_data.nets.items():
-            if net.name == net_name:
-                net_id = nid
-                break
-        # If not found, check pads_by_net (for nets not in pcb.nets)
-        if net_id is None:
-            for nid, pads in pcb_data.pads_by_net.items():
-                for pad in pads:
-                    if pad.net_name == net_name:
-                        net_id = nid
-                        break
-                if net_id is not None:
-                    break
-        if net_id is None:
-            print(f"Warning: Net '{net_name}' not found, skipping")
-        else:
-            net_ids.append((net_name, net_id))
-
+    # Find net IDs and filter already-routed nets
+    net_ids = resolve_net_ids(pcb_data, net_names)
     if not net_ids:
         print("No valid nets to route!")
         return 0, 0, 0.0
 
-    # Filter out nets that are already fully connected (no routing needed)
-    already_routed = []
-    nets_to_route = []
-    for net_name, net_id in net_ids:
-        _, _, error = get_net_endpoints(pcb_data, net_id, config)
-        if error and "already" in error.lower():
-            already_routed.append((net_name, error))
-        else:
-            nets_to_route.append((net_name, net_id))
-
-    if already_routed:
-        print(f"\nSkipping {len(already_routed)} already-routed net(s):")
-        for net_name, reason in already_routed:
-            print(f"  {net_name}: {reason}")
-
-    net_ids = nets_to_route
-
+    net_ids, _ = filter_already_routed(pcb_data, net_ids, config)
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
         return 0, 0, 0.0
@@ -464,9 +374,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         exclusion_zone_lines = draw_exclusion_zones_debug(config, all_proximity_points)
         print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_proximity_points)} stub/pad proximity circles on User.5")
 
-    # GND net ID not used for single-ended routing
-    gnd_net_id = None
-
     # Pre-compute net obstacles for caching (speeds up per-route setup)
     print("Pre-computing net obstacle cache...")
     cache_start = time.time()
@@ -497,14 +404,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config=config,
         all_net_ids_to_route=all_net_ids_to_route,
         base_obstacles=base_obstacles,
-        diff_pair_base_obstacles=None,
+        diff_pair_base_obstacles=None,  # Not used for single-ended
         diff_pair_extra_clearance=0.0,
-        gnd_net_id=gnd_net_id,
+        gnd_net_id=None,  # Not used for single-ended
         all_unrouted_net_ids=all_unrouted_net_ids,
         total_routes=total_routes,
         enable_layer_switch=enable_layer_switch,
         debug_lines=debug_lines,
-        target_swaps={},
+        target_swaps={},  # Diff pair swaps not used
         target_swap_info=[],
         single_ended_target_swaps=single_ended_target_swaps,
         single_ended_target_swap_info=single_ended_target_swap_info,
@@ -515,21 +422,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         working_obstacles=working_obstacles,
     )
 
-    # Create local aliases for frequently-used state fields (enables gradual migration)
+    # Create local aliases for frequently-used state fields
     routed_net_ids = state.routed_net_ids
     routed_net_paths = state.routed_net_paths
     routed_results = state.routed_results
-    diff_pair_by_net_id = state.diff_pair_by_net_id
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
-    reroute_queue = state.reroute_queue
-    polarity_swapped_pairs = state.polarity_swapped_pairs
-    rip_and_retry_history = state.rip_and_retry_history
     ripup_success_pairs = state.ripup_success_pairs
     rerouted_pairs = state.rerouted_pairs
     remaining_net_ids = state.remaining_net_ids
     results = state.results
-    pad_swaps = state.pad_swaps
 
     # Counters (kept as locals, not aliased from state)
     route_index = 0
@@ -556,91 +458,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Apply length matching if configured
     if length_match_groups:
-        print("\n" + "=" * 60)
-        print("Length matching")
-        print("=" * 60)
-
-        # Build net_name -> result mapping
-        net_name_to_result = {}
-        for net_id, result in routed_results.items():
-            if net_id in pcb_data.nets:
-                net_name = pcb_data.nets[net_id].name
-                net_name_to_result[net_name] = result
-
-        all_routed_names = list(net_name_to_result.keys())
-
-        # Track all segments/vias from previously processed groups
-        # so that subsequent groups can check clearance against them
-        all_processed_segments = []
-        all_processed_vias = []
-
-        for group in length_match_groups:
-            # Handle "auto" for DDR4 grouping
-            if len(group) == 1 and group[0].lower() == 'auto':
-                auto_groups = auto_group_ddr4_nets(all_routed_names)
-                for auto_group in auto_groups:
-                    if len(auto_group) >= 2:
-                        net_name_to_result = apply_length_matching_to_group(
-                            net_name_to_result, auto_group, config, pcb_data,
-                            all_processed_segments, all_processed_vias
-                        )
-                        # Collect segments/vias from this group for subsequent groups
-                        for net_name in auto_group:
-                            if net_name in net_name_to_result:
-                                result = net_name_to_result[net_name]
-                                if result.get('new_segments'):
-                                    all_processed_segments.extend(result['new_segments'])
-                                if result.get('new_vias'):
-                                    all_processed_vias.extend(result['new_vias'])
-            else:
-                # Find nets matching the patterns in this group
-                matching_nets = find_nets_matching_patterns(all_routed_names, group)
-                if len(matching_nets) >= 2:
-                    print(f"\nLength match group: {group}")
-                    print(f"  Matched nets: {matching_nets}")
-                    net_name_to_result = apply_length_matching_to_group(
-                        net_name_to_result, matching_nets, config, pcb_data,
-                        all_processed_segments, all_processed_vias
-                    )
-                    # Collect segments/vias from this group for subsequent groups
-                    for net_name in matching_nets:
-                        if net_name in net_name_to_result:
-                            result = net_name_to_result[net_name]
-                            if result.get('new_segments'):
-                                all_processed_segments.extend(result['new_segments'])
-                            if result.get('new_vias'):
-                                all_processed_vias.extend(result['new_vias'])
+        run_length_matching(routed_results, length_match_groups, config, pcb_data)
 
     # Sync pcb_data with length-matched segments before Phase 3
     # This ensures tap routes see meanders from other nets as obstacles
-    # IMPORTANT: Preserve original stubs (segments from input file) - only replace routed segments
-    if routed_results:
-        routed_net_ids_set = set(routed_results.keys())
-        seg_count_before = len(pcb_data.segments)
-        # Remove only ROUTED segments (not original stubs) for routed nets
-        # Original stubs have id() in original_segment_ids, routed segments don't
-        pcb_data.segments = [s for s in pcb_data.segments
-                             if s.net_id not in routed_net_ids_set or id(s) in original_segment_ids]
-        seg_count_after_remove = len(pcb_data.segments)
-        # Add current (possibly meandered) segments
-        total_added = 0
-        for net_id, result in routed_results.items():
-            for seg in result.get('new_segments', []):
-                pcb_data.segments.append(seg)
-                total_added += 1
-        print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")
-
-        # Sync working_obstacles with the updated pcb_data
-        # This is needed because length matching may have modified segments
-        if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-            for net_id in routed_net_ids_set:
-                # Remove old cache from working
-                if net_id in state.net_obstacles_cache:
-                    remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
-                # Recompute cache from current pcb_data
-                state.net_obstacles_cache[net_id] = precompute_net_obstacles(pcb_data, net_id, config)
-                # Add new cache to working
-                add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])
+    sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
 
     # Phase 3: Complete multi-point routing (tap connections)
     # This happens AFTER length matching so tap routes connect to meandered main routes
@@ -649,13 +471,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         pcb_data=pcb_data,
         config=config,
         base_obstacles=base_obstacles,
-        gnd_net_id=gnd_net_id,
+        gnd_net_id=None,  # Not used for single-ended
         all_unrouted_net_ids=all_unrouted_net_ids,
         routed_net_ids=routed_net_ids,
         remaining_net_ids=remaining_net_ids,
         routed_net_paths=routed_net_paths,
         routed_results=routed_results,
-        diff_pair_by_net_id=diff_pair_by_net_id,
+        diff_pair_by_net_id=state.diff_pair_by_net_id,  # Empty for single-ended
         results=results,
         track_proximity_cache=track_proximity_cache,
         layer_map=layer_map

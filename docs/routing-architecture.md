@@ -8,10 +8,12 @@ The router is organized into focused modules with clear separation of concerns:
 
 ```
 KiCadRoutingTools/
-├── route.py                   # Main CLI and batch orchestration
+├── route.py                   # Main CLI - single-ended routing
+├── route_diff.py              # Main CLI - differential pair routing
 ├── routing_config.py          # Configuration dataclasses
 ├── routing_state.py           # RoutingState - tracks progress and results
 ├── routing_context.py         # Helper functions for obstacle building
+├── routing_common.py          # Shared utilities for route.py and route_diff.py
 ├── routing_utils.py           # Shared utilities
 ├── obstacle_map.py            # Obstacle map building
 │
@@ -41,10 +43,12 @@ KiCadRoutingTools/
 
 | Module | Purpose |
 |--------|---------|
-| `route.py` | CLI interface and batch routing orchestration |
+| `route.py` | CLI for single-ended routing |
+| `route_diff.py` | CLI for differential pair routing |
 | `routing_config.py` | `GridRouteConfig`, `GridCoord`, `DiffPair` dataclasses |
 | `routing_state.py` | `RoutingState` class tracking routing progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording route success |
+| `routing_common.py` | Shared utilities: BGA zone setup, net resolution, length matching, pcb_data sync |
 | `routing_utils.py` | Core utilities: `pos_key()`, `segment_length()`, `build_layer_map()`, `POSITION_DECIMALS` |
 | `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones) |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, closest points) |

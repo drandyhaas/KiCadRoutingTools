@@ -7,8 +7,14 @@ This document describes all configuration options for the KiCad Grid Router.
 ### Basic Usage
 
 ```bash
+# Single-ended routing
 python route.py input.kicad_pcb output.kicad_pcb --nets "Net-*" [OPTIONS]
+
+# Differential pair routing
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" [OPTIONS]
 ```
+
+Use `route.py` for single-ended nets and `route_diff.py` for differential pairs.
 
 ### Net Selection
 
@@ -76,11 +82,12 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 | `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
 | `--vertical-attraction-cost` | 0.1 | Cost bonus for aligning with tracks on other layers (mm) |
 
-### Differential Pair Options
+### Differential Pair Options (route_diff.py only)
+
+These options are only available in `route_diff.py`. All nets passed to route_diff.py are treated as differential pairs.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--diff-pairs` / `-D` | - | Glob patterns for diff pair nets |
 | `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
@@ -88,6 +95,8 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
+| `--diff-chamfer-extra` | 1.5 | Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings) |
+| `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
@@ -329,8 +338,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
 ### Differential Pairs (LVDS)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
-    --diff-pairs "*lvds*" \
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --diff-pair-gap 0.1 \
     --track-width 0.1 \
     --clearance 0.1 \
