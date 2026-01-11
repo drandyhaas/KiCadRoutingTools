@@ -11,6 +11,38 @@ import numpy as np
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
 
+# Module-level cache for pre-computed proximity offset tables
+# Key: (radius_grid, cost_grid) -> List of (ex, ey, cost) tuples
+_proximity_offset_cache: Dict[Tuple[int, int], List[Tuple[int, int, int]]] = {}
+
+
+def _get_proximity_offsets(radius_grid: int, cost_grid: int) -> List[Tuple[int, int, int]]:
+    """Get pre-computed proximity offsets and costs for a given radius.
+
+    Returns a list of (ex, ey, cost) tuples for all grid cells within the radius.
+    Uses caching to avoid recomputing the same table multiple times.
+    """
+    cache_key = (radius_grid, cost_grid)
+    if cache_key in _proximity_offset_cache:
+        return _proximity_offset_cache[cache_key]
+
+    offsets = []
+    radius_sq = radius_grid * radius_grid
+
+    for ex in range(-radius_grid, radius_grid + 1):
+        for ey in range(-radius_grid, radius_grid + 1):
+            dist_sq = ex * ex + ey * ey
+            if dist_sq <= radius_sq:
+                dist = dist_sq ** 0.5
+                # Use exact same formula as original to avoid floating-point differences
+                proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
+                cost = int(proximity * cost_grid)
+                offsets.append((ex, ey, cost))
+
+    _proximity_offset_cache[cache_key] = offsets
+    return offsets
+
+
 # Import Rust router
 import sys
 import os
@@ -113,6 +145,9 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
     radius_grid = coord.to_grid_dist(config.track_proximity_distance)
     cost_grid = int(config.track_proximity_cost * 1000 / config.grid_step)
 
+    # Get pre-computed offset table (cached)
+    offsets = _get_proximity_offsets(radius_grid, cost_grid)
+
     # Sample every ~1mm along segments (not every grid step) for performance
     sample_interval = max(1, int(1.0 / config.grid_step))
 
@@ -140,18 +175,12 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
         while True:
             # Only process every sample_interval'th point
             if step_count % sample_interval == 0:
-                # Add proximity costs around this track point
-                for ex in range(-radius_grid, radius_grid + 1):
-                    for ey in range(-radius_grid, radius_grid + 1):
-                        dist_sq = ex * ex + ey * ey
-                        if dist_sq <= radius_grid * radius_grid:
-                            dist = dist_sq ** 0.5
-                            proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
-                            cost = int(proximity * cost_grid)
-                            key = (layer_idx, gx + ex, gy + ey)
-                            # Store max cost at each cell
-                            if key not in result or cost > result[key]:
-                                result[key] = cost
+                # Add proximity costs using pre-computed offset table
+                for ex, ey, cost in offsets:
+                    key = (layer_idx, gx + ex, gy + ey)
+                    # Store max cost at each cell
+                    if key not in result or cost > result[key]:
+                        result[key] = cost
 
             if gx == gx2 and gy == gy2:
                 break
