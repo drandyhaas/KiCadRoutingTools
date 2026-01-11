@@ -64,8 +64,8 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 # Route ALL nets on a component including power (use "*" pattern)
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
 
-# Route differential pairs
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --diff-pairs "*lvds*" --no-bga-zones
+# Route differential pairs (use route_diff.py)
+python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
 ```
 
 ### 3. Verify Results
@@ -137,7 +137,8 @@ This script routes nets on the kit-dev-coldfire-xilinx board directly from pads,
 
 ```
 KiCadRoutingTools/
-├── route.py                  # Main CLI - batch routing orchestration
+├── route.py                  # Main CLI - single-ended routing
+├── route_diff.py             # Main CLI - differential pair routing
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building
@@ -214,7 +215,8 @@ KiCadRoutingTools/
 
 | Module | Purpose |
 |--------|---------|
-| `route.py` | CLI and batch routing orchestration |
+| `route.py` | CLI for single-ended routing |
+| `route_diff.py` | CLI for differential pair routing |
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
@@ -283,6 +285,8 @@ Rust acceleration provides ~10x speedup vs pure Python.
 
 ## Common Options
 
+### Single-Ended Routing (route.py)
+
 ```bash
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-*" [OPTIONS]
 
@@ -298,13 +302,12 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
---via-cost 50           # Via penalty (grid steps, doubled for diff pairs)
+--via-cost 50           # Via penalty (grid steps)
 --max-iterations 200000      # A* iteration limit
 --max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
 --heuristic-weight 1.9       # A* greediness (>1 = faster)
 --turn-cost 1000             # Penalty for direction changes (straighter paths)
 --max-ripup 3                # Max blockers to rip up at once (1-N progressive)
---max-setback-angle 45       # Max angle for setback search (degrees)
 --routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)
 --hole-to-hole-clearance 0.2 # Minimum drill hole edge-to-edge clearance (mm)
 --board-edge-clearance 0.0   # Clearance from board edge (0 = use track clearance)
@@ -325,20 +328,10 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 --vertical-attraction-radius 1.0  # Radius for cross-layer track attraction (mm)
 --vertical-attraction-cost 0.1    # Cost bonus for aligning with tracks on other layers (mm)
 
-# Differential pairs
---diff-pairs "*lvds*"   # Pattern for diff pair nets
---diff-pair-gap 0.101   # P-N gap (mm)
---diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
---min-turning-radius 0.2      # Min turn radius (mm)
---max-turn-angle 180          # Max cumulative turn (degrees, prevents U-turns)
---direction backward    # Route from target to source
---no-gnd-vias           # Disable GND via placement (enabled by default)
-
-# Layer optimization (stub layer swap enabled by default for both diff pairs and single-ended)
+# Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching
---can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default for diff pairs)
 
-# Target swap optimization (works for both diff pairs and single-ended nets)
+# Target swap optimization
 --swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
 --crossing-penalty 1000  # Penalty for crossing assignments (default: 1000)
 --no-crossing-layer-check  # Count crossings regardless of layer (default: same-layer only)
@@ -351,14 +344,37 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 --length-match-group "pattern1" "pattern2"  # Manual grouping by net patterns
 --length-match-tolerance 0.1    # Acceptable length variance within group (mm)
 --meander-amplitude 1.0         # Height of meanders perpendicular to trace (mm)
---diff-chamfer-extra 1.5        # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
---diff-pair-intra-match         # Match P/N lengths within each diff pair (meander shorter track)
 
 # Debug
 --verbose               # Print detailed diagnostic output
 --debug-lines           # Output debug geometry on User layers
 --skip-routing          # Skip routing, only do swaps and write debug info
 --debug-memory          # Print memory usage statistics during routing
+```
+
+### Differential Pair Routing (route_diff.py)
+
+```bash
+python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" [OPTIONS]
+
+# All nets specified with --nets are treated as differential pairs (P/N naming convention)
+
+# Diff pair specific options
+--diff-pair-gap 0.101   # P-N gap (mm)
+--diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
+--min-turning-radius 0.2      # Min turn radius (mm)
+--max-turn-angle 180          # Max cumulative turn (degrees, prevents U-turns)
+--max-setback-angle 45        # Max angle for setback search (degrees)
+--direction backward    # Route from target to source
+--no-gnd-vias           # Disable GND via placement (enabled by default)
+--diff-chamfer-extra 1.5      # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
+--diff-pair-intra-match       # Match P/N lengths within each diff pair (meander shorter track)
+
+# Layer optimization
+--no-stub-layer-swap    # Disable stub layer switching
+--can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
+
+# All other options from route.py also apply (geometry, strategy, proximity, length matching, etc.)
 ```
 
 See [Configuration](docs/configuration.md) for complete option reference.
