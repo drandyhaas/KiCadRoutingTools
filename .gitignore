@@ -45,4 +45,4 @@ rust_router/target/
 /kicad_files/fanout_starting_point.kicad_pcb
 /kicad_files/routed_output_diff12.pcb
 /kicad_files/fp-info-cache
-/kicad_files/kit-out.kicad_pcb
+/kicad_files/kit-out*.kicad_pcb
