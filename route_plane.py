@@ -15,20 +15,18 @@ import argparse
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
 
-# Add rust_router to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+# Run startup checks before other imports
+from startup_checks import run_all_checks
+run_all_checks()
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment
 from kicad_writer import generate_via_sexpr, generate_segment_sexpr, generate_zone_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map
 
-try:
-    from grid_router import GridObstacleMap
-except ImportError:
-    print("Error: grid_router module not found. Please build the Rust router first.")
-    print("Run: python build_router.py")
-    sys.exit(1)
+# Import Rust router (startup_checks ensures it's available and up-to-date)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+from grid_router import GridObstacleMap, GridRouter
 
 
 @dataclass
@@ -378,30 +376,45 @@ def find_via_position(
     pad: Pad,
     obstacles: GridObstacleMap,
     coord: GridCoord,
-    max_search_radius: float
+    max_search_radius: float,
+    routing_obstacles: GridObstacleMap = None,
+    config: GridRouteConfig = None,
+    pad_layer: str = None,
+    net_id: int = None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the closest valid position for a via near a pad.
 
     Uses spiral search outward from pad center, checking clearances.
+    If routing_obstacles is provided, also verifies that A* can route from the via to the pad.
+
+    Args:
+        pad: Target pad
+        obstacles: Via obstacle map
+        coord: Grid coordinate converter
+        max_search_radius: Maximum distance to search
+        routing_obstacles: Optional routing obstacle map for routability check
+        config: Optional routing config (required if routing_obstacles provided)
+        pad_layer: Layer for routing (required if routing_obstacles provided)
+        net_id: Net ID for routing (required if routing_obstacles provided)
 
     Returns:
         (x, y) position for via, or None if no valid position found
     """
     pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
 
-    # Try pad center first
+    # Try pad center first - if not blocked, use it (no routing needed)
     if not obstacles.is_via_blocked(pad_gx, pad_gy):
         return (pad.global_x, pad.global_y)
 
     # Spiral search outward
     max_radius_grid = coord.to_grid_dist(max_search_radius)
 
+    # Collect all valid via positions, sorted by distance
+    valid_positions = []
+
     # Search in expanding rings
     for radius in range(1, max_radius_grid + 1):
-        best_pos = None
-        best_dist_sq = float('inf')
-
         # Check all points at this Manhattan radius
         for dx in range(-radius, radius + 1):
             for dy in range(-radius, radius + 1):
@@ -415,16 +428,32 @@ def find_via_position(
                 if obstacles.is_via_blocked(gx, gy):
                     continue
 
-                # Check Euclidean distance
+                # Valid via position - add to list with distance
                 dist_sq = dx * dx + dy * dy
-                if dist_sq < best_dist_sq:
-                    best_dist_sq = dist_sq
-                    best_pos = coord.to_float(gx, gy)
+                via_pos = coord.to_float(gx, gy)
+                valid_positions.append((dist_sq, via_pos))
 
-        if best_pos:
-            return best_pos
+    # Sort by distance (closest first)
+    valid_positions.sort(key=lambda x: x[0])
 
-    return None  # No valid position within search radius
+    # If no routing check needed, return closest valid position
+    if routing_obstacles is None or config is None:
+        if valid_positions:
+            return valid_positions[0][1]
+        return None
+
+    # Check routability for each position until we find one that works
+    for dist_sq, via_pos in valid_positions:
+        # Try to route from this via position to the pad
+        route_result = route_via_to_pad(
+            via_pos, pad, pad_layer, net_id,
+            routing_obstacles, config, verbose=False
+        )
+        if route_result is not None:
+            # Routing succeeded - use this position
+            return via_pos
+
+    return None  # No valid position with routable path
 
 
 def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
@@ -446,6 +475,253 @@ def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
     _block_via_circle(obstacles, gx, gy, expand)
 
 
+def build_routing_obstacle_map(
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    exclude_net_id: int,
+    route_layer: str,
+    skip_pad_blocking: bool = False
+) -> GridObstacleMap:
+    """
+    Build obstacle map for A* routing on a specific layer.
+
+    Blocks:
+    - Pads on the route layer (except target net pads) - skipped if skip_pad_blocking
+    - Segments on the route layer (except target net)
+    - Vias (they occupy space on all layers)
+
+    Args:
+        skip_pad_blocking: If True, don't block based on pad clearances.
+                          Use this for plane via connections where DRC is lenient.
+    """
+    coord = GridCoord(config.grid_step)
+    # Single layer routing
+    num_layers = 1
+    layer_idx = 0
+
+    obstacles = GridObstacleMap(num_layers)
+
+    # Track expansion for clearance
+    expansion_mm = config.track_width / 2 + config.clearance
+    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+
+    # Add pads on this layer as obstacles (excluding target net)
+    # Skip this entirely for plane connections where we're more lenient
+    if not skip_pad_blocking:
+        for net_id, pads in pcb_data.pads_by_net.items():
+            if net_id == exclude_net_id:
+                continue
+            for pad in pads:
+                # Check if pad is on the route layer
+                if route_layer in pad.layers or "*.Cu" in pad.layers:
+                    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                    # Use rectangular expansion based on actual pad dimensions
+                    # (not circular based on max dimension)
+                    # Use floor (int) instead of round to avoid over-blocking at grid boundaries
+                    half_width = pad.size_x / 2
+                    half_height = pad.size_y / 2
+                    margin = config.track_width / 2 + config.clearance
+                    expand_x = int((half_width + margin) / config.grid_step)
+                    expand_y = int((half_height + margin) / config.grid_step)
+                    for ex in range(-expand_x, expand_x + 1):
+                        for ey in range(-expand_y, expand_y + 1):
+                            obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+
+    # Add segments on this layer as obstacles (excluding target net)
+    for seg in pcb_data.segments:
+        if seg.net_id == exclude_net_id:
+            continue
+        if seg.layer != route_layer:
+            continue
+        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, expansion_grid)
+
+    # Add vias as obstacles (they block all layers)
+    for via in pcb_data.vias:
+        if via.net_id == exclude_net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+        via_expansion = coord.to_grid_dist(via.size / 2 + config.track_width / 2 + config.clearance)
+        for ex in range(-via_expansion, via_expansion + 1):
+            for ey in range(-via_expansion, via_expansion + 1):
+                if ex*ex + ey*ey <= via_expansion * via_expansion:
+                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+
+    return obstacles
+
+
+def _add_segment_routing_obstacle(obstacles: GridObstacleMap, seg: Segment,
+                                    coord: GridCoord, layer_idx: int, expansion_grid: int):
+    """Add a segment as a routing obstacle on a specific layer."""
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+    # Bresenham line with expansion
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+
+    x, y = gx1, gy1
+    if dx > dy:
+        err = dx / 2
+        while x != gx2:
+            _block_routing_circle(obstacles, x, y, layer_idx, expansion_grid)
+            err -= dy
+            if err < 0:
+                y += sy
+                err += dx
+            x += sx
+    else:
+        err = dy / 2
+        while y != gy2:
+            _block_routing_circle(obstacles, x, y, layer_idx, expansion_grid)
+            err -= dx
+            if err < 0:
+                x += sx
+                err += dy
+            y += sy
+    _block_routing_circle(obstacles, gx2, gy2, layer_idx, expansion_grid)
+
+
+def _block_routing_circle(obstacles: GridObstacleMap, cx: int, cy: int,
+                           layer_idx: int, radius: int):
+    """Block cells in a circular region for routing."""
+    for ex in range(-radius, radius + 1):
+        for ey in range(-radius, radius + 1):
+            if ex*ex + ey*ey <= radius * radius:
+                obstacles.add_blocked_cell(cx + ex, cy + ey, layer_idx)
+
+
+def route_via_to_pad(
+    via_pos: Tuple[float, float],
+    pad: Pad,
+    pad_layer: str,
+    net_id: int,
+    routing_obstacles: GridObstacleMap,
+    config: GridRouteConfig,
+    max_iterations: int = 10000,
+    verbose: bool = False
+) -> Optional[List[Dict]]:
+    """
+    Route from via position to pad center using A* pathfinding.
+
+    Args:
+        via_pos: (x, y) position of the via
+        pad: Target pad
+        pad_layer: Layer to route on
+        net_id: Net ID for the segments
+        routing_obstacles: Obstacle map for the route layer
+        config: Routing configuration
+        max_iterations: Maximum A* iterations
+        verbose: Print debug info on failure
+
+    Returns:
+        List of segment dicts, or None if routing failed
+    """
+    coord = GridCoord(config.grid_step)
+
+    # Check if via is at pad center (within tolerance)
+    if abs(via_pos[0] - pad.global_x) < 0.001 and abs(via_pos[1] - pad.global_y) < 0.001:
+        return []  # Via is at pad center, no trace needed
+
+    # Set up source (via) and target (pad) - single layer routing
+    layer_idx = 0
+    via_gx, via_gy = coord.to_grid(via_pos[0], via_pos[1])
+    pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
+
+    # Add source and target as source_target_cells to override blocking
+    # This allows routing to/from positions that might be blocked by nearby pad clearances
+    routing_obstacles.add_source_target_cell(via_gx, via_gy, layer_idx)
+    routing_obstacles.add_source_target_cell(pad_gx, pad_gy, layer_idx)
+
+    # Debug: check if source/target are blocked (should be False now after adding to source_target_cells)
+    source_blocked = routing_obstacles.is_blocked(via_gx, via_gy, layer_idx)
+    target_blocked = routing_obstacles.is_blocked(pad_gx, pad_gy, layer_idx)
+
+    if verbose and (source_blocked or target_blocked):
+        print(f"\n    DEBUG: source_blocked={source_blocked}, target_blocked={target_blocked}")
+        print(f"    DEBUG: via=({via_pos[0]:.2f}, {via_pos[1]:.2f}) grid=({via_gx}, {via_gy})")
+        print(f"    DEBUG: pad=({pad.global_x:.2f}, {pad.global_y:.2f}) grid=({pad_gx}, {pad_gy})")
+
+    sources = [(via_gx, via_gy, layer_idx)]
+    targets = [(pad_gx, pad_gy, layer_idx)]
+
+    # Create router and find path
+    router = GridRouter(
+        via_cost=config.via_cost * 1000,
+        h_weight=config.heuristic_weight,
+        turn_cost=config.turn_cost,
+        via_proximity_cost=0
+    )
+
+    path, iterations, _ = router.route_with_frontier(
+        routing_obstacles, sources, targets, max_iterations,
+        False,  # collinear_vias
+        0,      # via_exclusion_radius
+        None,   # start_direction
+        None,   # end_direction
+        0       # direction_steps
+    )
+
+    if path is None:
+        if verbose:
+            print(f"    DEBUG: A* failed after {iterations} iterations")
+        # Clear source_target_cells for next route
+        routing_obstacles.clear_source_target_cells()
+        return None  # Routing failed
+
+    # Clear source_target_cells for next route
+    routing_obstacles.clear_source_target_cells()
+
+    # Convert path to segments
+    segments = []
+
+    # Add connecting segment from via to first path point
+    if path:
+        first_gx, first_gy, _ = path[0]
+        first_x, first_y = coord.to_float(first_gx, first_gy)
+        if abs(via_pos[0] - first_x) > 0.001 or abs(via_pos[1] - first_y) > 0.001:
+            segments.append({
+                'start': via_pos,
+                'end': (first_x, first_y),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    # Convert path points to segments
+    for i in range(len(path) - 1):
+        gx1, gy1, _ = path[i]
+        gx2, gy2, _ = path[i + 1]
+
+        x1, y1 = coord.to_float(gx1, gy1)
+        x2, y2 = coord.to_float(gx2, gy2)
+
+        if (x1, y1) != (x2, y2):
+            segments.append({
+                'start': (x1, y1),
+                'end': (x2, y2),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    # Add connecting segment from last path point to pad center
+    if path:
+        last_gx, last_gy, _ = path[-1]
+        last_x, last_y = coord.to_float(last_gx, last_gy)
+        if abs(pad.global_x - last_x) > 0.001 or abs(pad.global_y - last_y) > 0.001:
+            segments.append({
+                'start': (last_x, last_y),
+                'end': (pad.global_x, pad.global_y),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    return segments
+
+
 def create_via_to_pad_trace(
     via_pos: Tuple[float, float],
     pad: Pad,
@@ -455,6 +731,8 @@ def create_via_to_pad_trace(
 ) -> Optional[Dict]:
     """
     Create a direct trace from via position to pad center.
+
+    DEPRECATED: Use route_via_to_pad() for A* routed traces instead.
 
     Returns segment dict or None if via is at pad center.
     """
@@ -635,13 +913,28 @@ def create_plane(
     else:
         obstacles = None
 
-    # Step 7: Place vias near each target pad (or reuse existing)
+    # Step 7: Build routing obstacle maps for each unique pad layer
+    routing_obstacles_cache: Dict[str, GridObstacleMap] = {}
+
+    def get_routing_obstacles(layer: str) -> GridObstacleMap:
+        """Get or create routing obstacle map for a layer."""
+        if layer not in routing_obstacles_cache:
+            if verbose:
+                print(f"  Building routing obstacle map for {layer}...")
+            # Enable pad blocking so A* routes around other net pads
+            routing_obstacles_cache[layer] = build_routing_obstacle_map(
+                pcb_data, config, net_id, layer, skip_pad_blocking=False
+            )
+        return routing_obstacles_cache[layer]
+
+    # Step 8: Place vias near each target pad (or reuse existing)
     new_vias = []
     new_segments = []
     vias_placed = 0
     vias_reused = 0
     traces_added = 0
     failed_vias = 0
+    failed_routes = 0
 
     # Track all available vias (existing + newly placed) for reuse
     available_vias = list(existing_net_vias)
@@ -660,18 +953,25 @@ def create_plane(
         existing_via = find_existing_via_nearby(pad, available_vias, max_search_radius)
 
         if existing_via:
-            # Reuse existing via - just create trace to connect
+            # Reuse existing via - route trace to connect
             via_pos = existing_via
             vias_reused += 1
 
             if pad_layer:
-                trace = create_via_to_pad_trace(via_pos, pad, pad_layer, net_id, track_width)
-                if trace:
-                    new_segments.append(trace)
-                    traces_added += 1
+                routing_obs = get_routing_obstacles(pad_layer)
+                trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
+                                                   routing_obs, config, verbose=verbose)
+                if trace_segments is None:
+                    # A* routing failed
+                    if verbose:
+                        print(f"\033[91mROUTE FAILED from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
+                    failed_routes += 1
+                elif trace_segments:
+                    new_segments.extend(trace_segments)
+                    traces_added += len(trace_segments)
                     if verbose:
                         dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-                        print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), trace {dist:.2f}mm")
+                        print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segs, {dist:.2f}mm")
                 else:
                     if verbose:
                         print(f"reusing via at pad center ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
@@ -680,46 +980,81 @@ def create_plane(
                     print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
         else:
             # Need to place a new via
-            via_pos = find_via_position(pad, obstacles, coord, max_search_radius)
+            # Get routing obstacles for routability check
+            routing_obs = get_routing_obstacles(pad_layer) if pad_layer else None
+
+            # Find via position that is both valid for via placement AND routable to pad
+            via_pos = find_via_position(
+                pad, obstacles, coord, max_search_radius,
+                routing_obstacles=routing_obs,
+                config=config,
+                pad_layer=pad_layer,
+                net_id=net_id
+            )
 
             if via_pos:
-                # Create via
-                new_vias.append({
-                    'x': via_pos[0],
-                    'y': via_pos[1],
-                    'size': via_size,
-                    'drill': via_drill,
-                    'layers': ['F.Cu', 'B.Cu'],  # Through-hole via
-                    'net_id': net_id
-                })
-                vias_placed += 1
+                # Check if via is at pad center (within tolerance) - no trace needed
+                via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
+                                     abs(via_pos[1] - pad.global_y) < 0.001)
 
-                # Add to available vias for potential reuse by other pads
-                available_vias.append(via_pos)
+                should_add_via = True  # Via position was validated during search
+                trace_segments = None
 
-                # Block this via position for hole-to-hole clearance
-                block_via_position(obstacles, via_pos[0], via_pos[1], coord,
-                                   hole_to_hole_clearance, via_drill)
-
-                # Create trace if via not at pad center
-                if pad_layer:
-                    trace = create_via_to_pad_trace(via_pos, pad, pad_layer, net_id, track_width)
-                    if trace:
-                        new_segments.append(trace)
-                        traces_added += 1
+                if via_at_pad_center:
+                    # Via at pad center - no trace needed
+                    if verbose:
+                        print(f"new via at pad center ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                elif pad_layer:
+                    # Route from via to pad using A* (should succeed since position was validated)
+                    trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
+                                                       routing_obs, config, verbose=verbose)
+                    if trace_segments is None:
+                        # This shouldn't happen since we validated during via search
+                        if verbose:
+                            print(f"\033[91mROUTE FAILED from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
+                        failed_routes += 1
+                        should_add_via = False
+                    elif trace_segments:
                         if verbose:
                             dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-                            print(f"new via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), trace {dist:.2f}mm")
+                            print(f"new via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segs, {dist:.2f}mm")
                     else:
+                        # Empty segment list (via at pad center)
                         if verbose:
-                            print(f"new via at pad center ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                            print(f"new via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                 else:
+                    # No pad layer specified - just place via
+                    should_add_via = True
                     if verbose:
                         print(f"new via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+
+                if should_add_via:
+                    # Create via
+                    new_vias.append({
+                        'x': via_pos[0],
+                        'y': via_pos[1],
+                        'size': via_size,
+                        'drill': via_drill,
+                        'layers': ['F.Cu', 'B.Cu'],  # Through-hole via
+                        'net_id': net_id
+                    })
+                    vias_placed += 1
+
+                    # Add traces if any
+                    if trace_segments:
+                        new_segments.extend(trace_segments)
+                        traces_added += len(trace_segments)
+
+                    # Add to available vias for potential reuse by other pads
+                    available_vias.append(via_pos)
+
+                    # Block this via position for hole-to-hole clearance
+                    block_via_position(obstacles, via_pos[0], via_pos[1], coord,
+                                       hole_to_hole_clearance, via_drill)
             else:
                 failed_vias += 1
                 if verbose:
-                    print(f"FAILED - no valid position within {max_search_radius}mm")
+                    print(f"\033[91mFAILED - no valid via position within {max_search_radius}mm of pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
 
     # Step 8: Generate zone polygon (only if we should create one)
     zone_sexpr = None
@@ -746,6 +1081,8 @@ def create_plane(
         print(f"  Traces added: {traces_added}")
         if failed_vias > 0:
             print(f"  Failed via placements: {failed_vias}")
+        if failed_routes > 0:
+            print(f"  Failed routes (A* couldn't find path): {failed_routes}")
 
     if dry_run:
         print("\nDry run - no output file written")
