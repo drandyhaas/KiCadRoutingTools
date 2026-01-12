@@ -13,7 +13,7 @@ import os
 import re
 import argparse
 import math
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Set
 from dataclasses import dataclass
 
 # Run startup checks before other imports
@@ -24,6 +24,7 @@ from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment
 from kicad_writer import generate_via_sexpr, generate_segment_sexpr, generate_zone_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map
+from route_modification import remove_net_from_pcb_data
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
@@ -397,7 +398,8 @@ def find_via_position(
     config: GridRouteConfig = None,
     pad_layer: str = None,
     net_id: int = None,
-    verbose: bool = False
+    verbose: bool = False,
+    failed_route_positions: Optional[Set[Tuple[int, int]]] = None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the closest valid position for a via near a pad.
@@ -415,6 +417,9 @@ def find_via_position(
         pad_layer: Layer for routing (required if routing_obstacles provided)
         net_id: Net ID for routing (required if routing_obstacles provided)
         verbose: Print debug output on failure
+        failed_route_positions: Optional set of (gx, gy) positions where routing previously
+            failed. Positions within 2x via-size will be skipped. Failed positions from
+            this call will be added to the set.
 
     Returns:
         (x, y) position for via, or None if no valid position found
@@ -427,6 +432,12 @@ def find_via_position(
 
     # Spiral search outward
     max_radius_grid = coord.to_grid_dist(max_search_radius)
+
+    # Skip radius: 2x via-size in grid units
+    skip_radius_sq = 0
+    if failed_route_positions is not None and config:
+        skip_radius = coord.to_grid_dist(config.via_size * 2)
+        skip_radius_sq = skip_radius * skip_radius
 
     # Collect all valid via positions, sorted by distance
     valid_positions = []
@@ -446,10 +457,22 @@ def find_via_position(
                 if obstacles.is_via_blocked(gx, gy):
                     continue
 
+                # Skip if too close to a previously failed route position
+                if failed_route_positions and skip_radius_sq > 0:
+                    too_close = False
+                    for failed_gx, failed_gy in failed_route_positions:
+                        fdx = gx - failed_gx
+                        fdy = gy - failed_gy
+                        if fdx * fdx + fdy * fdy <= skip_radius_sq:
+                            too_close = True
+                            break
+                    if too_close:
+                        continue
+
                 # Valid via position - add to list with distance
                 dist_sq = dx * dx + dy * dy
                 via_pos = coord.to_float(gx, gy)
-                valid_positions.append((dist_sq, via_pos))
+                valid_positions.append((dist_sq, via_pos, gx, gy))
 
     # Sort by distance (closest first)
     valid_positions.sort(key=lambda x: x[0])
@@ -465,7 +488,21 @@ def find_via_position(
 
     # Check routability for each position until we find one that works
     route_failures = 0
-    for dist_sq, via_pos in valid_positions:
+    skipped_count = 0
+    for dist_sq, via_pos, gx, gy in valid_positions:
+        # Skip if too close to a position where routing already failed (within this call)
+        if failed_route_positions and skip_radius_sq > 0:
+            too_close = False
+            for failed_gx, failed_gy in failed_route_positions:
+                fdx = gx - failed_gx
+                fdy = gy - failed_gy
+                if fdx * fdx + fdy * fdy <= skip_radius_sq:
+                    too_close = True
+                    break
+            if too_close:
+                skipped_count += 1
+                continue
+
         # Try to route from this via position to the pad
         # Use verbose for first few failures to help debug
         route_verbose = verbose and route_failures < 3
@@ -475,11 +512,18 @@ def find_via_position(
         )
         if route_result is not None:
             # Routing succeeded - use this position
+            if verbose and (route_failures > 0 or skipped_count > 0):
+                print(f"[tried {route_failures+1}, skipped {skipped_count}]", end=" ")
             return via_pos
+
+        # Routing failed - add to failed set so nearby positions are skipped
+        if failed_route_positions is not None:
+            failed_route_positions.add((gx, gy))
         route_failures += 1
 
     # Debug output on failure
     if verbose:
+        print(f"[tried {route_failures}, skipped {skipped_count}]", end=" ")
         if not valid_positions:
             print(f"\n    DEBUG: No valid via positions found (all blocked in obstacle map)")
             print(f"    DEBUG: Searched {max_radius_grid} grid steps ({max_search_radius}mm) from pad center")
@@ -627,6 +671,14 @@ def _block_routing_circle(obstacles: GridObstacleMap, cx: int, cy: int,
                 obstacles.add_blocked_cell(cx + ex, cy + ey, layer_idx)
 
 
+@dataclass
+class RouteResult:
+    """Result of a routing attempt."""
+    segments: Optional[List[Dict]]  # Segments if successful, None if failed
+    blocked_cells: List[Tuple[int, int, int]]  # Blocked cells from frontier (for blocker analysis)
+    success: bool
+
+
 def route_via_to_pad(
     via_pos: Tuple[float, float],
     pad: Pad,
@@ -635,7 +687,8 @@ def route_via_to_pad(
     routing_obstacles: GridObstacleMap,
     config: GridRouteConfig,
     max_iterations: int = 10000,
-    verbose: bool = False
+    verbose: bool = False,
+    return_blocked_cells: bool = False
 ) -> Optional[List[Dict]]:
     """
     Route from via position to pad center using A* pathfinding.
@@ -649,14 +702,18 @@ def route_via_to_pad(
         config: Routing configuration
         max_iterations: Maximum A* iterations
         verbose: Print debug info on failure
+        return_blocked_cells: If True, return RouteResult instead of segments
 
     Returns:
         List of segment dicts, or None if routing failed
+        If return_blocked_cells=True, returns RouteResult instead
     """
     coord = GridCoord(config.grid_step)
 
     # Check if via is at pad center (within tolerance)
     if abs(via_pos[0] - pad.global_x) < 0.001 and abs(via_pos[1] - pad.global_y) < 0.001:
+        if return_blocked_cells:
+            return RouteResult(segments=[], blocked_cells=[], success=True)
         return []  # Via is at pad center, no trace needed
 
     # Set up source (via) and target (pad) - single layer routing
@@ -713,7 +770,7 @@ def route_via_to_pad(
         via_proximity_cost=0
     )
 
-    path, iterations, _ = router.route_with_frontier(
+    path, iterations, blocked_cells = router.route_with_frontier(
         routing_obstacles, sources, targets, max_iterations,
         False,  # collinear_vias
         0,      # via_exclusion_radius
@@ -727,6 +784,8 @@ def route_via_to_pad(
             print(f"    DEBUG: A* failed after {iterations} iterations")
         # Clear source_target_cells for next route
         routing_obstacles.clear_source_target_cells()
+        if return_blocked_cells:
+            return RouteResult(segments=None, blocked_cells=blocked_cells, success=False)
         return None  # Routing failed
 
     # Clear source_target_cells for next route
@@ -778,6 +837,8 @@ def route_via_to_pad(
                 'net_id': net_id
             })
 
+    if return_blocked_cells:
+        return RouteResult(segments=segments, blocked_cells=[], success=True)
     return segments
 
 
@@ -808,16 +869,419 @@ def create_via_to_pad_trace(
     }
 
 
+def _point_to_segment_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Calculate squared distance from point (px, py) to line segment (x1,y1)-(x2,y2)."""
+    dx = x2 - x1
+    dy = y2 - y1
+    length_sq = dx * dx + dy * dy
+
+    if length_sq < 1e-10:
+        # Degenerate segment (point)
+        return (px - x1) ** 2 + (py - y1) ** 2
+
+    # Project point onto line, clamped to segment
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+
+    return (px - proj_x) ** 2 + (py - proj_y) ** 2
+
+
+def find_via_position_blocker(
+    via_x: float,
+    via_y: float,
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    exclude_net_id: int
+) -> Optional[int]:
+    """
+    Find the net that is blocking via placement at a specific position.
+
+    Checks segments and vias from other nets to find what's blocking
+    the given via position.
+
+    Args:
+        via_x, via_y: Position where via placement is blocked
+        pcb_data: PCB data with all segments/vias
+        config: Routing configuration
+        exclude_net_id: Net ID to exclude (the target net)
+
+    Returns:
+        Net ID of the closest blocker, or None if no blocker found
+    """
+    best_blocker = None
+    best_dist_sq = float('inf')
+
+    # Check segments
+    for seg in pcb_data.segments:
+        if seg.net_id == exclude_net_id:
+            continue
+        dist_sq = _point_to_segment_dist_sq(via_x, via_y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
+        clearance_needed = config.via_size / 2 + seg.width / 2 + config.clearance
+        if dist_sq < clearance_needed ** 2 and dist_sq < best_dist_sq:
+            best_dist_sq = dist_sq
+            best_blocker = seg.net_id
+
+    # Check vias
+    for via in pcb_data.vias:
+        if via.net_id == exclude_net_id:
+            continue
+        dx = via.x - via_x
+        dy = via.y - via_y
+        dist_sq = dx * dx + dy * dy
+        clearance_needed = config.via_size / 2 + via.size / 2 + config.clearance
+        if dist_sq < clearance_needed ** 2 and dist_sq < best_dist_sq:
+            best_dist_sq = dist_sq
+            best_blocker = via.net_id
+
+    return best_blocker
+
+
+def find_route_blocker_from_frontier(
+    blocked_cells: List[Tuple[int, int, int]],
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    exclude_net_id: int
+) -> Optional[int]:
+    """
+    Find the net most responsible for blocking a route based on frontier data.
+
+    Uses the blocked_cells from route_with_frontier to identify which net's
+    segments/vias are blocking the most cells on the search frontier.
+
+    Args:
+        blocked_cells: List of (gx, gy, layer) cells from route_with_frontier
+        pcb_data: PCB data with all segments/vias
+        config: Routing configuration
+        exclude_net_id: Net ID to exclude (the target net)
+
+    Returns:
+        Net ID of the top blocker, or None if no blocker found
+    """
+    if not blocked_cells:
+        return None
+
+    coord = GridCoord(config.grid_step)
+    blocked_set = set(blocked_cells)
+
+    # Count how many blocked cells each net is responsible for
+    net_block_count: Dict[int, int] = {}
+
+    # Check segments
+    expansion_mm = config.track_width / 2 + config.clearance
+    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+
+    for seg in pcb_data.segments:
+        if seg.net_id == exclude_net_id:
+            continue
+
+        # Get layer index (assume single layer routing, layer 0)
+        layer_idx = 0
+
+        # Trace along segment and check for blocked cells
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+        # Simple line walk
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+
+        gx, gy = gx1, gy1
+        count = 0
+        while True:
+            # Check expansion around this point
+            for ex in range(-expansion_grid, expansion_grid + 1):
+                for ey in range(-expansion_grid, expansion_grid + 1):
+                    cell = (gx + ex, gy + ey, layer_idx)
+                    if cell in blocked_set:
+                        count += 1
+
+            if gx == gx2 and gy == gy2:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+
+        if count > 0:
+            net_block_count[seg.net_id] = net_block_count.get(seg.net_id, 0) + count
+
+    # Check vias
+    via_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance))
+
+    for via in pcb_data.vias:
+        if via.net_id == exclude_net_id:
+            continue
+
+        gx, gy = coord.to_grid(via.x, via.y)
+        count = 0
+        for ex in range(-via_expansion_grid, via_expansion_grid + 1):
+            for ey in range(-via_expansion_grid, via_expansion_grid + 1):
+                if ex * ex + ey * ey <= via_expansion_grid * via_expansion_grid:
+                    # Vias block all layers, but for single-layer routing check layer 0
+                    cell = (gx + ex, gy + ey, 0)
+                    if cell in blocked_set:
+                        count += 1
+
+        if count > 0:
+            net_block_count[via.net_id] = net_block_count.get(via.net_id, 0) + count
+
+    if not net_block_count:
+        return None
+
+    # Return the net with the highest block count
+    return max(net_block_count.keys(), key=lambda k: net_block_count[k])
+
+
+def find_best_via_position_with_blocker(
+    pad: Pad,
+    obstacles: GridObstacleMap,
+    coord: GridCoord,
+    max_search_radius: float,
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    exclude_net_id: int
+) -> Tuple[Optional[Tuple[float, float]], Optional[int]]:
+    """
+    Find the best (closest) via position near a pad, and identify blocker if blocked.
+
+    Returns:
+        (via_pos, blocker_net_id) where:
+        - via_pos is (x, y) if found, None if all positions blocked
+        - blocker_net_id is the net blocking the closest position (if blocked), None otherwise
+    """
+    pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
+
+    # Try pad center first
+    if not obstacles.is_via_blocked(pad_gx, pad_gy):
+        return ((pad.global_x, pad.global_y), None)
+
+    # Find blocker at pad center
+    center_blocker = find_via_position_blocker(pad.global_x, pad.global_y, pcb_data, config, exclude_net_id)
+
+    # Search outward for valid position
+    max_radius_grid = coord.to_grid_dist(max_search_radius)
+    best_dist_sq = float('inf')
+    best_pos = None
+
+    for radius in range(1, max_radius_grid + 1):
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if abs(dx) != radius and abs(dy) != radius:
+                    continue
+
+                gx, gy = pad_gx + dx, pad_gy + dy
+                if not obstacles.is_via_blocked(gx, gy):
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq < best_dist_sq:
+                        best_dist_sq = dist_sq
+                        best_pos = coord.to_float(gx, gy)
+
+        # If we found a position at this radius, no need to search further
+        if best_pos is not None:
+            break
+
+    if best_pos is not None:
+        return (best_pos, None)
+
+    # All positions blocked - return blocker for closest position (pad center)
+    return (None, center_blocker)
+
+
+@dataclass
+class ViaPlacementResult:
+    """Result of via placement attempt with potential rip-up."""
+    success: bool
+    via_pos: Optional[Tuple[float, float]]
+    segments: List[Dict]
+    ripped_net_ids: List[int]  # Nets that were ripped up to achieve success
+    via_at_pad_center: bool
+
+
+def try_place_via_with_ripup(
+    pad: Pad,
+    pad_layer: str,
+    net_id: int,
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    coord: GridCoord,
+    max_search_radius: float,
+    max_rip_nets: int,
+    obstacles: GridObstacleMap,
+    routing_obstacles: Optional[GridObstacleMap],
+    build_via_obstacles_func,
+    build_routing_obstacles_func,
+    via_blocked: bool,  # True if via placement failed, False if routing failed
+    blocked_cells: Optional[List[Tuple[int, int, int]]] = None,  # Frontier from failed route
+    verbose: bool = False
+) -> ViaPlacementResult:
+    """
+    Try to place a via and route to pad, ripping up blockers as needed.
+
+    Called AFTER the fast path already failed. On first iteration, just finds and
+    rips up the blocker without re-searching (since we already know search failed).
+    """
+    ripped_net_ids = []
+    failed_route_positions: Set[Tuple[int, int]] = set()  # Track positions where routing failed
+
+    for attempt in range(max_rip_nets):
+        if attempt == 0:
+            # First iteration: skip search, we already know it failed
+            # Just find the blocker directly
+            if via_blocked:
+                blocker = find_via_position_blocker(
+                    pad.global_x, pad.global_y, pcb_data, config, net_id
+                )
+            else:
+                # Route was blocked - use frontier data
+                blocker = find_route_blocker_from_frontier(
+                    blocked_cells or [], pcb_data, config, net_id
+                )
+        else:
+            # After rip-up, try again (skip positions near previously failed ones)
+            via_pos = find_via_position(
+                pad, obstacles, coord, max_search_radius,
+                routing_obstacles=routing_obstacles,
+                config=config,
+                pad_layer=pad_layer,
+                net_id=net_id,
+                verbose=False,
+                failed_route_positions=failed_route_positions
+            )
+
+            if via_pos:
+                via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
+                                     abs(via_pos[1] - pad.global_y) < 0.001)
+                if via_at_pad_center or not pad_layer:
+                    return ViaPlacementResult(
+                        success=True, via_pos=via_pos, segments=[],
+                        ripped_net_ids=ripped_net_ids, via_at_pad_center=via_at_pad_center
+                    )
+
+                # Try routing
+                route_result = route_via_to_pad(
+                    via_pos, pad, pad_layer, net_id,
+                    routing_obstacles, config,
+                    verbose=False, return_blocked_cells=True
+                )
+
+                if route_result.success:
+                    return ViaPlacementResult(
+                        success=True, via_pos=via_pos, segments=route_result.segments,
+                        ripped_net_ids=ripped_net_ids, via_at_pad_center=False
+                    )
+
+                # Routing failed - find blocker from frontier
+                blocker = find_route_blocker_from_frontier(
+                    route_result.blocked_cells, pcb_data, config, net_id
+                )
+            else:
+                # Via placement blocked
+                blocker = find_via_position_blocker(
+                    pad.global_x, pad.global_y, pcb_data, config, net_id
+                )
+
+        if blocker is None:
+            break
+
+        # Rip up blocker
+        blocker_net = pcb_data.nets.get(blocker)
+        blocker_name = blocker_net.name if blocker_net else f"net_{blocker}"
+        print(f"ripping {blocker_name}...", end=" ")
+        removed_segs, removed_vias = remove_net_from_pcb_data(pcb_data, blocker)
+        ripped_net_ids.append(blocker)
+
+        # Full rebuild of obstacle maps
+        obstacles = build_via_obstacles_func()
+        if pad_layer:
+            routing_obstacles = build_routing_obstacles_func(pad_layer)
+
+    return ViaPlacementResult(
+        success=False, via_pos=None, segments=[],
+        ripped_net_ids=ripped_net_ids, via_at_pad_center=False
+    )
+
+
+def filter_nets_from_content(content: str, net_ids_to_exclude: List[int]) -> str:
+    """
+    Filter out segments and vias for specific net IDs from PCB file content.
+
+    Args:
+        content: Raw PCB file content
+        net_ids_to_exclude: List of net IDs to remove
+
+    Returns:
+        Filtered content with those nets' segments and vias removed
+    """
+    if not net_ids_to_exclude:
+        return content
+
+    net_id_set = set(net_ids_to_exclude)
+    lines = content.split('\n')
+    result_lines = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Check if this starts a segment or via (may be multi-line)
+        if stripped == '(segment' or stripped.startswith('(segment ') or \
+           stripped == '(via' or stripped.startswith('(via '):
+            # Collect all lines of this element
+            element_lines = [line]
+            open_parens = line.count('(') - line.count(')')
+            while open_parens > 0 and i + 1 < len(lines):
+                i += 1
+                element_lines.append(lines[i])
+                open_parens += lines[i].count('(') - lines[i].count(')')
+
+            # Check if any line contains net ID to exclude
+            element_text = '\n'.join(element_lines)
+            net_match = re.search(r'\(net\s+(\d+)\)', element_text)
+            if net_match:
+                element_net_id = int(net_match.group(1))
+                if element_net_id in net_id_set:
+                    # Skip this element entirely
+                    i += 1
+                    continue
+
+            # Keep this element
+            result_lines.extend(element_lines)
+        else:
+            result_lines.append(line)
+
+        i += 1
+
+    return '\n'.join(result_lines)
+
+
 def write_plane_output(
     input_file: str,
     output_file: str,
     zone_sexpr: Optional[str],
     new_vias: List[Dict],
-    new_segments: List[Dict]
+    new_segments: List[Dict],
+    exclude_net_ids: List[int] = None
 ) -> bool:
-    """Write the complete output file with zone (optional), vias, and traces."""
+    """Write the complete output file with zone (optional), vias, and traces.
+
+    Args:
+        exclude_net_ids: Optional list of net IDs to exclude from output
+                         (their segments/vias will be filtered out)
+    """
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # Filter out excluded nets if specified
+    if exclude_net_ids:
+        content = filter_nets_from_content(content, exclude_net_ids)
 
     # Build routing text
     elements = []
@@ -879,10 +1343,17 @@ def create_plane(
     hole_to_hole_clearance: float = 0.2,
     all_layers: List[str] = None,
     verbose: bool = False,
-    dry_run: bool = False
+    dry_run: bool = False,
+    rip_blocker_nets: bool = False,
+    max_rip_nets: int = 3
 ) -> Tuple[int, int, int]:
     """
     Create a copper plane zone and place vias to connect target pads.
+
+    Args:
+        rip_blocker_nets: If True, identify and temporarily remove nets blocking
+                          via placement, then retry. Ripped nets excluded from output.
+        max_rip_nets: Maximum number of blocker nets to rip up.
 
     Returns:
         (vias_placed, traces_added, pads_needing_vias)
@@ -988,11 +1459,18 @@ def create_plane(
     vias_placed = 0
     vias_reused = 0
     traces_added = 0
-    failed_vias = 0
-    failed_routes = 0
+    failed_pads = 0
+    ripped_net_ids: List[int] = []  # Nets ripped, excluded from output
 
     # Track all available vias (existing + newly placed) for reuse
     available_vias = list(existing_net_vias)
+
+    # Create obstacle map builder functions for iterative rip-up
+    def build_via_obstacles():
+        return build_via_obstacle_map(pcb_data, config, net_id)
+
+    def build_routing_obstacles_for_layer(layer: str):
+        return build_routing_obstacle_map(pcb_data, config, net_id, layer, skip_pad_blocking=False)
 
     for pad_info in target_pads:
         if not pad_info['needs_via']:
@@ -1001,7 +1479,7 @@ def create_plane(
         pad = pad_info['pad']
         pad_layer = pad_info.get('pad_layer')
 
-        print(f"  Finding via position for pad {pad.component_ref}.{pad.pad_number}...", end=" ")
+        print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
 
         # First check if there's an existing or already-placed via nearby (within reuse radius)
         existing_via = find_existing_via_nearby(pad, available_vias, max_via_reuse_radius)
@@ -1009,122 +1487,197 @@ def create_plane(
         if existing_via:
             # Reuse existing via - route trace to connect
             via_pos = existing_via
-            vias_reused += 1
 
             if pad_layer:
                 routing_obs = get_routing_obstacles(pad_layer)
-                trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                                   routing_obs, config, verbose=verbose)
+                route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
+                                                   routing_obs, config, verbose=verbose,
+                                                   return_blocked_cells=True)
+                trace_segments = route_result.segments if route_result.success else None
                 if trace_segments is None:
-                    # A* routing failed
-                    print(f"\033[91mROUTING FAILED - no path from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
-                    failed_routes += 1
+                    # Routing failed - if rip_blocker_nets, try with iterative rip-up
+                    if rip_blocker_nets:
+                        print(f"routing blocked, trying rip-up...", end=" ")
+                        result = try_place_via_with_ripup(
+                            pad, pad_layer, net_id, pcb_data, config, coord,
+                            max_search_radius, max_rip_nets,
+                            obstacles, routing_obs,
+                            build_via_obstacles, build_routing_obstacles_for_layer,
+                            via_blocked=False,  # Route was blocked, not via placement
+                            blocked_cells=route_result.blocked_cells,
+                            verbose=verbose
+                        )
+                        if result.success:
+                            # Track ripped nets
+                            for rid in result.ripped_net_ids:
+                                if rid not in ripped_net_ids:
+                                    ripped_net_ids.append(rid)
+                            # Invalidate routing cache since pcb_data changed
+                            routing_obstacles_cache.clear()
+                            # Add via and segments
+                            new_vias.append({
+                                'x': result.via_pos[0], 'y': result.via_pos[1],
+                                'size': via_size, 'drill': via_drill,
+                                'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
+                            })
+                            vias_placed += 1
+                            new_segments.extend(result.segments)
+                            traces_added += len(result.segments)
+                            available_vias.append(result.via_pos)
+                            rip_info = f", ripped {len(result.ripped_net_ids)} nets" if result.ripped_net_ids else ""
+                            print(f"\033[92mSUCCESS via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}){rip_info}\033[0m")
+                        else:
+                            print(f"\033[91mFAILED after {len(result.ripped_net_ids)} rip-ups\033[0m")
+                            failed_pads += 1
+                            for rid in result.ripped_net_ids:
+                                if rid not in ripped_net_ids:
+                                    ripped_net_ids.append(rid)
+                    else:
+                        print(f"\033[91mROUTING FAILED\033[0m")
+                        failed_pads += 1
                 elif trace_segments:
                     new_segments.extend(trace_segments)
                     traces_added += len(trace_segments)
+                    vias_reused += 1
                     dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-                    print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segs, {dist:.2f}mm")
+                    print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments)} segs, {dist:.2f}mm")
                 else:
-                    print(f"reusing via at pad center ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                    vias_reused += 1
+                    print(f"reusing via at pad center")
             else:
+                vias_reused += 1
                 print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
         else:
-            # Need to place a new via
-            # Get routing obstacles for routability check
+            # Need to place a new via - try fast path first
             routing_obs = get_routing_obstacles(pad_layer) if pad_layer else None
-
-            # Find via position that is both valid for via placement AND routable to pad
+            failed_route_positions: Set[Tuple[int, int]] = set()  # Track failed positions for this pad
             via_pos = find_via_position(
                 pad, obstacles, coord, max_search_radius,
                 routing_obstacles=routing_obs,
                 config=config,
                 pad_layer=pad_layer,
                 net_id=net_id,
-                verbose=verbose
+                verbose=verbose,
+                failed_route_positions=failed_route_positions
             )
 
+            placement_success = False
+            trace_segments = None
+            via_blocked = via_pos is None
+            blocked_cells = []
+
             if via_pos:
-                # Check if via is at pad center (within tolerance) - no trace needed
                 via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
                                      abs(via_pos[1] - pad.global_y) < 0.001)
 
-                should_add_via = True  # Via position was validated during search
-                trace_segments = None
-
                 if via_at_pad_center:
-                    # Via at pad center - no trace needed
-                    print(f"new via at pad center ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                    placement_success = True
                 elif pad_layer:
-                    # Route from via to pad using A* (should succeed since position was validated)
-                    trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                                       routing_obs, config, verbose=verbose)
-                    if trace_segments is None:
-                        # This shouldn't happen since we validated during via search
-                        print(f"\033[91mROUTING FAILED - no path from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
-                        failed_routes += 1
-                        should_add_via = False
-                    elif trace_segments:
-                        dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-                        print(f"new via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segs, {dist:.2f}mm")
+                    route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
+                                                       routing_obs, config, verbose=verbose,
+                                                       return_blocked_cells=True)
+                    if route_result.success:
+                        trace_segments = route_result.segments
+                        placement_success = True
                     else:
-                        # Empty segment list (via at pad center)
-                        print(f"new via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                        blocked_cells = route_result.blocked_cells
                 else:
-                    # No pad layer specified - just place via
-                    should_add_via = True
-                    print(f"new via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                    placement_success = True
 
-                if should_add_via:
-                    # Create via
+            # If fast path failed and rip_blocker_nets enabled, try iterative rip-up
+            if not placement_success and rip_blocker_nets:
+                print(f"blocked, trying rip-up...", end=" ")
+                result = try_place_via_with_ripup(
+                    pad, pad_layer, net_id, pcb_data, config, coord,
+                    max_search_radius, max_rip_nets,
+                    obstacles, routing_obs,
+                    build_via_obstacles, build_routing_obstacles_for_layer,
+                    via_blocked=via_blocked,
+                    blocked_cells=blocked_cells,
+                    verbose=verbose
+                )
+
+                if result.success:
+                    # Track ripped nets
+                    for rid in result.ripped_net_ids:
+                        if rid not in ripped_net_ids:
+                            ripped_net_ids.append(rid)
+
+                    # Invalidate caches if we ripped nets
+                    if result.ripped_net_ids:
+                        routing_obstacles_cache.clear()
+                        obstacles = build_via_obstacles()
+
+                    # Add via
                     new_vias.append({
-                        'x': via_pos[0],
-                        'y': via_pos[1],
-                        'size': via_size,
-                        'drill': via_drill,
-                        'layers': ['F.Cu', 'B.Cu'],  # Through-hole via
-                        'net_id': net_id
+                        'x': result.via_pos[0], 'y': result.via_pos[1],
+                        'size': via_size, 'drill': via_drill,
+                        'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
                     })
                     vias_placed += 1
-
-                    # Add traces if any
-                    if trace_segments:
-                        new_segments.extend(trace_segments)
-                        traces_added += len(trace_segments)
-
-                    # Add to available vias for potential reuse by other pads
-                    available_vias.append(via_pos)
-
-                    # Block this via position for hole-to-hole clearance
-                    block_via_position(obstacles, via_pos[0], via_pos[1], coord,
+                    available_vias.append(result.via_pos)
+                    new_segments.extend(result.segments)
+                    traces_added += len(result.segments)
+                    block_via_position(obstacles, result.via_pos[0], result.via_pos[1], coord,
                                        hole_to_hole_clearance, via_drill)
-            else:
-                # Fallback: try reusing an existing via up to max_search_radius
-                # (even if beyond max_via_reuse_radius)
+                    print(f"\033[92mvia at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}), ripped {len(result.ripped_net_ids)} nets\033[0m")
+                else:
+                    failed_pads += 1
+                    for rid in result.ripped_net_ids:
+                        if rid not in ripped_net_ids:
+                            ripped_net_ids.append(rid)
+                    print(f"\033[91mFAILED after {len(result.ripped_net_ids)} rip-ups\033[0m")
+
+            elif placement_success:
+                # Fast path succeeded
+                via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
+                                     abs(via_pos[1] - pad.global_y) < 0.001)
+                new_vias.append({
+                    'x': via_pos[0], 'y': via_pos[1],
+                    'size': via_size, 'drill': via_drill,
+                    'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
+                })
+                vias_placed += 1
+                available_vias.append(via_pos)
+                if trace_segments:
+                    new_segments.extend(trace_segments)
+                    traces_added += len(trace_segments)
+                block_via_position(obstacles, via_pos[0], via_pos[1], coord,
+                                   hole_to_hole_clearance, via_drill)
+
+                if via_at_pad_center:
+                    print(f"via at pad center")
+                else:
+                    print(f"via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments) if trace_segments else 0} segs")
+
+            elif not rip_blocker_nets:
+                # Fast path failed, no rip-up enabled - try fallback via reuse
                 fallback_via = find_existing_via_nearby(pad, available_vias, max_search_radius)
                 if fallback_via:
                     via_pos = fallback_via
-                    vias_reused += 1
                     if pad_layer:
                         routing_obs = get_routing_obstacles(pad_layer)
                         trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
                                                            routing_obs, config, verbose=verbose)
                         if trace_segments is None:
-                            print(f"\033[91mROUTING FAILED - no path from fallback via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
-                            failed_routes += 1
+                            print(f"\033[91mROUTING FAILED\033[0m")
+                            failed_pads += 1
                         elif trace_segments:
                             new_segments.extend(trace_segments)
                             traces_added += len(trace_segments)
-                            dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-                            print(f"fallback reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segs, {dist:.2f}mm")
+                            vias_reused += 1
+                            print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments)} segs")
                         else:
-                            print(f"fallback reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                            vias_reused += 1
+                            print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                     else:
-                        print(f"fallback reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                        vias_reused += 1
+                        print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                 else:
-                    failed_vias += 1
-                    print(f"\033[91mVIA PLACEMENT FAILED - no valid position within {max_search_radius}mm of pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
+                    print(f"\033[91mFAILED - no valid position\033[0m")
+                    failed_pads += 1
 
-    # Step 8: Generate zone polygon (only if we should create one)
+    # Step 9: Generate zone polygon (only if we should create one)
     zone_sexpr = None
     if should_create_zone:
         zone_sexpr = generate_zone_sexpr(
@@ -1137,7 +1690,7 @@ def create_plane(
             direct_connect=True
         )
 
-    # Step 9: Write output
+    # Step 10: Write output
     print(f"\nResults:")
     if should_create_zone:
         print(f"  Zone created on {plane_layer}")
@@ -1146,18 +1699,26 @@ def create_plane(
     print(f"  New vias placed: {vias_placed}")
     print(f"  Existing vias reused: {vias_reused}")
     print(f"  Traces added: {traces_added}")
-    if failed_vias > 0:
-        print(f"  Failed via placements: {failed_vias}")
-    if failed_routes > 0:
-        print(f"  Failed routes (A* couldn't find path): {failed_routes}")
+    if failed_pads > 0:
+        print(f"  Failed pads: {failed_pads}")
+
+    if ripped_net_ids:
+        ripped_names = []
+        for rid in ripped_net_ids:
+            net = pcb_data.nets.get(rid)
+            ripped_names.append(net.name if net else f"net_{rid}")
+        print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
     if dry_run:
         print("\nDry run - no output file written")
     else:
         print(f"\nWriting output to {output_file}...")
-        if write_plane_output(input_file, output_file, zone_sexpr, new_vias, new_segments):
+        if write_plane_output(input_file, output_file, zone_sexpr, new_vias, new_segments,
+                               exclude_net_ids=ripped_net_ids):
             print(f"Output written to {output_file}")
             print("Note: Open in KiCad and press 'B' to refill zones")
+            if ripped_net_ids:
+                print(f"WARNING: {len(ripped_net_ids)} net(s) were removed from output and need re-routing!")
         else:
             print("Error writing output file")
 
@@ -1200,6 +1761,12 @@ Examples:
     parser.add_argument("--all-layers", nargs="+", default=['F.Cu', 'B.Cu'],
                         help="All copper layers for via span (default: F.Cu B.Cu)")
 
+    # Blocker rip-up options
+    parser.add_argument("--rip-blocker-nets", action="store_true",
+                        help="Identify and rip up nets blocking via placement, then retry. Ripped nets are excluded from output.")
+    parser.add_argument("--max-rip-nets", type=int, default=3,
+                        help="Maximum number of blocker nets to rip up (default: 3)")
+
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
@@ -1223,7 +1790,9 @@ Examples:
         hole_to_hole_clearance=args.hole_to_hole_clearance,
         all_layers=args.all_layers,
         verbose=args.verbose,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        rip_blocker_nets=args.rip_blocker_nets,
+        max_rip_nets=args.max_rip_nets
     )
 
 

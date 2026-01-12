@@ -650,3 +650,37 @@ def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
         else:
             new_vias.append(via)
     pcb_data.vias = new_vias
+
+
+def remove_net_from_pcb_data(pcb_data: PCBData, net_id: int) -> Tuple[List[Segment], List[Via]]:
+    """Remove all segments and vias for a net from pcb_data.
+
+    This is a simpler alternative to remove_route_from_pcb_data() when you want
+    to remove an entire net rather than specific segments/vias.
+
+    Args:
+        pcb_data: PCB data structure to modify
+        net_id: Net ID to remove
+
+    Returns:
+        (removed_segments, removed_vias) - the removed elements for potential restoration
+    """
+    removed_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    removed_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+
+    pcb_data.segments = [s for s in pcb_data.segments if s.net_id != net_id]
+    pcb_data.vias = [v for v in pcb_data.vias if v.net_id != net_id]
+
+    return removed_segments, removed_vias
+
+
+def restore_net_to_pcb_data(pcb_data: PCBData, segments: List[Segment], vias: List[Via]) -> None:
+    """Restore previously removed segments and vias to pcb_data.
+
+    Args:
+        pcb_data: PCB data structure to modify
+        segments: Segments to restore
+        vias: Vias to restore
+    """
+    pcb_data.segments.extend(segments)
+    pcb_data.vias.extend(vias)
