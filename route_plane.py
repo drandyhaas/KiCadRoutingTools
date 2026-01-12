@@ -25,6 +25,7 @@ from kicad_writer import generate_via_sexpr, generate_segment_sexpr, generate_zo
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map
 from route_modification import remove_net_from_pcb_data
+from route import batch_route
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
@@ -1360,7 +1361,8 @@ def create_plane(
     verbose: bool = False,
     dry_run: bool = False,
     rip_blocker_nets: bool = False,
-    max_rip_nets: int = 3
+    max_rip_nets: int = 3,
+    reroute_ripped_nets: bool = False
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1371,6 +1373,7 @@ def create_plane(
         rip_blocker_nets: If True, identify and temporarily remove nets blocking
                           via placement, then retry. Ripped nets excluded from output.
         max_rip_nets: Maximum number of blocker nets to rip up.
+        reroute_ripped_nets: If True, automatically re-route ripped nets after placing vias.
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -1845,7 +1848,46 @@ def create_plane(
             print(f"Output written to {output_file}")
             print("Note: Open in KiCad and press 'B' to refill zones")
             if all_ripped_net_ids:
-                print(f"WARNING: {len(all_ripped_net_ids)} net(s) were removed from output and need re-routing!")
+                ripped_net_names = []
+                for rid in all_ripped_net_ids:
+                    net = pcb_data.nets.get(rid)
+                    if net:
+                        ripped_net_names.append(net.name)
+                if reroute_ripped_nets and ripped_net_names:
+                    # Re-route the ripped nets using the batch router
+                    print(f"\n{'='*60}")
+                    print(f"Re-routing {len(ripped_net_names)} ripped net(s)...")
+                    print(f"{'='*60}")
+                    # Increase recursion limit for large PCBs with many zone segments
+                    old_recursion_limit = sys.getrecursionlimit()
+                    sys.setrecursionlimit(max(old_recursion_limit, 100000))
+                    try:
+                        # Determine routing layers: all copper layers except plane layers
+                        routing_layers = [l for l in all_layers if l not in plane_layers]
+                        if not routing_layers:
+                            routing_layers = ['F.Cu', 'B.Cu']
+                        # Use all copper layers for via obstacle checking
+                        all_copper_layers = list(set(all_layers + plane_layers))
+                        routed, failed, route_time = batch_route(
+                            input_file=output_file,
+                            output_file=output_file,
+                            net_names=ripped_net_names,
+                            layers=all_copper_layers,  # All layers for via clearance
+                            track_width=track_width,
+                            clearance=clearance,
+                            via_size=via_size,
+                            via_drill=via_drill,
+                            grid_step=grid_step,
+                            hole_to_hole_clearance=hole_to_hole_clearance,
+                            verbose=verbose
+                        )
+                        print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
+                    finally:
+                        sys.setrecursionlimit(old_recursion_limit)
+                else:
+                    print(f"WARNING: {len(all_ripped_net_ids)} net(s) were removed from output and need re-routing!")
+                    if ripped_net_names:
+                        print(f"  Ripped nets: {', '.join(ripped_net_names)}")
         else:
             print("Error writing output file")
 
@@ -1859,13 +1901,13 @@ def main():
         epilog="""
 Examples:
     # Single net:
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu
+    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
 
-    # Multiple nets (each net paired with corresponding layer):
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND 3.3V --layer In1.Cu In2.Cu
+    # Multiple nets (each net paired with corresponding plane layer):
+    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
 
-    # With options:
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND VCC --layer In1.Cu In2.Cu --via-size 0.5 --rip-blocker-nets
+    # With rip-up and automatic re-routing:
+    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND VCC --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
@@ -1874,8 +1916,8 @@ Examples:
     # Required options (can be multiple)
     parser.add_argument("--net", "-n", nargs="+", required=True,
                         help="Net name(s) for the plane(s) (e.g., GND VCC)")
-    parser.add_argument("--layer", "-l", nargs="+", required=True,
-                        help="Copper layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
+    parser.add_argument("--plane-layer", "-p", nargs="+", required=True,
+                        help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
 
     # Via and track geometry
     parser.add_argument("--via-size", type=float, default=0.3, help="Via outer diameter in mm (default: 0.3)")
@@ -1892,14 +1934,16 @@ Examples:
     parser.add_argument("--max-search-radius", type=float, default=10.0, help="Max radius to search for valid via position in mm (default: 10.0)")
     parser.add_argument("--max-via-reuse-radius", type=float, default=1.0, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2, help="Minimum clearance between drill holes in mm (default: 0.2)")
-    parser.add_argument("--all-layers", nargs="+", default=['F.Cu', 'B.Cu'],
-                        help="All copper layers for via span (default: F.Cu B.Cu)")
+    parser.add_argument("--layers", "-l", nargs="+", default=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
+                        help="All copper layers for routing and via span (default: F.Cu In1.Cu In2.Cu B.Cu)")
 
     # Blocker rip-up options
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="Identify and rip up nets blocking via placement, then retry. Ripped nets are excluded from output.")
     parser.add_argument("--max-rip-nets", type=int, default=3,
                         help="Maximum number of blocker nets to rip up (default: 3)")
+    parser.add_argument("--reroute-ripped-nets", action="store_true",
+                        help="Automatically re-route ripped nets after via placement")
 
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
@@ -1907,17 +1951,17 @@ Examples:
 
     args = parser.parse_args()
 
-    # Validate net/layer counts match
-    if len(args.net) != len(args.layer):
-        print(f"Error: Number of nets ({len(args.net)}) must match number of layers ({len(args.layer)})")
-        print("Each net needs a corresponding layer (e.g., --net GND VCC --layer In1.Cu In2.Cu)")
+    # Validate net/plane-layer counts match
+    if len(args.net) != len(args.plane_layer):
+        print(f"Error: Number of nets ({len(args.net)}) must match number of plane layers ({len(args.plane_layer)})")
+        print("Each net needs a corresponding plane layer (e.g., --net GND VCC --plane-layer In1.Cu In2.Cu)")
         return
 
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
         net_names=args.net,
-        plane_layers=args.layer,
+        plane_layers=args.plane_layer,
         via_size=args.via_size,
         via_drill=args.via_drill,
         track_width=args.track_width,
@@ -1928,11 +1972,12 @@ Examples:
         max_search_radius=args.max_search_radius,
         max_via_reuse_radius=args.max_via_reuse_radius,
         hole_to_hole_clearance=args.hole_to_hole_clearance,
-        all_layers=args.all_layers,
+        all_layers=args.layers,
         verbose=args.verbose,
         dry_run=args.dry_run,
         rip_blocker_nets=args.rip_blocker_nets,
-        max_rip_nets=args.max_rip_nets
+        max_rip_nets=args.max_rip_nets,
+        reroute_ripped_nets=args.reroute_ripped_nets
     )
 
 
