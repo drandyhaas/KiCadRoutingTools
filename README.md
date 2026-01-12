@@ -74,8 +74,14 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 # Create GND zone on B.Cu with via connections to all GND pads
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu
 
+# Create multiple planes at once (each net paired with corresponding layer)
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --layer In1.Cu In2.Cu
+
 # Create VCC plane with larger vias
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net VCC --layer In2.Cu --via-size 0.5 --via-drill 0.4
+
+# Rip up blocking nets to place more vias (removes blockers from output)
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer In1.Cu --rip-blocker-nets
 
 # Dry run to see what would be placed
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu --dry-run
@@ -400,9 +406,9 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 ```bash
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu [OPTIONS]
 
-# Required
---net, -n GND           # Net name for the plane (e.g., GND, VCC)
---layer, -l B.Cu        # Copper layer for the zone (e.g., B.Cu, In1.Cu)
+# Required (can specify multiple nets/layers)
+--net, -n GND VCC       # Net name(s) for planes (e.g., GND VCC +3.3V)
+--layer, -l In1.Cu In2.Cu  # Copper layer(s), one per net
 
 # Via/trace geometry
 --via-size 0.3          # Via outer diameter (mm)
@@ -421,15 +427,22 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 --hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
 --all-layers F.Cu B.Cu  # Copper layers for via span
 
+# Blocker rip-up
+--rip-blocker-nets      # Rip up nets blocking via placement, exclude from output
+--max-rip-nets 3        # Max blocker nets to rip up per pad (default: 3)
+
 # Debug
 --dry-run               # Analyze without writing output
+--verbose, -v           # Print detailed debug messages
 ```
 
 Features:
+- **Multi-net support** - Process multiple nets in one run (e.g., GND and VCC planes)
 - **Automatic pad classification** - Identifies SMD pads needing vias vs through-hole/zone-layer pads
 - **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
 - **A* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
 - **Via reuse with fallback** - Prefers nearby vias within reuse radius, falls back to farther vias if placement fails
+- **Blocker rip-up** - When via placement/routing fails, identifies blocking nets and temporarily removes them, then retries. Ripped nets are excluded from output and need re-routing
 - **Zone creation** - Creates copper pour zone or uses existing zone if present
 
 See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.

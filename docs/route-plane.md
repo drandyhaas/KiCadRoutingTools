@@ -10,6 +10,7 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 2. **Pad classification** - Identifies which pads need vias vs direct zone connection
 3. **Via placement** - Places vias near pads, avoiding obstacles on all copper layers
 4. **Trace routing** - Routes traces from offset vias to pads using A* pathfinding
+5. **Blocker rip-up** - Optionally removes blocking nets to place more vias
 
 ## Basic Usage
 
@@ -17,8 +18,14 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 # Create GND plane on bottom layer
 python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu
 
+# Create multiple planes at once (each net paired with corresponding layer)
+python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --layer In1.Cu In2.Cu
+
 # Create VCC plane on inner layer with larger vias
 python route_plane.py input.kicad_pcb output.kicad_pcb --net VCC --layer In2.Cu --via-size 0.5 --via-drill 0.4
+
+# Rip up blocking nets to maximize via placement
+python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer In1.Cu --rip-blocker-nets
 
 # Preview what would be placed without writing
 python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu --dry-run
@@ -30,8 +37,10 @@ python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu --
 
 | Option | Description |
 |--------|-------------|
-| `--net`, `-n` | Net name for the plane (e.g., "GND", "VCC", "+3V3") |
-| `--layer`, `-l` | Copper layer for the zone (e.g., "B.Cu", "In1.Cu", "In2.Cu") |
+| `--net`, `-n` | Net name(s) for the plane(s). Can specify multiple (e.g., "GND" "+3.3V") |
+| `--layer`, `-l` | Copper layer(s) for the zone(s), one per net (e.g., "In1.Cu" "In2.Cu") |
+
+When specifying multiple nets, each net is paired with its corresponding layer. For example, `--net GND VCC --layer In1.Cu In2.Cu` creates a GND plane on In1.Cu and a VCC plane on In2.Cu.
 
 ### Via/Trace Geometry
 
@@ -59,11 +68,23 @@ python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu --
 | `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm |
 | `--all-layers` | F.Cu B.Cu | Copper layers for via span |
 
+### Blocker Rip-up Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--rip-blocker-nets` | off | Enable blocker identification and removal |
+| `--max-rip-nets` | 3 | Maximum blocker nets to rip up per pad |
+
+When enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad.
+
+**Important:** Ripped nets are excluded from the output file and will need to be re-routed afterward.
+
 ### Debug Options
 
 | Option | Description |
 |--------|-------------|
 | `--dry-run` | Analyze and report without writing output file |
+| `--verbose`, `-v` | Print detailed debug messages |
 
 ## How It Works
 
@@ -97,6 +118,26 @@ When a via cannot be placed at the pad center, the tool routes a trace from the 
 - Avoids other-net pads and tracks
 - Respects clearance requirements
 - Uses the pad's layer for the trace
+
+### Blocker Rip-up
+
+When `--rip-blocker-nets` is enabled and via placement or routing fails:
+
+1. **Identify blocker** - Analyzes what net is blocking:
+   - For via placement failures: finds the nearest segment/via from another net
+   - For routing failures: analyzes the A* frontier to find which net's obstacles are blocking the most cells
+
+2. **Remove blocker** - Temporarily removes the blocking net's segments and vias from the PCB data
+
+3. **Rebuild obstacles** - Rebuilds the obstacle maps without the ripped net (also re-blocks any vias already placed in this run)
+
+4. **Retry placement** - Attempts via placement and routing again
+
+5. **Repeat** - If still blocked, identifies the next blocker and repeats (up to `--max-rip-nets` times)
+
+The tool also uses a skip optimization: when routing fails from a particular via position, nearby positions (within 2x via-size) are skipped to avoid redundant attempts.
+
+**Output handling:** All ripped nets are excluded from the output file. The tool reports which nets were ripped and warns that they need re-routing.
 
 ## Error Messages
 
@@ -133,12 +174,23 @@ A via position was found (or an existing via was selected), but the A* router co
 
 4. **Run after other routing** - Place plane vias last so they work around existing routes
 
+5. **Use blocker rip-up** - For maximum via placement, enable `--rip-blocker-nets`. This removes blocking nets from the output so you can place plane vias first, then re-route the ripped nets afterward
+   ```bash
+   --rip-blocker-nets --max-rip-nets 5
+   ```
+
 ## Example Output
+
+### Single Net
 
 ```
 Loading PCB from input.kicad_pcb...
 Found net 'GND' with ID 91
 Board bounds: (71.12, 55.88) to (228.60, 147.32)
+
+============================================================
+Processing net 'GND' on layer B.Cu
+============================================================
 
 Pad analysis for net 'GND':
   Through-hole pads (no via needed): 31
@@ -146,21 +198,95 @@ Pad analysis for net 'GND':
   SMD pads on other layers (via needed): 81
 
 Building obstacle map for via placement...
-  Finding via position for pad C107.2... new via at pad center (136.65, 118.68)
-  Finding via position for pad U102.3... new via at (140.40, 92.70), routed 12 segs, 1.10mm
-  Finding via position for pad U102.15... new via at (134.40, 92.70), routed 12 segs, 1.10mm
+  Pad C107.2... via at pad center
+  Pad U102.3... via at (140.40, 92.70), 12 segs
+  Pad U102.15... via at (134.40, 92.70), 12 segs
   ...
 
-Results:
+Results for 'GND':
   Zone created on B.Cu
   New vias placed: 74
   Existing vias reused: 6
   Traces added: 362
-  Failed via placements: 1
+
+============================================================
+OVERALL TOTALS
+============================================================
+  Nets processed: 1
+  Total new vias placed: 74
+  Total existing vias reused: 6
+  Total traces added: 362
 
 Writing output to output.kicad_pcb...
 Output written to output.kicad_pcb
 Note: Open in KiCad and press 'B' to refill zones
+```
+
+### Multiple Nets
+
+```
+Loading PCB from input.kicad_pcb...
+Found net 'GND' with ID 91
+Found net '+3.3V' with ID 104
+Board bounds: (71.12, 55.88) to (228.60, 147.32)
+
+============================================================
+Processing net 'GND' on layer In1.Cu
+============================================================
+...
+Results for 'GND':
+  Using existing zone on In1.Cu
+  New vias placed: 89
+  Existing vias reused: 6
+  Traces added: 358
+
+============================================================
+Processing net '+3.3V' on layer In2.Cu
+============================================================
+...
+Results for '+3.3V':
+  Using existing zone on In2.Cu
+  New vias placed: 83
+  Existing vias reused: 5
+  Traces added: 346
+
+============================================================
+OVERALL TOTALS
+============================================================
+  Nets processed: 2
+  Total new vias placed: 172
+  Total existing vias reused: 11
+  Total traces added: 704
+```
+
+### With Blocker Rip-up
+
+```
+  Pad U102.3... blocked, trying rip-up... ripping /NET_A... via at (140.40, 92.70), ripped 1 nets
+  Pad U102.15... via at pad center
+  Pad U301.24... blocked, trying rip-up... ripping /NET_B... ripping /NET_C... FAILED after 2 rip-ups
+  ...
+
+Results for 'GND':
+  New vias placed: 77
+  Existing vias reused: 6
+  Traces added: 380
+  Failed pads: 1
+
+============================================================
+OVERALL TOTALS
+============================================================
+  Nets processed: 1
+  Total new vias placed: 77
+  Total existing vias reused: 6
+  Total traces added: 380
+  Total failed pads: 1
+  Nets excluded from output: /NET_A, /NET_B, /NET_C
+
+Writing output to output.kicad_pcb...
+Output written to output.kicad_pcb
+Note: Open in KiCad and press 'B' to refill zones
+WARNING: 3 net(s) were removed from output and need re-routing!
 ```
 
 ## Post-Processing
