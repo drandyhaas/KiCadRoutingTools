@@ -30,7 +30,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
-- **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement (ripped nets excluded from output for re-routing)
+- **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
 
 ## Quick Start
 
@@ -73,19 +73,19 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 
 ```bash
 # Create GND zone on B.Cu with via connections to all GND pads
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu
 
-# Create multiple planes at once (each net paired with corresponding layer)
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --layer In1.Cu In2.Cu
+# Create multiple planes at once (each net paired with corresponding plane layer)
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
 
 # Create VCC plane with larger vias
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net VCC --layer In2.Cu --via-size 0.5 --via-drill 0.4
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
 
-# Rip up blocking nets to place more vias (removes blockers from output)
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer In1.Cu --rip-blocker-nets
+# Rip up blocking nets and automatically re-route them
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Dry run to see what would be placed
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu --dry-run
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
 ```
 
 ### 4. Verify Results
@@ -405,11 +405,11 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 ### Power/Ground Plane Via Connections (route_plane.py)
 
 ```bash
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu [OPTIONS]
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu [OPTIONS]
 
-# Required (can specify multiple nets/layers)
---net, -n GND VCC       # Net name(s) for planes (e.g., GND VCC +3.3V)
---layer, -l In1.Cu In2.Cu  # Copper layer(s), one per net
+# Required (can specify multiple nets/plane layers)
+--net, -n GND VCC           # Net name(s) for planes (e.g., GND VCC +3.3V)
+--plane-layer, -p In1.Cu In2.Cu  # Plane layer(s), one per net
 
 # Via/trace geometry
 --via-size 0.3          # Via outer diameter (mm)
@@ -426,11 +426,12 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 --max-search-radius 10.0  # Max radius to search for valid via position (mm)
 --max-via-reuse-radius 1.0  # Max radius to prefer reusing existing via (mm)
 --hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
---all-layers F.Cu B.Cu  # Copper layers for via span
+--layers, -l F.Cu In1.Cu In2.Cu B.Cu  # All copper layers for routing and via span
 
 # Blocker rip-up
---rip-blocker-nets      # Rip up nets blocking via placement, exclude from output
+--rip-blocker-nets      # Rip up nets blocking via placement
 --max-rip-nets 3        # Max blocker nets to rip up per pad (default: 3)
+--reroute-ripped-nets   # Automatically re-route ripped nets after via placement
 
 # Debug
 --dry-run               # Analyze without writing output
@@ -443,7 +444,8 @@ Features:
 - **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
 - **A* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
 - **Via reuse with fallback** - Prefers nearby vias within reuse radius, falls back to farther vias if placement fails
-- **Blocker rip-up** - When via placement/routing fails, identifies blocking nets and temporarily removes them, then retries. Ripped nets are excluded from output and need re-routing
+- **Blocker rip-up** - When via placement/routing fails, identifies blocking nets and temporarily removes them, then retries
+- **Automatic re-routing** - Optionally re-routes ripped nets after all plane vias are placed
 - **Zone creation** - Creates copper pour zone or uses existing zone if present
 
 See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.

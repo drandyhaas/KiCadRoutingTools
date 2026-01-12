@@ -11,24 +11,25 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 3. **Via placement** - Places vias near pads, avoiding obstacles on all copper layers
 4. **Trace routing** - Routes traces from offset vias to pads using A* pathfinding
 5. **Blocker rip-up** - Optionally removes blocking nets to place more vias
+6. **Automatic re-routing** - Optionally re-routes ripped nets after via placement
 
 ## Basic Usage
 
 ```bash
 # Create GND plane on bottom layer
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu
+python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
 
-# Create multiple planes at once (each net paired with corresponding layer)
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --layer In1.Cu In2.Cu
+# Create multiple planes at once (each net paired with corresponding plane layer)
+python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
 
 # Create VCC plane on inner layer with larger vias
-python route_plane.py input.kicad_pcb output.kicad_pcb --net VCC --layer In2.Cu --via-size 0.5 --via-drill 0.4
+python route_plane.py input.kicad_pcb output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
 
-# Rip up blocking nets to maximize via placement
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer In1.Cu --rip-blocker-nets
+# Rip up blocking nets and automatically re-route them
+python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Preview what would be placed without writing
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu --dry-run
+python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
 ```
 
 ## Command-Line Options
@@ -38,9 +39,9 @@ python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu --
 | Option | Description |
 |--------|-------------|
 | `--net`, `-n` | Net name(s) for the plane(s). Can specify multiple (e.g., "GND" "+3.3V") |
-| `--layer`, `-l` | Copper layer(s) for the zone(s), one per net (e.g., "In1.Cu" "In2.Cu") |
+| `--plane-layer`, `-p` | Plane layer(s) for the zone(s), one per net (e.g., "In1.Cu" "In2.Cu") |
 
-When specifying multiple nets, each net is paired with its corresponding layer. For example, `--net GND VCC --layer In1.Cu In2.Cu` creates a GND plane on In1.Cu and a VCC plane on In2.Cu.
+When specifying multiple nets, each net is paired with its corresponding plane layer. For example, `--net GND VCC --plane-layer In1.Cu In2.Cu` creates a GND plane on In1.Cu and a VCC plane on In2.Cu.
 
 ### Via/Trace Geometry
 
@@ -66,7 +67,7 @@ When specifying multiple nets, each net is paired with its corresponding layer. 
 | `--max-search-radius` | 10.0 | Maximum radius to search for valid via position in mm |
 | `--max-via-reuse-radius` | 1.0 | Prefer reusing existing vias within this radius in mm |
 | `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm |
-| `--all-layers` | F.Cu B.Cu | Copper layers for via span |
+| `--layers`, `-l` | F.Cu In1.Cu In2.Cu B.Cu | All copper layers for routing and via span |
 
 ### Blocker Rip-up Options
 
@@ -74,10 +75,13 @@ When specifying multiple nets, each net is paired with its corresponding layer. 
 |--------|---------|-------------|
 | `--rip-blocker-nets` | off | Enable blocker identification and removal |
 | `--max-rip-nets` | 3 | Maximum blocker nets to rip up per pad |
+| `--reroute-ripped-nets` | off | Automatically re-route ripped nets after via placement |
 
-When enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad.
+When `--rip-blocker-nets` is enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad.
 
-**Important:** Ripped nets are excluded from the output file and will need to be re-routed afterward.
+When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, the tool automatically re-routes the ripped nets using the batch router from `route.py`. This uses all copper layers specified by `--layers` for proper via clearance checking.
+
+**Note:** The plane nets being processed are protected and will never be ripped up, even if they block each other during multi-net processing.
 
 ### Debug Options
 
@@ -126,6 +130,7 @@ When `--rip-blocker-nets` is enabled and via placement or routing fails:
 1. **Identify blocker** - Analyzes what net is blocking:
    - For via placement failures: finds the nearest segment/via from another net
    - For routing failures: analyzes the A* frontier to find which net's obstacles are blocking the most cells
+   - **Protected nets** (the plane nets being processed) are never identified as blockers
 
 2. **Remove blocker** - Temporarily removes the blocking net's segments and vias from the PCB data
 
@@ -137,7 +142,16 @@ When `--rip-blocker-nets` is enabled and via placement or routing fails:
 
 The tool also uses a skip optimization: when routing fails from a particular via position, nearby positions (within 2x via-size) are skipped to avoid redundant attempts.
 
-**Output handling:** All ripped nets are excluded from the output file. The tool reports which nets were ripped and warns that they need re-routing.
+### Automatic Re-routing
+
+When `--reroute-ripped-nets` is enabled, after all plane vias are placed:
+
+1. The tool collects all ripped net names
+2. Calls `batch_route` from `route.py` with the ripped nets
+3. Uses all copper layers (`--layers`) for routing and via clearance checking
+4. Reports how many nets were successfully re-routed
+
+This ensures that ripped nets are re-routed while respecting clearance from the newly placed plane vias on all layers.
 
 ## Error Messages
 
@@ -174,9 +188,9 @@ A via position was found (or an existing via was selected), but the A* router co
 
 4. **Run after other routing** - Place plane vias last so they work around existing routes
 
-5. **Use blocker rip-up** - For maximum via placement, enable `--rip-blocker-nets`. This removes blocking nets from the output so you can place plane vias first, then re-route the ripped nets afterward
+5. **Use blocker rip-up with re-routing** - For maximum via placement, enable both options:
    ```bash
-   --rip-blocker-nets --max-rip-nets 5
+   --rip-blocker-nets --reroute-ripped-nets --max-rip-nets 5
    ```
 
 ## Example Output
@@ -259,7 +273,7 @@ OVERALL TOTALS
   Total traces added: 704
 ```
 
-### With Blocker Rip-up
+### With Blocker Rip-up and Re-routing
 
 ```
   Pad U102.3... blocked, trying rip-up... ripping /NET_A... via at (140.40, 92.70), ripped 1 nets
@@ -281,12 +295,21 @@ OVERALL TOTALS
   Total existing vias reused: 6
   Total traces added: 380
   Total failed pads: 1
-  Nets excluded from output: /NET_A, /NET_B, /NET_C
 
 Writing output to output.kicad_pcb...
 Output written to output.kicad_pcb
 Note: Open in KiCad and press 'B' to refill zones
-WARNING: 3 net(s) were removed from output and need re-routing!
+
+============================================================
+Re-routing 3 ripped net(s)...
+============================================================
+Loading output.kicad_pcb...
+...
+Routing complete
+  Single-ended:  2/3 routed (1 FAILED)
+...
+
+Re-routing complete: 2 routed, 1 failed in 15.32s
 ```
 
 ## Post-Processing
@@ -296,4 +319,4 @@ After running the tool:
 1. **Open in KiCad** - Load the output file
 2. **Refill zones** - Press `B` or use Edit > Fill All Zones to generate the copper pour
 3. **Run DRC** - Verify no design rule violations
-4. **Manual cleanup** - Address any failed placements manually if needed
+4. **Manual cleanup** - Address any failed placements or re-routes manually if needed
