@@ -68,7 +68,20 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
 ```
 
-### 3. Verify Results
+### 3. Create Power/Ground Planes
+
+```bash
+# Create GND zone on B.Cu with via stitching to all GND pads
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu
+
+# Create VCC plane with larger vias
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net VCC --layer In2.Cu --via-size 0.5 --via-drill 0.4
+
+# Dry run to see what would be placed
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu --dry-run
+```
+
+### 4. Verify Results
 
 ```bash
 # Check for DRC violations
@@ -81,7 +94,7 @@ python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 python check_connected.py kicad_files/output.kicad_pcb --component U1
 ```
 
-### 4. Full Integration Test
+### 5. Full Integration Test
 
 Run the complete pipeline (QFN/BGA fanout → routing → DRC → connectivity) on the test board:
 
@@ -103,7 +116,7 @@ This script demonstrates a real-world workflow:
 5. DDR routing (DQS/CK diff pairs + DQ data lanes with auto byte-lane grouping)
 6. DRC and connectivity verification after each stage
 
-### 5. Pad-to-Pad Routing Test
+### 6. Pad-to-Pad Routing Test
 
 Route directly between pads without fanout (for boards with standard through-hole or SMD pads):
 
@@ -139,6 +152,7 @@ This script routes nets on the kit-dev-coldfire-xilinx board directly from pads,
 KiCadRoutingTools/
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
+├── route_plane.py            # Main CLI - power/ground plane via stitching
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building
@@ -218,6 +232,7 @@ KiCadRoutingTools/
 |--------|---------|
 | `route.py` | CLI for single-ended routing |
 | `route_diff.py` | CLI for differential pair routing |
+| `route_plane.py` | CLI for power/ground plane via stitching |
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
@@ -378,6 +393,42 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 
 # All other options from route.py also apply (geometry, strategy, proximity, length matching, etc.)
 ```
+
+### Power/Ground Plane Via Stitching (route_plane.py)
+
+```bash
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu [OPTIONS]
+
+# Required
+--net, -n GND           # Net name for the plane (e.g., GND, VCC)
+--layer, -l B.Cu        # Copper layer for the zone (e.g., B.Cu, In1.Cu)
+
+# Via/trace geometry
+--via-size 0.3          # Via outer diameter (mm)
+--via-drill 0.2         # Via drill size (mm)
+--track-width 0.2       # Track width for via-to-pad connections (mm)
+--clearance 0.1         # Clearance (mm)
+
+# Zone options
+--zone-clearance 0.2    # Zone clearance from other copper (mm)
+--min-thickness 0.1     # Minimum zone copper thickness (mm)
+
+# Algorithm
+--grid-step 0.1         # Grid resolution (mm)
+--max-search-radius 10.0  # Max radius to search for valid via position (mm)
+--hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
+--all-layers F.Cu B.Cu  # Copper layers for via span
+
+# Debug
+--dry-run               # Analyze without writing output
+```
+
+Features:
+- **Automatic pad classification** - Identifies SMD pads needing vias vs through-hole/zone-layer pads
+- **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
+- **A* trace routing** - Routes traces from offset vias to pads, avoiding obstacles
+- **Via reuse** - Reuses nearby vias for multiple pads when possible
+- **Zone creation** - Creates copper pour zone or uses existing zone if present
 
 See [Configuration](docs/configuration.md) for complete option reference.
 

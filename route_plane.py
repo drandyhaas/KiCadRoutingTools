@@ -1105,7 +1105,7 @@ def main():
         epilog="""
 Examples:
     python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net VCC --layer In2.Cu --verbose
+    python route_plane.py input.kicad_pcb output.kicad_pcb --net VCC --layer In2.Cu --via-size 0.5
     python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu --dry-run
 """
     )
@@ -1128,13 +1128,12 @@ Examples:
 
     # Algorithm options
     parser.add_argument("--grid-step", type=float, default=0.1, help="Grid resolution in mm (default: 0.1)")
-    parser.add_argument("--max-search-radius", type=float, default=2.0, help="Max radius to search for valid via position in mm (default: 2.0)")
+    parser.add_argument("--max-search-radius", type=float, default=10.0, help="Max radius to search for valid via position in mm (default: 10.0)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2, help="Minimum clearance between drill holes in mm (default: 0.2)")
     parser.add_argument("--all-layers", nargs="+", default=['F.Cu', 'B.Cu'],
                         help="All copper layers for via span (default: F.Cu B.Cu)")
 
     # Debug options
-    parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed output")
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
 
     args = parser.parse_args()
@@ -1154,7 +1153,7 @@ Examples:
         max_search_radius=args.max_search_radius,
         hole_to_hole_clearance=args.hole_to_hole_clearance,
         all_layers=args.all_layers,
-        verbose=args.verbose,
+        verbose=True,
         dry_run=args.dry_run
     )
 
