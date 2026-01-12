@@ -71,7 +71,7 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 ### 3. Create Power/Ground Planes
 
 ```bash
-# Create GND zone on B.Cu with via stitching to all GND pads
+# Create GND zone on B.Cu with via connections to all GND pads
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu
 
 # Create VCC plane with larger vias
@@ -140,6 +140,7 @@ This script routes nets on the kit-dev-coldfire-xilinx board directly from pads,
 | [Configuration](docs/configuration.md) | Command-line options, GridRouteConfig parameters |
 | [Differential Pairs](docs/differential-pairs.md) | P/N pairing, polarity swaps, via handling |
 | [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
+| [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
 | [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher |
 | [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
 | [QFN Fanout](qfn_fanout/README.md) | QFN/QFP escape routing generator |
@@ -152,7 +153,7 @@ This script routes nets on the kit-dev-coldfire-xilinx board directly from pads,
 KiCadRoutingTools/
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
-├── route_plane.py            # Main CLI - power/ground plane via stitching
+├── route_plane.py            # Main CLI - power/ground plane via connections
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building
@@ -232,7 +233,7 @@ KiCadRoutingTools/
 |--------|---------|
 | `route.py` | CLI for single-ended routing |
 | `route_diff.py` | CLI for differential pair routing |
-| `route_plane.py` | CLI for power/ground plane via stitching |
+| `route_plane.py` | CLI for power/ground plane via connections |
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
@@ -394,7 +395,7 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 # All other options from route.py also apply (geometry, strategy, proximity, length matching, etc.)
 ```
 
-### Power/Ground Plane Via Stitching (route_plane.py)
+### Power/Ground Plane Via Connections (route_plane.py)
 
 ```bash
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --layer B.Cu [OPTIONS]
@@ -416,7 +417,7 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
 --max-search-radius 10.0  # Max radius to search for valid via position (mm)
---max-via-reuse-radius 1.0  # Max radius to reuse existing via (mm)
+--max-via-reuse-radius 1.0  # Max radius to prefer reusing existing via (mm)
 --hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
 --all-layers F.Cu B.Cu  # Copper layers for via span
 
@@ -427,11 +428,11 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 Features:
 - **Automatic pad classification** - Identifies SMD pads needing vias vs through-hole/zone-layer pads
 - **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
-- **A* trace routing** - Routes traces from offset vias to pads, avoiding obstacles
-- **Via reuse** - Reuses nearby vias for multiple pads when possible
+- **A* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
+- **Via reuse with fallback** - Prefers nearby vias within reuse radius, falls back to farther vias if placement fails
 - **Zone creation** - Creates copper pour zone or uses existing zone if present
 
-See [Configuration](docs/configuration.md) for complete option reference.
+See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
 
 ## Requirements
 

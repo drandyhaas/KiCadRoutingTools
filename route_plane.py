@@ -966,7 +966,7 @@ def create_plane(
                 if trace_segments is None:
                     # A* routing failed
                     if verbose:
-                        print(f"\033[91mROUTE FAILED from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
+                        print(f"\033[91mROUTING FAILED - no path from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
                     failed_routes += 1
                 elif trace_segments:
                     new_segments.extend(trace_segments)
@@ -1013,7 +1013,7 @@ def create_plane(
                     if trace_segments is None:
                         # This shouldn't happen since we validated during via search
                         if verbose:
-                            print(f"\033[91mROUTE FAILED from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
+                            print(f"\033[91mROUTING FAILED - no path from via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
                         failed_routes += 1
                         should_add_via = False
                     elif trace_segments:
@@ -1054,9 +1054,36 @@ def create_plane(
                     block_via_position(obstacles, via_pos[0], via_pos[1], coord,
                                        hole_to_hole_clearance, via_drill)
             else:
-                failed_vias += 1
-                if verbose:
-                    print(f"\033[91mFAILED - no valid via position within {max_search_radius}mm of pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
+                # Fallback: try reusing an existing via up to max_search_radius
+                # (even if beyond max_via_reuse_radius)
+                fallback_via = find_existing_via_nearby(pad, available_vias, max_search_radius)
+                if fallback_via:
+                    via_pos = fallback_via
+                    vias_reused += 1
+                    if pad_layer:
+                        routing_obs = get_routing_obstacles(pad_layer)
+                        trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
+                                                           routing_obs, config, verbose=verbose)
+                        if trace_segments is None:
+                            if verbose:
+                                print(f"\033[91mROUTING FAILED - no path from fallback via ({via_pos[0]:.2f}, {via_pos[1]:.2f}) to pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
+                            failed_routes += 1
+                        elif trace_segments:
+                            new_segments.extend(trace_segments)
+                            traces_added += len(trace_segments)
+                            if verbose:
+                                dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
+                                print(f"fallback reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segs, {dist:.2f}mm")
+                        else:
+                            if verbose:
+                                print(f"fallback reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                    else:
+                        if verbose:
+                            print(f"fallback reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                else:
+                    failed_vias += 1
+                    if verbose:
+                        print(f"\033[91mVIA PLACEMENT FAILED - no valid position within {max_search_radius}mm of pad at ({pad.global_x:.2f}, {pad.global_y:.2f})\033[0m")
 
     # Step 8: Generate zone polygon (only if we should create one)
     zone_sexpr = None
