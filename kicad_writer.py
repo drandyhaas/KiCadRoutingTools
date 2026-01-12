@@ -73,6 +73,70 @@ def generate_gr_text_sexpr(text: str, x: float, y: float, layer: str,
 	)'''
 
 
+def generate_zone_sexpr(
+    net_id: int,
+    net_name: str,
+    layer: str,
+    polygon_points: List[Tuple[float, float]],
+    clearance: float = 0.2,
+    min_thickness: float = 0.1,
+    thermal_gap: float = 0.2,
+    thermal_bridge_width: float = 0.2,
+    direct_connect: bool = True
+) -> str:
+    """Generate KiCad S-expression for a filled copper zone.
+
+    Args:
+        net_id: Net ID (e.g., 690 for GND)
+        net_name: Net name string (e.g., "GND")
+        layer: Copper layer (e.g., "B.Cu", "In1.Cu")
+        polygon_points: List of (x, y) coordinates defining zone boundary
+        clearance: Clearance from other copper in mm
+        min_thickness: Minimum copper thickness in mm
+        thermal_gap: Gap for thermal relief spokes
+        thermal_bridge_width: Width of thermal bridges
+        direct_connect: If True, use solid/direct pad connections; if False, use thermal relief
+
+    Returns:
+        S-expression string for the zone
+    """
+    # Format polygon points
+    pts_lines = []
+    for x, y in polygon_points:
+        pts_lines.append(f"(xy {x:.6f} {y:.6f})")
+    pts_str = " ".join(pts_lines)
+
+    # Connect pads mode: "yes" for direct solid connection, omit for thermal relief
+    if direct_connect:
+        connect_pads_str = f'''(connect_pads yes
+		(clearance {clearance})
+	)'''
+    else:
+        connect_pads_str = f'''(connect_pads
+		(clearance {clearance})
+	)'''
+
+    return f'''	(zone
+		(net {net_id})
+		(net_name "{net_name}")
+		(layer "{layer}")
+		(uuid "{uuid.uuid4()}")
+		(hatch edge 0.5)
+		{connect_pads_str}
+		(min_thickness {min_thickness})
+		(filled_areas_thickness no)
+		(fill yes
+			(thermal_gap {thermal_gap})
+			(thermal_bridge_width {thermal_bridge_width})
+		)
+		(polygon
+			(pts
+				{pts_str}
+			)
+		)
+	)'''
+
+
 def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict]) -> bool:
     """
     Add track segments to a PCB file.
