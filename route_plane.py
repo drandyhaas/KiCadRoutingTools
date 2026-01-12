@@ -208,12 +208,13 @@ def build_via_obstacle_map(
                 if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
 
-    # Add existing segments as obstacles (via can't overlap with tracks)
+    # Add existing segments as obstacles (via can't overlap with tracks on ANY layer)
+    # Since vias span all layers, we must check segments on all copper layers, not just config.layers
     for seg in pcb_data.segments:
         if seg.net_id == exclude_net_id:
             continue
-        layer_idx = layer_map.get(seg.layer)
-        if layer_idx is None:
+        # Include any copper layer (*.Cu)
+        if not seg.layer.endswith('.Cu'):
             continue
         _add_segment_via_obstacle(obstacles, seg, coord, via_track_expansion_grid)
 
@@ -815,7 +816,8 @@ def create_plane(
     zone_clearance: float = 0.2,
     min_thickness: float = 0.1,
     grid_step: float = 0.1,
-    max_search_radius: float = 2.0,
+    max_search_radius: float = 10.0,
+    max_via_reuse_radius: float = 1.0,
     hole_to_hole_clearance: float = 0.2,
     all_layers: List[str] = None,
     verbose: bool = False,
@@ -949,8 +951,8 @@ def create_plane(
         if verbose:
             print(f"  Finding via position for pad {pad.component_ref}.{pad.pad_number}...", end=" ")
 
-        # First check if there's an existing or already-placed via nearby
-        existing_via = find_existing_via_nearby(pad, available_vias, max_search_radius)
+        # First check if there's an existing or already-placed via nearby (within reuse radius)
+        existing_via = find_existing_via_nearby(pad, available_vias, max_via_reuse_radius)
 
         if existing_via:
             # Reuse existing via - route trace to connect
@@ -1129,6 +1131,7 @@ Examples:
     # Algorithm options
     parser.add_argument("--grid-step", type=float, default=0.1, help="Grid resolution in mm (default: 0.1)")
     parser.add_argument("--max-search-radius", type=float, default=10.0, help="Max radius to search for valid via position in mm (default: 10.0)")
+    parser.add_argument("--max-via-reuse-radius", type=float, default=1.0, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2, help="Minimum clearance between drill holes in mm (default: 0.2)")
     parser.add_argument("--all-layers", nargs="+", default=['F.Cu', 'B.Cu'],
                         help="All copper layers for via span (default: F.Cu B.Cu)")
@@ -1151,6 +1154,7 @@ Examples:
         min_thickness=args.min_thickness,
         grid_step=args.grid_step,
         max_search_radius=args.max_search_radius,
+        max_via_reuse_radius=args.max_via_reuse_radius,
         hole_to_hole_clearance=args.hole_to_hole_clearance,
         all_layers=args.all_layers,
         verbose=True,

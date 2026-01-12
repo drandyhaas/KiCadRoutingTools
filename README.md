@@ -416,6 +416,7 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
 --max-search-radius 10.0  # Max radius to search for valid via position (mm)
+--max-via-reuse-radius 1.0  # Max radius to reuse existing via (mm)
 --hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
 --all-layers F.Cu B.Cu  # Copper layers for via span
 
