@@ -1119,6 +1119,9 @@ def try_place_via_with_ripup(
     build_routing_obstacles_func,
     via_blocked: bool,  # True if via placement failed, False if routing failed
     blocked_cells: Optional[List[Tuple[int, int, int]]] = None,  # Frontier from failed route
+    new_vias: List[Dict] = None,  # Previously placed vias to re-block after rebuild
+    hole_to_hole_clearance: float = 0.2,
+    via_drill: float = 0.4,
     verbose: bool = False
 ) -> ViaPlacementResult:
     """
@@ -1199,6 +1202,11 @@ def try_place_via_with_ripup(
 
         # Full rebuild of obstacle maps
         obstacles = build_via_obstacles_func()
+        # Re-block previously placed vias
+        if new_vias:
+            for placed_via in new_vias:
+                block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
+                                   hole_to_hole_clearance, via_drill)
         if pad_layer:
             routing_obstacles = build_routing_obstacles_func(pad_layer)
 
@@ -1505,6 +1513,9 @@ def create_plane(
                             build_via_obstacles, build_routing_obstacles_for_layer,
                             via_blocked=False,  # Route was blocked, not via placement
                             blocked_cells=route_result.blocked_cells,
+                            new_vias=new_vias,
+                            hole_to_hole_clearance=hole_to_hole_clearance,
+                            via_drill=via_drill,
                             verbose=verbose
                         )
                         if result.success:
@@ -1514,6 +1525,11 @@ def create_plane(
                                     ripped_net_ids.append(rid)
                             # Invalidate routing cache since pcb_data changed
                             routing_obstacles_cache.clear()
+                            # Rebuild obstacles and re-block all previously placed vias
+                            obstacles = build_via_obstacles()
+                            for placed_via in new_vias:
+                                block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
+                                                   hole_to_hole_clearance, via_drill)
                             # Add via and segments
                             new_vias.append({
                                 'x': result.via_pos[0], 'y': result.via_pos[1],
@@ -1524,6 +1540,8 @@ def create_plane(
                             new_segments.extend(result.segments)
                             traces_added += len(result.segments)
                             available_vias.append(result.via_pos)
+                            block_via_position(obstacles, result.via_pos[0], result.via_pos[1], coord,
+                                               hole_to_hole_clearance, via_drill)
                             rip_info = f", ripped {len(result.ripped_net_ids)} nets" if result.ripped_net_ids else ""
                             print(f"\033[92mSUCCESS via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}){rip_info}\033[0m")
                         else:
@@ -1594,6 +1612,9 @@ def create_plane(
                     build_via_obstacles, build_routing_obstacles_for_layer,
                     via_blocked=via_blocked,
                     blocked_cells=blocked_cells,
+                    new_vias=new_vias,
+                    hole_to_hole_clearance=hole_to_hole_clearance,
+                    via_drill=via_drill,
                     verbose=verbose
                 )
 
@@ -1607,6 +1628,10 @@ def create_plane(
                     if result.ripped_net_ids:
                         routing_obstacles_cache.clear()
                         obstacles = build_via_obstacles()
+                        # Re-block all previously placed vias
+                        for placed_via in new_vias:
+                            block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
+                                               hole_to_hole_clearance, via_drill)
 
                     # Add via
                     new_vias.append({
