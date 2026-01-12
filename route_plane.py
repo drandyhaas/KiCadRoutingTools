@@ -892,7 +892,8 @@ def find_via_position_blocker(
     via_y: float,
     pcb_data: PCBData,
     config: GridRouteConfig,
-    exclude_net_id: int
+    exclude_net_id: int,
+    protected_net_ids: Optional[Set[int]] = None
 ) -> Optional[int]:
     """
     Find the net that is blocking via placement at a specific position.
@@ -905,16 +906,18 @@ def find_via_position_blocker(
         pcb_data: PCB data with all segments/vias
         config: Routing configuration
         exclude_net_id: Net ID to exclude (the target net)
+        protected_net_ids: Set of net IDs that should never be identified as blockers
 
     Returns:
         Net ID of the closest blocker, or None if no blocker found
     """
     best_blocker = None
     best_dist_sq = float('inf')
+    protected = protected_net_ids or set()
 
     # Check segments
     for seg in pcb_data.segments:
-        if seg.net_id == exclude_net_id:
+        if seg.net_id == exclude_net_id or seg.net_id in protected:
             continue
         dist_sq = _point_to_segment_dist_sq(via_x, via_y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
         clearance_needed = config.via_size / 2 + seg.width / 2 + config.clearance
@@ -924,7 +927,7 @@ def find_via_position_blocker(
 
     # Check vias
     for via in pcb_data.vias:
-        if via.net_id == exclude_net_id:
+        if via.net_id == exclude_net_id or via.net_id in protected:
             continue
         dx = via.x - via_x
         dy = via.y - via_y
@@ -941,7 +944,8 @@ def find_route_blocker_from_frontier(
     blocked_cells: List[Tuple[int, int, int]],
     pcb_data: PCBData,
     config: GridRouteConfig,
-    exclude_net_id: int
+    exclude_net_id: int,
+    protected_net_ids: Optional[Set[int]] = None
 ) -> Optional[int]:
     """
     Find the net most responsible for blocking a route based on frontier data.
@@ -954,6 +958,7 @@ def find_route_blocker_from_frontier(
         pcb_data: PCB data with all segments/vias
         config: Routing configuration
         exclude_net_id: Net ID to exclude (the target net)
+        protected_net_ids: Set of net IDs that should never be identified as blockers
 
     Returns:
         Net ID of the top blocker, or None if no blocker found
@@ -963,6 +968,7 @@ def find_route_blocker_from_frontier(
 
     coord = GridCoord(config.grid_step)
     blocked_set = set(blocked_cells)
+    protected = protected_net_ids or set()
 
     # Count how many blocked cells each net is responsible for
     net_block_count: Dict[int, int] = {}
@@ -972,7 +978,7 @@ def find_route_blocker_from_frontier(
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
 
     for seg in pcb_data.segments:
-        if seg.net_id == exclude_net_id:
+        if seg.net_id == exclude_net_id or seg.net_id in protected:
             continue
 
         # Get layer index (assume single layer routing, layer 0)
@@ -1016,7 +1022,7 @@ def find_route_blocker_from_frontier(
     via_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance))
 
     for via in pcb_data.vias:
-        if via.net_id == exclude_net_id:
+        if via.net_id == exclude_net_id or via.net_id in protected:
             continue
 
         gx, gy = coord.to_grid(via.x, via.y)
@@ -1122,6 +1128,7 @@ def try_place_via_with_ripup(
     new_vias: List[Dict] = None,  # Previously placed vias to re-block after rebuild
     hole_to_hole_clearance: float = 0.2,
     via_drill: float = 0.4,
+    protected_net_ids: Optional[Set[int]] = None,  # Nets that should never be ripped up
     verbose: bool = False
 ) -> ViaPlacementResult:
     """
@@ -1139,12 +1146,12 @@ def try_place_via_with_ripup(
             # Just find the blocker directly
             if via_blocked:
                 blocker = find_via_position_blocker(
-                    pad.global_x, pad.global_y, pcb_data, config, net_id
+                    pad.global_x, pad.global_y, pcb_data, config, net_id, protected_net_ids
                 )
             else:
                 # Route was blocked - use frontier data
                 blocker = find_route_blocker_from_frontier(
-                    blocked_cells or [], pcb_data, config, net_id
+                    blocked_cells or [], pcb_data, config, net_id, protected_net_ids
                 )
         else:
             # After rip-up, try again (skip positions near previously failed ones)
@@ -1182,12 +1189,12 @@ def try_place_via_with_ripup(
 
                 # Routing failed - find blocker from frontier
                 blocker = find_route_blocker_from_frontier(
-                    route_result.blocked_cells, pcb_data, config, net_id
+                    route_result.blocked_cells, pcb_data, config, net_id, protected_net_ids
                 )
             else:
                 # Via placement blocked
                 blocker = find_via_position_blocker(
-                    pad.global_x, pad.global_y, pcb_data, config, net_id
+                    pad.global_x, pad.global_y, pcb_data, config, net_id, protected_net_ids
                 )
 
         if blocker is None:
@@ -1389,6 +1396,9 @@ def create_plane(
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
 
+    # Set of all net IDs being processed - these should never be ripped up
+    protected_net_ids = set(net_ids)
+
     # Step 2: Check for existing zones on each target layer
     existing_zones = extract_zones(input_file)
     should_create_zones = []  # Per-net flag for whether to create zone
@@ -1484,12 +1494,18 @@ def create_plane(
 
         # Step 8: Build routing obstacle maps (cached per layer, but rebuild for each net)
         routing_obstacles_cache: Dict[str, GridObstacleMap] = {}
+        if verbose:
+            print(f"  pcb_data has {len(pcb_data.vias)} vias, {len(pcb_data.segments)} segments")
 
         def get_routing_obstacles(layer: str) -> GridObstacleMap:
             """Get or create routing obstacle map for a layer."""
             if layer not in routing_obstacles_cache:
                 if verbose:
                     print(f"  Building routing obstacle map for {layer}...")
+                    # Debug: check for via at 144.50, 99.40
+                    for v in pcb_data.vias:
+                        if abs(v.x - 144.50) < 0.01 and abs(v.y - 99.40) < 0.01:
+                            print(f"    DEBUG: Found via at (144.50, 99.40) net_id={v.net_id}, excluding={net_id}")
                 routing_obstacles_cache[layer] = build_routing_obstacle_map(
                     pcb_data, config, net_id, layer, skip_pad_blocking=False
                 )
@@ -1558,6 +1574,7 @@ def create_plane(
                                 new_vias=new_vias,
                                 hole_to_hole_clearance=hole_to_hole_clearance,
                                 via_drill=via_drill,
+                                protected_net_ids=protected_net_ids,
                                 verbose=verbose
                             )
                             if result.success:
@@ -1657,6 +1674,7 @@ def create_plane(
                         new_vias=new_vias,
                         hole_to_hole_clearance=hole_to_hole_clearance,
                         via_drill=via_drill,
+                        protected_net_ids=protected_net_ids,
                         verbose=verbose
                     )
 
@@ -1780,6 +1798,21 @@ def create_plane(
         for rid in ripped_net_ids:
             if rid not in all_ripped_net_ids:
                 all_ripped_net_ids.append(rid)
+
+        # Add new vias/segments to pcb_data so subsequent nets will avoid them
+        for v in new_vias:
+            pcb_data.vias.append(Via(
+                x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                layers=v['layers'], net_id=v['net_id']
+            ))
+        for s in new_segments:
+            start = s['start']
+            end = s['end']
+            pcb_data.segments.append(Segment(
+                start_x=start[0], start_y=start[1],
+                end_x=end[0], end_y=end[1],
+                width=s['width'], layer=s['layer'], net_id=s['net_id']
+            ))
 
     # End of per-net loop
 
