@@ -437,6 +437,8 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 # Multi-net plane layers (Voronoi partitioning)
 --plane-proximity-radius 2.0  # Proximity radius for routing around other nets' vias (mm)
 --plane-proximity-cost 5.0    # Proximity cost for routing around other nets' vias
+--voronoi-seed-interval 2.0   # Sample interval for seed points along connection routes (mm)
+--plane-max-iterations 200000 # Max A* iterations for plane connection routing
 
 # Blocker rip-up
 --rip-blocker-nets      # Rip up nets blocking via placement

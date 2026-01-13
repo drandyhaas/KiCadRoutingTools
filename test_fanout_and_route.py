@@ -99,7 +99,7 @@ def main():
     if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1*)"', unbuffered)
 
     # Add and route GND plane
-    run('python3 route_plane.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --net "GND" "/fpga_adc/VA19|/fpga_adc/VA11" --plane-layer In4.Cu In5.Cu --rip-blocker-nets --reroute-ripped-nets ', unbuffered)
+    run('python3 route_plane.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --net "GND" "/fpga_adc/VA19|/fpga_adc/VA11|/fpga_adc/VLVDS" --plane-layer In4.Cu In5.Cu --voronoi-seed-interval 0.4 --plane-max-iterations 200000 --rip-blocker-nets --reroute-ripped-nets ', unbuffered)
 
     print("\n=== All tests completed ===")
 
