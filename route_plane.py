@@ -16,38 +16,6 @@ import math
 import time
 from typing import List, Optional, Tuple, Dict, Set
 from dataclasses import dataclass
-from collections import defaultdict
-
-
-# Simple timing profiler
-class TimingProfiler:
-    """Accumulate timing for named operations."""
-    def __init__(self):
-        self.times = defaultdict(float)
-        self.counts = defaultdict(int)
-
-    def add(self, name: str, elapsed: float):
-        self.times[name] += elapsed
-        self.counts[name] += 1
-
-    def report(self):
-        if not self.times:
-            return
-        print("\n" + "=" * 60)
-        print("TIMING PROFILE")
-        print("=" * 60)
-        total = sum(self.times.values())
-        for name in sorted(self.times.keys(), key=lambda n: -self.times[n]):
-            t = self.times[name]
-            c = self.counts[name]
-            pct = 100 * t / total if total > 0 else 0
-            print(f"  {name}: {t:.2f}s ({c} calls, {pct:.1f}%)")
-        print(f"  TOTAL: {total:.2f}s")
-        print("=" * 60)
-
-
-# Global profiler instance
-_profiler = TimingProfiler()
 
 # Run startup checks before other imports
 from startup_checks import run_all_checks
@@ -231,7 +199,6 @@ def build_via_obstacle_map(
     - Board edge clearance
     - Through-hole pad drills (hole-to-hole clearance)
     """
-    _t0 = time.time()
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
