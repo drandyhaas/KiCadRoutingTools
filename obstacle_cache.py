@@ -303,3 +303,195 @@ def update_net_obstacles_after_routing(pcb_data, net_id: int, result: Dict,
         pcb_data, net_id, config,
         extra_clearance=0.0, diagonal_margin=0.25
     )
+
+
+# =============================================================================
+# Via Placement Obstacle Cache
+# =============================================================================
+# Separate cache for via placement in route_plane.py. Uses different clearance
+# calculations than routing (actual segment widths vs uniform track width).
+
+@dataclass
+class ViaPlacementObstacleData:
+    """Cached obstacle data for via placement (used by route_plane.py).
+
+    Stores blocked via positions and routing cells per layer for incremental
+    updates when ripping up nets during plane via placement.
+    """
+    # Blocked via positions as numpy array of shape (N, 2) with columns [gx, gy]
+    # May contain duplicates to match reference counting in GridObstacleMap
+    blocked_vias: np.ndarray
+    # Blocked routing cells per layer as dict: layer_name -> numpy array of shape (M, 2) [gx, gy]
+    blocked_cells_by_layer: Dict[str, np.ndarray]
+
+
+def precompute_via_placement_obstacles(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    all_copper_layers: List[str]
+) -> ViaPlacementObstacleData:
+    """
+    Pre-compute via placement obstacle positions for a single net.
+
+    Used for incremental updates when ripping up nets - we can quickly remove
+    this net's blocked positions instead of rebuilding the entire obstacle map.
+
+    Unlike precompute_net_obstacles (for routing), this uses actual segment widths
+    for clearance calculations rather than a uniform track width.
+
+    Args:
+        pcb_data: PCB data structure
+        net_id: Net ID to compute obstacles for
+        config: Routing configuration
+        all_copper_layers: All copper layers for routing obstacle cells
+
+    Returns:
+        ViaPlacementObstacleData with blocked_vias and blocked_cells_by_layer
+    """
+    import math
+    coord = GridCoord(config.grid_step)
+
+    # Collect blocked via positions from this net's segments and vias
+    # Use lists (not sets) to preserve duplicate counts - the obstacle map uses
+    # reference counting, so we need to remove exactly as many times as we added
+    blocked_vias_list: List[Tuple[int, int]] = []
+
+    # Collect blocked routing cells per layer
+    blocked_cells_by_layer: Dict[str, List[Tuple[int, int]]] = {
+        layer: [] for layer in all_copper_layers
+    }
+
+    # Process this net's segments - they block via placement
+    for seg in pcb_data.segments:
+        if seg.net_id != net_id:
+            continue
+        # Via-segment clearance (via can't overlap segment on any layer)
+        seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
+        seg_expansion_sq = (seg_expansion_mm / config.grid_step) ** 2
+        seg_expansion_int = int(math.ceil(math.sqrt(seg_expansion_sq)))
+
+        # Routing clearance for this segment's layer
+        route_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
+        route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
+
+        # Walk along segment using Bresenham
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+
+        x, y = gx1, gy1
+        if dx > dy:
+            err = dx // 2
+            while x != gx2:
+                # Block via positions
+                for ex in range(-seg_expansion_int, seg_expansion_int + 1):
+                    for ey in range(-seg_expansion_int, seg_expansion_int + 1):
+                        if ex*ex + ey*ey <= seg_expansion_sq:
+                            blocked_vias_list.append((x + ex, y + ey))
+                # Block routing cells on this segment's layer
+                if seg.layer in blocked_cells_by_layer:
+                    for ex in range(-route_expansion_grid, route_expansion_grid + 1):
+                        for ey in range(-route_expansion_grid, route_expansion_grid + 1):
+                            blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                x += sx
+        else:
+            err = dy // 2
+            while y != gy2:
+                for ex in range(-seg_expansion_int, seg_expansion_int + 1):
+                    for ey in range(-seg_expansion_int, seg_expansion_int + 1):
+                        if ex*ex + ey*ey <= seg_expansion_sq:
+                            blocked_vias_list.append((x + ex, y + ey))
+                if seg.layer in blocked_cells_by_layer:
+                    for ex in range(-route_expansion_grid, route_expansion_grid + 1):
+                        for ey in range(-route_expansion_grid, route_expansion_grid + 1):
+                            blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                y += sy
+        # Final point
+        for ex in range(-seg_expansion_int, seg_expansion_int + 1):
+            for ey in range(-seg_expansion_int, seg_expansion_int + 1):
+                if ex*ex + ey*ey <= seg_expansion_sq:
+                    blocked_vias_list.append((x + ex, y + ey))
+        if seg.layer in blocked_cells_by_layer:
+            for ex in range(-route_expansion_grid, route_expansion_grid + 1):
+                for ey in range(-route_expansion_grid, route_expansion_grid + 1):
+                    blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
+
+    # Process this net's vias - they block via placement and routing on all layers
+    via_via_expansion_mm = config.via_size + config.clearance
+    via_via_radius_sq = (via_via_expansion_mm / config.grid_step) ** 2
+    via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
+
+    via_route_expansion = coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance)
+
+    for via in pcb_data.vias:
+        if via.net_id != net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+        # Block via positions (via-via clearance)
+        for ex in range(-via_via_radius_int, via_via_radius_int + 1):
+            for ey in range(-via_via_radius_int, via_via_radius_int + 1):
+                if ex*ex + ey*ey <= via_via_radius_sq:
+                    blocked_vias_list.append((gx + ex, gy + ey))
+        # Block routing cells on all layers (via spans all layers)
+        for layer in all_copper_layers:
+            for ex in range(-via_route_expansion, via_route_expansion + 1):
+                for ey in range(-via_route_expansion, via_route_expansion + 1):
+                    if ex*ex + ey*ey <= via_route_expansion * via_route_expansion:
+                        blocked_cells_by_layer[layer].append((gx + ex, gy + ey))
+
+    # Convert to numpy arrays (keep duplicates for reference counting)
+    if blocked_vias_list:
+        blocked_vias_arr = np.array(blocked_vias_list, dtype=np.int32)
+    else:
+        blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
+
+    blocked_cells_arrays = {}
+    for layer, cells in blocked_cells_by_layer.items():
+        if cells:
+            blocked_cells_arrays[layer] = np.array(cells, dtype=np.int32)
+        else:
+            blocked_cells_arrays[layer] = np.empty((0, 2), dtype=np.int32)
+
+    return ViaPlacementObstacleData(
+        blocked_vias=blocked_vias_arr,
+        blocked_cells_by_layer=blocked_cells_arrays
+    )
+
+
+def remove_via_placement_obstacles(
+    via_obstacles: 'GridObstacleMap',
+    routing_obstacles_by_layer: Dict[str, 'GridObstacleMap'],
+    cache: ViaPlacementObstacleData
+):
+    """
+    Remove a net's obstacles from the via and routing obstacle maps.
+
+    Used for incremental updates when ripping up a net during plane via placement.
+
+    Args:
+        via_obstacles: Via obstacle map to update
+        routing_obstacles_by_layer: Dict of routing obstacle maps per layer
+        cache: Pre-computed ViaPlacementObstacleData for this net
+    """
+    # Remove from via obstacle map
+    if len(cache.blocked_vias) > 0:
+        via_obstacles.remove_blocked_vias_batch(cache.blocked_vias)
+
+    # Remove from routing obstacle maps (single-layer maps use layer_idx=0)
+    for layer, cells in cache.blocked_cells_by_layer.items():
+        if layer in routing_obstacles_by_layer and len(cells) > 0:
+            obs = routing_obstacles_by_layer[layer]
+            cells_3d = np.column_stack([cells, np.zeros(len(cells), dtype=np.int32)])
+            obs.remove_blocked_cells_batch(cells_3d)
