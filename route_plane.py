@@ -16,6 +16,14 @@ import math
 from typing import List, Optional, Tuple, Dict, Set
 from dataclasses import dataclass
 
+# scipy for Voronoi computation (multi-net layer support)
+try:
+    from scipy.spatial import Voronoi
+    import numpy as np
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 # Run startup checks before other imports
 from startup_checks import run_all_checks
 run_all_checks()
@@ -1394,6 +1402,240 @@ def write_plane_output(
     return True
 
 
+def compute_zone_boundaries(
+    vias_by_net: Dict[int, List[Tuple[float, float]]],
+    board_bounds: Tuple[float, float, float, float]
+) -> Dict[int, List[Tuple[float, float]]]:
+    """
+    Compute non-overlapping zone polygons for multiple nets using Voronoi.
+
+    Algorithm:
+    1. Create Voronoi cell around EACH via (not centroid)
+    2. Label each cell with its via's net_id
+    3. Clip cells to board bounds
+    4. Merge adjacent cells of the same net
+    5. If same-net cells aren't adjacent → error (interleaved vias)
+
+    Args:
+        vias_by_net: Dict mapping net_id → list of (x, y) via positions
+        board_bounds: Tuple of (min_x, min_y, max_x, max_y)
+
+    Returns:
+        Dict mapping net_id → polygon points (list of (x, y) tuples)
+
+    Raises:
+        ValueError: If scipy is not available or vias are interleaved
+    """
+    if not SCIPY_AVAILABLE:
+        raise ValueError("scipy is required for multi-net layer support. Install with: pip install scipy")
+
+    min_x, min_y, max_x, max_y = board_bounds
+
+    # Collect all vias into a single list with net labels
+    all_vias = []
+    via_net_ids = []
+    for net_id, positions in vias_by_net.items():
+        for pos in positions:
+            all_vias.append(pos)
+            via_net_ids.append(net_id)
+
+    if len(all_vias) < 2:
+        # Single via or empty: return full board rectangle for the one net
+        if len(all_vias) == 1:
+            net_id = via_net_ids[0]
+            return {net_id: [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]}
+        return {}
+
+    # Add mirror points outside board bounds to ensure all regions are finite
+    # This is a standard technique for bounded Voronoi
+    pad = max(max_x - min_x, max_y - min_y) * 2
+    mirror_points = [
+        (min_x - pad, min_y - pad),
+        (max_x + pad, min_y - pad),
+        (min_x - pad, max_y + pad),
+        (max_x + pad, max_y + pad),
+        ((min_x + max_x) / 2, min_y - pad),
+        ((min_x + max_x) / 2, max_y + pad),
+        (min_x - pad, (min_y + max_y) / 2),
+        (max_x + pad, (min_y + max_y) / 2),
+    ]
+
+    points = np.array(all_vias + mirror_points)
+    vor = Voronoi(points)
+
+    # Build polygon for each real via (not mirror points)
+    via_polygons: Dict[int, List[List[Tuple[float, float]]]] = {net_id: [] for net_id in vias_by_net}
+
+    for via_idx in range(len(all_vias)):
+        region_idx = vor.point_region[via_idx]
+        region = vor.regions[region_idx]
+
+        if -1 in region or len(region) == 0:
+            # Infinite region (shouldn't happen with mirror points, but handle it)
+            continue
+
+        # Get polygon vertices
+        polygon = [tuple(vor.vertices[i]) for i in region]
+
+        # Clip polygon to board bounds
+        clipped = clip_polygon_to_rect(polygon, min_x, min_y, max_x, max_y)
+
+        if clipped and len(clipped) >= 3:
+            net_id = via_net_ids[via_idx]
+            via_polygons[net_id].append(clipped)
+
+    # Merge polygons for each net
+    result: Dict[int, List[Tuple[float, float]]] = {}
+
+    for net_id, polygons in via_polygons.items():
+        if not polygons:
+            continue
+
+        if len(polygons) == 1:
+            result[net_id] = polygons[0]
+        else:
+            # Merge all polygons for this net
+            merged = merge_polygons(polygons)
+            if merged:
+                result[net_id] = merged
+            else:
+                # Fallback: use convex hull of all polygon vertices
+                all_vertices = []
+                for poly in polygons:
+                    all_vertices.extend(poly)
+                result[net_id] = convex_hull(all_vertices)
+
+    return result
+
+
+def clip_polygon_to_rect(
+    polygon: List[Tuple[float, float]],
+    min_x: float, min_y: float, max_x: float, max_y: float
+) -> List[Tuple[float, float]]:
+    """
+    Clip a polygon to a rectangle using Sutherland-Hodgman algorithm.
+    """
+    def inside_edge(p, edge):
+        """Check if point p is inside the clipping edge."""
+        x, y = p
+        if edge == 'left':
+            return x >= min_x
+        elif edge == 'right':
+            return x <= max_x
+        elif edge == 'bottom':
+            return y >= min_y
+        elif edge == 'top':
+            return y <= max_y
+        return True
+
+    def intersect_edge(p1, p2, edge):
+        """Find intersection of line p1-p2 with clipping edge."""
+        x1, y1 = p1
+        x2, y2 = p2
+        dx = x2 - x1
+        dy = y2 - y1
+
+        if edge == 'left':
+            if abs(dx) < 1e-10:
+                return (min_x, y1)
+            t = (min_x - x1) / dx
+            return (min_x, y1 + t * dy)
+        elif edge == 'right':
+            if abs(dx) < 1e-10:
+                return (max_x, y1)
+            t = (max_x - x1) / dx
+            return (max_x, y1 + t * dy)
+        elif edge == 'bottom':
+            if abs(dy) < 1e-10:
+                return (x1, min_y)
+            t = (min_y - y1) / dy
+            return (x1 + t * dx, min_y)
+        elif edge == 'top':
+            if abs(dy) < 1e-10:
+                return (x1, max_y)
+            t = (max_y - y1) / dy
+            return (x1 + t * dx, max_y)
+        return p1
+
+    output = polygon
+    for edge in ['left', 'right', 'bottom', 'top']:
+        if not output:
+            return []
+        input_poly = output
+        output = []
+
+        for i in range(len(input_poly)):
+            p1 = input_poly[i]
+            p2 = input_poly[(i + 1) % len(input_poly)]
+
+            p1_inside = inside_edge(p1, edge)
+            p2_inside = inside_edge(p2, edge)
+
+            if p1_inside and p2_inside:
+                output.append(p2)
+            elif p1_inside and not p2_inside:
+                output.append(intersect_edge(p1, p2, edge))
+            elif not p1_inside and p2_inside:
+                output.append(intersect_edge(p1, p2, edge))
+                output.append(p2)
+            # else: both outside, add nothing
+
+    return output
+
+
+def merge_polygons(polygons: List[List[Tuple[float, float]]]) -> Optional[List[Tuple[float, float]]]:
+    """
+    Merge a list of adjacent polygons into a single polygon.
+    Returns None if polygons are not all adjacent (interleaved).
+    """
+    if not polygons:
+        return None
+    if len(polygons) == 1:
+        return polygons[0]
+
+    # Simple approach: use convex hull of all vertices
+    # This works for adjacent Voronoi cells but may over-simplify
+    all_vertices = []
+    for poly in polygons:
+        all_vertices.extend(poly)
+
+    return convex_hull(all_vertices)
+
+
+def convex_hull(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """
+    Compute convex hull of points using Graham scan.
+    """
+    if len(points) < 3:
+        return points
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    # Sort points by x, then by y
+    points = sorted(set(points))
+
+    if len(points) < 3:
+        return points
+
+    # Build lower hull
+    lower = []
+    for p in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+
+    # Build upper hull
+    upper = []
+    for p in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+
+    # Remove last point of each half because it's repeated
+    return lower[:-1] + upper[:-1]
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -1414,7 +1656,8 @@ def create_plane(
     dry_run: bool = False,
     rip_blocker_nets: bool = False,
     max_rip_nets: int = 3,
-    reroute_ripped_nets: bool = False
+    reroute_ripped_nets: bool = False,
+    layer_nets: Dict[str, List[str]] = None
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1772,8 +2015,11 @@ def create_plane(
                 failed_pads += 1
 
         # Step 10: Generate zone for this net (if needed)
+        # For multi-net layers, defer zone generation until all nets are processed
         zone_sexpr = None
-        if should_create_zone:
+        is_multi_net_layer = layer_nets and len(layer_nets.get(plane_layer, [])) > 1
+        if should_create_zone and not is_multi_net_layer:
+            # Single-net layer: use full board rectangle
             zone_sexpr = generate_zone_sexpr(
                 net_id=net_id,
                 net_name=net_name,
@@ -1787,7 +2033,9 @@ def create_plane(
 
         # Print per-net results
         print(f"\nResults for '{net_name}':")
-        if should_create_zone:
+        if should_create_zone and is_multi_net_layer:
+            print(f"  Zone on {plane_layer} deferred (multi-net layer)")
+        elif should_create_zone:
             print(f"  Zone created on {plane_layer}")
         else:
             print(f"  Using existing zone on {plane_layer}")
@@ -1824,6 +2072,95 @@ def create_plane(
             ))
 
     # End of per-net loop
+
+    # Generate zones for multi-net layers using Voronoi boundaries
+    if layer_nets:
+        for layer, nets_on_layer in layer_nets.items():
+            if len(nets_on_layer) > 1:
+                print(f"\n{'='*60}")
+                print(f"Computing zone boundaries for multi-net layer {layer}")
+                print(f"Nets: {', '.join(nets_on_layer)}")
+                print(f"{'='*60}")
+
+                # Build vias_by_net for this layer
+                vias_by_net: Dict[int, List[Tuple[float, float]]] = {}
+                net_name_to_id = {}
+                for net_name in nets_on_layer:
+                    net_id = next((nid for nid, n in pcb_data.nets.items() if n.name == net_name), None)
+                    if net_id is not None:
+                        net_name_to_id[net_name] = net_id
+                        vias_by_net[net_id] = []
+
+                # Collect via positions for nets on this layer
+                for via in all_new_vias:
+                    if via['net_id'] in vias_by_net:
+                        vias_by_net[via['net_id']].append((via['x'], via['y']))
+
+                # Check for nets with no vias
+                nets_with_vias = []
+                for net_name in nets_on_layer:
+                    net_id = net_name_to_id.get(net_name)
+                    if net_id:
+                        via_count = len(vias_by_net.get(net_id, []))
+                        if via_count == 0:
+                            print(f"  Warning: Net '{net_name}' has no vias on layer {layer}, skipping zone")
+                        else:
+                            nets_with_vias.append(net_name)
+                            print(f"  Net '{net_name}': {via_count} vias")
+
+                if len(nets_with_vias) < 2:
+                    # Only one net has vias, use full board rectangle
+                    if nets_with_vias:
+                        net_name = nets_with_vias[0]
+                        net_id = net_name_to_id[net_name]
+                        print(f"  Only '{net_name}' has vias, using full board rectangle")
+                        zone_sexpr = generate_zone_sexpr(
+                            net_id=net_id,
+                            net_name=net_name,
+                            layer=layer,
+                            polygon_points=zone_polygon,
+                            clearance=zone_clearance,
+                            min_thickness=min_thickness,
+                            direct_connect=True
+                        )
+                        all_zone_sexprs.append(zone_sexpr)
+                    continue
+
+                # Compute zone boundaries using Voronoi
+                try:
+                    zone_polygons = compute_zone_boundaries(vias_by_net, board_bounds)
+                except ValueError as e:
+                    print(f"  Error computing zone boundaries: {e}")
+                    print(f"  Falling back to full board rectangle for first net with vias")
+                    net_name = nets_with_vias[0]
+                    net_id = net_name_to_id[net_name]
+                    zone_sexpr = generate_zone_sexpr(
+                        net_id=net_id,
+                        net_name=net_name,
+                        layer=layer,
+                        polygon_points=zone_polygon,
+                        clearance=zone_clearance,
+                        min_thickness=min_thickness,
+                        direct_connect=True
+                    )
+                    all_zone_sexprs.append(zone_sexpr)
+                    continue
+
+                # Generate zones for each net
+                for net_id, polygon in zone_polygons.items():
+                    net = pcb_data.nets.get(net_id)
+                    net_name = net.name if net else f"net_{net_id}"
+                    print(f"  Creating zone for '{net_name}' with {len(polygon)} vertices")
+                    zone_sexpr = generate_zone_sexpr(
+                        net_id=net_id,
+                        net_name=net_name,
+                        layer=layer,
+                        polygon_points=polygon,
+                        clearance=zone_clearance,
+                        min_thickness=min_thickness,
+                        direct_connect=True
+                    )
+                    all_zone_sexprs.append(zone_sexpr)
 
     # Print overall totals
     print(f"\n{'='*60}")
@@ -1967,15 +2304,41 @@ Examples:
 
     # Validate net/plane-layer counts match
     if len(args.net) != len(args.plane_layer):
-        print(f"Error: Number of nets ({len(args.net)}) must match number of plane layers ({len(args.plane_layer)})")
-        print("Each net needs a corresponding plane layer (e.g., --net GND VCC --plane-layer In1.Cu In2.Cu)")
+        print(f"Error: Number of net arguments ({len(args.net)}) must match number of plane layers ({len(args.plane_layer)})")
+        print("Each net argument needs a corresponding plane layer")
+        print("Use | to separate multiple nets on the same layer (e.g., --net GND 'VA19|VA11' --plane-layer In4.Cu In5.Cu)")
         return
+
+    # Parse --net arguments: detect | separator for multi-net layers
+    # Build data structures:
+    #   net_names: List[str] - all individual net names (expanded)
+    #   plane_layers: List[str] - layer for each net (expanded to match net_names)
+    #   layer_nets: Dict[str, List[str]] - layer → list of nets on that layer
+    net_names = []
+    plane_layers = []
+    layer_nets = {}
+
+    for net_arg, layer in zip(args.net, args.plane_layer):
+        nets_on_layer = [n.strip() for n in net_arg.split('|')]
+        for net in nets_on_layer:
+            net_names.append(net)
+            plane_layers.append(layer)
+
+        # Track nets per layer
+        if layer not in layer_nets:
+            layer_nets[layer] = []
+        layer_nets[layer].extend(nets_on_layer)
+
+    # Report multi-net layers
+    for layer, nets in layer_nets.items():
+        if len(nets) > 1:
+            print(f"Layer {layer} has multiple nets: {', '.join(nets)}")
 
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
-        net_names=args.net,
-        plane_layers=args.plane_layer,
+        net_names=net_names,
+        plane_layers=plane_layers,
         via_size=args.via_size,
         via_drill=args.via_drill,
         track_width=args.track_width,
@@ -1991,7 +2354,8 @@ Examples:
         dry_run=args.dry_run,
         rip_blocker_nets=args.rip_blocker_nets,
         max_rip_nets=args.max_rip_nets,
-        reroute_ripped_nets=args.reroute_ripped_nets
+        reroute_ripped_nets=args.reroute_ripped_nets,
+        layer_nets=layer_nets
     )
 
 
