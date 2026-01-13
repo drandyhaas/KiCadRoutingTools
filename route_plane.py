@@ -1405,7 +1405,8 @@ def write_plane_output(
 def compute_zone_boundaries(
     vias_by_net: Dict[int, List[Tuple[float, float]]],
     board_bounds: Tuple[float, float, float, float],
-    return_raw_polygons: bool = False
+    return_raw_polygons: bool = False,
+    board_edge_clearance: float = 0.0
 ) -> Dict[int, List[Tuple[float, float]]]:
     """
     Compute non-overlapping zone polygons for multiple nets using Voronoi.
@@ -1413,7 +1414,7 @@ def compute_zone_boundaries(
     Algorithm:
     1. Create Voronoi cell around EACH via (not centroid)
     2. Label each cell with its via's net_id
-    3. Clip cells to board bounds
+    3. Clip cells to board bounds (inset by board_edge_clearance)
     4. Merge adjacent cells of the same net
     5. If same-net cells aren't adjacent → they become disconnected regions
 
@@ -1423,6 +1424,7 @@ def compute_zone_boundaries(
         return_raw_polygons: If True, return tuple (merged_polygons, raw_polygons, via_to_polygon_idx)
                             where raw_polygons[net_id] is list of individual Voronoi cells,
                             and via_to_polygon_idx[net_id] maps via position to polygon index
+        board_edge_clearance: Clearance from board edge for zone polygons (mm)
 
     Returns:
         If return_raw_polygons=False:
@@ -1438,6 +1440,12 @@ def compute_zone_boundaries(
 
     min_x, min_y, max_x, max_y = board_bounds
 
+    # Apply board edge clearance (inset the clipping bounds)
+    clip_min_x = min_x + board_edge_clearance
+    clip_min_y = min_y + board_edge_clearance
+    clip_max_x = max_x - board_edge_clearance
+    clip_max_y = max_y - board_edge_clearance
+
     # Collect all vias into a single list with net labels
     all_vias = []
     via_net_ids = []
@@ -1447,10 +1455,11 @@ def compute_zone_boundaries(
             via_net_ids.append(net_id)
 
     if len(all_vias) < 2:
-        # Single via or empty: return full board rectangle for the one net
+        # Single via or empty: return full board rectangle (with clearance) for the one net
         if len(all_vias) == 1:
             net_id = via_net_ids[0]
-            return {net_id: [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]}
+            return {net_id: [(clip_min_x, clip_min_y), (clip_max_x, clip_min_y),
+                            (clip_max_x, clip_max_y), (clip_min_x, clip_max_y)]}
         return {}
 
     # Add mirror points outside board bounds to ensure all regions are finite
@@ -1486,8 +1495,8 @@ def compute_zone_boundaries(
         # Get polygon vertices
         polygon = [tuple(vor.vertices[i]) for i in region]
 
-        # Clip polygon to board bounds
-        clipped = clip_polygon_to_rect(polygon, min_x, min_y, max_x, max_y)
+        # Clip polygon to board bounds (with edge clearance applied)
+        clipped = clip_polygon_to_rect(polygon, clip_min_x, clip_min_y, clip_max_x, clip_max_y)
 
         if clipped and len(clipped) >= 3:
             net_id = via_net_ids[via_idx]
@@ -1948,7 +1957,8 @@ def create_plane(
     reroute_ripped_nets: bool = False,
     layer_nets: Dict[str, List[str]] = None,
     plane_proximity_radius: float = 3.0,
-    plane_proximity_cost: float = 2.0
+    plane_proximity_cost: float = 2.0,
+    board_edge_clearance: float = 0.5
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1962,6 +1972,7 @@ def create_plane(
         reroute_ripped_nets: If True, automatically re-route ripped nets after placing vias.
         plane_proximity_radius: Radius around other nets' vias for proximity cost (mm).
         plane_proximity_cost: Maximum proximity cost around other nets' vias (mm equivalent).
+        board_edge_clearance: Clearance from board edge for zone polygons (mm).
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -2011,12 +2022,12 @@ def create_plane(
     min_x, min_y, max_x, max_y = board_bounds
     print(f"Board bounds: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})")
 
-    # Create zone polygon from board bounds
+    # Create zone polygon from board bounds (with edge clearance applied)
     zone_polygon = [
-        (min_x, min_y),
-        (max_x, min_y),
-        (max_x, max_y),
-        (min_x, max_y)
+        (min_x + board_edge_clearance, min_y + board_edge_clearance),
+        (max_x - board_edge_clearance, min_y + board_edge_clearance),
+        (max_x - board_edge_clearance, max_y - board_edge_clearance),
+        (min_x + board_edge_clearance, max_y - board_edge_clearance)
     ]
 
     # Step 4: Build config and coordinate system
@@ -2421,7 +2432,8 @@ def create_plane(
 
                 # Compute zone boundaries using Voronoi (with raw polygon info)
                 try:
-                    result = compute_zone_boundaries(vias_by_net, board_bounds, return_raw_polygons=True)
+                    result = compute_zone_boundaries(vias_by_net, board_bounds, return_raw_polygons=True,
+                                                      board_edge_clearance=board_edge_clearance)
                     zone_polygons, raw_polygons, via_to_polygon_idx = result
                 except ValueError as e:
                     print(f"  Error computing zone boundaries: {e}")
@@ -2535,7 +2547,8 @@ def create_plane(
                 if total_augmented > 0:
                     print(f"  Re-computing zone boundaries with {total_augmented} additional seed points")
                     try:
-                        zone_polygons = compute_zone_boundaries(augmented_vias_by_net, board_bounds)
+                        zone_polygons = compute_zone_boundaries(augmented_vias_by_net, board_bounds,
+                                                                 board_edge_clearance=board_edge_clearance)
                     except ValueError as e:
                         print(f"  Error re-computing zone boundaries: {e}")
                         # Fall back to original zone_polygons computed above
@@ -2689,6 +2702,10 @@ Examples:
     parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
                         help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
 
+    # Board edge clearance
+    parser.add_argument("--board-edge-clearance", type=float, default=0.5,
+                        help="Clearance from board edge for zones in mm (default: 0.5)")
+
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
@@ -2757,7 +2774,8 @@ Examples:
         reroute_ripped_nets=args.reroute_ripped_nets,
         layer_nets=layer_nets,
         plane_proximity_radius=args.plane_proximity_radius,
-        plane_proximity_cost=args.plane_proximity_cost
+        plane_proximity_cost=args.plane_proximity_cost,
+        board_edge_clearance=args.board_edge_clearance
     )
 
 
