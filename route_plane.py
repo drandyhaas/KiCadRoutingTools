@@ -1404,7 +1404,8 @@ def write_plane_output(
 
 def compute_zone_boundaries(
     vias_by_net: Dict[int, List[Tuple[float, float]]],
-    board_bounds: Tuple[float, float, float, float]
+    board_bounds: Tuple[float, float, float, float],
+    return_raw_polygons: bool = False
 ) -> Dict[int, List[Tuple[float, float]]]:
     """
     Compute non-overlapping zone polygons for multiple nets using Voronoi.
@@ -1414,17 +1415,23 @@ def compute_zone_boundaries(
     2. Label each cell with its via's net_id
     3. Clip cells to board bounds
     4. Merge adjacent cells of the same net
-    5. If same-net cells aren't adjacent → error (interleaved vias)
+    5. If same-net cells aren't adjacent → they become disconnected regions
 
     Args:
         vias_by_net: Dict mapping net_id → list of (x, y) via positions
         board_bounds: Tuple of (min_x, min_y, max_x, max_y)
+        return_raw_polygons: If True, return tuple (merged_polygons, raw_polygons, via_to_polygon_idx)
+                            where raw_polygons[net_id] is list of individual Voronoi cells,
+                            and via_to_polygon_idx[net_id] maps via position to polygon index
 
     Returns:
-        Dict mapping net_id → polygon points (list of (x, y) tuples)
+        If return_raw_polygons=False:
+            Dict mapping net_id → polygon points (list of (x, y) tuples)
+        If return_raw_polygons=True:
+            Tuple of (merged_polygons, raw_polygons, via_to_polygon_idx)
 
     Raises:
-        ValueError: If scipy is not available or vias are interleaved
+        ValueError: If scipy is not available
     """
     if not SCIPY_AVAILABLE:
         raise ValueError("scipy is required for multi-net layer support. Install with: pip install scipy")
@@ -1464,7 +1471,9 @@ def compute_zone_boundaries(
     vor = Voronoi(points)
 
     # Build polygon for each real via (not mirror points)
+    # Also track which via produced which polygon (for disconnection routing)
     via_polygons: Dict[int, List[List[Tuple[float, float]]]] = {net_id: [] for net_id in vias_by_net}
+    via_to_polygon_idx: Dict[int, Dict[Tuple[float, float], int]] = {net_id: {} for net_id in vias_by_net}
 
     for via_idx in range(len(all_vias)):
         region_idx = vor.point_region[via_idx]
@@ -1482,7 +1491,11 @@ def compute_zone_boundaries(
 
         if clipped and len(clipped) >= 3:
             net_id = via_net_ids[via_idx]
+            polygon_idx = len(via_polygons[net_id])
             via_polygons[net_id].append(clipped)
+            # Track which via produced this polygon
+            via_pos = all_vias[via_idx]
+            via_to_polygon_idx[net_id][via_pos] = polygon_idx
 
     # Merge polygons for each net
     result: Dict[int, List[Tuple[float, float]]] = {}
@@ -1505,6 +1518,8 @@ def compute_zone_boundaries(
                     all_vertices.extend(poly)
                 result[net_id] = convex_hull(all_vertices)
 
+    if return_raw_polygons:
+        return result, via_polygons, via_to_polygon_idx
     return result
 
 
@@ -1586,15 +1601,23 @@ def clip_polygon_to_rect(
 def merge_polygons(polygons: List[List[Tuple[float, float]]]) -> Optional[List[Tuple[float, float]]]:
     """
     Merge a list of adjacent polygons into a single polygon.
-    Returns None if polygons are not all adjacent (interleaved).
+    Returns None if polygons are not all adjacent (i.e., disconnected).
+
+    Uses find_polygon_groups() to detect if polygons form multiple
+    disconnected groups. Only merges if all polygons are in the same group.
     """
     if not polygons:
         return None
     if len(polygons) == 1:
         return polygons[0]
 
-    # Simple approach: use convex hull of all vertices
-    # This works for adjacent Voronoi cells but may over-simplify
+    # Check if all polygons are connected via shared edges
+    groups = find_polygon_groups(polygons)
+    if len(groups) > 1:
+        # Polygons are disconnected - return None to signal caller
+        return None
+
+    # All polygons are adjacent - safe to use convex hull
     all_vertices = []
     for poly in polygons:
         all_vertices.extend(poly)
@@ -1636,6 +1659,272 @@ def convex_hull(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     return lower[:-1] + upper[:-1]
 
 
+def polygons_share_edge(
+    poly1: List[Tuple[float, float]],
+    poly2: List[Tuple[float, float]],
+    tolerance: float = 0.001
+) -> bool:
+    """
+    Check if two polygons share a common edge (not just a point).
+
+    Two polygons share an edge if they have two consecutive vertices that
+    match (in either direction) within tolerance.
+    """
+    if len(poly1) < 2 or len(poly2) < 2:
+        return False
+
+    # Get all edges from both polygons
+    edges1 = []
+    for i in range(len(poly1)):
+        p1 = poly1[i]
+        p2 = poly1[(i + 1) % len(poly1)]
+        edges1.append((p1, p2))
+
+    edges2 = []
+    for i in range(len(poly2)):
+        p1 = poly2[i]
+        p2 = poly2[(i + 1) % len(poly2)]
+        edges2.append((p1, p2))
+
+    def points_match(a: Tuple[float, float], b: Tuple[float, float]) -> bool:
+        return abs(a[0] - b[0]) < tolerance and abs(a[1] - b[1]) < tolerance
+
+    def edges_match(e1: Tuple, e2: Tuple) -> bool:
+        # Check if edges match in either direction
+        return ((points_match(e1[0], e2[0]) and points_match(e1[1], e2[1])) or
+                (points_match(e1[0], e2[1]) and points_match(e1[1], e2[0])))
+
+    # Check if any edge from poly1 matches any edge from poly2
+    for e1 in edges1:
+        for e2 in edges2:
+            if edges_match(e1, e2):
+                return True
+
+    return False
+
+
+def find_polygon_groups(
+    polygons: List[List[Tuple[float, float]]],
+    tolerance: float = 0.001
+) -> List[List[int]]:
+    """
+    Group polygons by adjacency using union-find.
+
+    Two polygons are adjacent if they share at least one edge.
+
+    Args:
+        polygons: List of polygons, each polygon is list of (x, y) vertices
+        tolerance: Distance tolerance for vertex matching
+
+    Returns:
+        List of groups, each group is list of polygon indices
+    """
+    if not polygons:
+        return []
+
+    n = len(polygons)
+    parent = list(range(n))
+
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    # Check all pairs for shared edges
+    for i in range(n):
+        for j in range(i + 1, n):
+            if polygons_share_edge(polygons[i], polygons[j], tolerance):
+                union(i, j)
+
+    # Group polygons by their root
+    groups: Dict[int, List[int]] = {}
+    for i in range(n):
+        root = find(i)
+        if root not in groups:
+            groups[root] = []
+        groups[root].append(i)
+
+    return list(groups.values())
+
+
+def sample_route_for_voronoi(
+    route_path: List[Tuple[float, float]],
+    sample_interval: float = 2.0
+) -> List[Tuple[float, float]]:
+    """
+    Sample points along a route path for Voronoi seeding.
+
+    Args:
+        route_path: List of (x, y) points along the route
+        sample_interval: Distance between samples in mm
+
+    Returns:
+        List of (x, y) sample points along the route
+    """
+    if not route_path or len(route_path) < 2:
+        return []
+
+    samples = []
+    accumulated_dist = 0.0
+
+    for i in range(len(route_path) - 1):
+        x1, y1 = route_path[i]
+        x2, y2 = route_path[i + 1]
+
+        seg_len = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        if seg_len < 0.001:
+            continue
+
+        # Direction vector
+        dx = (x2 - x1) / seg_len
+        dy = (y2 - y1) / seg_len
+
+        # Sample along this segment
+        dist_in_seg = 0.0
+        while dist_in_seg < seg_len:
+            # Check if we need to place a sample
+            if accumulated_dist >= sample_interval:
+                # Place sample
+                x = x1 + dx * dist_in_seg
+                y = y1 + dy * dist_in_seg
+                samples.append((x, y))
+                accumulated_dist = 0.0
+
+            # Step forward
+            step = min(sample_interval - accumulated_dist, seg_len - dist_in_seg)
+            dist_in_seg += step
+            accumulated_dist += step
+
+    return samples
+
+
+def route_plane_connection(
+    via_a: Tuple[float, float],
+    via_b: Tuple[float, float],
+    plane_layer: str,
+    net_id: int,
+    other_nets_vias: Dict[int, List[Tuple[float, float]]],
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+    proximity_radius: float = 3.0,
+    proximity_cost: float = 2.0,
+    verbose: bool = False
+) -> Optional[List[Tuple[float, float]]]:
+    """
+    Route a trace on the plane layer between two vias, avoiding other nets' vias.
+
+    Args:
+        via_a: (x, y) position of first via
+        via_b: (x, y) position of second via
+        plane_layer: Layer to route on (e.g., 'In5.Cu')
+        net_id: Net ID for this connection
+        other_nets_vias: Dict mapping other net_id -> list of (x, y) via positions
+        config: Routing configuration
+        pcb_data: PCB data for obstacle building
+        proximity_radius: Radius around other vias to add proximity cost (mm)
+        proximity_cost: Maximum proximity cost (mm equivalent)
+        verbose: Print debug info
+
+    Returns:
+        List of (x, y) points along the route, or None if routing fails
+    """
+    coord = GridCoord(config.grid_step)
+
+    # Build single-layer obstacle map
+    num_layers = 1
+    layer_idx = 0
+    obstacles = GridObstacleMap(num_layers)
+
+    # Block other nets' vias as hard obstacles
+    for other_net_id, via_positions in other_nets_vias.items():
+        for vx, vy in via_positions:
+            gx, gy = coord.to_grid(vx, vy)
+            # Block a circular area around each via (via size + clearance)
+            via_radius = coord.to_grid_dist(config.via_size / 2 + config.clearance)
+            for ex in range(-via_radius, via_radius + 1):
+                for ey in range(-via_radius, via_radius + 1):
+                    if ex * ex + ey * ey <= via_radius * via_radius:
+                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+
+    # Add proximity costs around other nets' vias
+    proximity_radius_grid = coord.to_grid_dist(proximity_radius)
+    proximity_cost_grid = int(proximity_cost * 1000 / config.grid_step)
+
+    all_other_vias = []
+    for via_positions in other_nets_vias.values():
+        for vx, vy in via_positions:
+            gx, gy = coord.to_grid(vx, vy)
+            all_other_vias.append((gx, gy))
+
+    if all_other_vias:
+        obstacles.add_stub_proximity_costs_batch(
+            all_other_vias,
+            proximity_radius_grid,
+            proximity_cost_grid,
+            False  # Don't block vias (we just want proximity cost)
+        )
+
+    # Also block existing segments on this layer from other nets
+    for seg in pcb_data.segments:
+        if seg.net_id == net_id:
+            continue
+        if seg.layer != plane_layer:
+            continue
+        seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
+        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
+        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+
+    # Set up source and target
+    via_a_gx, via_a_gy = coord.to_grid(via_a[0], via_a[1])
+    via_b_gx, via_b_gy = coord.to_grid(via_b[0], via_b[1])
+
+    # Make sure source and target are not blocked
+    obstacles.add_source_target_cell(via_a_gx, via_a_gy, layer_idx)
+    obstacles.add_source_target_cell(via_b_gx, via_b_gy, layer_idx)
+
+    sources = [(via_a_gx, via_a_gy, layer_idx)]
+    targets = [(via_b_gx, via_b_gy, layer_idx)]
+
+    # Create router and find path
+    router = GridRouter(
+        via_cost=config.via_cost * 1000,
+        h_weight=config.heuristic_weight,
+        turn_cost=config.turn_cost,
+        via_proximity_cost=0
+    )
+
+    max_iterations = 50000  # Allow more iterations for longer routes
+    path, iterations, _ = router.route_with_frontier(
+        obstacles, sources, targets, max_iterations,
+        False,  # collinear_vias
+        0,      # via_exclusion_radius
+        None,   # start_direction
+        None,   # end_direction
+        0       # direction_steps
+    )
+
+    if path is None:
+        if verbose:
+            print(f"    Route between regions failed after {iterations} iterations")
+        return None
+
+    if verbose:
+        print(f"    Route found in {iterations} iterations, {len(path)} points")
+
+    # Convert path to float coordinates
+    route_points = []
+    for gx, gy, _ in path:
+        x, y = coord.to_float(gx, gy)
+        route_points.append((x, y))
+
+    return route_points
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -1657,7 +1946,9 @@ def create_plane(
     rip_blocker_nets: bool = False,
     max_rip_nets: int = 3,
     reroute_ripped_nets: bool = False,
-    layer_nets: Dict[str, List[str]] = None
+    layer_nets: Dict[str, List[str]] = None,
+    plane_proximity_radius: float = 3.0,
+    plane_proximity_cost: float = 2.0
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1669,6 +1960,8 @@ def create_plane(
                           via placement, then retry. Ripped nets excluded from output.
         max_rip_nets: Maximum number of blocker nets to rip up.
         reroute_ripped_nets: If True, automatically re-route ripped nets after placing vias.
+        plane_proximity_radius: Radius around other nets' vias for proximity cost (mm).
+        plane_proximity_cost: Maximum proximity cost around other nets' vias (mm equivalent).
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -2126,9 +2419,10 @@ def create_plane(
                         all_zone_sexprs.append(zone_sexpr)
                     continue
 
-                # Compute zone boundaries using Voronoi
+                # Compute zone boundaries using Voronoi (with raw polygon info)
                 try:
-                    zone_polygons = compute_zone_boundaries(vias_by_net, board_bounds)
+                    result = compute_zone_boundaries(vias_by_net, board_bounds, return_raw_polygons=True)
+                    zone_polygons, raw_polygons, via_to_polygon_idx = result
                 except ValueError as e:
                     print(f"  Error computing zone boundaries: {e}")
                     print(f"  Falling back to full board rectangle for first net with vias")
@@ -2145,6 +2439,106 @@ def create_plane(
                     )
                     all_zone_sexprs.append(zone_sexpr)
                     continue
+
+                # Check for disconnected regions in each net and route to connect them
+                augmented_vias_by_net = {net_id: list(vias) for net_id, vias in vias_by_net.items()}
+                connection_routes = []  # Track routes for logging
+
+                for net_id, polygons in raw_polygons.items():
+                    if len(polygons) <= 1:
+                        continue  # Single polygon, nothing to connect
+
+                    # Find disconnected groups
+                    groups = find_polygon_groups(polygons)
+                    if len(groups) <= 1:
+                        continue  # All polygons are connected
+
+                    net = pcb_data.nets.get(net_id)
+                    net_name = net.name if net else f"net_{net_id}"
+                    print(f"  Net '{net_name}': Found {len(groups)} disconnected regions")
+
+                    # Get vias for this net and map them to polygon groups
+                    net_vias = vias_by_net.get(net_id, [])
+                    if len(net_vias) < 2:
+                        continue
+
+                    # Build group -> vias mapping
+                    group_vias: Dict[int, List[Tuple[float, float]]] = {i: [] for i in range(len(groups))}
+                    for via_pos in net_vias:
+                        poly_idx = via_to_polygon_idx.get(net_id, {}).get(via_pos)
+                        if poly_idx is not None:
+                            # Find which group this polygon belongs to
+                            for group_idx, group in enumerate(groups):
+                                if poly_idx in group:
+                                    group_vias[group_idx].append(via_pos)
+                                    break
+
+                    # Build other_nets_vias for proximity cost (vias from other nets)
+                    other_nets_vias: Dict[int, List[Tuple[float, float]]] = {}
+                    for other_net_id, other_vias in vias_by_net.items():
+                        if other_net_id != net_id:
+                            other_nets_vias[other_net_id] = other_vias
+
+                    # Route between groups using MST-style approach
+                    # For simplicity, connect group 0 to all other groups
+                    for group_idx in range(1, len(groups)):
+                        if not group_vias[0] or not group_vias[group_idx]:
+                            continue
+
+                        # Pick representative vias: closest pair between groups
+                        best_dist = float('inf')
+                        best_via_a, best_via_b = None, None
+                        for via_a in group_vias[0]:
+                            for via_b in group_vias[group_idx]:
+                                dist = math.sqrt((via_a[0] - via_b[0])**2 + (via_a[1] - via_b[1])**2)
+                                if dist < best_dist:
+                                    best_dist = dist
+                                    best_via_a, best_via_b = via_a, via_b
+
+                        if best_via_a is None or best_via_b is None:
+                            continue
+
+                        print(f"    Routing from region 0 to region {group_idx} (dist: {best_dist:.2f}mm)")
+
+                        # Route connection
+                        route_path = route_plane_connection(
+                            via_a=best_via_a,
+                            via_b=best_via_b,
+                            plane_layer=layer,
+                            net_id=net_id,
+                            other_nets_vias=other_nets_vias,
+                            config=config,
+                            pcb_data=pcb_data,
+                            proximity_radius=plane_proximity_radius,
+                            proximity_cost=plane_proximity_cost,
+                            verbose=verbose
+                        )
+
+                        if route_path:
+                            print(f"      Route found with {len(route_path)} points")
+                            connection_routes.append((net_id, layer, route_path))
+
+                            # Sample route path for Voronoi seeding
+                            samples = sample_route_for_voronoi(route_path, sample_interval=2.0)
+                            if samples:
+                                print(f"      Added {len(samples)} seed points along route")
+                                augmented_vias_by_net[net_id].extend(samples)
+
+                            # Add vias in group_idx to group 0 for future connections
+                            group_vias[0].extend(group_vias[group_idx])
+                        else:
+                            print(f"      Failed to route - regions may remain disconnected")
+
+                # Re-compute zone boundaries with augmented vias if we added any
+                total_augmented = sum(len(augmented_vias_by_net[nid]) - len(vias_by_net.get(nid, []))
+                                      for nid in augmented_vias_by_net)
+                if total_augmented > 0:
+                    print(f"  Re-computing zone boundaries with {total_augmented} additional seed points")
+                    try:
+                        zone_polygons = compute_zone_boundaries(augmented_vias_by_net, board_bounds)
+                    except ValueError as e:
+                        print(f"  Error re-computing zone boundaries: {e}")
+                        # Fall back to original zone_polygons computed above
 
                 # Generate zones for each net
                 for net_id, polygon in zone_polygons.items():
@@ -2289,6 +2683,12 @@ Examples:
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
 
+    # Multi-net layer connection options
+    parser.add_argument("--plane-proximity-radius", type=float, default=3.0,
+                        help="Radius around other nets' vias to add proximity cost when routing plane connections (mm, default: 3.0)")
+    parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
+                        help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
+
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
@@ -2355,7 +2755,9 @@ Examples:
         rip_blocker_nets=args.rip_blocker_nets,
         max_rip_nets=args.max_rip_nets,
         reroute_ripped_nets=args.reroute_ripped_nets,
-        layer_nets=layer_nets
+        layer_nets=layer_nets,
+        plane_proximity_radius=args.plane_proximity_radius,
+        plane_proximity_cost=args.plane_proximity_cost
     )
 
 
