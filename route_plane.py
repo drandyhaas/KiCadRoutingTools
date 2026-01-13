@@ -1879,7 +1879,8 @@ def create_plane(
                             via_drill=via_drill,
                             grid_step=grid_step,
                             hole_to_hole_clearance=hole_to_hole_clearance,
-                            verbose=verbose
+                            verbose=verbose,
+                            minimal_obstacle_cache=True  # Only build cache for nets being routed
                         )
                         print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
                     finally:

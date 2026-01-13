@@ -139,6 +139,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 mps_reverse_rounds: bool = False,
                 mps_layer_swap: bool = False,
                 mps_segment_intersection: bool = False,
+                minimal_obstacle_cache: bool = False,
                 vis_callback=None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
@@ -171,6 +172,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         bga_proximity_radius: Radius around BGA edges to penalize in mm (default: 7.0)
         bga_proximity_cost: Cost penalty near BGA edges in mm equivalent (default: 0.2)
         debug_lines: Output debug geometry on User.2/3/8/9 layers
+        minimal_obstacle_cache: If True, only build obstacle cache for nets being routed
+                               (faster when re-routing a small number of nets)
         vis_callback: Optional visualization callback (implements VisualizationCallback protocol)
 
     Returns:
@@ -360,10 +363,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if visualize:
         vis_callback.on_routing_start(total_routes, layers, grid_step)
 
-    # Get ALL unrouted nets in the PCB for stub proximity costs
+    # Get unrouted nets for stub proximity costs
     # Use sorted list for deterministic iteration order
-    all_unrouted_net_ids = sorted(set(get_all_unrouted_net_ids(pcb_data)))
-    print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
+    if minimal_obstacle_cache:
+        # Only consider nets we're routing (faster for re-routing a few nets)
+        all_unrouted_net_ids = sorted(all_net_ids_to_route)
+        print(f"Using minimal obstacle cache for {len(all_unrouted_net_ids)} nets being routed")
+    else:
+        # All unrouted nets in the PCB (full analysis for stub proximity)
+        all_unrouted_net_ids = sorted(set(get_all_unrouted_net_ids(pcb_data)))
+        print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
 
     # Get exclusion zone lines for User.5 if debug_lines is enabled
     exclusion_zone_lines = []
