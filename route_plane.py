@@ -2396,9 +2396,17 @@ def create_plane(
                         vias_by_net[net_id] = []
 
                 # Collect via positions for nets on this layer
+                # Include BOTH newly placed vias AND existing vias (for reused ones)
                 for via in all_new_vias:
                     if via['net_id'] in vias_by_net:
                         vias_by_net[via['net_id']].append((via['x'], via['y']))
+
+                # Also include existing vias from the PCB (reused vias aren't in all_new_vias)
+                for via in pcb_data.vias:
+                    if via.net_id in vias_by_net:
+                        via_pos = (via.x, via.y)
+                        if via_pos not in vias_by_net[via.net_id]:
+                            vias_by_net[via.net_id].append(via_pos)
 
                 # Check for nets with no vias
                 nets_with_vias = []
