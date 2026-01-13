@@ -13,7 +13,6 @@ import os
 import re
 import argparse
 import math
-import time
 from typing import List, Optional, Tuple, Dict, Set
 from dataclasses import dataclass
 
@@ -244,7 +243,6 @@ def build_via_obstacle_map(
     # Add hole-to-hole clearance blocking for existing drills
     _add_drill_hole_via_obstacles(obstacles, pcb_data, config, exclude_net_id)
 
-    _profiler.add("build_via_obstacle_map", time.time() - _t0)
     return obstacles
 
 
@@ -433,12 +431,10 @@ def find_via_position(
     Returns:
         (x, y) position for via, or None if no valid position found
     """
-    _t0 = time.time()
     pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
 
     # Try pad center first - if not blocked, use it (no routing needed)
     if not obstacles.is_via_blocked(pad_gx, pad_gy):
-        _profiler.add("find_via_position", time.time() - _t0)
         return (pad.global_x, pad.global_y)
 
     # Spiral search outward
@@ -490,7 +486,6 @@ def find_via_position(
 
     # If no routing check needed, return closest valid position
     if routing_obstacles is None or config is None:
-        _profiler.add("find_via_position", time.time() - _t0)
         if valid_positions:
             return valid_positions[0][1]
         if verbose:
@@ -526,7 +521,6 @@ def find_via_position(
             # Routing succeeded - use this position
             if verbose and (route_failures > 0 or skipped_count > 0):
                 print(f"[tried {route_failures+1}, skipped {skipped_count}]", end=" ")
-            _profiler.add("find_via_position", time.time() - _t0)
             return via_pos
 
         # Routing failed - add to failed set so nearby positions are skipped
@@ -545,7 +539,6 @@ def find_via_position(
             print(f"    DEBUG: Closest unblocked position: ({valid_positions[0][1][0]:.2f}, {valid_positions[0][1][1]:.2f})")
             print(f"    DEBUG: Tried to route on layer {pad_layer}")
 
-    _profiler.add("find_via_position", time.time() - _t0)
     return None  # No valid position with routable path
 
 
@@ -587,7 +580,6 @@ def build_routing_obstacle_map(
         skip_pad_blocking: If True, don't block based on pad clearances.
                           Use this for plane via connections where DRC is lenient.
     """
-    _t0 = time.time()
     coord = GridCoord(config.grid_step)
     # Single layer routing
     num_layers = 1
@@ -640,7 +632,6 @@ def build_routing_obstacle_map(
                 if ex*ex + ey*ey <= via_expansion * via_expansion:
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
 
-    _profiler.add("build_routing_obstacle_map", time.time() - _t0)
     return obstacles
 
 
@@ -724,12 +715,10 @@ def route_via_to_pad(
         List of segment dicts, or None if routing failed
         If return_blocked_cells=True, returns RouteResult instead
     """
-    _t0 = time.time()
     coord = GridCoord(config.grid_step)
 
     # Check if via is at pad center (within tolerance)
     if abs(via_pos[0] - pad.global_x) < 0.001 and abs(via_pos[1] - pad.global_y) < 0.001:
-        _profiler.add("route_via_to_pad", time.time() - _t0)
         if return_blocked_cells:
             return RouteResult(segments=[], blocked_cells=[], success=True)
         return []  # Via is at pad center, no trace needed
@@ -802,7 +791,6 @@ def route_via_to_pad(
             print(f"    DEBUG: A* failed after {iterations} iterations")
         # Clear source_target_cells for next route
         routing_obstacles.clear_source_target_cells()
-        _profiler.add("route_via_to_pad", time.time() - _t0)
         if return_blocked_cells:
             return RouteResult(segments=None, blocked_cells=blocked_cells, success=False)
         return None  # Routing failed
@@ -856,7 +844,6 @@ def route_via_to_pad(
                 'net_id': net_id
             })
 
-    _profiler.add("route_via_to_pad", time.time() - _t0)
     if return_blocked_cells:
         return RouteResult(segments=segments, blocked_cells=[], success=True)
     return segments
@@ -1226,11 +1213,9 @@ def try_place_via_with_ripup(
 
         # Compute cache BEFORE ripping (while segments/vias still exist in pcb_data)
         if blocker not in via_obstacle_cache:
-            _t0 = time.time()
             via_obstacle_cache[blocker] = precompute_via_placement_obstacles(
                 pcb_data, blocker, config, all_copper_layers
             )
-            _profiler.add("precompute_via_placement_obstacles", time.time() - _t0)
 
         # Rip up blocker
         blocker_net = pcb_data.nets.get(blocker)
@@ -1571,11 +1556,9 @@ def create_plane(
         def ensure_via_obstacle_cache(blocker_net_id: int):
             """Ensure we have cached obstacles for a net (computed lazily)."""
             if blocker_net_id not in via_obstacle_cache:
-                _t0 = time.time()
                 via_obstacle_cache[blocker_net_id] = precompute_via_placement_obstacles(
                     pcb_data, blocker_net_id, config, all_layers
                 )
-                _profiler.add("precompute_via_placement_obstacles", time.time() - _t0)
 
         for pad_info in target_pads:
             if not pad_info['needs_via']:
@@ -1913,9 +1896,6 @@ def create_plane(
                         print(f"  Ripped nets: {', '.join(ripped_net_names)}")
         else:
             print("Error writing output file")
-
-    # Print timing profile
-    _profiler.report()
 
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
