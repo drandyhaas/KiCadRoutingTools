@@ -16,17 +16,16 @@ import math
 from typing import List, Optional, Tuple, Dict, Set
 from dataclasses import dataclass
 
-# scipy for Voronoi computation (multi-net layer support)
-try:
-    from scipy.spatial import Voronoi
-    import numpy as np
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-
-# Run startup checks before other imports
+# Run startup checks first (validates numpy, scipy, shapely are installed)
 from startup_checks import run_all_checks
 run_all_checks()
+
+# These imports are guaranteed to work after startup_checks passes
+from scipy.spatial import Voronoi
+import numpy as np
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.ops import unary_union
+from shapely.validation import make_valid
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment
 from kicad_writer import generate_via_sexpr, generate_segment_sexpr, generate_zone_sexpr
@@ -1432,12 +1431,7 @@ def compute_zone_boundaries(
         If return_raw_polygons=True:
             Tuple of (merged_polygons, raw_polygons, via_to_polygon_idx)
 
-    Raises:
-        ValueError: If scipy is not available
     """
-    if not SCIPY_AVAILABLE:
-        raise ValueError("scipy is required for multi-net layer support. Install with: pip install scipy")
-
     min_x, min_y, max_x, max_y = board_bounds
 
     # Apply board edge clearance (inset the clipping bounds)
@@ -1612,8 +1606,9 @@ def merge_polygons(polygons: List[List[Tuple[float, float]]]) -> Optional[List[T
     Merge a list of adjacent polygons into a single polygon.
     Returns None if polygons are not all adjacent (i.e., disconnected).
 
-    Uses find_polygon_groups() to detect if polygons form multiple
-    disconnected groups. Only merges if all polygons are in the same group.
+    Uses Shapely's unary_union for proper polygon union that preserves
+    the original edges (unlike convex hull which loses concave details).
+    Falls back to convex hull if Shapely is not available.
     """
     if not polygons:
         return None
@@ -1626,12 +1621,36 @@ def merge_polygons(polygons: List[List[Tuple[float, float]]]) -> Optional[List[T
         # Polygons are disconnected - return None to signal caller
         return None
 
-    # All polygons are adjacent - safe to use convex hull
-    all_vertices = []
+    # Use Shapely for proper polygon union (preserves Voronoi boundaries)
+    # Convert to Shapely polygons
+    shapely_polys = []
     for poly in polygons:
-        all_vertices.extend(poly)
+        if len(poly) >= 3:
+            sp = ShapelyPolygon(poly)
+            if not sp.is_valid:
+                sp = make_valid(sp)
+            if sp.is_valid and not sp.is_empty:
+                shapely_polys.append(sp)
 
-    return convex_hull(all_vertices)
+    if not shapely_polys:
+        return None
+
+    # Union all polygons
+    merged = unary_union(shapely_polys)
+
+    # Extract exterior coordinates
+    if merged.is_empty:
+        return None
+    if merged.geom_type == 'Polygon':
+        coords = list(merged.exterior.coords)[:-1]  # Remove duplicate closing point
+        return [(float(x), float(y)) for x, y in coords]
+    elif merged.geom_type == 'MultiPolygon':
+        # Multiple disconnected polygons - take the largest one
+        largest = max(merged.geoms, key=lambda g: g.area)
+        coords = list(largest.exterior.coords)[:-1]
+        return [(float(x), float(y)) for x, y in coords]
+    else:
+        return None
 
 
 def convex_hull(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:

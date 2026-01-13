@@ -23,11 +23,17 @@ def check_python_dependencies():
     except ImportError:
         missing.append('numpy')
 
-    # Check scipy (required for optimal target assignment)
+    # Check scipy (required for optimal target assignment and Voronoi)
     try:
         from scipy.optimize import linear_sum_assignment
     except ImportError:
         missing.append('scipy')
+
+    # Check shapely (required for polygon union in multi-net plane layers)
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        missing.append('shapely')
 
     if missing:
         print("ERROR: Missing required Python libraries:")

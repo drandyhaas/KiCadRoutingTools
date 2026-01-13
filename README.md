@@ -31,6 +31,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
+- **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon with boundaries equidistant from adjacent nets' vias. Disconnected regions are automatically detected and connected via A* routing with proximity costs to avoid other nets' via clusters. Uses Shapely for proper polygon union that preserves Voronoi boundaries
 
 ## Quick Start
 
@@ -83,6 +84,9 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 
 # Rip up blocking nets and automatically re-route them
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+
+# Multiple nets sharing same layer via Voronoi partitioning (use | separator)
+python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND "VA19|VA11" --plane-layer In4.Cu In5.Cu
 
 # Dry run to see what would be placed
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
@@ -409,7 +413,8 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 
 # Required (can specify multiple nets/plane layers)
 --net, -n GND VCC           # Net name(s) for planes (e.g., GND VCC +3.3V)
---plane-layer, -p In1.Cu In2.Cu  # Plane layer(s), one per net
+                            # Use | to share a layer: "VA19|VA11" creates Voronoi-partitioned zones
+--plane-layer, -p In1.Cu In2.Cu  # Plane layer(s), one per net (or one per net group)
 
 # Via/trace geometry
 --via-size 0.3          # Via outer diameter (mm)
@@ -427,6 +432,11 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 --max-via-reuse-radius 1.0  # Max radius to prefer reusing existing via (mm)
 --hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
 --layers, -l F.Cu In1.Cu In2.Cu B.Cu  # All copper layers for routing and via span
+--board-edge-clearance 0.5  # Zone clearance from board edge (mm)
+
+# Multi-net plane layers (Voronoi partitioning)
+--plane-proximity-radius 2.0  # Proximity radius for routing around other nets' vias (mm)
+--plane-proximity-cost 5.0    # Proximity cost for routing around other nets' vias
 
 # Blocker rip-up
 --rip-blocker-nets      # Rip up nets blocking via placement
@@ -440,6 +450,7 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 
 Features:
 - **Multi-net support** - Process multiple nets in one run (e.g., GND and VCC planes)
+- **Voronoi partitioning** - Multiple nets can share a single plane layer using `|` separator (e.g., `"VA19|VA11"`). Each net's vias get non-overlapping zone polygons with boundaries equidistant from adjacent nets. Disconnected regions are automatically connected via A* routing with proximity costs to avoid other nets' via clusters
 - **Automatic pad classification** - Identifies SMD pads needing vias vs through-hole/zone-layer pads
 - **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
 - **A* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
@@ -454,7 +465,8 @@ See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
 
 - Python 3.7+
 - numpy (`pip3 install numpy`)
-- scipy (`pip3 install scipy`) - used for optimal target assignment
+- scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
+- shapely (`pip3 install shapely`) - used for polygon union in multi-net plane layers
 - Rust toolchain (for building the router module)
 - pygame-ce (optional, for visualizer: `pip3 install pygame-ce`)
 
