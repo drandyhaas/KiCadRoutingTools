@@ -98,6 +98,9 @@ def main():
     # Check connections
     if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1*)"', unbuffered)
 
+    # Add and route GND plane
+    run('python3 route_plane.py kicad_files/kit-out.kicad_pcb kicad_files/kit-out-plane.kicad_pcb --net GND VA19 --plane-layer In4.Cu In5.Cu --rip-blocker-nets --reroute-ripped-nets ', unbuffered)
+
     print("\n=== All tests completed ===")
 
 
