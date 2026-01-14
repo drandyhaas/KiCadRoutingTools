@@ -425,6 +425,7 @@ def route_plane_connection(
     pcb_data: PCBData,
     proximity_radius: float = 3.0,
     proximity_cost: float = 2.0,
+    track_via_clearance: float = 0.8,
     max_iterations: int = 200000,
     verbose: bool = False,
     previous_routes: Optional[List[List[Tuple[float, float]]]] = None
@@ -442,6 +443,8 @@ def route_plane_connection(
         pcb_data: PCB data for obstacle building
         proximity_radius: Radius around other vias to add proximity cost (mm)
         proximity_cost: Maximum proximity cost (mm equivalent)
+        track_via_clearance: Clearance from track center to other nets' via centers (mm).
+            This should be large enough to leave room for polygon fill.
         max_iterations: Maximum A* iterations
         verbose: Print debug info
         previous_routes: List of previously routed paths from other nets to avoid (each is a list of (x,y) points)
@@ -457,11 +460,13 @@ def route_plane_connection(
     obstacles = GridObstacleMap(num_layers)
 
     # Block other nets' vias as hard obstacles
+    # Use track_via_clearance as radius from via center to track center
     for other_net_id, via_positions in other_nets_vias.items():
         for vx, vy in via_positions:
             gx, gy = coord.to_grid(vx, vy)
-            # Block a circular area around each via (via size + clearance)
-            via_radius = coord.to_grid_dist(config.via_size / 2 + config.clearance)
+            # Block a circular area around each via using track_via_clearance
+            # This ensures routes stay far enough from vias for polygons to fit
+            via_radius = coord.to_grid_dist(track_via_clearance)
             for ex in range(-via_radius, via_radius + 1):
                 for ey in range(-via_radius, via_radius + 1):
                     if ex * ex + ey * ey <= via_radius * via_radius:
@@ -611,6 +616,7 @@ def create_plane(
     layer_nets: Dict[str, List[str]] = None,
     plane_proximity_radius: float = 3.0,
     plane_proximity_cost: float = 2.0,
+    plane_track_via_clearance: float = 0.8,
     board_edge_clearance: float = 0.5,
     voronoi_seed_interval: float = 2.0,
     plane_max_iterations: int = 200000,
@@ -628,6 +634,9 @@ def create_plane(
         reroute_ripped_nets: If True, automatically re-route ripped nets after placing vias.
         plane_proximity_radius: Radius around other nets' vias for proximity cost (mm).
         plane_proximity_cost: Maximum proximity cost around other nets' vias (mm equivalent).
+        plane_track_via_clearance: Clearance from track center to other nets' via centers (mm).
+            MST routes will avoid regions within this distance of other nets' vias to
+            leave room for polygon fill.
         board_edge_clearance: Clearance from board edge for zone polygons (mm).
         voronoi_seed_interval: Sample interval for Voronoi seed points along routes (mm).
         plane_max_iterations: Max A* iterations for routing plane connections.
@@ -1159,6 +1168,7 @@ def create_plane(
                                 pcb_data=pcb_data,
                                 proximity_radius=plane_proximity_radius,
                                 proximity_cost=plane_proximity_cost,
+                                track_via_clearance=plane_track_via_clearance,
                                 max_iterations=plane_max_iterations,
                                 verbose=verbose,
                                 previous_routes=other_nets_routes
@@ -1390,6 +1400,8 @@ Examples:
                         help="Radius around other nets' vias to add proximity cost when routing plane connections (mm, default: 3.0)")
     parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
                         help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
+    parser.add_argument("--plane-track-via-clearance", type=float, default=0.8,
+                        help="Clearance from track center to other nets' via centers when routing MST connections (mm, default: 0.8)")
     parser.add_argument("--voronoi-seed-interval", type=float, default=2.0,
                         help="Sample interval for Voronoi seed points along plane connection routes (mm, default: 2.0)")
     parser.add_argument("--plane-max-iterations", type=int, default=200000,
@@ -1469,6 +1481,7 @@ Examples:
         layer_nets=layer_nets,
         plane_proximity_radius=args.plane_proximity_radius,
         plane_proximity_cost=args.plane_proximity_cost,
+        plane_track_via_clearance=args.plane_track_via_clearance,
         board_edge_clearance=args.board_edge_clearance,
         voronoi_seed_interval=args.voronoi_seed_interval,
         plane_max_iterations=args.plane_max_iterations,
