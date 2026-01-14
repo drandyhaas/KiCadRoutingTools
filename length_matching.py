@@ -588,7 +588,10 @@ def generate_trombone_meander(
                 )
                 if safe_amp_other >= min_amplitude:
                     # Mark the original direction as blocked if safe_amp was 0
-                    if safe_amp == 0:
+                    # But NOT for intra-pair matching (paired_net_id set) - the paired track
+                    # blocks full bumps but exit chamfers back to centerline are always valid
+                    # since the original track position is already properly spaced
+                    if safe_amp == 0 and paired_net_id is None:
                         blocked_direction = direction
                     direction = other_dir
                     safe_amp = safe_amp_other
