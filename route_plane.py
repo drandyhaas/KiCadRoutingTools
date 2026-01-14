@@ -27,6 +27,7 @@ from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from route import batch_route
 from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
+from connectivity import compute_mst_segments
 
 # Import from new refactored modules
 from plane_io import (
@@ -1092,14 +1093,134 @@ def create_plane(
                         all_zone_sexprs.append(zone_sexpr)
                     continue
 
-                # Compute zone boundaries using Voronoi (with raw polygon info)
+                # Route MST between all vias for each net, then compute Voronoi zones
+                # Compute MST edges for each net upfront
+                net_mst_edges: Dict[int, List[Tuple[Tuple[float, float], Tuple[float, float]]]] = {}
+                net_debug_layers: Dict[int, str] = {}
+                for net_idx, net_name in enumerate(nets_with_vias):
+                    net_id = net_name_to_id[net_name]
+                    net_vias = vias_by_net.get(net_id, [])
+                    if len(net_vias) >= 2:
+                        net_mst_edges[net_id] = compute_mst_segments(net_vias)
+                        net_debug_layers[net_id] = f"User.{net_idx + 1}"
+                        print(f"  Net '{net_name}': MST with {len(net_mst_edges[net_id])} edges between {len(net_vias)} vias")
+                    else:
+                        print(f"  Net '{net_name}': only {len(net_vias)} via(s), no MST needed")
+
+                # Iteratively route all nets, reordering to put failed nets first
+                max_mst_iterations = 5
+                net_order = list(net_mst_edges.keys())  # Initial order
+                failed_nets: Set[int] = set()
+                best_result = None  # (total_failed, connection_routes, augmented_vias, debug_lines_for_layer)
+
+                for mst_iteration in range(max_mst_iterations):
+                    if mst_iteration > 0:
+                        # Reorder: failed nets first
+                        net_order = sorted(net_order, key=lambda nid: (0 if nid in failed_nets else 1))
+                        failed_net_names = [pcb_data.nets[nid].name for nid in failed_nets if nid in pcb_data.nets]
+                        print(f"  Retry {mst_iteration + 1}: reordering with failed nets first: {', '.join(failed_net_names)}")
+
+                    # Clear and restart routing for this iteration
+                    connection_routes = []
+                    augmented_vias_by_net = {net_id: list(vias) for net_id, vias in vias_by_net.items()}
+                    debug_lines_for_layer = []
+                    failed_nets = set()
+                    total_failed_edges = 0
+
+                    for net_id in net_order:
+                        net = pcb_data.nets.get(net_id)
+                        net_name = net.name if net else f"net_{net_id}"
+                        mst_edges = net_mst_edges[net_id]
+                        debug_layer = net_debug_layers[net_id]
+
+                        # Build other_nets_vias for proximity cost
+                        other_nets_vias: Dict[int, List[Tuple[float, float]]] = {}
+                        for other_net_id, other_vias in augmented_vias_by_net.items():
+                            if other_net_id != net_id:
+                                other_nets_vias[other_net_id] = other_vias
+
+                        routed_count = 0
+                        failed_count = 0
+
+                        for via_a, via_b in mst_edges:
+                            # Collect previous routes from OTHER nets to avoid
+                            other_nets_routes = [
+                                route for route_net_id, _, route in connection_routes
+                                if route_net_id != net_id
+                            ]
+
+                            route_path = route_plane_connection(
+                                via_a=via_a,
+                                via_b=via_b,
+                                plane_layer=layer,
+                                net_id=net_id,
+                                other_nets_vias=other_nets_vias,
+                                config=config,
+                                pcb_data=pcb_data,
+                                proximity_radius=plane_proximity_radius,
+                                proximity_cost=plane_proximity_cost,
+                                max_iterations=plane_max_iterations,
+                                verbose=verbose,
+                                previous_routes=other_nets_routes
+                            )
+
+                            if route_path:
+                                routed_count += 1
+                                connection_routes.append((net_id, layer, route_path))
+
+                                # Generate debug lines
+                                if debug_lines and len(route_path) >= 2:
+                                    for i in range(len(route_path) - 1):
+                                        debug_lines_for_layer.append(generate_gr_line_sexpr(
+                                            route_path[i], route_path[i + 1],
+                                            width=0.1, layer=debug_layer
+                                        ))
+
+                                # Sample route path for Voronoi seeding
+                                samples = sample_route_for_voronoi(route_path, sample_interval=voronoi_seed_interval)
+                                if samples:
+                                    augmented_vias_by_net[net_id].extend(samples)
+                            else:
+                                failed_count += 1
+                                if verbose:
+                                    print(f"    {net_name}: ({via_a[0]:.2f},{via_a[1]:.2f}) -> ({via_b[0]:.2f},{via_b[1]:.2f}) FAILED")
+
+                        if failed_count > 0:
+                            failed_nets.add(net_id)
+                            total_failed_edges += failed_count
+                            print(f"    {net_name}: {routed_count}/{len(mst_edges)} MST edges ({failed_count} failed)")
+                        else:
+                            print(f"    {net_name}: all {routed_count} MST edges routed")
+
+                    # Track best result (fewest failures)
+                    if best_result is None or total_failed_edges < best_result[0]:
+                        best_result = (total_failed_edges, connection_routes, augmented_vias_by_net, debug_lines_for_layer)
+
+                    # Stop if no failures
+                    if total_failed_edges == 0:
+                        break
+
+                # Use best result
+                if best_result:
+                    _, connection_routes, augmented_vias_by_net, debug_lines_for_layer = best_result
+                    all_debug_lines.extend(debug_lines_for_layer)
+                    if best_result[0] > 0:
+                        print(f"  Best result: {best_result[0]} failed edge(s)")
+
+                # Compute final Voronoi zones with augmented seeds
+                total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
+                print(f"  Computing final Voronoi zones with {total_seeds} seed points")
+
                 try:
-                    result = compute_zone_boundaries(vias_by_net, board_bounds, return_raw_polygons=True,
-                                                      board_edge_clearance=board_edge_clearance, verbose=verbose)
-                    zone_polygons, raw_polygons, via_to_polygon_idx = result
+                    zone_polygons, _, _ = compute_zone_boundaries(
+                        augmented_vias_by_net, board_bounds,
+                        return_raw_polygons=True,
+                        board_edge_clearance=board_edge_clearance,
+                        verbose=verbose
+                    )
                 except ValueError as e:
                     print(f"  Error computing zone boundaries: {e}")
-                    print(f"  Falling back to full board rectangle for first net with vias")
+                    print(f"  Falling back to full board rectangle for first net")
                     net_name = nets_with_vias[0]
                     net_id = net_name_to_id[net_name]
                     zone_sexpr = generate_zone_sexpr(
@@ -1114,163 +1235,7 @@ def create_plane(
                     all_zone_sexprs.append(zone_sexpr)
                     continue
 
-                # Iteratively route between disconnected regions until all connected
-                # (or max iterations reached)
-                augmented_vias_by_net = {net_id: list(vias) for net_id, vias in vias_by_net.items()}
-                connection_routes = []  # Track routes for logging
-                max_iterations = 5
-
-                for iteration in range(max_iterations):
-                    routes_added_this_iteration = 0
-
-                    for net_id, polygons in raw_polygons.items():
-                        if len(polygons) <= 1:
-                            continue  # Single polygon, nothing to connect
-
-                        net = pcb_data.nets.get(net_id)
-                        net_name = net.name if net else f"net_{net_id}"
-
-                        if verbose:
-                            print(f"    Net '{net_name}': {len(polygons)} Voronoi cells from vias")
-
-                        # Find disconnected groups
-                        groups = find_polygon_groups(polygons, verbose=verbose)
-                        if len(groups) <= 1:
-                            if verbose:
-                                print(f"    All polygons connected - no routing needed")
-                            continue  # All polygons are connected
-
-                        if iteration == 0:
-                            print(f"  Net '{net_name}': Found {len(groups)} disconnected regions")
-                        else:
-                            print(f"  Net '{net_name}': Still {len(groups)} disconnected regions (iteration {iteration + 1})")
-
-                        # Get vias for this net (including seed points from previous iterations)
-                        net_vias = augmented_vias_by_net.get(net_id, [])
-                        if len(net_vias) < 2:
-                            continue
-
-                        # Build group -> vias mapping
-                        group_vias: Dict[int, List[Tuple[float, float]]] = {i: [] for i in range(len(groups))}
-                        for via_pos in net_vias:
-                            poly_idx = via_to_polygon_idx.get(net_id, {}).get(via_pos)
-                            if poly_idx is not None:
-                                # Find which group this polygon belongs to
-                                for group_idx, group in enumerate(groups):
-                                    if poly_idx in group:
-                                        group_vias[group_idx].append(via_pos)
-                                        break
-
-                        if verbose:
-                            for group_idx, vias in group_vias.items():
-                                print(f"      Group {group_idx}: {len(vias)} vias")
-                                for v in vias:
-                                    print(f"        Via at ({v[0]:.2f}, {v[1]:.2f})")
-
-                        # Build other_nets_vias for proximity cost (vias from other nets)
-                        other_nets_vias: Dict[int, List[Tuple[float, float]]] = {}
-                        for other_net_id, other_vias in augmented_vias_by_net.items():
-                            if other_net_id != net_id:
-                                other_nets_vias[other_net_id] = other_vias
-
-                        # Route between groups using MST-style approach
-                        # For simplicity, connect group 0 to all other groups
-                        for group_idx in range(1, len(groups)):
-                            if not group_vias[0] or not group_vias[group_idx]:
-                                continue
-
-                            # Pick representative vias: closest pair between groups
-                            best_dist = float('inf')
-                            best_via_a, best_via_b = None, None
-                            for via_a in group_vias[0]:
-                                for via_b in group_vias[group_idx]:
-                                    dist = math.sqrt((via_a[0] - via_b[0])**2 + (via_a[1] - via_b[1])**2)
-                                    if dist < best_dist:
-                                        best_dist = dist
-                                        best_via_a, best_via_b = via_a, via_b
-
-                            if best_via_a is None or best_via_b is None:
-                                continue
-
-                            print(f"    Routing from region 0 to region {group_idx} (dist: {best_dist:.2f}mm)")
-
-                            # Collect previous routes from OTHER nets on this layer to avoid
-                            other_nets_routes = [
-                                route for route_net_id, route_layer, route in connection_routes
-                                if route_net_id != net_id
-                            ]
-
-                            # Route connection
-                            route_path = route_plane_connection(
-                                via_a=best_via_a,
-                                via_b=best_via_b,
-                                plane_layer=layer,
-                                net_id=net_id,
-                                other_nets_vias=other_nets_vias,
-                                config=config,
-                                pcb_data=pcb_data,
-                                proximity_radius=plane_proximity_radius,
-                                proximity_cost=plane_proximity_cost,
-                                max_iterations=plane_max_iterations,
-                                verbose=verbose,
-                                previous_routes=other_nets_routes
-                            )
-
-                            if route_path:
-                                print(f"      Route found with {len(route_path)} points")
-                                connection_routes.append((net_id, layer, route_path))
-                                routes_added_this_iteration += 1
-
-                                # Generate debug lines on User.4 if requested
-                                if debug_lines and len(route_path) >= 2:
-                                    for i in range(len(route_path) - 1):
-                                        all_debug_lines.append(generate_gr_line_sexpr(
-                                            route_path[i], route_path[i + 1],
-                                            width=0.1, layer="User.4"
-                                        ))
-
-                                # Sample route path for Voronoi seeding
-                                samples = sample_route_for_voronoi(route_path, sample_interval=voronoi_seed_interval)
-                                if samples:
-                                    print(f"      Added {len(samples)} seed points along route")
-                                    augmented_vias_by_net[net_id].extend(samples)
-
-                                # Add vias in group_idx to group 0 for future connections
-                                group_vias[0].extend(group_vias[group_idx])
-                            else:
-                                print(f"      Failed to route - regions may remain disconnected")
-
-                    # Re-compute zone boundaries with augmented vias if we added any routes
-                    if routes_added_this_iteration == 0:
-                        break  # No more routes added, we're done
-
-                    total_augmented = sum(len(augmented_vias_by_net[nid]) - len(vias_by_net.get(nid, []))
-                                          for nid in augmented_vias_by_net)
-                    print(f"  Re-computing zone boundaries with {total_augmented} total seed points")
-                    try:
-                        result = compute_zone_boundaries(augmented_vias_by_net, board_bounds,
-                                                         return_raw_polygons=True,
-                                                         board_edge_clearance=board_edge_clearance,
-                                                         verbose=verbose)
-                        zone_polygons, raw_polygons, via_to_polygon_idx = result
-                    except ValueError as e:
-                        print(f"  Error re-computing zone boundaries: {e}")
-                        break
-
-                    # Check if all nets are now fully connected
-                    all_connected = True
-                    for net_id, polygons_list in zone_polygons.items():
-                        if len(polygons_list) > 1:
-                            all_connected = False
-                            break
-
-                    if all_connected:
-                        print(f"  All regions connected after {iteration + 1} iteration(s)")
-                        break
-                else:
-                    print(f"  Warning: Max iterations ({max_iterations}) reached, some regions may remain disconnected")
-
-                # Generate zones for each net (may have multiple polygons if disconnected)
+                # Generate zones for each net
                 for net_id, polygons in zone_polygons.items():
                     net = pcb_data.nets.get(net_id)
                     net_name = net.name if net else f"net_{net_id}"

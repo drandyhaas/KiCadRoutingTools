@@ -145,7 +145,30 @@ def compute_zone_boundaries(
                         if sp.is_valid and not sp.is_empty:
                             shapely_polys.append(sp)
                 if shapely_polys:
+                    # First try direct union
                     combined = unary_union(shapely_polys)
+
+                    # If MultiPolygon, try buffering to merge nearly-touching polygons
+                    # (Voronoi cells can have tiny gaps due to floating point precision)
+                    if combined.geom_type == 'MultiPolygon':
+                        buffer_dist = 0.01  # 0.01mm buffer to close tiny gaps
+                        buffered = [p.buffer(buffer_dist) for p in shapely_polys]
+                        combined_buffered = unary_union(buffered)
+                        if combined_buffered.geom_type == 'Polygon':
+                            # Successfully merged - shrink back
+                            combined = combined_buffered.buffer(-buffer_dist)
+                            if verbose:
+                                print(f"    Buffered merge succeeded")
+                        elif combined_buffered.geom_type == 'MultiPolygon':
+                            # Still disconnected - shrink each part back
+                            shrunk_parts = []
+                            for geom in combined_buffered.geoms:
+                                shrunk = geom.buffer(-buffer_dist)
+                                if not shrunk.is_empty:
+                                    shrunk_parts.append(shrunk)
+                            if shrunk_parts:
+                                combined = unary_union(shrunk_parts) if len(shrunk_parts) > 1 else shrunk_parts[0]
+
                     if verbose:
                         print(f"    Fallback unary_union result: {combined.geom_type}")
                     if combined.geom_type == 'Polygon':
@@ -288,15 +311,12 @@ def merge_polygons(polygons: List[List[Tuple[float, float]]], verbose: bool = Fa
         coords = list(merged.exterior.coords)[:-1]  # Remove duplicate closing point
         return [(float(x), float(y)) for x, y in coords]
     elif merged.geom_type == 'MultiPolygon':
-        # Multiple disconnected polygons - this shouldn't happen if find_polygon_groups said they're connected
+        # Multiple disconnected polygons - return None to let caller handle them all
         if verbose:
             print(f"      WARNING: unary_union returned MultiPolygon with {len(merged.geoms)} parts!")
             for i, geom in enumerate(merged.geoms):
                 print(f"        Part {i}: area={geom.area:.2f}, centroid=({geom.centroid.x:.2f}, {geom.centroid.y:.2f})")
-        # Multiple disconnected polygons - take the largest one
-        largest = max(merged.geoms, key=lambda g: g.area)
-        coords = list(largest.exterior.coords)[:-1]
-        return [(float(x), float(y)) for x, y in coords]
+        return None  # Let compute_zone_boundaries handle all polygons via fallback
     else:
         return None
 
