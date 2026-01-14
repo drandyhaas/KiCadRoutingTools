@@ -425,7 +425,8 @@ def route_plane_connection(
     proximity_radius: float = 3.0,
     proximity_cost: float = 2.0,
     max_iterations: int = 200000,
-    verbose: bool = False
+    verbose: bool = False,
+    previous_routes: Optional[List[List[Tuple[float, float]]]] = None
 ) -> Optional[List[Tuple[float, float]]]:
     """
     Route a trace on the plane layer between two vias, avoiding other nets' vias.
@@ -442,6 +443,7 @@ def route_plane_connection(
         proximity_cost: Maximum proximity cost (mm equivalent)
         max_iterations: Maximum A* iterations
         verbose: Print debug info
+        previous_routes: List of previously routed paths from other nets to avoid (each is a list of (x,y) points)
 
     Returns:
         List of (x, y) points along the route, or None if routing fails
@@ -491,6 +493,53 @@ def route_plane_connection(
         seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
         seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+
+    # Block previous routes between disconnected regions (same net, avoid self-crossing)
+    if previous_routes:
+        route_expansion_mm = config.track_width + config.clearance
+        route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
+        for route_path in previous_routes:
+            for i in range(len(route_path) - 1):
+                p1, p2 = route_path[i], route_path[i + 1]
+                # Create a temporary segment-like structure for blocking
+                gx1, gy1 = coord.to_grid(p1[0], p1[1])
+                gx2, gy2 = coord.to_grid(p2[0], p2[1])
+                # Block along the line with expansion
+                dx = abs(gx2 - gx1)
+                dy = abs(gy2 - gy1)
+                sx = 1 if gx1 < gx2 else -1
+                sy = 1 if gy1 < gy2 else -1
+                gx, gy = gx1, gy1
+                radius_sq = route_expansion_grid * route_expansion_grid
+                if dx > dy:
+                    err = dx / 2
+                    while gx != gx2:
+                        for ex in range(-route_expansion_grid, route_expansion_grid + 1):
+                            for ey in range(-route_expansion_grid, route_expansion_grid + 1):
+                                if ex*ex + ey*ey <= radius_sq:
+                                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+                        err -= dy
+                        if err < 0:
+                            gy += sy
+                            err += dx
+                        gx += sx
+                else:
+                    err = dy / 2
+                    while gy != gy2:
+                        for ex in range(-route_expansion_grid, route_expansion_grid + 1):
+                            for ey in range(-route_expansion_grid, route_expansion_grid + 1):
+                                if ex*ex + ey*ey <= radius_sq:
+                                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+                        err -= dx
+                        if err < 0:
+                            gx += sx
+                            err += dy
+                        gy += sy
+                # Block endpoint
+                for ex in range(-route_expansion_grid, route_expansion_grid + 1):
+                    for ey in range(-route_expansion_grid, route_expansion_grid + 1):
+                        if ex*ex + ey*ey <= radius_sq:
+                            obstacles.add_blocked_cell(gx2 + ex, gy2 + ey, layer_idx)
 
     # Set up source and target
     via_a_gx, via_a_gy = coord.to_grid(via_a[0], via_a[1])
@@ -1145,6 +1194,12 @@ def create_plane(
 
                             print(f"    Routing from region 0 to region {group_idx} (dist: {best_dist:.2f}mm)")
 
+                            # Collect previous routes from OTHER nets on this layer to avoid
+                            other_nets_routes = [
+                                route for route_net_id, route_layer, route in connection_routes
+                                if route_net_id != net_id
+                            ]
+
                             # Route connection
                             route_path = route_plane_connection(
                                 via_a=best_via_a,
@@ -1157,7 +1212,8 @@ def create_plane(
                                 proximity_radius=plane_proximity_radius,
                                 proximity_cost=plane_proximity_cost,
                                 max_iterations=plane_max_iterations,
-                                verbose=verbose
+                                verbose=verbose,
+                                previous_routes=other_nets_routes
                             )
 
                             if route_path:
