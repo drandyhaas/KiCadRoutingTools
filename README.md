@@ -31,7 +31,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
-- **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon with boundaries equidistant from adjacent nets' vias. Disconnected regions are automatically detected and connected via A* routing with proximity costs to avoid other nets' via clusters. Uses Shapely for proper polygon union that preserves Voronoi boundaries
+- **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route
 
 ## Quick Start
 
@@ -458,7 +458,7 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 
 Features:
 - **Multi-net support** - Process multiple nets in one run (e.g., GND and VCC planes)
-- **Voronoi partitioning** - Multiple nets can share a single plane layer using `|` separator (e.g., `"VA19|VA11"`). Each net's vias get non-overlapping zone polygons with boundaries equidistant from adjacent nets. Disconnected regions are automatically connected via A* routing with proximity costs to avoid other nets' via clusters
+- **Voronoi partitioning** - Multiple nets can share a single plane layer using `|` separator (e.g., `"VA19|VA11"`). Each net's vias get non-overlapping zone polygons. MST edges are routed between all vias using A* pathfinding, with routes sampled as Voronoi seeds to ensure connected zones. Retries with failed nets first (up to 5 iterations)
 - **Automatic pad classification** - Identifies SMD pads needing vias vs through-hole/zone-layer pads
 - **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
 - **A* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
