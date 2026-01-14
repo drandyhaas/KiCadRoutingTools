@@ -69,6 +69,20 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 | `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm |
 | `--layers`, `-l` | F.Cu In1.Cu In2.Cu B.Cu | All copper layers for routing and via span |
 
+### Multi-net Plane Layer Options
+
+These options control MST-based routing between vias when multiple nets share the same plane layer.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--plane-proximity-radius` | 3.0 | Radius around other nets' vias for proximity cost (mm) |
+| `--plane-proximity-cost` | 2.0 | Maximum proximity cost around other nets' vias (mm equivalent) |
+| `--plane-track-via-clearance` | 0.8 | Clearance from MST track center to other nets' via centers (mm) |
+| `--voronoi-seed-interval` | 2.0 | Sample interval for Voronoi seed points along routes (mm) |
+| `--plane-max-iterations` | 200000 | Maximum A* iterations for routing plane connections |
+
+The `--plane-track-via-clearance` parameter ensures MST routes don't pass through narrow gaps between other nets' vias. A larger value ensures more room for polygon fill but may cause routing failures on dense boards.
+
 ### Blocker Rip-up Options
 
 | Option | Default | Description |
