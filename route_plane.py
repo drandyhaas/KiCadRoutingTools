@@ -1402,7 +1402,7 @@ Examples:
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
-    parser.add_argument("--debug-lines", action="store_true", help="Output debug geometry on User.4 (inter-region routes)")
+    parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
 
     args = parser.parse_args()
 

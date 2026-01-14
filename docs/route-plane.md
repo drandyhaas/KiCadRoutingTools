@@ -89,7 +89,7 @@ When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, t
 |--------|-------------|
 | `--dry-run` | Analyze and report without writing output file |
 | `--verbose`, `-v` | Print detailed debug messages |
-| `--debug-lines` | Draw inter-region connection routes on User.4 layer |
+| `--debug-lines` | Draw MST routes on User.1, User.2, etc. per net |
 
 ## How It Works
 
@@ -153,6 +153,18 @@ When `--reroute-ripped-nets` is enabled, after all plane vias are placed:
 4. Reports how many nets were successfully re-routed
 
 This ensures that ripped nets are re-routed while respecting clearance from the newly placed plane vias on all layers.
+
+### Multi-Net Layer Zone Generation
+
+When multiple nets share the same plane layer (e.g., `--net "VA19|VA11" --plane-layer In5.Cu`), the tool uses MST-based routing to ensure connected Voronoi zones:
+
+1. **Compute MST** - For each net, computes a Minimum Spanning Tree between all its vias
+2. **Route MST edges** - Routes each MST edge on the plane layer using A* pathfinding, avoiding other nets' vias and previously routed paths
+3. **Retry with reordering** - If some edges fail to route, retries with failed nets processed first (up to 5 iterations), keeping the best result
+4. **Sample routes for Voronoi** - Samples points along successful routes as additional Voronoi seed points
+5. **Compute final zones** - Uses Voronoi diagram with augmented seeds to create non-overlapping zone polygons per net
+
+The MST routes ensure that each net's zone polygons are connected (if routing succeeds). The `--debug-lines` option outputs the MST routes on User.1, User.2, etc. for visualization.
 
 ## Error Messages
 
@@ -341,7 +353,7 @@ The plane generation code is organized into several modules:
 - `create_plane()` - Main orchestration function
 - `find_via_position()` - Searches for valid via positions with routing verification
 - `route_via_to_pad()` - A* routing from via to pad
-- `route_plane_connection()` - Routes between disconnected zone regions
+- `route_plane_connection()` - Routes MST edges between vias on multi-net layers
 
 **plane_io.py:**
 - `extract_zones()` - Reads existing zones from PCB file
