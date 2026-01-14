@@ -165,6 +165,11 @@ KiCadRoutingTools/
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
 ├── route_plane.py            # Main CLI - power/ground plane via connections
+├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
+├── plane_obstacle_builder.py # Obstacle map building for plane via placement
+├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
+├── plane_zone_geometry.py    # Voronoi zone computation for multi-net layers
+├── plane_create_helpers.py   # Helper functions for create_plane
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building

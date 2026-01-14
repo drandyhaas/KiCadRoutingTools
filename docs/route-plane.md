@@ -320,3 +320,44 @@ After running the tool:
 2. **Refill zones** - Press `B` or use Edit > Fill All Zones to generate the copper pour
 3. **Run DRC** - Verify no design rule violations
 4. **Manual cleanup** - Address any failed placements or re-routes manually if needed
+
+## Code Organization
+
+The plane generation code is organized into several modules:
+
+| Module | Description |
+|--------|-------------|
+| `route_plane.py` | Main CLI and orchestration - loads PCB, coordinates via placement per-net, and writes output |
+| `plane_io.py` | I/O utilities - zone extraction, PCB file reading/writing, net ID resolution |
+| `plane_obstacle_builder.py` | Obstacle map construction - builds grid-based maps for via placement and routing |
+| `plane_blocker_detection.py` | Blocker detection and rip-up - identifies which nets are blocking via placement |
+| `plane_zone_geometry.py` | Voronoi zone computation - computes non-overlapping zone polygons for multi-net layers |
+| `plane_create_helpers.py` | Helper functions for create_plane - pad processing, multi-net zones, result output |
+
+### Key Functions
+
+**route_plane.py:**
+- `create_plane()` - Main orchestration function
+- `find_via_position()` - Searches for valid via positions with routing verification
+- `route_via_to_pad()` - A* routing from via to pad
+- `route_plane_connection()` - Routes between disconnected zone regions
+
+**plane_io.py:**
+- `extract_zones()` - Reads existing zones from PCB file
+- `check_existing_zones()` - Validates zone conflicts
+- `write_plane_output()` - Writes vias, traces, and zones to output file
+
+**plane_obstacle_builder.py:**
+- `build_via_obstacle_map()` - Creates obstacle map for via placement (all layers)
+- `build_routing_obstacle_map()` - Creates obstacle map for single-layer routing
+- `identify_target_pads()` - Classifies pads by connection type
+
+**plane_blocker_detection.py:**
+- `find_via_position_blocker()` - Identifies net blocking a via position
+- `find_route_blocker_from_frontier()` - Identifies net blocking A* routing
+- `try_place_via_with_ripup()` - Iterative rip-up and retry logic
+
+**plane_zone_geometry.py:**
+- `compute_zone_boundaries()` - Computes Voronoi-based zone polygons
+- `find_polygon_groups()` - Groups adjacent polygons for connectivity analysis
+- `sample_route_for_voronoi()` - Samples route paths for Voronoi seeding
