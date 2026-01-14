@@ -399,12 +399,16 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
     # Build map of existing segment endpoints by layer (store actual coordinates for proximity check)
     existing_endpoints = {}
+    # Also build map of full existing segments by layer (for point-on-segment check)
+    existing_segs_by_layer = {}
     if existing_segments:
         for seg in existing_segments:
             if seg.layer not in existing_endpoints:
                 existing_endpoints[seg.layer] = []
+                existing_segs_by_layer[seg.layer] = []
             existing_endpoints[seg.layer].append((seg.start_x, seg.start_y))
             existing_endpoints[seg.layer].append((seg.end_x, seg.end_y))
+            existing_segs_by_layer[seg.layer].append(seg)
 
     # Build map of via locations by layer (store actual coordinates and size for proximity check)
     via_locations = {}
@@ -477,6 +481,36 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
                 return True
         return False
 
+    def point_on_any_segment(px, py, segs_list, tolerance):
+        """Check if point lies on any segment (not just endpoints).
+
+        Returns True if the point is within tolerance of any segment's line.
+        This catches tap points that are in the middle of existing segments.
+        """
+        for seg in segs_list:
+            # Vector from segment start to end
+            dx = seg.end_x - seg.start_x
+            dy = seg.end_y - seg.start_y
+            seg_len_sq = dx * dx + dy * dy
+            if seg_len_sq < 0.0001:  # Degenerate segment
+                continue
+            # Vector from segment start to point
+            px_rel = px - seg.start_x
+            py_rel = py - seg.start_y
+            # Project point onto segment line (parametric t)
+            t = (px_rel * dx + py_rel * dy) / seg_len_sq
+            # Check if projection is within segment bounds (with small margin)
+            if t < -0.01 or t > 1.01:
+                continue
+            # Calculate closest point on segment
+            closest_x = seg.start_x + t * dx
+            closest_y = seg.start_y + t * dy
+            # Check distance from point to closest point on segment
+            dist = math.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+            if dist < tolerance:
+                return True
+        return False
+
     # When debug_lines is enabled, build endpoint degree map across ALL layers
     # because debug_lines puts turn segments on different layers but they still connect
     global_endpoint_counts = None
@@ -490,6 +524,7 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
     for layer, layer_segs in layer_segments.items():
         layer_existing = existing_endpoints.get(layer, [])
+        layer_existing_segs = existing_segs_by_layer.get(layer, [])
         layer_vias = via_locations.get(layer, [])
         layer_pads = pad_locations.get(layer, [])
 
@@ -519,11 +554,14 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
 
             # Check if endpoints connect to existing segments (with proximity tolerance), vias, or pads
             # Use track width / 4 as proximity tolerance for segments, via/pad size / 4 for vias/pads
+            # Also check if point lies ON an existing segment (for tap points in middle of segments)
             proximity_tol = seg.width / 4
             start_connects_existing = (point_near_any(seg.start_x, seg.start_y, layer_existing, proximity_tol) or
+                                       point_on_any_segment(seg.start_x, seg.start_y, layer_existing_segs, proximity_tol) or
                                        point_near_any_via(seg.start_x, seg.start_y, layer_vias) or
                                        point_near_any_pad(seg.start_x, seg.start_y, layer_pads))
             end_connects_existing = (point_near_any(seg.end_x, seg.end_y, layer_existing, proximity_tol) or
+                                     point_on_any_segment(seg.end_x, seg.end_y, layer_existing_segs, proximity_tol) or
                                      point_near_any_via(seg.end_x, seg.end_y, layer_vias) or
                                      point_near_any_pad(seg.end_x, seg.end_y, layer_pads))
 
