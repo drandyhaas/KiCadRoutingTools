@@ -89,6 +89,7 @@ When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, t
 |--------|-------------|
 | `--dry-run` | Analyze and report without writing output file |
 | `--verbose`, `-v` | Print detailed debug messages |
+| `--debug-lines` | Draw inter-region connection routes on User.4 layer |
 
 ## How It Works
 

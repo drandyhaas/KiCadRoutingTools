@@ -453,6 +453,7 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 # Debug
 --dry-run               # Analyze without writing output
 --verbose, -v           # Print detailed debug messages
+--debug-lines           # Draw inter-region routes on User.4 layer
 ```
 
 Features:

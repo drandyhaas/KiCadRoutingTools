@@ -23,7 +23,7 @@ run_all_checks()
 import numpy as np
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment
-from kicad_writer import generate_zone_sexpr
+from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from route import batch_route
 from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
@@ -563,7 +563,8 @@ def create_plane(
     plane_proximity_cost: float = 2.0,
     board_edge_clearance: float = 0.5,
     voronoi_seed_interval: float = 2.0,
-    plane_max_iterations: int = 200000
+    plane_max_iterations: int = 200000,
+    debug_lines: bool = False
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -653,6 +654,7 @@ def create_plane(
     all_new_vias = []
     all_new_segments = []
     all_zone_sexprs = []
+    all_debug_lines = []  # Debug lines for inter-region routes (User.4)
     total_vias_placed = 0
     total_vias_reused = 0
     total_traces_added = 0
@@ -1163,6 +1165,14 @@ def create_plane(
                                 connection_routes.append((net_id, layer, route_path))
                                 routes_added_this_iteration += 1
 
+                                # Generate debug lines on User.4 if requested
+                                if debug_lines and len(route_path) >= 2:
+                                    for i in range(len(route_path) - 1):
+                                        all_debug_lines.append(generate_gr_line_sexpr(
+                                            route_path[i], route_path[i + 1],
+                                            width=0.1, layer="User.4"
+                                        ))
+
                                 # Sample route path for Voronoi seeding
                                 samples = sample_route_for_voronoi(route_path, sample_interval=voronoi_seed_interval)
                                 if samples:
@@ -1246,8 +1256,11 @@ def create_plane(
         print("\nDry run - no output file written")
     else:
         print(f"\nWriting output to {output_file}...")
-        # Combine all zone sexprs
-        combined_zone_sexpr = '\n'.join(all_zone_sexprs) if all_zone_sexprs else None
+        # Combine all zone sexprs and debug lines
+        all_sexprs = all_zone_sexprs + all_debug_lines
+        combined_zone_sexpr = '\n'.join(all_sexprs) if all_sexprs else None
+        if all_debug_lines:
+            print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
         if write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
                                exclude_net_ids=all_ripped_net_ids):
             print(f"Output written to {output_file}")
@@ -1368,6 +1381,7 @@ Examples:
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
+    parser.add_argument("--debug-lines", action="store_true", help="Output debug geometry on User.4 (inter-region routes)")
 
     args = parser.parse_args()
 
@@ -1436,7 +1450,8 @@ Examples:
         plane_proximity_cost=args.plane_proximity_cost,
         board_edge_clearance=args.board_edge_clearance,
         voronoi_seed_interval=args.voronoi_seed_interval,
-        plane_max_iterations=args.plane_max_iterations
+        plane_max_iterations=args.plane_max_iterations,
+        debug_lines=args.debug_lines
     )
 
 
