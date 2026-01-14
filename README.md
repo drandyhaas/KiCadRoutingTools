@@ -26,6 +26,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **U-turn prevention** - Prevents differential pair routes from making U-turns (>180° cumulative turn)
 - **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
+- **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
@@ -203,6 +204,7 @@ KiCadRoutingTools/
 ├── kicad_writer.py           # KiCad S-expression generator
 ├── output_writer.py          # Route output and swap application
 ├── route_modification.py     # Add/remove routes from PCB data
+├── schematic_updater.py      # Update .kicad_sch files with pad swaps
 ├── chip_boundary.py          # Chip boundary detection
 ├── geometry_utils.py         # Shared geometry calculations
 ├── memory_debug.py           # Memory usage statistics
@@ -301,6 +303,7 @@ KiCadRoutingTools/
 | `kicad_writer.py` | KiCad S-expression generator |
 | `output_writer.py` | Write routed output with swaps and debug geometry |
 | `route_modification.py` | Add/remove routes from PCB data structure |
+| `schematic_updater.py` | Update .kicad_sch files with pad swaps from routing |
 | `memory_debug.py` | Memory usage statistics and debugging |
 
 ## Performance
@@ -367,6 +370,8 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 
 # Target swap optimization
 --swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
+--schematic-dir /path/to/kicad  # Optional: sync pad swaps to .kicad_sch files (disabled by default)
+                                # Updates lib_symbols in ALL files containing the symbol
 --crossing-penalty 1000  # Penalty for crossing assignments (default: 1000)
 --no-crossing-layer-check  # Count crossings regardless of layer (default: same-layer only)
 --mps-reverse-rounds     # Route most-conflicting MPS groups first (instead of least)
@@ -407,6 +412,12 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 # Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching
 --can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
+
+# Target/polarity swap with schematic sync
+--swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
+--schematic-dir /path/to/kicad  # Optional: sync pad swaps to .kicad_sch files (disabled by default)
+                                # Syncs target swaps (P1_P<->P2_P, P1_N<->P2_N) and polarity swaps (P<->N)
+                                # Updates ALL schematic files containing the lib_symbol
 
 # All other options from route.py also apply (geometry, strategy, proximity, length matching, etc.)
 ```

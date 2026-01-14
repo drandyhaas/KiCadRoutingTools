@@ -30,6 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
+from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord
@@ -140,7 +141,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 mps_layer_swap: bool = False,
                 mps_segment_intersection: bool = False,
                 minimal_obstacle_cache: bool = False,
-                vis_callback=None) -> Tuple[int, int, float]:
+                vis_callback=None,
+                schematic_dir: Optional[str] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -584,6 +586,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         skip_routing=skip_routing
     )
 
+    # Update schematics with swap info if directory specified
+    if schematic_dir and single_ended_target_swap_info:
+        # Convert swap info to format for schematic updater
+        schematic_swaps = []
+        for info in single_ended_target_swap_info:
+            if info.get('n1_pad') and info.get('n2_pad'):
+                pad1 = info['n1_pad']
+                pad2 = info['n2_pad']
+                schematic_swaps.append({
+                    'component_ref': pad1.component_ref,
+                    'pad1': pad1.pad_number,
+                    'pad2': pad2.pad_number
+                })
+        if schematic_swaps:
+            apply_swaps_to_schematics(schematic_dir, schematic_swaps, verbose=verbose)
+
     # Final memory summary
     if debug_memory:
         final_mem = get_process_memory_mb()
@@ -690,6 +708,8 @@ For differential pair routing, use route_diff.py:
                         help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
     parser.add_argument("--swappable-nets", nargs="+",
                         help="Glob patterns for nets that can have targets swapped (e.g., '*DATA_*')")
+    parser.add_argument("--schematic-dir", default=None,
+                        help="Directory containing .kicad_sch files to update with pad swaps (default: no schematic update)")
     parser.add_argument("--crossing-penalty", type=float, default=1000.0,
                         help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
     parser.add_argument("--mps-reverse-rounds", action="store_true",
@@ -853,4 +873,5 @@ For differential pair routing, use route_diff.py:
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
                 mps_segment_intersection=args.mps_segment_intersection,
-                vis_callback=vis_callback)
+                vis_callback=vis_callback,
+                schematic_dir=args.schematic_dir)

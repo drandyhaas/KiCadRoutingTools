@@ -31,6 +31,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
+from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
@@ -150,7 +151,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 debug_memory: bool = False,
                 mps_reverse_rounds: bool = False,
                 mps_layer_swap: bool = False,
-                mps_segment_intersection: bool = False) -> Tuple[int, int, float]:
+                mps_segment_intersection: bool = False,
+                schematic_dir: Optional[str] = None) -> Tuple[int, int, float]:
     """
     Route differential pairs using the Rust router.
 
@@ -641,6 +643,47 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         skip_routing=skip_routing
     )
 
+    # Update schematics with swap info if directory specified
+    if schematic_dir and (target_swap_info or pad_swaps):
+        schematic_swaps = []
+
+        # Diff pair target swaps (P pads swap, N pads swap)
+        for info in target_swap_info:
+            if all(k in info for k in ['p1_p_pad', 'p2_p_pad', 'p1_n_pad', 'p2_n_pad']):
+                p1_p = info['p1_p_pad']
+                p2_p = info['p2_p_pad']
+                p1_n = info['p1_n_pad']
+                p2_n = info['p2_n_pad']
+                # P pads swap
+                if p1_p and p2_p and p1_p.component_ref == p2_p.component_ref:
+                    schematic_swaps.append({
+                        'component_ref': p1_p.component_ref,
+                        'pad1': p1_p.pad_number,
+                        'pad2': p2_p.pad_number
+                    })
+                # N pads swap
+                if p1_n and p2_n and p1_n.component_ref == p2_n.component_ref:
+                    schematic_swaps.append({
+                        'component_ref': p1_n.component_ref,
+                        'pad1': p1_n.pad_number,
+                        'pad2': p2_n.pad_number
+                    })
+
+        # Polarity swaps (P/N swap within same diff pair)
+        for swap_info in pad_swaps:
+            if 'pad_p' in swap_info and 'pad_n' in swap_info:
+                pad_p = swap_info['pad_p']
+                pad_n = swap_info['pad_n']
+                if pad_p and pad_n and pad_p.component_ref == pad_n.component_ref:
+                    schematic_swaps.append({
+                        'component_ref': pad_p.component_ref,
+                        'pad1': pad_p.pad_number,
+                        'pad2': pad_n.pad_number
+                    })
+
+        if schematic_swaps:
+            apply_swaps_to_schematics(schematic_dir, schematic_swaps, verbose=verbose)
+
     # Final memory summary
     if debug_memory:
         final_mem = get_process_memory_mb()
@@ -757,6 +800,8 @@ Examples:
                         help="Allow swapping stubs to F.Cu (top layer). Off by default due to via clearance issues.")
     parser.add_argument("--swappable-nets", nargs="+",
                         help="Glob patterns for diff pair nets that can have targets swapped (e.g., 'rx1_*')")
+    parser.add_argument("--schematic-dir", default=None,
+                        help="Directory containing .kicad_sch files to update with pad swaps (default: no schematic update)")
     parser.add_argument("--crossing-penalty", type=float, default=1000.0,
                         help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
     parser.add_argument("--mps-reverse-rounds", action="store_true",
@@ -883,4 +928,5 @@ Examples:
                 debug_memory=args.debug_memory,
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
-                mps_segment_intersection=args.mps_segment_intersection)
+                mps_segment_intersection=args.mps_segment_intersection,
+                schematic_dir=args.schematic_dir)
