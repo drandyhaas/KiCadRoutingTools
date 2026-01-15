@@ -67,6 +67,14 @@ from plane_create_helpers import (
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
 
+# Plane resistance calculations
+from plane_resistance import (
+    analyze_single_net_plane,
+    analyze_multi_net_plane,
+    print_single_net_resistance,
+    print_multi_net_resistance
+)
+
 
 def find_existing_via_nearby(
     pad: Pad,
@@ -999,6 +1007,10 @@ def create_plane(
             )
             all_zone_sexprs.append(zone_sexpr)
 
+            # Calculate and print resistance for single-net layer
+            result = analyze_single_net_plane(zone_polygon, plane_layer)
+            print_single_net_resistance(result, net_name)
+
         # Print per-net results
         print(f"\nResults for '{net_name}':")
         if should_create_zone and is_multi_net_layer:
@@ -1131,6 +1143,9 @@ def create_plane(
 
                     # Clear and restart routing for this iteration
                     connection_routes = []
+                    routed_paths_by_edge: Dict[int, Dict[Tuple[Tuple[float, float], Tuple[float, float]], List[Tuple[float, float]]]] = {
+                        net_id: {} for net_id in net_mst_edges.keys()
+                    }
                     augmented_vias_by_net = {net_id: list(vias) for net_id, vias in vias_by_net.items()}
                     debug_lines_for_layer = []
                     failed_nets = set()
@@ -1177,6 +1192,7 @@ def create_plane(
                             if route_path:
                                 routed_count += 1
                                 connection_routes.append((net_id, layer, route_path))
+                                routed_paths_by_edge[net_id][(via_a, via_b)] = route_path
 
                                 # Generate debug lines
                                 if debug_lines and len(route_path) >= 2:
@@ -1204,7 +1220,7 @@ def create_plane(
 
                     # Track best result (fewest failures)
                     if best_result is None or total_failed_edges < best_result[0]:
-                        best_result = (total_failed_edges, connection_routes, augmented_vias_by_net, debug_lines_for_layer)
+                        best_result = (total_failed_edges, connection_routes, augmented_vias_by_net, debug_lines_for_layer, routed_paths_by_edge)
 
                     # Stop if no failures
                     if total_failed_edges == 0:
@@ -1212,7 +1228,7 @@ def create_plane(
 
                 # Use best result
                 if best_result:
-                    _, connection_routes, augmented_vias_by_net, debug_lines_for_layer = best_result
+                    _, connection_routes, augmented_vias_by_net, debug_lines_for_layer, routed_paths_by_edge = best_result
                     all_debug_lines.extend(debug_lines_for_layer)
                     if best_result[0] > 0:
                         print(f"  Best result: {best_result[0]} failed edge(s)")
@@ -1264,6 +1280,22 @@ def create_plane(
                             direct_connect=True
                         )
                         all_zone_sexprs.append(zone_sexpr)
+
+                # Calculate and print resistance for each polygon
+                resistance_results = {}
+                for net_id, polygons in zone_polygons.items():
+                    net = pcb_data.nets.get(net_id)
+                    net_name = net.name if net else f"net_{net_id}"
+
+                    mst_edges = net_mst_edges.get(net_id, [])
+                    edge_routes = routed_paths_by_edge.get(net_id, {})
+
+                    # Use largest polygon for this net
+                    largest_polygon = max(polygons, key=lambda p: len(p))
+                    result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer)
+                    resistance_results[net_name] = result
+
+                print_multi_net_resistance(resistance_results)
 
     # Print overall totals
     print(f"\n{'='*60}")
