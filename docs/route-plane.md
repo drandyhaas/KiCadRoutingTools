@@ -12,6 +12,7 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 4. **Trace routing** - Routes traces from offset vias to pads using A* pathfinding
 5. **Blocker rip-up** - Optionally removes blocking nets to place more vias
 6. **Automatic re-routing** - Optionally re-routes ripped nets after via placement
+7. **Resistance analysis** - Calculates and displays plane resistance and max current capacity
 
 ## Basic Usage
 
@@ -179,6 +180,52 @@ When multiple nets share the same plane layer (e.g., `--net "VA19|VA11" --plane-
 5. **Compute final zones** - Uses Voronoi diagram with augmented seeds to create non-overlapping zone polygons per net
 
 The MST routes ensure that each net's zone polygons are connected (if routing succeeds). The `--debug-lines` option outputs the MST routes on User.1, User.2, etc. for visualization.
+
+### Plane Resistance Analysis
+
+After zone creation, the tool calculates and displays approximate plane resistance and maximum current capacity for each polygon:
+
+**For single-net layers:**
+- Uses the bounding box diagonal as the path length
+- Samples polygon width perpendicular to the diagonal path
+
+**For multi-net layers:**
+- Uses the longest path through the MST (tree diameter) as the path length
+- Follows the actual routed traces, not straight-line distance
+- Samples polygon width perpendicular to the path at 1mm intervals
+
+**Calculations:**
+- **Resistance:** `R = ρ × L / (W × t)` where ρ = 1.68×10⁻⁸ Ω·m (copper), L = path length, W = average width, t = copper thickness
+- **Max current:** IPC-2152 formula `I = k × ΔT^0.44 × A^0.725` where k = 0.024 for internal layers, 0.048 for external, A = cross-sectional area in mils²
+
+**Assumptions:**
+- 1 oz copper (35 µm thickness)
+- 10°C maximum temperature rise
+
+**Example output (single-net layer):**
+```
+Plane Resistance Analysis (1 oz copper, 10°C rise):
+  Path length: 117.0 mm (diagonal)
+  Avg width:   52.2 mm
+  Resistance:  1.075 mΩ
+  Max current: 21.05 A
+```
+
+**Example output (multi-net layer):**
+```
+Plane Resistance Analysis (1 oz copper, 10°C rise):
+----------------------------------------------------------------------
+Net                       Path(mm)   AvgW(mm)   R(mΩ)      Imax(A)
+----------------------------------------------------------------------
+/fpga_adc/VA19            33.6       3.6        4.457      3.03
+/fpga_adc/VA11            96.3       5.7        8.121      4.22
+/fpga_adc/VLVDS           28.4       78.1       0.175      28.18
+/fpga_adc/VD11            31.7       4.3        3.537      3.44
+----------------------------------------------------------------------
+Path = longest MST route, AvgW = avg polygon width along path
+```
+
+This helps identify potential current bottlenecks in power distribution networks. Narrow polygon sections (low AvgW) will have higher resistance and lower current capacity.
 
 ## Error Messages
 
@@ -359,6 +406,7 @@ The plane generation code is organized into several modules:
 | `plane_obstacle_builder.py` | Obstacle map construction - builds grid-based maps for via placement and routing |
 | `plane_blocker_detection.py` | Blocker detection and rip-up - identifies which nets are blocking via placement |
 | `plane_zone_geometry.py` | Voronoi zone computation - computes non-overlapping zone polygons for multi-net layers |
+| `plane_resistance.py` | Resistance analysis - calculates plane resistance and max current capacity |
 | `plane_create_helpers.py` | Helper functions for create_plane - pad processing, multi-net zones, result output |
 
 ### Key Functions
@@ -388,3 +436,11 @@ The plane generation code is organized into several modules:
 - `compute_zone_boundaries()` - Computes Voronoi-based zone polygons
 - `find_polygon_groups()` - Groups adjacent polygons for connectivity analysis
 - `sample_route_for_voronoi()` - Samples route paths for Voronoi seeding
+
+**plane_resistance.py:**
+- `analyze_single_net_plane()` - Calculates resistance using bounding box diagonal
+- `analyze_multi_net_plane()` - Calculates resistance using longest MST path
+- `find_mst_diameter_path()` - Finds longest path through MST (tree diameter)
+- `calculate_average_width_along_path()` - Samples polygon width perpendicular to path
+- `calculate_resistance()` - Computes R = ρL/Wt
+- `calculate_max_current_ipc()` - Computes max current using IPC-2152 formula
