@@ -32,7 +32,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
-- **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route
+- **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
 
 ## Quick Start
 
@@ -170,6 +170,7 @@ KiCadRoutingTools/
 ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
 ├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
 ├── plane_zone_geometry.py    # Voronoi zone computation for multi-net layers
+├── plane_resistance.py       # Plane resistance and current capacity calculations
 ├── plane_create_helpers.py   # Helper functions for create_plane
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
@@ -478,6 +479,7 @@ Features:
 - **Blocker rip-up** - When via placement/routing fails, identifies blocking nets and temporarily removes them, then retries
 - **Automatic re-routing** - Optionally re-routes ripped nets after all plane vias are placed
 - **Zone creation** - Creates copper pour zone or uses existing zone if present
+- **Resistance analysis** - Calculates and displays approximate plane resistance and maximum current capacity (IPC-2152) for each polygon. For multi-net layers, uses the longest MST route path length; for single-net layers, uses the bounding box diagonal. Samples polygon width perpendicular to the current path to estimate effective cross-section. Assumes 1 oz copper and 10°C temperature rise
 
 See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
 
