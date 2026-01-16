@@ -142,19 +142,23 @@ def build_base_obstacle_map(pcb_data, config, nets_to_route, extra_clearance=0.0
 
 ### Clearance Expansion
 
-Obstacles are expanded by track clearance to ensure DRC compliance:
+Obstacles are expanded by track clearance to ensure DRC compliance. For impedance-controlled routing, track widths vary per layer (microstrip on outer layers is wider than stripline on inner layers), so clearance calculations use per-layer widths:
 
 ```python
-# Track clearance expansion
-expansion_mm = track_width / 2 + clearance
-expansion_grid = coord.to_grid_dist(expansion_mm)
+# Per-layer track clearance expansion
+for layer_name in config.layers:
+    layer_width = config.get_track_width(layer_name)  # Impedance-controlled width
+    expansion_mm = layer_width / 2 + clearance
+    expansion_grid = coord.to_grid_dist(expansion_mm)
 
-# Via blocking near tracks
-via_block_mm = via_size / 2 + track_width / 2 + clearance
-via_block_grid = coord.to_grid_dist(via_block_mm)
+    # Via blocking near tracks - uses to_grid_dist_safe() for safety margin
+    via_block_mm = via_size / 2 + layer_width / 2 + clearance
+    via_block_grid = coord.to_grid_dist_safe(via_block_mm)
 ```
 
 A segment at position (x, y) blocks all cells within `expansion_grid` radius on its layer, and blocks via placement within `via_block_grid` radius.
+
+**Grid quantization safety**: Via-related clearances use `to_grid_dist_safe()` which adds half a grid step before rounding. This prevents edge cases where clearances round down and cause minor DRC violations (e.g., 0.01mm overlaps).
 
 ## A* Pathfinding Algorithm
 

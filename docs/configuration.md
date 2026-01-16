@@ -38,11 +38,14 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--track-width` | 0.1 | Track width in mm |
+| `--track-width` | 0.1 | Track width in mm (ignored if `--impedance` specified) |
+| `--impedance` | - | Target single-ended impedance in ohms (calculates width per layer from stackup) |
 | `--clearance` | 0.1 | Track-to-track clearance in mm |
 | `--via-size` | 0.3 | Via outer diameter in mm |
 | `--via-drill` | 0.2 | Via drill diameter in mm |
 | `--grid-step` | 0.1 | Grid resolution in mm |
+
+**Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
 
 ### Algorithm Options
 
@@ -88,7 +91,8 @@ These options are only available in `route_diff.py`. All nets passed to route_di
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
+| `--impedance` | - | Target differential impedance in ohms (calculates width per layer from stackup) |
+| `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm), also used as spacing for impedance calculation |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
