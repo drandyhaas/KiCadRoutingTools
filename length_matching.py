@@ -140,6 +140,15 @@ class ClearanceIndex:
                         self.pad_cells[cell] = []
                     self.pad_cells[cell].append((pad, expanded))
 
+    def add_segments(self, segments: List[Segment], margin: float):
+        """Incrementally add segments to the index after initial build."""
+        for seg in segments:
+            cells = self._cells_for_segment(seg.start_x, seg.start_y, seg.end_x, seg.end_y, margin)
+            for cell in cells:
+                if cell not in self.segment_cells:
+                    self.segment_cells[cell] = []
+                self.segment_cells[cell].append(seg)
+
     def query_segments(self, x1: float, y1: float, x2: float, y2: float, margin: float) -> List:
         """Get segments potentially within margin of a line segment."""
         cells = self._cells_for_segment(x1, y1, x2, y2, margin)
@@ -1119,7 +1128,8 @@ def apply_meanders_to_route(
     min_bumps: int = 0,
     amplitude_override: float = None,
     paired_net_id: int = None,
-    excluded_centerline_ranges: List[Tuple[float, float]] = None
+    excluded_centerline_ranges: List[Tuple[float, float]] = None,
+    clearance_index: 'ClearanceIndex' = None
 ) -> Tuple[List[Segment], int]:
     """
     Apply meanders to a route to add extra length.
@@ -1136,6 +1146,7 @@ def apply_meanders_to_route(
         amplitude_override: Override amplitude (for scaling down to hit target length)
         paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
         excluded_centerline_ranges: List of (start, end) position ranges to avoid (e.g., inter-pair meanders)
+        clearance_index: Pre-built spatial index for clearance checking (optional, built if not provided)
 
     Returns:
         Tuple of (modified segment list, bump_count)
@@ -1154,9 +1165,8 @@ def apply_meanders_to_route(
         print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
         return segments, 0
 
-    # Build spatial index once for efficient clearance checking
-    clearance_index = None
-    if pcb_data is not None and config is not None:
+    # Use provided index or build one for efficient clearance checking
+    if clearance_index is None and pcb_data is not None and config is not None:
         clearance_index = ClearanceIndex()
         clearance_index.build(pcb_data, config, extra_segments, extra_vias)
 
@@ -1324,6 +1334,15 @@ def apply_length_matching_to_group(
         if result.get('new_vias'):
             already_processed_vias.extend(result['new_vias'])
 
+    # Build spatial index ONCE for the entire group (major performance optimization)
+    # Index is updated incrementally after each net's meanders are generated
+    group_clearance_index = None
+    index_margin = 0  # Will be set when index is built
+    if pcb_data is not None and config is not None:
+        group_clearance_index = ClearanceIndex()
+        group_clearance_index.build(pcb_data, config, already_processed_segments, already_processed_vias)
+        index_margin = config.track_width + config.clearance + config.meander_amplitude
+
     # Apply meanders to shorter routes
     from net_queries import calculate_route_length
 
@@ -1428,6 +1447,10 @@ def apply_length_matching_to_group(
             if result.get('new_vias'):
                 already_processed_vias.extend(result['new_vias'])
 
+            # Update spatial index with new meandered segments for subsequent nets
+            if group_clearance_index is not None:
+                group_clearance_index.add_segments(result['new_segments'], index_margin)
+
         else:
             # Single-ended net: use existing meander logic
             print(f"    {net_name}: {current_length:.2f}mm -> adding {delta:.2f}mm")
@@ -1446,7 +1469,8 @@ def apply_length_matching_to_group(
                 pcb_data=pcb_data,
                 net_id=net_id,
                 extra_segments=already_processed_segments,
-                extra_vias=already_processed_vias
+                extra_vias=already_processed_vias,
+                clearance_index=group_clearance_index
             )
             new_length = calculate_route_length(new_segments) + stub_length
 
@@ -1464,7 +1488,8 @@ def apply_length_matching_to_group(
                     net_id=net_id,
                     extra_segments=already_processed_segments,
                     extra_vias=already_processed_vias,
-                    min_bumps=bump_count
+                    min_bumps=bump_count,
+                    clearance_index=group_clearance_index
                 )
                 prev_length = new_length
                 new_length = calculate_route_length(new_segments) + stub_length
@@ -1501,7 +1526,8 @@ def apply_length_matching_to_group(
                     extra_segments=already_processed_segments,
                     extra_vias=already_processed_vias,
                     min_bumps=bump_count,
-                    amplitude_override=scaled_amplitude
+                    amplitude_override=scaled_amplitude,
+                    clearance_index=group_clearance_index
                 )
                 trial_length = calculate_route_length(trial_segments) + stub_length
 
@@ -1532,6 +1558,10 @@ def apply_length_matching_to_group(
             already_processed_segments.extend(new_segments)
             if result.get('new_vias'):
                 already_processed_vias.extend(result['new_vias'])
+
+            # Update spatial index with new meandered segments for subsequent nets
+            if group_clearance_index is not None:
+                group_clearance_index.add_segments(new_segments, index_margin)
 
     return net_results
 
