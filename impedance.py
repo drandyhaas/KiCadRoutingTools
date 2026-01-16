@@ -685,9 +685,14 @@ def print_stackup_impedance_table(pcb: PCBData, trace_width: float = 0.15, spaci
     print("=" * 85)
 
 
+# Empirical scaling factor to match online calculators (formulas tend to overestimate width)
+IMPEDANCE_WIDTH_SCALE = 0.90
+
+
 def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target_z0: float,
                                          spacing: float = 0.0, is_differential: bool = False,
-                                         fallback_width: float = 0.1) -> Dict[str, float]:
+                                         fallback_width: float = 0.1,
+                                         min_width: float = 0.0) -> Dict[str, float]:
     """
     Calculate trace widths for each layer to achieve target impedance.
 
@@ -704,6 +709,7 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
         spacing: Differential pair spacing in mm (required if is_differential=True)
         is_differential: If True, target_z0 is differential impedance
         fallback_width: Width to use if impedance calculation fails
+        min_width: Minimum allowed track width (from --track-width parameter)
 
     Returns:
         Dict mapping layer name to trace width in mm
@@ -720,13 +726,22 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
             # Use fallback width if calculation fails
             layer_widths[layer_name] = fallback_width
         else:
-            layer_widths[layer_name] = result['calculated_width_mm']
+            # Apply scaling factor to match online calculators
+            calculated_width = result['calculated_width_mm'] * IMPEDANCE_WIDTH_SCALE
+
+            # Enforce minimum width
+            if calculated_width < min_width:
+                print(f"  WARNING: {layer_name} calculated width {calculated_width:.4f}mm < min {min_width:.4f}mm, using min")
+                calculated_width = min_width
+
+            layer_widths[layer_name] = calculated_width
 
     return layer_widths
 
 
 def print_impedance_routing_plan(pcb: PCBData, layers: List[str], target_z0: float,
-                                 spacing: float = 0.0, is_differential: bool = False):
+                                 spacing: float = 0.0, is_differential: bool = False,
+                                 min_width: float = 0.0):
     """
     Print the impedance-controlled routing plan showing width per layer.
 
@@ -736,14 +751,16 @@ def print_impedance_routing_plan(pcb: PCBData, layers: List[str], target_z0: flo
         target_z0: Target impedance in ohms
         spacing: Differential pair spacing in mm
         is_differential: Whether this is differential impedance
+        min_width: Minimum allowed track width (for warning display)
     """
     imp_type = "differential" if is_differential else "single-ended"
     print(f"\nImpedance-Controlled Routing Plan: {target_z0}Ω {imp_type}")
     if is_differential:
         print(f"Differential pair spacing: {spacing}mm ({spacing * 39.3701:.2f} mil)")
-    print("=" * 75)
-    print(f"{'Layer':<12} {'Type':<12} {'Width(mm)':<12} {'Width(mil)':<12} {'Verified Z':<12}")
-    print("-" * 75)
+    print(f"Width scaling factor: {IMPEDANCE_WIDTH_SCALE:.0%}")
+    print("=" * 80)
+    print(f"{'Layer':<12} {'Type':<12} {'Width(mm)':<12} {'Width(mil)':<12} {'Verified Z':<15}")
+    print("-" * 80)
 
     for layer_name in layers:
         result = calculate_width_for_impedance(
@@ -756,14 +773,24 @@ def print_impedance_routing_plan(pcb: PCBData, layers: List[str], target_z0: flo
         else:
             params = result.get('params')
             layer_type = "Microstrip" if params and params.is_outer_layer else "Stripline"
-            width_mm = result.get('calculated_width_mm', 0)
-            width_mil = result.get('calculated_width_mils', 0)
-            verified = result.get('verified_z0', 0)
+            raw_width = result.get('calculated_width_mm', 0)
+            width_mm = raw_width * IMPEDANCE_WIDTH_SCALE
+            width_mil = width_mm * 39.3701
             z_unit = "Ω diff" if is_differential else "Ω"
 
+            # Calculate verified impedance at scaled width
             if width_mm > 0:
-                print(f"{layer_name:<12} {layer_type:<12} {width_mm:<12.4f} {width_mil:<12.2f} {verified:.1f} {z_unit}")
+                verify = calculate_impedance_for_layer(pcb, layer_name, width_mm, spacing)
+                verified = verify.get('zdiff' if is_differential else 'z0', 0)
+
+                note = ""
+                if width_mm < min_width:
+                    note = f" (clamped to min {min_width:.3f}mm)"
+                    width_mm = min_width
+                    width_mil = width_mm * 39.3701
+
+                print(f"{layer_name:<12} {layer_type:<12} {width_mm:<12.4f} {width_mil:<12.2f} {verified:.1f} {z_unit}{note}")
             else:
                 print(f"{layer_name:<12} {layer_type:<12} {'N/A':<12} {'N/A':<12} {'Not achievable'}")
 
-    print("=" * 75)
+    print("=" * 80)

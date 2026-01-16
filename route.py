@@ -208,9 +208,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             layer_widths = calculate_layer_widths_for_impedance(
                 pcb_data, layers, impedance,
                 spacing=0.0, is_differential=False,
-                fallback_width=track_width
+                fallback_width=track_width,
+                min_width=track_width
             )
-            print_impedance_routing_plan(pcb_data, layers, impedance, is_differential=False)
+            print_impedance_routing_plan(pcb_data, layers, impedance, is_differential=False,
+                                        min_width=track_width)
 
     # Auto-detect BGA exclusion zones if not specified
     bga_exclusion_zones = setup_bga_exclusion_zones(pcb_data, disable_bga_zones, bga_exclusion_zones)
