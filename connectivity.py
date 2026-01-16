@@ -172,7 +172,10 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
 
 
 def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> List[List[Segment]]:
-    """Find groups of connected segments using union-find."""
+    """Find groups of connected segments using union-find with spatial hashing.
+
+    Uses O(n) spatial hashing instead of O(n²) pairwise comparison.
+    """
     if not segments:
         return []
 
@@ -189,17 +192,32 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
         if px != py:
             parent[px] = py
 
-    # Check all pairs for shared endpoints
-    for i in range(n):
-        for j in range(i + 1, n):
-            si, sj = segments[i], segments[j]
-            pts_i = [(si.start_x, si.start_y), (si.end_x, si.end_y)]
-            pts_j = [(sj.start_x, sj.start_y), (sj.end_x, sj.end_y)]
-            for pi in pts_i:
-                for pj in pts_j:
-                    if abs(pi[0] - pj[0]) < tolerance and abs(pi[1] - pj[1]) < tolerance:
-                        union(i, j)
-                        break
+    # Spatial hash: map rounded coordinates to (segment_index, x, y) tuples
+    # Use tolerance-based grid cells
+    inv_tol = 1.0 / tolerance
+    endpoint_map: Dict[Tuple[int, int], List[Tuple[int, float, float]]] = {}
+
+    # First pass: build spatial hash with actual coordinates
+    for i, seg in enumerate(segments):
+        for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
+            key = (int(x * inv_tol), int(y * inv_tol))
+            if key not in endpoint_map:
+                endpoint_map[key] = []
+            endpoint_map[key].append((i, x, y))
+
+    # Second pass: check each endpoint against neighbors (handles bucket boundary issues)
+    for i, seg in enumerate(segments):
+        for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
+            gx, gy = int(x * inv_tol), int(y * inv_tol)
+            # Check current cell and 8 neighbors
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    key = (gx + dx, gy + dy)
+                    if key in endpoint_map:
+                        for j, ox, oy in endpoint_map[key]:
+                            if i < j:  # Avoid duplicate checks
+                                if abs(x - ox) < tolerance and abs(y - oy) < tolerance:
+                                    union(i, j)
 
     # Group segments by their root
     groups: Dict[int, List[Segment]] = {}
