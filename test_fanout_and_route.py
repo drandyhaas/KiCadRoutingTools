@@ -31,20 +31,22 @@ def main():
     parser = argparse.ArgumentParser(description='Test fanning out BGA chips and routing')
     parser.add_argument('--quick', action='store_true', default=False,
                         help='Run quick test with reduced routing')
-    parser.add_argument('--fanout', action='store_true', default=True,
+    parser.add_argument('--fanout', action='store_true', default=False,
                         help='Run fanout tests')
-    parser.add_argument('--ftdi', action='store_true', default=True,
+    parser.add_argument('--ftdi', action='store_true', default=False,
                         help='Run ftdi routing tests')
-    parser.add_argument('--lvds', action='store_true', default=True,
+    parser.add_argument('--lvds', action='store_true', default=False,
                         help='Run lvds routing tests')
-    parser.add_argument('--ram', action='store_true', default=True,
+    parser.add_argument('--ram', action='store_true', default=False,
                         help='Run RAM routing tests')
-    parser.add_argument('--planes', action='store_true', default=True,
+    parser.add_argument('--planes', action='store_true', default=False,
                         help='Run planes routing tests')
-    parser.add_argument('--checks', action='store_true', default=True,
+    parser.add_argument('--checks', action='store_true', default=False,
                         help='Run checks of DRC and connectivity (unless --quick given)')
     parser.add_argument('--onlychecks', action='store_true', default=False,
-                        help='Run onyl checks, no routing')
+                        help='Run only checks, no routing')
+    parser.add_argument('--all', action='store_true', default=False,
+                        help='Run all tests and checks')
     parser.add_argument('-u', '--unbuffered', action='store_true', default=False,
                         help='Run python commands with -u (unbuffered output)')
     args = parser.parse_args()
@@ -57,6 +59,13 @@ def main():
     planes = args.planes
     checks = args.checks
     onlychecks = args.onlychecks
+    if args.all:
+        fanout=True
+        ftdi=True
+        lvds=True
+        ram=True
+        planes=True
+        checks=True
     unbuffered = args.unbuffered
 
     if fanout and not onlychecks:

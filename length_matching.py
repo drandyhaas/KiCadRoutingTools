@@ -28,6 +28,157 @@ MIN_SEGMENT_LENGTH = 0.001  # mm - minimum meaningful segment length
 COLINEAR_DOT_THRESHOLD = 0.99  # dot product threshold for colinearity check
 POSITION_TOLERANCE = 0.01  # mm - tolerance for position comparisons
 CORNER_BLOAT_FACTOR = 0.42  # sqrt(2) - 1, extra copper extension at 90-degree corners
+SPATIAL_CELL_SIZE = 2.0  # mm - spatial index cell size
+
+
+class ClearanceIndex:
+    """
+    Spatial index for efficient clearance checking.
+
+    Divides the board into cells and stores references to segments/vias/pads
+    in each cell they overlap. This allows efficient queries for items within
+    a specific region rather than checking all items.
+    """
+
+    def __init__(self, cell_size: float = SPATIAL_CELL_SIZE):
+        self.cell_size = cell_size
+        self.segment_cells: Dict[Tuple[int, int], List] = {}  # cell -> list of (seg, layer)
+        self.via_cells: Dict[Tuple[int, int], List] = {}  # cell -> list of vias
+        self.pad_cells: Dict[Tuple[int, int], List] = {}  # cell -> list of (pad, expanded_layers)
+        self._pad_layer_cache: Dict[int, List[str]] = {}  # id(pad) -> expanded layers
+
+    def _cell_key(self, x: float, y: float) -> Tuple[int, int]:
+        """Convert (x, y) coordinates to cell key."""
+        return (int(x / self.cell_size), int(y / self.cell_size))
+
+    def _cells_for_segment(self, x1: float, y1: float, x2: float, y2: float, margin: float = 0) -> List[Tuple[int, int]]:
+        """Get all cells that a segment (with margin) might touch."""
+        min_x = min(x1, x2) - margin
+        max_x = max(x1, x2) + margin
+        min_y = min(y1, y2) - margin
+        max_y = max(y1, y2) + margin
+
+        min_cx, min_cy = self._cell_key(min_x, min_y)
+        max_cx, max_cy = self._cell_key(max_x, max_y)
+
+        cells = []
+        for cx in range(min_cx, max_cx + 1):
+            for cy in range(min_cy, max_cy + 1):
+                cells.append((cx, cy))
+        return cells
+
+    def _cells_for_point(self, x: float, y: float, radius: float) -> List[Tuple[int, int]]:
+        """Get all cells within radius of a point."""
+        min_cx, min_cy = self._cell_key(x - radius, y - radius)
+        max_cx, max_cy = self._cell_key(x + radius, y + radius)
+
+        cells = []
+        for cx in range(min_cx, max_cx + 1):
+            for cy in range(min_cy, max_cy + 1):
+                cells.append((cx, cy))
+        return cells
+
+    def build(self, pcb_data: PCBData, config: GridRouteConfig,
+              extra_segments: List[Segment] = None, extra_vias: List = None):
+        """
+        Build the spatial index from PCB data.
+
+        Args:
+            pcb_data: PCB data with segments, vias, pads
+            config: Routing configuration (for clearance margin in cell assignment)
+            extra_segments: Additional segments to include
+            extra_vias: Additional vias to include
+        """
+        # Clearance margin for cell assignment - ensures we find all potentially conflicting items
+        margin = config.track_width + config.clearance + config.meander_amplitude
+
+        # Index segments
+        for seg in pcb_data.segments:
+            cells = self._cells_for_segment(seg.start_x, seg.start_y, seg.end_x, seg.end_y, margin)
+            for cell in cells:
+                if cell not in self.segment_cells:
+                    self.segment_cells[cell] = []
+                self.segment_cells[cell].append(seg)
+
+        if extra_segments:
+            for seg in extra_segments:
+                cells = self._cells_for_segment(seg.start_x, seg.start_y, seg.end_x, seg.end_y, margin)
+                for cell in cells:
+                    if cell not in self.segment_cells:
+                        self.segment_cells[cell] = []
+                    self.segment_cells[cell].append(seg)
+
+        # Index vias
+        via_margin = config.via_size / 2 + margin
+        for via in pcb_data.vias:
+            cells = self._cells_for_point(via.x, via.y, via_margin)
+            for cell in cells:
+                if cell not in self.via_cells:
+                    self.via_cells[cell] = []
+                self.via_cells[cell].append(via)
+
+        if extra_vias:
+            for via in extra_vias:
+                cells = self._cells_for_point(via.x, via.y, via_margin)
+                for cell in cells:
+                    if cell not in self.via_cells:
+                        self.via_cells[cell] = []
+                    self.via_cells[cell].append(via)
+
+        # Index pads and pre-compute expanded layers
+        for pad_net_id, pad_list in pcb_data.pads_by_net.items():
+            for pad in pad_list:
+                pad_radius = max(pad.size_x, pad.size_y) / 2 + margin
+                cells = self._cells_for_point(pad.global_x, pad.global_y, pad_radius)
+
+                # Pre-compute expanded layers once per pad
+                expanded = expand_pad_layers(pad.layers, config.layers)
+                self._pad_layer_cache[id(pad)] = expanded
+
+                for cell in cells:
+                    if cell not in self.pad_cells:
+                        self.pad_cells[cell] = []
+                    self.pad_cells[cell].append((pad, expanded))
+
+    def query_segments(self, x1: float, y1: float, x2: float, y2: float, margin: float) -> List:
+        """Get segments potentially within margin of a line segment."""
+        cells = self._cells_for_segment(x1, y1, x2, y2, margin)
+        seen = set()
+        result = []
+        for cell in cells:
+            for seg in self.segment_cells.get(cell, []):
+                seg_id = id(seg)
+                if seg_id not in seen:
+                    seen.add(seg_id)
+                    result.append(seg)
+        return result
+
+    def query_vias(self, x1: float, y1: float, x2: float, y2: float, margin: float) -> List:
+        """Get vias potentially within margin of a line segment."""
+        cells = self._cells_for_segment(x1, y1, x2, y2, margin)
+        seen = set()
+        result = []
+        for cell in cells:
+            for via in self.via_cells.get(cell, []):
+                via_id = id(via)
+                if via_id not in seen:
+                    seen.add(via_id)
+                    result.append(via)
+        return result
+
+    def query_pads(self, x1: float, y1: float, x2: float, y2: float, margin: float) -> List[Tuple]:
+        """Get pads (with expanded layers) potentially within margin of a line segment."""
+        cells = self._cells_for_segment(x1, y1, x2, y2, margin)
+        seen = set()
+        result = []
+        for cell in cells:
+            for pad_tuple in self.pad_cells.get(cell, []):
+                pad_id = id(pad_tuple[0])
+                if pad_id not in seen:
+                    seen.add(pad_id)
+                    result.append(pad_tuple)
+        return result
+
 
 def get_bump_segments(
     cx: float, cy: float,
@@ -105,7 +256,8 @@ def get_safe_amplitude_at_point(
     extra_segments: List[Segment] = None,
     extra_vias: List = None,
     is_first_bump: bool = True,
-    paired_net_id: int = None
+    paired_net_id: int = None,
+    clearance_index: 'ClearanceIndex' = None
 ) -> float:
     """
     Find the maximum safe amplitude for a meander bump at a specific point.
@@ -124,6 +276,7 @@ def get_safe_amplitude_at_point(
         extra_segments: Additional segments to check against (e.g., from other nets in same length-match pass)
         extra_vias: Additional vias to check against (e.g., from other nets in same length-match pass)
         paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
+        clearance_index: Pre-built spatial index for efficient collision detection (optional)
 
     Returns:
         Safe amplitude, or 0 if no safe amplitude found
@@ -136,19 +289,8 @@ def get_safe_amplitude_at_point(
     corner_margin = config.track_width / 2 * CORNER_BLOAT_FACTOR
     required_clearance = config.track_width + config.clearance + meander_clearance_margin + corner_margin
     via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
+    paired_clearance = config.track_width + config.clearance
     chamfer = CHAMFER_SIZE
-
-    max_safe = max_amplitude
-
-    # Combine pcb_data segments with extra_segments
-    all_segments = list(pcb_data.segments)
-    if extra_segments:
-        all_segments.extend(extra_segments)
-
-    # Combine pcb_data vias with extra_vias
-    all_vias = list(pcb_data.vias)
-    if extra_vias:
-        all_vias.extend(extra_vias)
 
     # Binary search for safe amplitude
     # Start with max_amplitude and reduce if there are conflicts
@@ -167,79 +309,79 @@ def get_safe_amplitude_at_point(
 
         conflict_found = False
 
-        # Check each bump segment against other segments on the same layer
-        for bx1, by1, bx2, by2 in bump_segs:
-            if conflict_found:
-                break
+        # Calculate bump bounding box for spatial queries
+        bump_min_x = min(min(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+        bump_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+        bump_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+        bump_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
 
-            for other_seg in all_segments:
-                if other_seg.net_id == net_id:
-                    continue
+        # Use spatial index if available, otherwise fall back to full iteration
+        if clearance_index is not None:
+            # Query segments in the bump region
+            nearby_segments = clearance_index.query_segments(
+                bump_min_x, bump_min_y, bump_max_x, bump_max_y, required_clearance
+            )
 
-                # For paired net (intra-pair meanders), use minimum clearance for DRC compliance
-                # but less than full diff pair spacing. Center-to-center distance needs to be:
-                # track_width/2 + clearance + track_width/2 = track_width + clearance
-                if other_seg.net_id == paired_net_id:
-                    check_clearance = config.track_width + config.clearance
-                else:
-                    check_clearance = required_clearance
-                if other_seg.layer != layer:
-                    continue
-
-                # Quick distance check - account for segment lengths
-                seg_center_x = (other_seg.start_x + other_seg.end_x) / 2
-                seg_center_y = (other_seg.start_y + other_seg.end_y) / 2
-                seg_half_len = math.sqrt((other_seg.end_x - other_seg.start_x)**2 +
-                                         (other_seg.end_y - other_seg.start_y)**2) / 2
-                bump_center_x = (bx1 + bx2) / 2
-                bump_center_y = (by1 + by2) / 2
-                rough_dist = math.sqrt((bump_center_x - seg_center_x)**2 + (bump_center_y - seg_center_y)**2)
-
-                # Skip only if clearly too far (accounting for segment length and meander amplitude)
-                if rough_dist > test_amp + seg_half_len + required_clearance + 1.0:
-                    continue
-
-                # Check segment-to-segment distance
-                dist = segment_to_segment_distance(
-                    bx1, by1, bx2, by2,
-                    other_seg.start_x, other_seg.start_y, other_seg.end_x, other_seg.end_y
-                )
-
-                if dist < check_clearance:
-                    conflict_found = True
-                    break
-
-        # Check bump segments against vias
-        if not conflict_found:
+            # Check each bump segment against nearby segments on the same layer
             for bx1, by1, bx2, by2 in bump_segs:
                 if conflict_found:
                     break
 
-                for via in all_vias:
-                    if via.net_id == net_id:
+                for other_seg in nearby_segments:
+                    # Layer check first (most likely to skip)
+                    if other_seg.layer != layer:
+                        continue
+                    if other_seg.net_id == net_id:
                         continue
 
-                    # Distance from via center to bump segment
-                    dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
+                    # For paired net (intra-pair meanders), use minimum clearance
+                    if other_seg.net_id == paired_net_id:
+                        check_clearance = paired_clearance
+                    else:
+                        check_clearance = required_clearance
 
-                    if dist < via_clearance:
+                    # Check segment-to-segment distance
+                    dist = segment_to_segment_distance(
+                        bx1, by1, bx2, by2,
+                        other_seg.start_x, other_seg.start_y, other_seg.end_x, other_seg.end_y
+                    )
+
+                    if dist < check_clearance:
                         conflict_found = True
                         break
 
-        # Check bump segments against pads (on same layer)
-        if not conflict_found:
-            pad_clearance = config.track_width / 2 + config.clearance + corner_margin
-            for bx1, by1, bx2, by2 in bump_segs:
-                if conflict_found:
-                    break
-                for pad_net_id, pad_list in pcb_data.pads_by_net.items():
-                    if pad_net_id == net_id:
-                        continue
+            # Check bump segments against nearby vias
+            if not conflict_found:
+                nearby_vias = clearance_index.query_vias(
+                    bump_min_x, bump_min_y, bump_max_x, bump_max_y, via_clearance
+                )
+
+                for bx1, by1, bx2, by2 in bump_segs:
                     if conflict_found:
                         break
-                    for pad in pad_list:
-                        # Expand wildcard layers like "*.Cu" to actual routing layers
-                        expanded_pad_layers = expand_pad_layers(pad.layers, config.layers)
+
+                    for via in nearby_vias:
+                        if via.net_id == net_id:
+                            continue
+
+                        # Distance from via center to bump segment
+                        dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
+
+                        if dist < via_clearance:
+                            conflict_found = True
+                            break
+
+            # Check bump segments against nearby pads (on same layer)
+            if not conflict_found:
+                pad_clearance = config.track_width / 2 + config.clearance + corner_margin
+                nearby_pads = clearance_index.query_pads(
+                    bump_min_x, bump_min_y, bump_max_x, bump_max_y, pad_clearance + 2.0
+                )
+
+                for bx1, by1, bx2, by2 in bump_segs:
+                    if conflict_found:
+                        break
+                    for pad, expanded_pad_layers in nearby_pads:
                         if layer not in expanded_pad_layers:
                             continue
                         # Treat pad as circle with radius = max(size_x, size_y)/2
@@ -248,6 +390,118 @@ def get_safe_amplitude_at_point(
                         if dist < pad_radius + pad_clearance:
                             conflict_found = True
                             break
+
+        else:
+            # Fallback: iterate all segments (slower, but works without index)
+            for bx1, by1, bx2, by2 in bump_segs:
+                if conflict_found:
+                    break
+
+                for other_seg in pcb_data.segments:
+                    # Layer check first (most likely to skip)
+                    if other_seg.layer != layer:
+                        continue
+                    if other_seg.net_id == net_id:
+                        continue
+
+                    # For paired net (intra-pair meanders), use minimum clearance
+                    if other_seg.net_id == paired_net_id:
+                        check_clearance = paired_clearance
+                    else:
+                        check_clearance = required_clearance
+
+                    # Quick distance check
+                    seg_center_x = (other_seg.start_x + other_seg.end_x) / 2
+                    seg_center_y = (other_seg.start_y + other_seg.end_y) / 2
+                    seg_half_len = math.sqrt((other_seg.end_x - other_seg.start_x)**2 +
+                                             (other_seg.end_y - other_seg.start_y)**2) / 2
+                    bump_center_x = (bx1 + bx2) / 2
+                    bump_center_y = (by1 + by2) / 2
+                    rough_dist = math.sqrt((bump_center_x - seg_center_x)**2 + (bump_center_y - seg_center_y)**2)
+
+                    if rough_dist > test_amp + seg_half_len + required_clearance + 1.0:
+                        continue
+
+                    # Check segment-to-segment distance
+                    dist = segment_to_segment_distance(
+                        bx1, by1, bx2, by2,
+                        other_seg.start_x, other_seg.start_y, other_seg.end_x, other_seg.end_y
+                    )
+
+                    if dist < check_clearance:
+                        conflict_found = True
+                        break
+
+                # Check extra_segments too
+                if not conflict_found and extra_segments:
+                    for other_seg in extra_segments:
+                        if other_seg.layer != layer:
+                            continue
+                        if other_seg.net_id == net_id:
+                            continue
+
+                        if other_seg.net_id == paired_net_id:
+                            check_clearance = paired_clearance
+                        else:
+                            check_clearance = required_clearance
+
+                        dist = segment_to_segment_distance(
+                            bx1, by1, bx2, by2,
+                            other_seg.start_x, other_seg.start_y, other_seg.end_x, other_seg.end_y
+                        )
+
+                        if dist < check_clearance:
+                            conflict_found = True
+                            break
+
+            # Check bump segments against vias
+            if not conflict_found:
+                for bx1, by1, bx2, by2 in bump_segs:
+                    if conflict_found:
+                        break
+
+                    for via in pcb_data.vias:
+                        if via.net_id == net_id:
+                            continue
+
+                        dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
+
+                        if dist < via_clearance:
+                            conflict_found = True
+                            break
+
+                    # Check extra_vias too
+                    if not conflict_found and extra_vias:
+                        for via in extra_vias:
+                            if via.net_id == net_id:
+                                continue
+
+                            dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
+
+                            if dist < via_clearance:
+                                conflict_found = True
+                                break
+
+            # Check bump segments against pads (on same layer)
+            if not conflict_found:
+                pad_clearance = config.track_width / 2 + config.clearance + corner_margin
+                for bx1, by1, bx2, by2 in bump_segs:
+                    if conflict_found:
+                        break
+                    for pad_net_id, pad_list in pcb_data.pads_by_net.items():
+                        if pad_net_id == net_id:
+                            continue
+                        if conflict_found:
+                            break
+                        for pad in pad_list:
+                            expanded_pad_layers = expand_pad_layers(pad.layers, config.layers)
+                            if layer not in expanded_pad_layers:
+                                continue
+                            pad_radius = max(pad.size_x, pad.size_y) / 2
+                            dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
+                            if dist < pad_radius + pad_clearance:
+                                conflict_found = True
+                                break
 
         if not conflict_found:
             return test_amp
@@ -426,7 +680,8 @@ def generate_trombone_meander(
     extra_segments: List[Segment] = None,
     extra_vias: List = None,
     min_bumps: int = 0,
-    paired_net_id: int = None
+    paired_net_id: int = None,
+    clearance_index: 'ClearanceIndex' = None
 ) -> Tuple[List[Segment], int]:
     """
     Generate trombone-style meander segments to replace a straight segment.
@@ -568,7 +823,7 @@ def generate_trombone_meander(
             safe_amp = get_safe_amplitude_at_point(
                 check_cx, check_cy, ux, uy, px, py, direction, amplitude, min_amplitude,
                 segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
-                paired_net_id=paired_net_id
+                paired_net_id=paired_net_id, clearance_index=clearance_index
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
@@ -584,7 +839,7 @@ def generate_trombone_meander(
                 safe_amp_other = get_safe_amplitude_at_point(
                     other_check_cx, other_check_cy, ux, uy, px, py, other_dir, amplitude, min_amplitude,
                     segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
-                    paired_net_id=paired_net_id
+                    paired_net_id=paired_net_id, clearance_index=clearance_index
                 )
                 if safe_amp_other >= min_amplitude:
                     # Mark the original direction as blocked if safe_amp was 0
@@ -899,6 +1154,12 @@ def apply_meanders_to_route(
         print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
         return segments, 0
 
+    # Build spatial index once for efficient clearance checking
+    clearance_index = None
+    if pcb_data is not None and config is not None:
+        clearance_index = ClearanceIndex()
+        clearance_index.build(pcb_data, config, extra_segments, extra_vias)
+
     # Calculate main direction for centerline projection (if we have excluded ranges)
     main_ux, main_uy, origin_x, origin_y = 0, 0, 0, 0
     if excluded_centerline_ranges:
@@ -959,7 +1220,8 @@ def apply_meanders_to_route(
             extra_segments=extra_segments,
             extra_vias=extra_vias,
             min_bumps=min_bumps,
-            paired_net_id=paired_net_id
+            paired_net_id=paired_net_id,
+            clearance_index=clearance_index
         )
 
         if bump_count == 0:
