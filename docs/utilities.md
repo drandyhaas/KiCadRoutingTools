@@ -372,13 +372,44 @@ Runs a complete integration test: fanout generation followed by routing and veri
 #### Usage
 
 ```bash
-python test_fanout_and_route.py
+# Run all stages
+python test_fanout_and_route.py --all
+
+# Quick mode (reduced scope)
+python test_fanout_and_route.py --all --quick
+
+# Run specific stages only
+python test_fanout_and_route.py --fanout --ftdi
+python test_fanout_and_route.py --ram --planes
+
+# Run only checks (no routing)
+python test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
 ```
 
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `--all` | Run all stages: fanout, ftdi, lvds, ram, planes, and checks |
+| `--quick` | Run quick test with reduced routing (fewer nets per stage) |
+| `--fanout` | Run fanout tests (QFN and BGA fanout) |
+| `--ftdi` | Run FTDI single-ended routing tests |
+| `--lvds` | Run LVDS differential pair routing tests |
+| `--ram` | Run DDR RAM routing tests |
+| `--planes` | Run power/ground plane routing tests |
+| `--checks` | Run DRC and connectivity checks after routing |
+| `--onlychecks` | Run only checks, skip all routing stages |
+| `-u, --unbuffered` | Run python commands with unbuffered output |
+
+Note: By default, no stages run. Use `--all` to run everything, or specify individual stages.
+
 This script runs a sequence of fanout and routing operations on the test board, including:
-1. BGA fanout for multiple components (FTDI, ADC, FPGA, DDR)
-2. Single-ended and differential pair routing
-3. DRC and connectivity verification
+1. QFN fanout for U2 (ADC interface)
+2. BGA fanout for multiple components (FTDI, ADC, FPGA, DDR)
+3. Single-ended routing (FTDI data lanes)
+4. Differential pair routing (LVDS)
+5. DDR routing (DQS/CK diff pairs + DQ data lanes)
+6. DRC and connectivity verification
 
 #### Cross-Platform
 

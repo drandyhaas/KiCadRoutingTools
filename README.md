@@ -112,32 +112,36 @@ python check_connected.py kicad_files/output.kicad_pcb --component U1
 Run the complete pipeline (QFN/BGA fanout → routing → DRC → connectivity) on the test board:
 
 ```bash
-python test_fanout_and_route.py
+# Run all stages (fanout, routing, checks)
+python test_fanout_and_route.py --all
 
 # Quick mode (reduced scope for faster testing)
-python test_fanout_and_route.py --quick
+python test_fanout_and_route.py --all --quick
 
 # Unbuffered output (useful for real-time logging)
-python test_fanout_and_route.py -u
+python test_fanout_and_route.py --all -u
 
-# Run only specific stages (all enabled by default)
+# Run only specific stages
 python test_fanout_and_route.py --ftdi --lvds    # Only FTDI and LVDS routing
 python test_fanout_and_route.py --ram --planes   # Only RAM routing and planes
 
 # Run only DRC/connectivity checks (no routing)
-python test_fanout_and_route.py --onlychecks
+python test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
 ```
 
 Options:
+- `--all` - Run all stages: fanout, ftdi, lvds, ram, planes, and checks
 - `--quick` - Run quick test with reduced routing (fewer nets per stage)
-- `--fanout` - Run fanout tests (QFN and BGA fanout, default: enabled)
-- `--ftdi` - Run FTDI single-ended routing tests (default: enabled)
-- `--lvds` - Run LVDS differential pair routing tests (default: enabled)
-- `--ram` - Run DDR RAM routing tests (default: enabled)
-- `--planes` - Run power/ground plane routing tests (default: enabled)
-- `--checks` - Run DRC and connectivity checks after routing (default: enabled, skipped in --quick mode)
-- `--onlychecks` - Run only checks, skip all routing stages
+- `--fanout` - Run fanout tests (QFN and BGA fanout)
+- `--ftdi` - Run FTDI single-ended routing tests
+- `--lvds` - Run LVDS differential pair routing tests
+- `--ram` - Run DDR RAM routing tests
+- `--planes` - Run power/ground plane routing tests
+- `--checks` - Run DRC and connectivity checks after routing (skipped in --quick mode)
+- `--onlychecks` - Run only checks, skip all routing stages (requires stage flags like --ftdi to specify which checks)
 - `-u, --unbuffered` - Run python commands with unbuffered output
+
+Note: By default, no stages run. Use `--all` to run everything, or specify individual stages.
 
 This script demonstrates a real-world workflow:
 1. QFN fanout for U2 (ADC interface)
