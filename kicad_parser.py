@@ -91,8 +91,11 @@ class Net:
 class StackupLayer:
     """A layer in the board stackup."""
     name: str
-    layer_type: str  # 'copper', 'dielectric', 'mask', etc.
+    layer_type: str  # 'copper', 'core', 'prepreg', etc.
     thickness: float  # in mm
+    epsilon_r: float = 0.0  # Dielectric constant (for dielectric layers)
+    loss_tangent: float = 0.0  # Loss tangent (for dielectric layers)
+    material: str = ""  # Material name (e.g., "FR4", "S1000-2M")
 
 
 @dataclass
@@ -225,7 +228,14 @@ def extract_layers(content: str) -> BoardInfo:
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
-    """Extract board stackup information for via barrel length calculation."""
+    """Extract board stackup information for impedance calculation and via barrel length.
+
+    Extracts copper and dielectric layers with their electrical properties:
+    - thickness: layer thickness in mm
+    - epsilon_r: dielectric constant (for dielectric layers)
+    - loss_tangent: loss tangent (for dielectric layers)
+    - material: material name
+    """
     stackup = []
 
     # Find the stackup section
@@ -253,12 +263,27 @@ def extract_stackup(content: str) -> List[StackupLayer]:
         thickness_match = re.search(r'\(thickness\s+([\d.]+)\)', layer_content)
         thickness = float(thickness_match.group(1)) if thickness_match else 0.0
 
+        # Extract dielectric constant (epsilon_r)
+        epsilon_match = re.search(r'\(epsilon_r\s+([\d.]+)\)', layer_content)
+        epsilon_r = float(epsilon_match.group(1)) if epsilon_match else 0.0
+
+        # Extract loss tangent
+        loss_match = re.search(r'\(loss_tangent\s+([\d.]+)\)', layer_content)
+        loss_tangent = float(loss_match.group(1)) if loss_match else 0.0
+
+        # Extract material name
+        material_match = re.search(r'\(material\s+"([^"]+)"\)', layer_content)
+        material = material_match.group(1) if material_match else ""
+
         # Only include copper and dielectric layers (skip mask, silk, paste)
         if layer_type in ('copper', 'core', 'prepreg'):
             stackup.append(StackupLayer(
                 name=layer_name,
                 layer_type=layer_type,
-                thickness=thickness
+                thickness=thickness,
+                epsilon_r=epsilon_r,
+                loss_tangent=loss_tangent,
+                material=material
             ))
 
     return stackup
