@@ -114,12 +114,30 @@ Run the complete pipeline (QFN/BGA fanout → routing → DRC → connectivity) 
 ```bash
 python test_fanout_and_route.py
 
-# Quick mode (reduced scope)
+# Quick mode (reduced scope for faster testing)
 python test_fanout_and_route.py --quick
 
 # Unbuffered output (useful for real-time logging)
 python test_fanout_and_route.py -u
+
+# Run only specific stages (all enabled by default)
+python test_fanout_and_route.py --ftdi --lvds    # Only FTDI and LVDS routing
+python test_fanout_and_route.py --ram --planes   # Only RAM routing and planes
+
+# Run only DRC/connectivity checks (no routing)
+python test_fanout_and_route.py --onlychecks
 ```
+
+Options:
+- `--quick` - Run quick test with reduced routing (fewer nets per stage)
+- `--fanout` - Run fanout tests (QFN and BGA fanout, default: enabled)
+- `--ftdi` - Run FTDI single-ended routing tests (default: enabled)
+- `--lvds` - Run LVDS differential pair routing tests (default: enabled)
+- `--ram` - Run DDR RAM routing tests (default: enabled)
+- `--planes` - Run power/ground plane routing tests (default: enabled)
+- `--checks` - Run DRC and connectivity checks after routing (default: enabled, skipped in --quick mode)
+- `--onlychecks` - Run only checks, skip all routing stages
+- `-u, --unbuffered` - Run python commands with unbuffered output
 
 This script demonstrates a real-world workflow:
 1. QFN fanout for U2 (ADC interface)
