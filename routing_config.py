@@ -87,6 +87,17 @@ class GridRouteConfig:
             return self.layer_widths[layer]
         return self.track_width
 
+    def get_max_track_width(self) -> float:
+        """Get the maximum track width across all layers.
+
+        Used for via clearance calculations where we need to ensure clearance
+        for the widest possible track (e.g., when a via connects two layers
+        with different impedance-controlled widths).
+        """
+        if self.layer_widths:
+            return max(self.layer_widths.values(), default=self.track_width)
+        return self.track_width
+
 
 class GridCoord:
     """Utilities for converting between float (mm) and integer grid coordinates."""

@@ -443,7 +443,9 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
         return gnd_vias
 
     # Calculate GND via perpendicular offset: track edge + clearance + via radius
-    gnd_via_perp_mm = spacing_mm + config.track_width/2 + config.clearance + config.via_size/2
+    # Use max track width for clearance since track width varies by layer
+    max_track_width = config.get_max_track_width()
+    gnd_via_perp_mm = spacing_mm + max_track_width/2 + config.clearance + config.via_size/2
     via_via_dist_mm = config.via_size + config.clearance
 
     # Track which layer change we're processing to get direction from gnd_via_dirs
@@ -1242,7 +1244,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # When centerline places a via, P/N vias are offset by via_spacing perpendicular to path
     # via_spacing is larger than spacing_mm to ensure via-via clearance
     # We need to prevent centerline from returning near the via such that offset tracks would conflict
-    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
+    # Use max track width for clearance since via connects layers with potentially different widths
+    max_track_width = config.get_max_track_width()
+    track_via_clearance = (config.clearance + max_track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
     min_via_spacing = config.via_size + config.clearance  # Minimum via center-to-center distance
     min_via_spacing_for_track = track_via_clearance - spacing_mm
     via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
@@ -1345,10 +1349,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     # Calculate GND via spacing if enabled
     # GND via center = P/N track outer edge + clearance + via_radius
+    # Use max track width for clearance since track width varies by layer
     gnd_via_perp_grid = 0
     gnd_via_along_grid = 0
     if config.gnd_via_enabled:
-        gnd_via_perp_mm = spacing_mm + config.track_width/2 + config.clearance + config.via_size/2
+        gnd_via_perp_mm = spacing_mm + max_track_width/2 + config.clearance + config.via_size/2
         via_via_dist_mm = config.via_size + config.clearance
         gnd_via_perp_grid = coord.to_grid_dist(gnd_via_perp_mm)
         gnd_via_along_grid = coord.to_grid_dist(via_via_dist_mm)
@@ -2083,7 +2088,9 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
     Handles multiple layer changes by processing in reverse order.
     """
     min_via_spacing = config.via_size + config.clearance  # Minimum center-to-center distance
-    track_via_clearance = (config.clearance + config.track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
+    # Use max track width for clearance since via connects layers with potentially different widths
+    max_track_width = config.get_max_track_width()
+    track_via_clearance = (config.clearance + max_track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
 
     if not p_float_path or not n_float_path or len(simplified_path) < 2:
         return p_float_path, n_float_path
