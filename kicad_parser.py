@@ -68,6 +68,16 @@ class Segment:
 
 
 @dataclass
+class Zone:
+    """Represents a filled zone (power plane)."""
+    net_id: int
+    net_name: str
+    layer: str
+    polygon: List[Tuple[float, float]]  # List of (x, y) vertices defining the zone outline
+    uuid: str = ""
+
+
+@dataclass
 class Footprint:
     """Represents a component footprint."""
     reference: str
@@ -116,6 +126,7 @@ class PCBData:
     vias: List[Via]
     segments: List[Segment]
     pads_by_net: Dict[int, List[Pad]]
+    zones: List[Zone] = field(default_factory=list)
 
     def get_via_barrel_length(self, layer1: str, layer2: str) -> float:
         """Calculate the via barrel length between two copper layers.
@@ -560,6 +571,98 @@ def extract_segments(content: str) -> List[Segment]:
     return segments
 
 
+def extract_zones(content: str) -> List[Zone]:
+    """Extract all filled zones from PCB file.
+
+    Parses zone definitions including their net assignment, layer, and polygon outline.
+    These are used for power planes and other filled copper areas.
+    """
+    zones = []
+
+    # Find each zone block start - zones are at the top level, indented with single tab
+    # Use \r?\n to handle both Unix and Windows line endings
+    zone_start_pattern = r'\r?\n\t\(zone\s*\r?\n'
+
+    for start_match in re.finditer(zone_start_pattern, content):
+        # Find the matching closing paren by counting balanced parens
+        start_pos = start_match.start() + len(start_match.group()) - 1  # Position after opening (
+        paren_count = 1
+        pos = start_match.end()
+        zone_end = None
+
+        while pos < len(content) and paren_count > 0:
+            char = content[pos]
+            if char == '(':
+                paren_count += 1
+            elif char == ')':
+                paren_count -= 1
+                if paren_count == 0:
+                    zone_end = pos
+            pos += 1
+
+        if zone_end is None:
+            continue
+
+        zone_content = content[start_match.end():zone_end]
+
+        # Extract net id
+        net_match = re.search(r'\(net\s+(\d+)\)', zone_content)
+        if not net_match:
+            continue
+        net_id = int(net_match.group(1))
+
+        # Extract net name
+        net_name_match = re.search(r'\(net_name\s+"([^"]*)"\)', zone_content)
+        net_name = net_name_match.group(1) if net_name_match else ""
+
+        # Extract layer
+        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_content)
+        if not layer_match:
+            continue
+        layer = layer_match.group(1)
+
+        # Extract UUID
+        uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', zone_content)
+        uuid = uuid_match.group(1) if uuid_match else ""
+
+        # Extract polygon points - find (pts ...) and extract xy coordinates
+        pts_start = zone_content.find('(pts')
+        if pts_start < 0:
+            continue
+
+        # Find matching closing paren for (pts
+        paren_count = 0
+        pts_end = pts_start
+        for i in range(pts_start, len(zone_content)):
+            if zone_content[i] == '(':
+                paren_count += 1
+            elif zone_content[i] == ')':
+                paren_count -= 1
+                if paren_count == 0:
+                    pts_end = i
+                    break
+
+        pts_content = zone_content[pts_start:pts_end + 1]
+        # Parse all (xy x y) points
+        xy_pattern = r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)'
+        polygon = [(float(m.group(1)), float(m.group(2)))
+                   for m in re.finditer(xy_pattern, pts_content)]
+
+        if not polygon:
+            continue
+
+        zone = Zone(
+            net_id=net_id,
+            net_name=net_name,
+            layer=layer,
+            polygon=polygon,
+            uuid=uuid
+        )
+        zones.append(zone)
+
+    return zones
+
+
 def parse_kicad_pcb(filepath: str) -> PCBData:
     """
     Parse a KiCad PCB file and extract all routing-relevant information.
@@ -579,6 +682,7 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
     footprints, pads_by_net = extract_footprints_and_pads(content, nets)
     vias = extract_vias(content)
     segments = extract_segments(content)
+    zones = extract_zones(content)
 
     return PCBData(
         board_info=board_info,
@@ -586,7 +690,8 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
         footprints=footprints,
         vias=vias,
         segments=segments,
-        pads_by_net=pads_by_net
+        pads_by_net=pads_by_net,
+        zones=zones
     )
 
 

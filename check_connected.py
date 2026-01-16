@@ -8,8 +8,36 @@ import math
 import fnmatch
 from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
-from kicad_parser import parse_kicad_pcb, Segment, Via, Pad, PCBData
+from kicad_parser import parse_kicad_pcb, Segment, Via, Pad, PCBData, Zone
 from net_queries import expand_pad_layers
+
+
+def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
+    """Check if a point (x, y) is inside a polygon using ray casting algorithm.
+
+    Args:
+        x, y: Point coordinates
+        polygon: List of (x, y) vertices defining the polygon
+
+    Returns:
+        True if point is inside the polygon
+    """
+    n = len(polygon)
+    if n < 3:
+        return False
+
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+
+        # Check if ray from point crosses this edge
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+
+    return inside
 
 
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:
@@ -56,9 +84,19 @@ def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 
 
 
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
-                           pads: List[Pad], tolerance: float = 0.02,
+                           pads: List[Pad], zones: List[Zone] = None,
+                           tolerance: float = 0.02,
                            verbose: bool = False) -> Dict:
     """Check connectivity for a single net.
+
+    Args:
+        net_id: The net ID being checked
+        segments: Track segments belonging to this net
+        vias: Vias belonging to this net
+        pads: Pads belonging to this net
+        zones: Zones (power planes) belonging to this net
+        tolerance: Connection tolerance in mm
+        verbose: If True, include detailed debug info
 
     Returns dict with:
         - connected: bool - whether all pads are connected
@@ -67,6 +105,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         - disconnected_pads: list of pad locations not connected to the main component
         - debug_info: dict with detailed component info (when verbose=True)
     """
+    if zones is None:
+        zones = []
     uf = UnionFind()
 
     # Detect all copper layers from segments, vias, and pads
@@ -84,6 +124,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # Skip wildcards like "*.Cu" - they don't represent actual layers
             if layer.endswith('.Cu') and not layer.startswith('*'):
                 copper_layer_set.add(layer)
+    for zone in zones:
+        if zone.layer.endswith('.Cu'):
+            copper_layer_set.add(zone.layer)
 
     # Sort layers: F.Cu first, then In*.Cu in order, then B.Cu last
     def layer_sort_key(layer):
@@ -166,6 +209,25 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         # Connect all layers of this pad together (through-hole pads act like vias)
         for pid in this_pad_ids[1:]:
             uf.union(this_pad_ids[0], pid)
+
+    # Connect points through zones (power planes)
+    # All points on the same layer that are inside the same zone are connected
+    for zone in zones:
+        zone_layer = zone.layer
+        # Find all points on this zone's layer
+        points_on_layer = [(x, y, layer, pid, size) for x, y, layer, pid, size in all_points
+                           if layer == zone_layer]
+
+        # Find which points are inside the zone polygon
+        points_in_zone = []
+        for x, y, layer, pid, size in points_on_layer:
+            if point_in_polygon(x, y, zone.polygon):
+                points_in_zone.append(pid)
+
+        # Connect all points inside this zone together
+        if len(points_in_zone) > 1:
+            for pid in points_in_zone[1:]:
+                uf.union(points_in_zone[0], pid)
 
     # Connect all points that are within tolerance on the same layer
     # Use size/4 as the tolerance for each point pair (use the larger of the two)
@@ -365,7 +427,8 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
 
     if not quiet:
         total_pads = sum(len(pads) for pads in pcb_data.pads_by_net.values())
-        print(f"Found {len(pcb_data.segments)} segments, {len(pcb_data.vias)} vias, {total_pads} pads")
+        zone_info = f", {len(pcb_data.zones)} zones" if pcb_data.zones else ""
+        print(f"Found {len(pcb_data.segments)} segments, {len(pcb_data.vias)} vias, {total_pads} pads{zone_info}")
 
     # Group segments by net
     segments_by_net = defaultdict(list)
@@ -376,6 +439,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     vias_by_net = defaultdict(list)
     for via in pcb_data.vias:
         vias_by_net[via.net_id].append(via)
+
+    # Group zones by net
+    zones_by_net = defaultdict(list)
+    for zone in pcb_data.zones:
+        zones_by_net[zone.net_id].append(zone)
 
     # Use existing pads_by_net from pcb_data
     pads_by_net = pcb_data.pads_by_net
@@ -427,8 +495,9 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         segments = segments_by_net.get(net_id, [])
         vias = vias_by_net.get(net_id, [])
         pads = pads_by_net.get(net_id, [])
+        zones = zones_by_net.get(net_id, [])
 
-        result = check_net_connectivity(net_id, segments, vias, pads, tolerance, verbose=verbose)
+        result = check_net_connectivity(net_id, segments, vias, pads, zones, tolerance, verbose=verbose)
 
         if not result['connected']:
             issue = {
