@@ -59,12 +59,19 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Add BGA proximity costs (penalize routing near BGA edges)
     add_bga_proximity_costs(obstacles, config)
 
-    # Precompute grid expansions (with extra clearance)
-    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
-    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
-    via_track_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+    # Precompute per-layer grid expansions for impedance-controlled routing
+    # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
+    expansion_grid_by_layer = {}
+    via_block_grid_by_layer = {}
+    via_track_expansion_grid_list = []
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance + extra_clearance
+        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
+        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
     via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
 
     # Add segments as obstacles (excluding nets we'll route - their stubs added per-net)
@@ -74,14 +81,16 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-
+        # Use per-layer expansion values
+        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid)
 
     # Add vias as obstacles (excluding nets we'll route)
     for via in pcb_data.vias:
         if via.net_id in nets_to_route_set:
             continue
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid)
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid_list, via_via_expansion_grid)
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     for net_id, pads in pcb_data.pads_by_net.items():
@@ -220,10 +229,16 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
-    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
-    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
+    # Precompute per-layer grid expansions for impedance-controlled routing
+    # Use to_grid_dist_safe for via blocking to avoid grid quantization DRC errors
+    expansion_grid_by_layer = {}
+    via_block_grid_by_layer = {}
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance + extra_clearance
+        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
 
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
@@ -231,6 +246,8 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
+        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid)
 
 
@@ -257,14 +274,22 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
-    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
-    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
+    # Precompute per-layer grid expansions for impedance-controlled routing
+    # Use to_grid_dist_safe for via blocking to avoid grid quantization DRC errors
+    expansion_grid_by_layer = {}
+    via_block_grid_by_layer = {}
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance + extra_clearance
+        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
 
     # Convert exclude endpoints to grid coordinates with some radius
+    # Use max track width for exclusion radius
+    max_track_width = config.get_max_track_width()
     exclude_grid_cells = set()
-    exclude_radius = max(2, coord.to_grid_dist(config.track_width * 2))  # 2x track width radius
+    exclude_radius = max(2, coord.to_grid_dist(max_track_width * 2))  # 2x track width radius
     if exclude_endpoints:
         for ex, ey in exclude_endpoints:
             gex, gey = coord.to_grid(ex, ey)
@@ -281,6 +306,8 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
             continue
 
         # Add segment as obstacle, but skip cells in excluded regions
+        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
         _add_segment_obstacle_with_exclusion(
             obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
             exclude_grid_cells
@@ -358,13 +385,19 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 
-    via_track_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+    # Compute per-layer expansion for impedance-controlled routing
+    # Use to_grid_dist_safe for via-track clearance to avoid grid quantization DRC errors
+    via_track_expansion_grid_list = []
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
     via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
 
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid_list, via_via_expansion_grid, diagonal_margin)
 
 
 def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
@@ -385,11 +418,17 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 
-    via_track_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+    # Compute per-layer expansion for impedance-controlled routing
+    # Use to_grid_dist_safe for via-track clearance to avoid grid quantization DRC errors
+    via_track_expansion_grid_list = []
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
     via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
 
     for via in vias:
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid_list, via_via_expansion_grid, diagonal_margin)
 
 
 def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
@@ -408,12 +447,22 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
-    expansion_grid = max(1, coord.to_grid_dist(config.track_width / 2 + config.clearance + extra_clearance))
-    via_block_grid = max(1, coord.to_grid_dist(config.track_width / 2 + config.via_size / 2 + config.clearance))
+    # Precompute per-layer grid expansions for impedance-controlled routing
+    # Use to_grid_dist_safe for via blocking to avoid grid quantization DRC errors
+    expansion_grid_by_layer = {}
+    via_block_grid_by_layer = {}
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance + extra_clearance
+        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance
+        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
 
     for seg in segments:
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is not None:
+            expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+            via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
             _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid)
 
 
@@ -530,29 +579,47 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
 
 
 def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
-                      num_layers: int, via_track_expansion_grid: int, via_via_expansion_grid: int,
+                      num_layers: int, via_track_expansion_grid, via_via_expansion_grid: int,
                       diagonal_margin: float = 0.0,
                       blocked_cells: List[Set[Tuple[int, int]]] = None,
                       blocked_vias: Set[Tuple[int, int]] = None):
     """Add a via as obstacle to the map.
 
     Args:
+        via_track_expansion_grid: Either a single int (same for all layers) or a list of ints
+                                 (per-layer expansion) for impedance-controlled routing.
         diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
                         segments that pass between grid points. Use 0.25 for single-ended routing.
         blocked_cells: Optional per-layer sets to collect blocked cells for visualization
         blocked_vias: Optional set to collect blocked via positions for visualization
     """
     gx, gy = coord.to_grid(via.x, via.y)
-    # Block cells for track routing.
-    effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
-    track_block_range = via_track_expansion_grid + 1
-    for ex in range(-track_block_range, track_block_range + 1):
-        for ey in range(-track_block_range, track_block_range + 1):
-            if ex*ex + ey*ey <= effective_track_block_sq:
-                for layer_idx in range(num_layers):
-                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-                    if blocked_cells is not None:
-                        blocked_cells[layer_idx].add((gx + ex, gy + ey))
+
+    # Support per-layer expansion for impedance-controlled routing
+    if isinstance(via_track_expansion_grid, list):
+        # Per-layer blocking
+        for layer_idx in range(num_layers):
+            layer_expansion = via_track_expansion_grid[layer_idx]
+            effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
+            track_block_range = layer_expansion + 1
+            for ex in range(-track_block_range, track_block_range + 1):
+                for ey in range(-track_block_range, track_block_range + 1):
+                    if ex*ex + ey*ey <= effective_track_block_sq:
+                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+                        if blocked_cells is not None:
+                            blocked_cells[layer_idx].add((gx + ex, gy + ey))
+    else:
+        # Single value for all layers (legacy behavior)
+        effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
+        track_block_range = via_track_expansion_grid + 1
+        for ex in range(-track_block_range, track_block_range + 1):
+            for ey in range(-track_block_range, track_block_range + 1):
+                if ex*ex + ey*ey <= effective_track_block_sq:
+                    for layer_idx in range(num_layers):
+                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+                        if blocked_cells is not None:
+                            blocked_cells[layer_idx].add((gx + ex, gy + ey))
+
     # Block cells for via placement
     for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
         for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
@@ -624,11 +691,21 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 
-    expansion_mm = config.track_width / 2 + config.clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance
-    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
-    via_track_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance))
+    # Precompute per-layer values for impedance-controlled routing
+    # Each layer may have different track widths
+    # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
+    expansion_grid_by_layer = []
+    via_block_grid_by_layer = []
+    via_track_expansion_grid_by_layer = []
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance
+        expansion_grid_by_layer.append(max(1, coord.to_grid_dist(expansion_mm)))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance
+        via_block_grid_by_layer.append(max(1, coord.to_grid_dist_safe(via_block_mm)))
+        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance
+        via_track_expansion_grid_by_layer.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
+
     via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
 
     for i in range(len(path) - 1):
@@ -636,13 +713,14 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
         gx2, gy2, layer2 = path[i + 1]
 
         if layer1 != layer2:
-            # Via - add via obstacle
-            effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
-            track_block_range = via_track_expansion_grid + 1
-            for ex in range(-track_block_range, track_block_range + 1):
-                for ey in range(-track_block_range, track_block_range + 1):
-                    if ex*ex + ey*ey <= effective_track_block_sq:
-                        for layer_idx in range(num_layers):
+            # Via - add via obstacle with per-layer track blocking
+            for layer_idx in range(num_layers):
+                via_track_expansion_grid = via_track_expansion_grid_by_layer[layer_idx]
+                effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
+                track_block_range = via_track_expansion_grid + 1
+                for ex in range(-track_block_range, track_block_range + 1):
+                    for ey in range(-track_block_range, track_block_range + 1):
+                        if ex*ex + ey*ey <= effective_track_block_sq:
                             obstacles.add_blocked_cell(gx1 + ex, gy1 + ey, layer_idx)
             for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
                 for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
@@ -650,6 +728,10 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
                         obstacles.add_blocked_via(gx1 + ex, gy1 + ey)
         else:
             # Segment on same layer - add track obstacle using Bresenham
+            # Use this layer's track width for via blocking
+            expansion_grid = expansion_grid_by_layer[layer1]
+            via_block_grid = via_block_grid_by_layer[layer1]
+
             dx = abs(gx2 - gx1)
             dy = abs(gy2 - gy1)
             sx = 1 if gx1 < gx2 else -1
@@ -754,12 +836,19 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     # Add BGA proximity costs (penalize routing near BGA edges)
     add_bga_proximity_costs(obstacles, config)
 
-    # Precompute grid expansions (with extra clearance)
-    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
-    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
-    via_track_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+    # Precompute per-layer grid expansions for impedance-controlled routing
+    # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
+    expansion_grid_by_layer = {}
+    via_block_grid_by_layer = {}
+    via_track_expansion_grid_list = []
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance + extra_clearance
+        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
+        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
     via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
 
     # Add segments as obstacles (excluding nets we'll route)
@@ -769,6 +858,8 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
+        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
                               blocked_cells, blocked_vias)
 
@@ -776,7 +867,7 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     for via in pcb_data.vias:
         if via.net_id in nets_to_route_set:
             continue
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid_list, via_via_expansion_grid,
                           blocked_cells=blocked_cells, blocked_vias=blocked_vias)
 
     # Add pads as obstacles (excluding nets we'll route)
@@ -815,11 +906,19 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
 
-    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_block_mm = config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
-    via_block_grid = max(1, coord.to_grid_dist(via_block_mm))
-    via_track_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+    # Precompute per-layer grid expansions for impedance-controlled routing
+    # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
+    expansion_grid_by_layer = {}
+    via_block_grid_by_layer = {}
+    via_track_expansion_grid_list = []
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance + extra_clearance
+        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
+        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
     via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
 
     if blocked_cells is None:
@@ -834,6 +933,8 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
+        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
                               blocked_cells, blocked_vias)
 
@@ -841,7 +942,7 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid_list, via_via_expansion_grid,
                           diagonal_margin, blocked_cells, blocked_vias)
 
     # Add pads
