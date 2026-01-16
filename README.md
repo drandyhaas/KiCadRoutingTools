@@ -496,6 +496,8 @@ See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
 
 - No push-and-shove (routes around obstacles, doesn't move them)
 - Layer swaps not supported for multi-point nets (3+ pads)
+- No blind or burried vias
+- No teardrops
 
 ## License
 
