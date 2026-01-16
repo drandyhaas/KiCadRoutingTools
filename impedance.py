@@ -683,3 +683,87 @@ def print_stackup_impedance_table(pcb: PCBData, trace_width: float = 0.15, spaci
                       f"{z0:<8.1f} {zdiff:<10.1f}")
 
     print("=" * 85)
+
+
+def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target_z0: float,
+                                         spacing: float = 0.0, is_differential: bool = False,
+                                         fallback_width: float = 0.1) -> Dict[str, float]:
+    """
+    Calculate trace widths for each layer to achieve target impedance.
+
+    This is the main function for impedance-controlled routing.
+    Returns a dictionary mapping layer names to widths.
+
+    For differential pairs, the spacing is fixed (from --diff-pair-gap) and
+    width is calculated to achieve the target differential impedance.
+
+    Args:
+        pcb: Parsed PCB data with stackup information
+        layers: List of copper layer names to calculate for
+        target_z0: Target impedance in ohms (single-ended or differential)
+        spacing: Differential pair spacing in mm (required if is_differential=True)
+        is_differential: If True, target_z0 is differential impedance
+        fallback_width: Width to use if impedance calculation fails
+
+    Returns:
+        Dict mapping layer name to trace width in mm
+    """
+    layer_widths = {}
+
+    for layer_name in layers:
+        result = calculate_width_for_impedance(
+            pcb, layer_name, target_z0,
+            spacing=spacing, is_differential=is_differential
+        )
+
+        if 'error' in result or result.get('calculated_width_mm', 0) <= 0:
+            # Use fallback width if calculation fails
+            layer_widths[layer_name] = fallback_width
+        else:
+            layer_widths[layer_name] = result['calculated_width_mm']
+
+    return layer_widths
+
+
+def print_impedance_routing_plan(pcb: PCBData, layers: List[str], target_z0: float,
+                                 spacing: float = 0.0, is_differential: bool = False):
+    """
+    Print the impedance-controlled routing plan showing width per layer.
+
+    Args:
+        pcb: Parsed PCB data
+        layers: List of layers that will be used for routing
+        target_z0: Target impedance in ohms
+        spacing: Differential pair spacing in mm
+        is_differential: Whether this is differential impedance
+    """
+    imp_type = "differential" if is_differential else "single-ended"
+    print(f"\nImpedance-Controlled Routing Plan: {target_z0}Ω {imp_type}")
+    if is_differential:
+        print(f"Differential pair spacing: {spacing}mm ({spacing * 39.3701:.2f} mil)")
+    print("=" * 75)
+    print(f"{'Layer':<12} {'Type':<12} {'Width(mm)':<12} {'Width(mil)':<12} {'Verified Z':<12}")
+    print("-" * 75)
+
+    for layer_name in layers:
+        result = calculate_width_for_impedance(
+            pcb, layer_name, target_z0,
+            spacing=spacing, is_differential=is_differential
+        )
+
+        if 'error' in result:
+            print(f"{layer_name:<12} {'ERROR':<12} {'-':<12} {'-':<12} {result['error']}")
+        else:
+            params = result.get('params')
+            layer_type = "Microstrip" if params and params.is_outer_layer else "Stripline"
+            width_mm = result.get('calculated_width_mm', 0)
+            width_mil = result.get('calculated_width_mils', 0)
+            verified = result.get('verified_z0', 0)
+            z_unit = "Ω diff" if is_differential else "Ω"
+
+            if width_mm > 0:
+                print(f"{layer_name:<12} {layer_type:<12} {width_mm:<12.4f} {width_mil:<12.2f} {verified:.1f} {z_unit}")
+            else:
+                print(f"{layer_name:<12} {layer_type:<12} {'N/A':<12} {'N/A':<12} {'Not achievable'}")
+
+    print("=" * 75)

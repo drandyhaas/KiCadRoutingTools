@@ -3,7 +3,7 @@ Configuration classes and coordinate utilities for PCB routing.
 """
 
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass, field
 
 
@@ -73,6 +73,19 @@ class GridRouteConfig:
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
     debug_memory: bool = False  # Print memory usage statistics at key points
+    # Impedance-controlled routing
+    impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
+    layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
+
+    def get_track_width(self, layer: str) -> float:
+        """Get track width for a specific layer (impedance-aware).
+
+        If impedance targeting is enabled and layer_widths is populated,
+        returns the layer-specific width. Otherwise returns the default track_width.
+        """
+        if self.layer_widths and layer in self.layer_widths:
+            return self.layer_widths[layer]
+        return self.track_width
 
 
 class GridCoord:

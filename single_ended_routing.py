@@ -283,7 +283,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             seg = Segment(
                 start_x=orig_x, start_y=orig_y,
                 end_x=first_grid_x, end_y=first_grid_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )
@@ -307,11 +307,12 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             new_vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
+                layer_name = layer_names[layer1]
                 seg = Segment(
                     start_x=x1, start_y=y1,
                     end_x=x2, end_y=y2,
-                    width=config.track_width,
-                    layer=layer_names[layer1],
+                    width=config.get_track_width(layer_name),
+                    layer=layer_name,
                     net_id=net_id
                 )
                 new_segments.append(seg)
@@ -324,7 +325,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )
@@ -436,7 +437,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             seg = Segment(
                 start_x=orig_x, start_y=orig_y,
                 end_x=first_grid_x, end_y=first_grid_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )
@@ -460,11 +461,12 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             new_vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
+                layer_name = layer_names[layer1]
                 seg = Segment(
                     start_x=x1, start_y=y1,
                     end_x=x2, end_y=y2,
-                    width=config.track_width,
-                    layer=layer_names[layer1],
+                    width=config.get_track_width(layer_name),
+                    layer=layer_name,
                     net_id=net_id
                 )
                 new_segments.append(seg)
@@ -476,7 +478,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )
@@ -648,7 +650,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
             seg = Segment(
                 start_x=orig_x, start_y=orig_y,
                 end_x=first_grid_x, end_y=first_grid_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )
@@ -672,11 +674,12 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
             new_vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
+                layer_name = layer_names[layer1]
                 seg = Segment(
                     start_x=x1, start_y=y1,
                     end_x=x2, end_y=y2,
-                    width=config.track_width,
-                    layer=layer_names[layer1],
+                    width=config.get_track_width(layer_name),
+                    layer=layer_name,
                     net_id=net_id
                 )
                 new_segments.append(seg)
@@ -688,7 +691,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )
@@ -1171,7 +1174,7 @@ def _path_to_segments_vias(
             seg = Segment(
                 start_x=orig_x, start_y=orig_y,
                 end_x=first_grid_x, end_y=first_grid_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )
@@ -1196,11 +1199,12 @@ def _path_to_segments_vias(
             vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
+                layer_name = layer_names[layer1]
                 seg = Segment(
                     start_x=x1, start_y=y1,
                     end_x=x2, end_y=y2,
-                    width=config.track_width,
-                    layer=layer_names[layer1],
+                    width=config.get_track_width(layer_name),
+                    layer=layer_name,
                     net_id=net_id
                 )
                 segments.append(seg)
@@ -1213,7 +1217,7 @@ def _path_to_segments_vias(
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
-                width=config.track_width,
+                width=config.get_track_width(orig_layer),
                 layer=orig_layer,
                 net_id=net_id
             )

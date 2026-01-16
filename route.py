@@ -44,6 +44,7 @@ from net_queries import (
     compute_mps_net_ordering, find_pad_nearest_to_position, find_pad_at_position,
     expand_net_patterns, find_single_ended_nets
 )
+from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
@@ -102,6 +103,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 ordering_strategy: str = "inside_out",
                 disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = 0.1,
+                impedance: Optional[float] = None,
                 clearance: float = 0.1,
                 via_size: float = 0.3,
                 via_drill: float = 0.2,
@@ -196,6 +198,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']  # Default 4-layer signal stack
     print(f"Using {len(layers)} routing layers: {layers}")
 
+    # Calculate layer-specific widths for impedance-controlled routing
+    layer_widths = {}
+    if impedance is not None:
+        if not pcb_data.board_info.stackup:
+            print("WARNING: No stackup found in PCB file. Using fixed track width.")
+        else:
+            print(f"\nCalculating trace widths for {impedance}Ω single-ended impedance...")
+            layer_widths = calculate_layer_widths_for_impedance(
+                pcb_data, layers, impedance,
+                spacing=0.0, is_differential=False,
+                fallback_width=track_width
+            )
+            print_impedance_routing_plan(pcb_data, layers, impedance, is_differential=False)
+
     # Auto-detect BGA exclusion zones if not specified
     bga_exclusion_zones = setup_bga_exclusion_zones(pcb_data, disable_bga_zones, bga_exclusion_zones)
 
@@ -219,6 +235,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
+    if layer_widths:
+        config_kwargs['layer_widths'] = layer_widths
+        config_kwargs['impedance_target'] = impedance
     config = GridRouteConfig(**config_kwargs)
 
     # Find net IDs and filter already-routed nets
@@ -657,7 +676,9 @@ For differential pair routing, use route_diff.py:
 
     # Track and via geometry
     parser.add_argument("--track-width", type=float, default=0.1,
-                        help="Track width in mm (default: 0.1)")
+                        help="Track width in mm (default: 0.1). Ignored if --impedance is specified.")
+    parser.add_argument("--impedance", type=float, default=None,
+                        help="Target single-ended impedance in ohms (e.g., 50). Calculates track width per layer from board stackup.")
     parser.add_argument("--clearance", type=float, default=0.1,
                         help="Clearance between tracks in mm (default: 0.1)")
     parser.add_argument("--via-size", type=float, default=0.3,
@@ -836,6 +857,7 @@ For differential pair routing, use route_diff.py:
                 disable_bga_zones=args.no_bga_zones,
                 layers=args.layers,
                 track_width=args.track_width,
+                impedance=args.impedance,
                 clearance=args.clearance,
                 via_size=args.via_size,
                 via_drill=args.via_drill,

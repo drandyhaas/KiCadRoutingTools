@@ -622,6 +622,8 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                 if dot <= 0.001 or dot >= src_extension - 0.001:
                     use_extension = True
 
+            # Use basic track_width for stub connectors to match stub spacing
+            first_layer_name = layer_names[first_layer]
             if use_extension:
                 # Add extension segment in stub direction
                 ext_x = orig_x + src_stub_dir[0] * src_extension
@@ -631,7 +633,7 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                     start_x=orig_x, start_y=orig_y,
                     end_x=ext_x, end_y=ext_y,
                     width=config.track_width,
-                    layer=layer_names[first_layer],
+                    layer=first_layer_name,
                     net_id=net_id
                 ))
                 # Connector from extension to route
@@ -639,7 +641,7 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                     start_x=ext_x, start_y=ext_y,
                     end_x=first_x, end_y=first_y,
                     width=config.track_width,
-                    layer=layer_names[first_layer],
+                    layer=first_layer_name,
                     net_id=net_id
                 ))
                 if config.debug_lines:
@@ -651,7 +653,7 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                     start_x=orig_x, start_y=orig_y,
                     end_x=first_x, end_y=first_y,
                     width=config.track_width,
-                    layer=layer_names[first_layer],
+                    layer=first_layer_name,
                     net_id=net_id
                 ))
                 if config.debug_lines:
@@ -673,11 +675,12 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
             ))
         elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
             # Always use actual layer for segment
+            layer_name = layer_names[layer1]
             segs.append(Segment(
                 start_x=x1, start_y=y1,
                 end_x=x2, end_y=y2,
-                width=config.track_width,
-                layer=layer_names[layer1],
+                width=config.get_track_width(layer_name),
+                layer=layer_name,
                 net_id=net_id
             ))
 
@@ -703,6 +706,8 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                 if dot <= 0.001 or dot >= tgt_extension - 0.001:
                     use_extension = True
 
+            # Use basic track_width for stub connectors to match stub spacing
+            last_layer_name = layer_names[last_layer]
             if use_extension:
                 # Extend along stub direction (toward route area)
                 ext_x = orig_x + tgt_stub_dir[0] * tgt_extension
@@ -713,7 +718,7 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                     start_x=last_x, start_y=last_y,
                     end_x=ext_x, end_y=ext_y,
                     width=config.track_width,
-                    layer=layer_names[last_layer],
+                    layer=last_layer_name,
                     net_id=net_id
                 ))
                 # Extension back to stub endpoint
@@ -721,7 +726,7 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                     start_x=ext_x, start_y=ext_y,
                     end_x=orig_x, end_y=orig_y,
                     width=config.track_width,
-                    layer=layer_names[last_layer],
+                    layer=last_layer_name,
                     net_id=net_id
                 ))
                 if config.debug_lines:
@@ -733,7 +738,7 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                     start_x=last_x, start_y=last_y,
                     end_x=orig_x, end_y=orig_y,
                     width=config.track_width,
-                    layer=layer_names[last_layer],
+                    layer=last_layer_name,
                     net_id=net_id
                 ))
                 if config.debug_lines:
