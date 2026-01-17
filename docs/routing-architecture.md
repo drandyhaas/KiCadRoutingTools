@@ -142,12 +142,17 @@ def build_base_obstacle_map(pcb_data, config, nets_to_route, extra_clearance=0.0
 
 ### Clearance Expansion
 
-Obstacles are expanded by track clearance to ensure DRC compliance. For impedance-controlled routing, track widths vary per layer (microstrip on outer layers is wider than stripline on inner layers), so clearance calculations use per-layer widths:
+Obstacles are expanded by track clearance to ensure DRC compliance. Track widths can vary based on:
+- **Layer** (impedance-controlled routing): microstrip on outer layers is wider than stripline on inner layers
+- **Net** (power net routing): power/ground nets can use wider tracks than signal nets
+
+Clearance calculations use per-net-per-layer widths:
 
 ```python
-# Per-layer track clearance expansion
+# Per-net-per-layer track clearance expansion
 for layer_name in config.layers:
-    layer_width = config.get_track_width(layer_name)  # Impedance-controlled width
+    # get_net_track_width checks power net overrides first, then layer widths (impedance)
+    layer_width = config.get_net_track_width(net_id, layer_name)
     expansion_mm = layer_width / 2 + clearance
     expansion_grid = coord.to_grid_dist(expansion_mm)
 

@@ -135,6 +135,47 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str]) -> List[str]:
     return result
 
 
+def identify_power_nets(pcb_data: PCBData,
+                        patterns: List[str],
+                        widths: List[float]) -> Dict[int, float]:
+    """
+    Identify power nets and map them to track widths based on pattern matching.
+
+    Each pattern in `patterns` corresponds to a width in `widths` at the same index.
+    Nets are matched against patterns in order; the first matching pattern determines
+    the width. This allows priority ordering (e.g., specific nets before wildcards).
+
+    Args:
+        pcb_data: Parsed PCB data with net information
+        patterns: Glob patterns for power nets (e.g., ['*GND*', '*VCC*', '+*V'])
+        widths: Track widths in mm corresponding to each pattern
+
+    Returns:
+        Dict mapping net_id to track width for matched nets
+
+    Example:
+        identify_power_nets(pcb, ['*GND*', '*VCC*'], [0.4, 0.5])
+        # Returns {5: 0.4, 12: 0.4, 7: 0.5} if nets 5,12 match GND and 7 matches VCC
+    """
+    if len(patterns) != len(widths):
+        raise ValueError(f"patterns ({len(patterns)}) and widths ({len(widths)}) must have same length")
+
+    power_net_widths: Dict[int, float] = {}
+
+    # Collect all net names and IDs
+    for net_id, net in pcb_data.nets.items():
+        if not net.name or net_id == 0:
+            continue
+
+        # Check patterns in order - first match wins
+        for pattern, width in zip(patterns, widths):
+            if fnmatch.fnmatch(net.name, pattern):
+                power_net_widths[net_id] = width
+                break
+
+    return power_net_widths
+
+
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     """
     Extract differential pair base name and polarity from net name.

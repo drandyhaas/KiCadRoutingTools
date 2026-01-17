@@ -42,7 +42,7 @@ from connectivity import (
 from net_queries import (
     get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position, find_pad_at_position,
-    expand_net_patterns, find_single_ended_nets
+    expand_net_patterns, find_single_ended_nets, identify_power_nets
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -104,6 +104,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = 0.1,
                 impedance: Optional[float] = None,
+                power_nets: Optional[List[str]] = None,
+                power_nets_widths: Optional[List[float]] = None,
                 clearance: float = 0.1,
                 via_size: float = 0.3,
                 via_drill: float = 0.2,
@@ -241,6 +243,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
     config = GridRouteConfig(**config_kwargs)
+
+    # Identify power nets and set up per-net widths
+    if power_nets and power_nets_widths:
+        if len(power_nets) != len(power_nets_widths):
+            raise ValueError(f"--power-nets ({len(power_nets)}) and --power-nets-widths ({len(power_nets_widths)}) must have same length")
+        power_net_widths = identify_power_nets(pcb_data, power_nets, power_nets_widths)
+        if power_net_widths:
+            config.power_net_widths = power_net_widths
+            print(f"\nPower net width assignments ({len(power_net_widths)} nets):")
+            # Group by width for summary
+            width_groups: Dict[float, List[str]] = {}
+            for net_id, width in power_net_widths.items():
+                net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+                if width not in width_groups:
+                    width_groups[width] = []
+                width_groups[width].append(net_name)
+            for width, names in sorted(width_groups.items()):
+                if len(names) <= 5:
+                    print(f"  {width}mm: {', '.join(names)}")
+                else:
+                    print(f"  {width}mm: {len(names)} nets ({', '.join(names[:3])}...)")
 
     # Find net IDs and filter already-routed nets
     net_ids = resolve_net_ids(pcb_data, net_names)
@@ -688,6 +711,12 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--via-drill", type=float, default=0.2,
                         help="Via drill size in mm (default: 0.2)")
 
+    # Power net routing options
+    parser.add_argument("--power-nets", nargs="*", default=[],
+                        help="Glob patterns for power nets (e.g., '*GND*' '*VCC*'). Must pair with --power-nets-widths.")
+    parser.add_argument("--power-nets-widths", nargs="*", type=float, default=[],
+                        help="Track widths in mm for each power-net pattern (must match --power-nets length)")
+
     # Router algorithm parameters
     parser.add_argument("--grid-step", type=float, default=0.1,
                         help="Grid resolution in mm (default: 0.1)")
@@ -860,6 +889,8 @@ For differential pair routing, use route_diff.py:
                 layers=args.layers,
                 track_width=args.track_width,
                 impedance=args.impedance,
+                power_nets=args.power_nets,
+                power_nets_widths=args.power_nets_widths,
                 clearance=args.clearance,
                 via_size=args.via_size,
                 via_drill=args.via_drill,

@@ -76,6 +76,8 @@ class GridRouteConfig:
     # Impedance-controlled routing
     impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
+    # Power net routing - per-net width overrides
+    power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).
@@ -97,6 +99,25 @@ class GridRouteConfig:
         if self.layer_widths:
             return max(self.layer_widths.values(), default=self.track_width)
         return self.track_width
+
+    def get_net_track_width(self, net_id: int, layer: str) -> float:
+        """Get track width for a specific net on a specific layer.
+
+        Priority order:
+        1. Per-net power width override (power_net_widths)
+        2. Layer-specific width (layer_widths, for impedance control)
+        3. Default track_width
+
+        Args:
+            net_id: The net ID to get width for
+            layer: The layer name
+
+        Returns:
+            Track width in mm
+        """
+        if net_id in self.power_net_widths:
+            return self.power_net_widths[net_id]
+        return self.get_track_width(layer)
 
 
 class GridCoord:

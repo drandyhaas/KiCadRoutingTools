@@ -64,13 +64,14 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     blocked_cells_set: Set[Tuple[int, int, int]] = set()
     blocked_vias_set: Set[Tuple[int, int]] = set()
 
-    # Precompute per-layer expansion values for impedance-controlled routing
+    # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
     expansion_grid_by_layer = {}
     via_block_grid_by_layer = {}
     via_track_expansion_grid_list = []
     for layer_name in config.layers:
-        layer_width = config.get_track_width(layer_name)
+        # Use per-net width for power nets, otherwise layer width (impedance) or default
+        layer_width = config.get_net_track_width(net_id, layer_name)
         expansion_mm = layer_width / 2 + config.clearance + extra_clearance
         expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
         via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
