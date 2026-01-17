@@ -303,7 +303,7 @@ def build_working_obstacle_map(base_obstacles: GridObstacleMap,
     Returns:
         Working obstacle map ready for incremental updates
     """
-    working = base_obstacles.clone()
+    working = base_obstacles.clone_fresh()
     for net_id, cache_data in net_obstacles_cache.items():
         add_net_obstacles_from_cache(working, cache_data)
     return working

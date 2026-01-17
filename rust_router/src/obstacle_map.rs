@@ -118,6 +118,28 @@ impl GridObstacleMap {
         }
     }
 
+    /// Create a deep copy for a fresh route (clears source_target_cells)
+    ///
+    /// Use this instead of clone() when starting a new route to avoid
+    /// source/target cells from a previous route leaking into the new one.
+    pub fn clone_fresh(&self) -> Self {
+        Self {
+            blocked_cells: self.blocked_cells.clone(),
+            blocked_vias: self.blocked_vias.clone(),
+            stub_proximity: self.stub_proximity.clone(),
+            layer_proximity_costs: self.layer_proximity_costs.clone(),
+            num_layers: self.num_layers,
+            bga_zones: self.bga_zones.clone(),
+            bga_proximity_radius: self.bga_proximity_radius,
+            allowed_cells: self.allowed_cells.clone(),
+            source_target_cells: (0..self.num_layers).map(|_| FxHashSet::default()).collect(),
+            cross_layer_tracks: self.cross_layer_tracks.clone(),
+            endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
+            endpoint_exempt_radius: self.endpoint_exempt_radius,
+            free_via_positions: self.free_via_positions.clone(),
+        }
+    }
+
     /// Get memory statistics for this obstacle map
     /// Returns (blocked_cells_count, blocked_vias_count, stub_proximity_count,
     ///          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)

@@ -83,7 +83,7 @@ def build_diff_pair_obstacles(
     Returns:
         Tuple of (obstacles, unrouted_stubs)
     """
-    obstacles = diff_pair_base_obstacles.clone()
+    obstacles = diff_pair_base_obstacles.clone_fresh()
 
     # Add previously routed nets as obstacles
     # Note: Cannot use cache for routed nets because their segments have changed
@@ -176,7 +176,7 @@ def build_single_ended_obstacles(
     Returns:
         Tuple of (obstacles, unrouted_stubs)
     """
-    obstacles = base_obstacles.clone()
+    obstacles = base_obstacles.clone_fresh()
 
     # Add previously routed nets as obstacles
     # Note: Cannot use cache for routed nets because their segments have changed
@@ -263,11 +263,7 @@ def build_incremental_obstacles(
         Tuple of (obstacles, unrouted_stubs)
     """
     # Clone the working map (has all net obstacles already)
-    obstacles = working_obstacles.clone()
-
-    # Clear source_target_cells from the clone - each route starts fresh with no overrides
-    # The routing function will add the correct source/target cells for the current route
-    obstacles.clear_source_target_cells()
+    obstacles = working_obstacles.clone_fresh()
 
     # Remove current net's obstacles so we can route through our own stubs
     if net_id in net_obstacles_cache:
@@ -339,6 +335,7 @@ def prepare_obstacles_inplace(
     working_obstacles.clear_layer_proximity()
     working_obstacles.clear_cross_layer_tracks()
     working_obstacles.clear_free_vias()
+    working_obstacles.clear_source_target_cells()  # Clear source/target overrides from previous route
 
     # Remove current net's obstacles so we can route through our own stubs
     if net_id in net_obstacles_cache:

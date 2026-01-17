@@ -173,7 +173,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
             accumulated_vias.extend(all_vias)
 
             # Rebuild obstacles and retry
-            retry_obstacles = diff_pair_base_obstacles.clone()
+            retry_obstacles = diff_pair_base_obstacles.clone_fresh()
             for routed_id in routed_net_ids:
                 add_net_stubs_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                 add_net_vias_as_obstacles(retry_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
@@ -289,7 +289,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             ripped_items.append((blocker, saved_result, rip_net_ids, was_in_results))
 
                             # Rebuild obstacles and retry
-                            rip_obstacles = diff_pair_base_obstacles.clone()
+                            rip_obstacles = diff_pair_base_obstacles.clone_fresh()
                             for routed_id in routed_net_ids:
                                 add_net_stubs_as_obstacles(rip_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                                 add_net_vias_as_obstacles(rip_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
@@ -327,7 +327,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                     if ripped_blocker.net_id in diff_pair_by_net_id:
                                         ripped_pair_name, ripped_pair = diff_pair_by_net_id[ripped_blocker.net_id]
                                         # Rebuild obstacles for rerouting the ripped pair
-                                        reroute_obstacles = diff_pair_base_obstacles.clone()
+                                        reroute_obstacles = diff_pair_base_obstacles.clone_fresh()
                                         for routed_id in routed_net_ids:
                                             add_net_stubs_as_obstacles(reroute_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)
                                             add_net_vias_as_obstacles(reroute_obstacles, pcb_data, routed_id, config, diff_pair_extra_clearance)

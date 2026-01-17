@@ -124,7 +124,7 @@ def route_single_ended_nets(
                 bounds=base_vis_data.bounds
             )
             # Build obstacles with visualization data
-            obstacles = base_obstacles.clone()
+            obstacles = base_obstacles.clone_fresh()
             for routed_id in routed_net_ids:
                 add_net_obstacles_with_vis(obstacles, pcb_data, routed_id, config, 0.0,
                                             vis_data.blocked_cells, vis_data.blocked_vias, diagonal_margin=0.25)

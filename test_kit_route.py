@@ -44,7 +44,7 @@ def main():
 
     base_options = '--track-width 0.2 --clearance 0.2 --via-size 0.5 --via-drill 0.4 --hole-to-hole-clearance 0.3 '
     power_nets = '--power-nets "/VDDPLL" "/VCCA" "GNDA" --power-nets-widths 0.3 0.3 0.3 '
-    options = base_options+'--via-proximity-cost 100 --stub-proximity-cost 0.5 --stub-proximity-radius 4.0 --max-ripup 10 --max-iterations 10000000 '+power_nets
+    options = base_options+'--via-proximity-cost 100 --via-cost 10 --stub-proximity-cost 1.0 --stub-proximity-radius 4.0 --max-ripup 10 --max-iterations 10000000 '+power_nets
 
     # Route some nets from pads (no fanout needed)
     run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options, unbuffered)
