@@ -49,6 +49,13 @@ for ref, fp in pcb.footprints.items():
     print(f"{ref}: {fp.value}")  # fp.value has the part number
 ```
 
+**API Notes:**
+- `pad.pinfunction` - Pin function name (e.g., "VCC", "GND", "IN")
+- `pad.pintype` - KiCad pin type (e.g., "power_in", "power_out", "passive", "input")
+- `pad.net_id` - Net ID this pad connects to
+- Pads do NOT have a `number` attribute - use `pad.pinfunction` instead
+- `detect_max_voltage_from_nets(pcb, power_net_ids)` requires a set of power net IDs as second argument
+
 ### Step 2: Identify Active Components
 
 Filter to find ICs and active components that need datasheet lookup. Skip obvious passives:
