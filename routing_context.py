@@ -265,6 +265,10 @@ def build_incremental_obstacles(
     # Clone the working map (has all net obstacles already)
     obstacles = working_obstacles.clone()
 
+    # Clear source_target_cells from the clone - each route starts fresh with no overrides
+    # The routing function will add the correct source/target cells for the current route
+    obstacles.clear_source_target_cells()
+
     # Remove current net's obstacles so we can route through our own stubs
     if net_id in net_obstacles_cache:
         remove_net_obstacles_from_cache(obstacles, net_obstacles_cache[net_id])
