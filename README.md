@@ -33,6 +33,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Impedance-controlled routing** - Specify target impedance (e.g., 50Ω single-ended, 100Ω differential) and track widths are automatically calculated per layer from the board stackup. Uses IPC-2141 formulas for microstrip (outer layers) and stripline (inner layers). Widths adjust automatically when switching layers via vias to maintain target impedance
 - **Power net routing** - Route power nets (GND, VCC, etc.) with wider tracks than signal nets. Specify patterns and corresponding widths (e.g., `--power-nets "*GND*" "*VCC*" --power-nets-widths 0.4 0.5`). First matching pattern determines width for each net. Obstacle clearances automatically adjust for wider power traces
+- **AI-powered power net analysis** - Use the `/analyze-power-nets` skill to automatically identify power nets and recommend track widths based on component datasheets. Combines KiCad pintype detection with AI datasheet lookup to catch mislabeled power pins (e.g., VDDPLL marked as "passive"). See [Power Net Analysis](docs/power-nets.md) for details
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
 - **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
 
@@ -112,7 +113,29 @@ python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 python check_connected.py kicad_files/output.kicad_pcb --component U1
 ```
 
-### 5. Full Integration Test
+### 5. Power Net Analysis
+
+Identify power nets and get track width recommendations:
+
+```python
+from kicad_parser import parse_kicad_pcb
+from net_queries import identify_power_nets_by_pintype, auto_assign_power_widths
+
+pcb = parse_kicad_pcb("kicad_files/my_board.kicad_pcb")
+power_nets = identify_power_nets_by_pintype(pcb)  # Detect from pintype annotations
+widths = auto_assign_power_widths(pcb)            # Auto-assign track widths
+```
+
+For AI-powered analysis when KiCad pintype annotations are missing or incorrect:
+
+```
+# Ask Claude to analyze your board with datasheet lookup
+/analyze-power-nets kicad_files/my_board.kicad_pcb
+```
+
+See [Power Net Analysis](docs/power-nets.md) for detailed documentation on automatic detection, AI-powered analysis, and IPC-2152 track width guidelines.
+
+### 6. Full Integration Test
 
 Run the complete pipeline (QFN/BGA fanout → routing → DRC → connectivity) on the test board:
 
@@ -186,6 +209,7 @@ This script routes nets on the kit-dev-coldfire-xilinx board directly from pads,
 | [QFN Fanout](qfn_fanout/README.md) | QFN/QFP escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
+| [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 
 ## Project Structure
 
@@ -270,7 +294,9 @@ KiCadRoutingTools/
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
-└── docs/                     # Documentation
+├── docs/                     # Documentation
+└── .claude/skills/           # Claude Code skills
+    └── analyze-power-nets/   # AI-powered power net analysis skill
 ```
 
 ## Module Overview
@@ -308,8 +334,13 @@ KiCadRoutingTools/
 | Module | Purpose |
 |--------|---------|
 | `net_ordering.py` | MPS, inside-out, and original net ordering strategies |
-| `net_queries.py` | Net queries (diff pair detection, MPS ordering, chip pad positions) |
+| `net_queries.py` | Net queries (diff pair detection, MPS ordering, power net detection, chip pad positions) |
 | `connectivity.py` | Stub endpoints, connected groups, multi-point net detection |
+
+Key functions in `net_queries.py`:
+- `identify_power_nets(pcb, patterns, widths)` - Pattern-based power net detection
+- `identify_power_nets_by_pintype(pcb)` - Automatic detection using KiCad pintype annotations
+- `auto_assign_power_widths(pcb)` - Automatic track width assignment for power nets
 
 ### Optimization
 
@@ -329,7 +360,7 @@ KiCadRoutingTools/
 
 | Module | Purpose |
 |--------|---------|
-| `kicad_parser.py` | KiCad .kicad_pcb file parser (extracts stackup with Er, thickness) |
+| `kicad_parser.py` | KiCad .kicad_pcb file parser (extracts stackup, footprint values, pintypes) |
 | `kicad_writer.py` | KiCad S-expression generator |
 | `output_writer.py` | Write routed output with swaps and debug geometry |
 | `route_modification.py` | Add/remove routes from PCB data structure |

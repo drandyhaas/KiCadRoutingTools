@@ -176,6 +176,120 @@ def identify_power_nets(pcb_data: PCBData,
     return power_net_widths
 
 
+def identify_power_nets_by_pintype(pcb_data: PCBData) -> Dict[int, Dict]:
+    """
+    Identify power nets using KiCad's pintype metadata from schematic symbols.
+
+    This function detects power nets based on pin type annotations (power_in, power_out)
+    rather than relying on net naming conventions. This catches power nets that have
+    non-standard names or are mislabeled.
+
+    Args:
+        pcb_data: Parsed PCB data with pad information including pintype
+
+    Returns:
+        Dict mapping net_id to info dict with keys:
+        - 'name': Net name
+        - 'type': 'ground', 'supply', or 'regulator_output'
+        - 'pintype': Original pintype ('power_in' or 'power_out')
+        - 'components': Set of component refs connected to this net
+        - 'pin_count': Number of power pins on this net
+
+    Example:
+        power_nets = identify_power_nets_by_pintype(pcb_data)
+        for net_id, info in power_nets.items():
+            print(f"{info['name']}: {info['type']} ({info['pin_count']} pins)")
+    """
+    power_nets: Dict[int, Dict] = {}
+
+    for net_id, pads in pcb_data.pads_by_net.items():
+        if net_id == 0:
+            continue
+
+        for pad in pads:
+            if not pad.pintype:
+                continue
+
+            if 'power' not in pad.pintype:
+                continue
+
+            net_name = pad.net_name or f"Net {net_id}"
+
+            if net_id not in power_nets:
+                # Classify the net type
+                pinfunction = (pad.pinfunction or "").upper()
+                net_name_upper = net_name.upper()
+
+                if any(g in pinfunction for g in ['GND', 'VSS', 'GROUND']):
+                    net_type = 'ground'
+                elif any(g in net_name_upper for g in ['GND', 'VSS', 'GROUND']):
+                    net_type = 'ground'
+                elif pad.pintype == 'power_out':
+                    net_type = 'regulator_output'
+                else:
+                    net_type = 'supply'
+
+                power_nets[net_id] = {
+                    'name': net_name,
+                    'type': net_type,
+                    'pintype': pad.pintype,
+                    'components': set(),
+                    'pin_count': 0
+                }
+
+            power_nets[net_id]['components'].add(pad.component_ref)
+            power_nets[net_id]['pin_count'] += 1
+
+    return power_nets
+
+
+def auto_assign_power_widths(
+    pcb_data: PCBData,
+    ground_width: float = 0.5,
+    supply_width: float = 0.4,
+    regulator_output_width: float = 0.5,
+    low_current_width: float = 0.3
+) -> Dict[int, float]:
+    """
+    Automatically assign track widths to power nets based on pintype detection.
+
+    Uses identify_power_nets_by_pintype() to find power nets, then assigns
+    widths based on net type and connection count.
+
+    Args:
+        pcb_data: Parsed PCB data
+        ground_width: Width for ground nets (default 0.5mm)
+        supply_width: Width for main power supply nets (default 0.4mm)
+        regulator_output_width: Width for regulator outputs (default 0.5mm)
+        low_current_width: Width for low-fanout power nets (default 0.3mm)
+
+    Returns:
+        Dict mapping net_id to recommended track width in mm
+
+    Example:
+        widths = auto_assign_power_widths(pcb_data)
+        config.power_net_widths = widths
+    """
+    power_nets = identify_power_nets_by_pintype(pcb_data)
+    widths: Dict[int, float] = {}
+
+    for net_id, info in power_nets.items():
+        net_type = info['type']
+        pin_count = info['pin_count']
+
+        # Low-fanout nets (< 5 pins) get smaller traces
+        if pin_count < 5:
+            widths[net_id] = low_current_width
+        elif net_type == 'ground':
+            widths[net_id] = ground_width
+        elif net_type == 'regulator_output':
+            widths[net_id] = regulator_output_width
+        else:  # supply
+            widths[net_id] = supply_width
+
+    return widths
+
+
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     """
     Extract differential pair base name and polarity from net name.

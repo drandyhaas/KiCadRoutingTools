@@ -54,8 +54,6 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 | `--power-nets` | - | Glob patterns for power nets (e.g., `"*GND*" "*VCC*"`) |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern (must match `--power-nets` length) |
 
-**Power net routing:** Allows routing power/ground nets with wider tracks than signal nets. Patterns are matched in order - first matching pattern determines the width for each net.
-
 ```bash
 # Route with wider tracks for power nets
 python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
@@ -64,13 +62,9 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
   --track-width 0.2  # default for non-power nets
 ```
 
-This routes:
-- Nets matching `*GND*` with 0.4mm tracks
-- Nets matching `*VCC*` with 0.5mm tracks
-- Nets matching `+3.3V` with 0.3mm tracks
-- All other nets with 0.2mm tracks (the default `--track-width`)
+Patterns are matched in order - first match determines width. Obstacle clearances automatically adjust for wider power traces.
 
-Obstacle clearances automatically adjust for the wider power traces.
+See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered analysis, and IPC-2152 track width guidelines.
 
 ### Algorithm Options
 

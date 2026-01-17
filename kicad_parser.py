@@ -87,6 +87,7 @@ class Footprint:
     rotation: float
     layer: str
     pads: List[Pad] = field(default_factory=list)
+    value: str = ""  # Component value (e.g., "MCF5213", "100nF", "10K")
 
 
 @dataclass
@@ -391,13 +392,18 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
         reference = ref_match.group(1) if ref_match else "?"
 
+        # Extract value (component part number or value)
+        value_match = re.search(r'\(property\s+"Value"\s+"([^"]+)"', fp_text)
+        value = value_match.group(1) if value_match else ""
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
             x=fp_x,
             y=fp_y,
             rotation=fp_rotation,
-            layer=fp_layer
+            layer=fp_layer,
+            value=value
         )
 
         # Extract pads
