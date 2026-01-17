@@ -397,6 +397,39 @@ def propagate_power_widths_through_passives(
         if len(net_ids) == 2 and net_ids[0] != net_ids[1]:
             series_connections[ref] = [(net_ids[0], net_ids[1])]
 
+    # Also detect voltage regulators: input carries same current as output
+    # Look for components with power_out pins (regulator outputs)
+    for ref, fp in pcb_data.footprints.items():
+        output_nets = set()
+        input_nets = set()
+
+        for pad in fp.pads:
+            if pad.net_id == 0:
+                continue
+            pinfunction = (pad.pinfunction or "").upper()
+            pintype = (pad.pintype or "").lower()
+
+            # Identify output pins (power_out or pin named OUT/VOUT)
+            if pintype == 'power_out' or pinfunction in ('OUT', 'VOUT', 'OUTPUT'):
+                output_nets.add(pad.net_id)
+            # Identify input pins (named IN/VIN but not power_in type, to avoid GND)
+            elif pinfunction in ('IN', 'VIN', 'INPUT') and 'power' not in pintype:
+                input_nets.add(pad.net_id)
+
+        # If we found both input and output, add connections
+        if output_nets and input_nets:
+            connections = []
+            for out_net in output_nets:
+                for in_net in input_nets:
+                    if out_net != in_net:
+                        connections.append((out_net, in_net))
+            if connections:
+                series_connections[ref] = connections
+                # Get net names for reporting
+                out_names = [pcb_data.nets[n].name for n in output_nets if n in pcb_data.nets]
+                in_names = [pcb_data.nets[n].name for n in input_nets if n in pcb_data.nets]
+                print(f"Power propagation: {ref} regulator input ({', '.join(in_names)}) <- output ({', '.join(out_names)})")
+
     if not series_connections:
         return result
 

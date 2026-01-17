@@ -33,6 +33,8 @@ This routes:
 
 Patterns are matched in order - first matching pattern determines the width. Obstacle clearances automatically adjust for wider power traces.
 
+**Note:** Power net widths are automatically enforced to be at least `--track-width`. This prevents accidentally specifying power widths smaller than signal widths.
+
 ## Automatic Power Net Detection
 
 Instead of manually specifying patterns, use Python helpers to automatically detect power nets from KiCad's pintype annotations:
@@ -79,6 +81,49 @@ The `auto_assign_power_widths()` function assigns track widths based on net type
 
 All defaults are configurable via function parameters.
 
+### Automatic Power Width Propagation
+
+The router automatically propagates power net widths through series elements. This ensures that the entire power path uses appropriate track widths, not just the nets directly connected to power pins.
+
+```python
+from net_queries import propagate_power_widths_through_passives
+
+# After identifying power nets
+power_net_widths = identify_power_nets(pcb_data, power_nets, power_nets_widths)
+
+# Propagate through series elements
+power_net_widths = propagate_power_widths_through_passives(pcb_data, power_net_widths)
+```
+
+**What gets propagated through:**
+
+| Component Type | Prefix | Example | Propagates? |
+|----------------|--------|---------|-------------|
+| Inductors | L* | L101 | Yes |
+| Ferrite beads | FB* | FB201 | Yes |
+| Fuses | F* | F1 | Yes |
+| Low-value resistors | R* | R100 (0R, 4R7) | Yes (if ≤ V_max/0.1A) |
+| Voltage regulators | VR*, U* | VR201 | Yes (output → input) |
+| Capacitors | C* | C101 | No (not series elements) |
+| High-value resistors | R* | R100 (10K) | No |
+
+**Voltage regulator detection:**
+
+The propagation automatically detects voltage regulators and propagates widths from output to input. Regulator inputs carry the same current as outputs (plus quiescent current), so they need the same track width capacity.
+
+```
+Example power path:
+DC Jack → F1 (fuse) → D1 (diode) → VR1 (regulator) → +3.3V
+                                        ↑
+                       Input net gets same width as +3.3V
+```
+
+**Voltage-based resistor inclusion:**
+
+Low-value resistors (current sense, etc.) are included based on the formula: R ≤ V_max / 0.1A
+
+The maximum voltage is auto-detected from power net names (e.g., "+5V", "VCC_3V3") with a 5V minimum for safety. At 5V max, resistors ≤50Ω are included in propagation.
+
 ## AI-Powered Power Net Analysis
 
 When KiCad pintype annotations are missing or incorrect, use the `/analyze-power-nets` Claude Code skill for AI-powered datasheet lookup.
@@ -105,7 +150,8 @@ Analyze the power nets in kicad_files/my_board.kicad_pcb and recommend track wid
 1. **Automated detection** - Finds power nets using KiCad's `pintype` annotations
 2. **Mislabel detection** - Identifies power-named nets that weren't detected (VDDPLL, VCCA, etc.)
 3. **Datasheet lookup** - Searches for component datasheets to verify power pins and current requirements
-4. **Width recommendations** - Calculates track widths based on IPC-2152 and estimated current
+4. **Regulator input analysis** - Identifies voltage regulator inputs that need same current capacity as outputs
+5. **Width recommendations** - Calculates track widths based on IPC-2152 and estimated current
 
 ### Why AI Analysis Helps
 
@@ -118,6 +164,7 @@ Many KiCad symbols have incorrect pintype annotations. Common mislabeling patter
 | Analog ground | `input` | VSSA, AGND, GNDA |
 | Reference voltage | `input` | VREF, VRH, VRL |
 | Core power | `passive` | VDDCORE, VCORE |
+| Regulator input | `input` | VIN, IN |
 
 **Example:** The MCF5213's VDDPLL pin is often marked as "passive" in KiCad symbols, but the [NXP datasheet](https://www.nxp.com/docs/en/data-sheet/MCF5213EC.pdf) shows it's the PLL power supply requiring filtered 3.3V.
 
@@ -141,11 +188,18 @@ Many KiCad symbols have incorrect pintype annotations. Common mislabeling patter
 | /VDDPLL  | PLL supply    | 5mA          | 0.3mm             |
 | /VCCA    | Analog supply | 10mA         | 0.3mm             |
 
+### Regulator Power Paths
+| Regulator | Input Net | Output Net | Max Current | Input Width |
+|-----------|-----------|------------|-------------|-------------|
+| VR201 (LT1129) | Net-(D201-K) | +3.3V | 700mA | 0.5mm |
+
 ### Ready-to-Use Configuration
 python route.py input.kicad_pcb output.kicad_pcb \
   --power-nets "GND" "+3.3V" "/VDDPLL" "/VCCA" "GNDA" \
   --power-nets-widths 0.5 0.5 0.3 0.3 0.3
 ```
+
+**Note:** The router automatically propagates power widths through series elements (fuses, inductors, ferrite beads) and voltage regulator inputs. You typically only need to specify the main power nets - downstream nets are handled automatically.
 
 ## Track Width Guidelines (IPC-2152)
 
@@ -166,6 +220,7 @@ Use these guidelines to select appropriate track widths based on expected curren
 - **Main power** (3.3V, 5V): 0.35-0.5mm depending on total load
 - **Low-current supplies** (VREF, PLL): 0.25-0.3mm
 - **Regulator outputs**: Size for max output current + margin
+- **Regulator inputs**: Same width as output (input current ≈ output current + quiescent current)
 
 ### Special Considerations
 
