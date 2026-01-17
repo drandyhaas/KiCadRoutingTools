@@ -194,9 +194,8 @@ Many KiCad symbols have incorrect pintype annotations. Common mislabeling patter
 | VR201 (LT1129) | Net-(D201-K) | +3.3V | 700mA | 0.5mm |
 
 ### Ready-to-Use Configuration
-python route.py input.kicad_pcb output.kicad_pcb \
-  --power-nets "GND" "+3.3V" "/VDDPLL" "/VCCA" "GNDA" \
-  --power-nets-widths 0.5 0.5 0.3 0.3 0.3
+```
+--power-nets "GND" "+3.3V" "/VDDPLL" "/VCCA" "GNDA" --power-nets-widths 0.5 0.5 0.3 0.3 0.3
 ```
 
 **Note:** The router automatically propagates power widths through series elements (fuses, inductors, ferrite beads) and voltage regulator inputs. You typically only need to specify the main power nets - downstream nets are handled automatically.

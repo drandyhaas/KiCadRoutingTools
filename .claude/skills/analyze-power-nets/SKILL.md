@@ -158,10 +158,9 @@ Provide results in this format:
 | VR1 (LT1129) | Net-(D1-K) | +3.3V | 700mA | 0.5mm |
 
 ### Routing Configuration
-For use with route.py:
+For use with route.py (single line for easy copy-paste):
 ```
---power-nets "GND" "+3.3V" "VDDPLL"
---power-nets-widths 0.5 0.4 0.3
+--power-nets "GND" "+3.3V" "VDDPLL" --power-nets-widths 0.5 0.4 0.3
 ```
 
 **Note:** The router automatically propagates power widths through:
@@ -195,8 +194,7 @@ For a board with MCF5213 + XCR3256 + MAX202:
 
 **Recommended configuration:**
 ```
---power-nets "GND" "+3.3V" "VDDPLL" "VCCA"
---power-nets-widths 0.5 0.5 0.3 0.3
+--power-nets "GND" "+3.3V" "VDDPLL" "VCCA" --power-nets-widths 0.5 0.5 0.3 0.3
 ```
 
 ## Finding Mislabeled Power Pins (AI Analysis)
@@ -323,8 +321,7 @@ Common mislabeling issues for regulator pins:
 After identifying regulator input nets, include them in the power net configuration:
 
 ```
---power-nets "GND" "+3.3V" "Net-(VR1-IN)" "Net-(F1-Pad1)"
---power-nets-widths 0.5 0.5 0.5 0.5
+--power-nets "GND" "+3.3V" "Net-(VR1-IN)" "Net-(F1-Pad1)" --power-nets-widths 0.5 0.5 0.5 0.5
 ```
 
 Or rely on automatic propagation which now handles:
