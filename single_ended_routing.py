@@ -42,7 +42,8 @@ def _probe_route_with_frontier(
     forward_targets: List,
     config: 'GridRouteConfig',
     print_prefix: str = "",
-    direction_labels: Tuple[str, str] = ("forward", "backward")
+    direction_labels: Tuple[str, str] = ("forward", "backward"),
+    track_margin: int = 0
 ) -> Tuple[Optional[List], int, List, List, bool]:
     """
     Probe routing with fail-fast on stuck directions.
@@ -58,6 +59,7 @@ def _probe_route_with_frontier(
         config: Routing configuration
         print_prefix: Prefix for print messages (e.g., "  " or "      ")
         direction_labels: Names for forward/backward directions
+        track_margin: Extra margin in grid cells for wide tracks (power nets)
 
     Returns:
         (path, total_iterations, forward_blocked, backward_blocked, reversed_path)
@@ -72,7 +74,7 @@ def _probe_route_with_frontier(
 
     # Probe forward direction
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, probe_iterations)
+        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin)
     first_probe_iters = iterations
     first_blocked = blocked_cells
     total_iterations = first_probe_iters
@@ -89,7 +91,7 @@ def _probe_route_with_frontier(
 
     # Probe backward direction
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, probe_iterations)
+        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin)
     second_probe_iters = iterations
     second_blocked = blocked_cells
     total_iterations += second_probe_iters
@@ -119,7 +121,7 @@ def _probe_route_with_frontier(
     print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
     path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, config.max_iterations)
+        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin)
     total_iterations += full_iters
 
     if path is not None:
@@ -131,7 +133,7 @@ def _probe_route_with_frontier(
     forward_blocked = full_blocked
 
     path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, config.max_iterations)
+        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin)
     total_iterations += backward_full_iters
 
     if path is not None:
@@ -181,6 +183,12 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
 
+    # Calculate track margin for wide power tracks
+    # Power nets need extra clearance from obstacles based on their wider track width
+    net_track_width = config.get_net_track_width(net_id, config.layers[0])
+    extra_half_width = (net_track_width - config.track_width) / 2
+    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+
     # Determine direction order (always deterministic)
     if config.direction_order in ("backwards", "backward"):
         start_backwards = True
@@ -203,13 +211,13 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     probe_iterations = config.max_probe_iterations
 
     # Probe first direction
-    path, iterations = router.route_multi(obstacles, first_sources, first_targets, probe_iterations)
+    path, iterations = router.route_multi(obstacles, first_sources, first_targets, probe_iterations, track_margin=track_margin)
     first_probe_iters = iterations
     total_iterations = first_probe_iters
 
     if path is None:
         # Probe second direction
-        path, iterations = router.route_multi(obstacles, second_sources, second_targets, probe_iterations)
+        path, iterations = router.route_multi(obstacles, second_sources, second_targets, probe_iterations, track_margin=track_margin)
         second_probe_iters = iterations
         total_iterations += second_probe_iters
 
@@ -232,7 +240,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 # Both probes reached max - do full search on first direction
                 print(f"Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
-                path, full_iters = router.route_multi(obstacles, first_sources, first_targets, config.max_iterations)
+                path, full_iters = router.route_multi(obstacles, first_sources, first_targets, config.max_iterations, track_margin=track_margin)
                 total_iterations += full_iters
 
                 if path is not None:
@@ -240,7 +248,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 else:
                     # First direction failed, try second
                     print(f"No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
-                    path, fallback_full_iters = router.route_multi(obstacles, second_sources, second_targets, config.max_iterations)
+                    path, fallback_full_iters = router.route_multi(obstacles, second_sources, second_targets, config.max_iterations, track_margin=track_margin)
                     total_iterations += fallback_full_iters
                     if path is not None:
                         reversed_path = start_backwards
@@ -375,6 +383,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
 
+    # Calculate track margin for wide power tracks
+    net_track_width = config.get_net_track_width(net_id, config.layers[0])
+    extra_half_width = (net_track_width - config.track_width) / 2
+    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+
     # Determine direction order (always deterministic)
     start_backwards = config.direction_order in ("backwards", "backward")
 
@@ -389,7 +402,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Use probe routing helper
     path, total_iterations, forward_blocked, backward_blocked, reversed_path = _probe_route_with_frontier(
         router, obstacles, forward_sources, forward_targets, config,
-        print_prefix="", direction_labels=direction_labels
+        print_prefix="", direction_labels=direction_labels, track_margin=track_margin
     )
 
     # Adjust reversed_path based on start direction
@@ -793,10 +806,15 @@ def route_multipoint_main(
     # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
 
+    # Calculate track margin for wide power tracks
+    net_track_width = config.get_net_track_width(net_id, config.layers[0])
+    extra_half_width = (net_track_width - config.track_width) / 2
+    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+
     # Use probe routing helper
     path, total_iterations, forward_blocked, backward_blocked, reversed_path = _probe_route_with_frontier(
         router, obstacles, sources, targets, config,
-        print_prefix="  ", direction_labels=("forward", "backward")
+        print_prefix="  ", direction_labels=("forward", "backward"), track_margin=track_margin
     )
 
     if path is None:
@@ -960,6 +978,12 @@ def route_multipoint_taps(
     print(f"  Multi-point net Phase 3: routing {len(remaining_edges)} remaining MST edges (longest first)")
 
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
+
+    # Calculate track margin for wide power tracks
+    net_track_width = config.get_net_track_width(net_id, config.layers[0])
+    extra_half_width = (net_track_width - config.track_width) / 2
+    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+
     total_iterations = 0
 
     # Route remaining MST edges in order (longest first)
@@ -1057,7 +1081,7 @@ def route_multipoint_taps(
 
         path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path = _probe_route_with_frontier(
             router, obstacles, sources, targets, config,
-            print_prefix="      ", direction_labels=("forward", "backward")
+            print_prefix="      ", direction_labels=("forward", "backward"), track_margin=track_margin
         )
 
         # If path was found in reverse direction, reverse it so it goes sources -> targets
@@ -1170,12 +1194,15 @@ def _path_to_segments_vias(
     if start_original:
         first_grid_x, first_grid_y = coord.to_float(path_start[0], path_start[1])
         orig_x, orig_y, orig_layer = start_original
+        # Use the actual path layer, not the original pad layer
+        # (through-hole pads may have orig_layer=F.Cu but router chose In1.Cu)
+        path_start_layer = layer_names[path_start[2]]
         if abs(orig_x - first_grid_x) > 0.001 or abs(orig_y - first_grid_y) > 0.001:
             seg = Segment(
                 start_x=orig_x, start_y=orig_y,
                 end_x=first_grid_x, end_y=first_grid_y,
-                width=config.get_net_track_width(net_id, orig_layer),
-                layer=orig_layer,
+                width=config.get_net_track_width(net_id, path_start_layer),
+                layer=path_start_layer,
                 net_id=net_id
             )
             segments.append(seg)
@@ -1213,12 +1240,14 @@ def _path_to_segments_vias(
     if end_original:
         last_grid_x, last_grid_y = coord.to_float(path_end[0], path_end[1])
         orig_x, orig_y, orig_layer = end_original
+        # Use the actual path layer, not the original pad layer
+        path_end_layer = layer_names[path_end[2]]
         if abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001:
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
-                width=config.get_net_track_width(net_id, orig_layer),
-                layer=orig_layer,
+                width=config.get_net_track_width(net_id, path_end_layer),
+                layer=path_end_layer,
                 net_id=net_id
             )
             segments.append(seg)

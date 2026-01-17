@@ -43,7 +43,9 @@ impl GridRouter {
     /// end_direction: Optional (dx, dy) continuous direction for final moves to target.
     /// If specified, checks arrival direction is within ±60° of this direction.
     /// direction_steps: Number of steps to constrain at start (default 2).
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2))]
+    /// track_margin: Extra margin in grid cells for wide tracks (e.g., power nets).
+    /// When > 0, checks cells within this radius for obstacles.
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
     pub fn route_multi(
         &self,
         obstacles: &GridObstacleMap,
@@ -55,6 +57,7 @@ impl GridRouter {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
+        track_margin: i32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32) {
         // Convert targets to set for O(1) lookup
         let target_set: FxHashSet<u64> = targets
@@ -272,7 +275,7 @@ impl GridRouter {
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
-                if obstacles.is_blocked(ngx, ngy, current.layer as usize) {
+                if obstacles.is_blocked_with_margin(ngx, ngy, current.layer as usize, track_margin) {
                     continue;
                 }
 
@@ -385,7 +388,7 @@ impl GridRouter {
                     }
 
                     // Check if destination layer is blocked at this position
-                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
+                    if obstacles.is_blocked_with_margin(current.gx, current.gy, layer as usize, track_margin) {
                         continue;
                     }
 
@@ -440,7 +443,7 @@ impl GridRouter {
     /// Returns (path, iterations, blocked_cells) where:
     /// - On success: path is Some, blocked_cells is empty
     /// - On failure: path is None, blocked_cells contains cells that blocked expansion
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
     pub fn route_with_frontier(
         &self,
         obstacles: &GridObstacleMap,
@@ -452,6 +455,7 @@ impl GridRouter {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
+        track_margin: i32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
         let mut tracker = BlockedCellTracker::new();
 
@@ -584,7 +588,7 @@ impl GridRouter {
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
-                if obstacles.is_blocked(ngx, ngy, current.layer as usize) {
+                if obstacles.is_blocked_with_margin(ngx, ngy, current.layer as usize, track_margin) {
                     tracker.track(ngx, ngy, current.layer);
                     continue;
                 }
@@ -655,7 +659,7 @@ impl GridRouter {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer { continue; }
 
-                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
+                    if obstacles.is_blocked_with_margin(current.gx, current.gy, layer as usize, track_margin) {
                         tracker.track(current.gx, current.gy, layer);
                         continue;
                     }

@@ -348,6 +348,27 @@ impl GridObstacleMap {
         false
     }
 
+    /// Check if cell is blocked with extra margin (for wide tracks)
+    /// Checks all cells within margin radius - if any is blocked, returns true.
+    /// This is O(margin^2) so only use for wide power tracks.
+    #[inline]
+    pub fn is_blocked_with_margin(&self, gx: i32, gy: i32, layer: usize, margin: i32) -> bool {
+        if margin <= 0 {
+            return self.is_blocked(gx, gy, layer);
+        }
+
+        // Check all cells within the margin square
+        // Early exit on first blocked cell found
+        for dx in -margin..=margin {
+            for dy in -margin..=margin {
+                if self.is_blocked(gx + dx, gy + dy, layer) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Check if via is blocked
     #[inline]
     pub fn is_via_blocked(&self, gx: i32, gy: i32) -> bool {
