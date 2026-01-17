@@ -40,6 +40,9 @@ pub struct GridObstacleMap {
     pub endpoint_exempt_positions: Vec<(i32, i32)>,
     /// Radius around endpoints to exempt from stub proximity costs
     pub endpoint_exempt_radius: i32,
+    /// Free via positions: positions where layer changes have zero cost
+    /// (e.g., through-hole pads on the same net - reuse existing holes instead of adding vias)
+    pub free_via_positions: FxHashSet<u64>,
 }
 
 #[pymethods]
@@ -59,6 +62,7 @@ impl GridObstacleMap {
             cross_layer_tracks: FxHashMap::default(),
             endpoint_exempt_positions: Vec::new(),
             endpoint_exempt_radius: 0,
+            free_via_positions: FxHashSet::default(),
         }
     }
 
@@ -110,22 +114,24 @@ impl GridObstacleMap {
             cross_layer_tracks: self.cross_layer_tracks.clone(),
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
+            free_via_positions: self.free_via_positions.clone(),
         }
     }
 
     /// Get memory statistics for this obstacle map
     /// Returns (blocked_cells_count, blocked_vias_count, stub_proximity_count,
-    ///          layer_proximity_count, cross_layer_count, source_target_count)
-    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize) {
+    ///          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
+    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
         let blocked_cells_count: usize = self.blocked_cells.iter().map(|m| m.len()).sum();
         let blocked_vias_count = self.blocked_vias.len();
         let stub_proximity_count = self.stub_proximity.len();
         let layer_proximity_count: usize = self.layer_proximity_costs.iter().map(|m| m.len()).sum();
         let cross_layer_count = self.cross_layer_tracks.len();
         let source_target_count: usize = self.source_target_cells.iter().map(|s| s.len()).sum();
+        let free_vias_count = self.free_via_positions.len();
 
         (blocked_cells_count, blocked_vias_count, stub_proximity_count,
-         layer_proximity_count, cross_layer_count, source_target_count)
+         layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
     }
 
     /// Clear stub proximity costs (for reuse with different stubs)
@@ -149,6 +155,7 @@ impl GridObstacleMap {
             layer_set.shrink_to_fit();
         }
         self.cross_layer_tracks.shrink_to_fit();
+        self.free_via_positions.shrink_to_fit();
     }
 
     /// Clear allowed cells (for reuse with different source/target)
@@ -540,5 +547,29 @@ impl GridObstacleMap {
     /// Clear cross-layer track data
     pub fn clear_cross_layer_tracks(&mut self) {
         self.cross_layer_tracks.clear();
+    }
+
+    /// Add a free via position (layer change here has zero cost)
+    /// Used for through-hole pads on the same net where we can reuse the existing hole
+    pub fn add_free_via(&mut self, gx: i32, gy: i32) {
+        self.free_via_positions.insert(pack_xy(gx, gy));
+    }
+
+    /// Check if position is a free via (zero-cost layer change)
+    #[inline]
+    pub fn is_free_via(&self, gx: i32, gy: i32) -> bool {
+        self.free_via_positions.contains(&pack_xy(gx, gy))
+    }
+
+    /// Clear all free via positions
+    pub fn clear_free_vias(&mut self) {
+        self.free_via_positions.clear();
+    }
+
+    /// Batch add free via positions from a list of (gx, gy) tuples
+    pub fn add_free_vias_batch(&mut self, positions: Vec<(i32, i32)>) {
+        for (gx, gy) in positions {
+            self.free_via_positions.insert(pack_xy(gx, gy));
+        }
     }
 }

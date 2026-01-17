@@ -7,9 +7,11 @@ like building obstacle maps and recording route results.
 
 from typing import List, Set, Dict, Optional, Tuple
 import numpy as np
+from routing_config import GridCoord
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
-    add_same_net_via_clearance, add_same_net_pad_drill_via_clearance
+    add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
+    get_same_net_through_hole_positions
 )
 from obstacle_costs import (
     add_stub_proximity_costs, merge_track_proximity_costs,
@@ -21,6 +23,26 @@ from obstacle_cache import (
 from connectivity import get_stub_endpoints
 from net_queries import get_chip_pad_positions
 from route_modification import add_route_to_pcb_data
+
+
+def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
+    """Add through-hole pads as free via positions (zero-cost layer change).
+
+    Args:
+        obstacles: GridObstacleMap to add free via positions to
+        pcb_data: PCB data with pads_by_net
+        net_ids: List of net IDs to add through-hole positions for
+        config: Routing config with grid_step
+    """
+    coord = GridCoord(config.grid_step)
+    free_via_positions = []
+    for net_id in net_ids:
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            if pad.drill and pad.drill > 0:
+                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                free_via_positions.append((gx, gy))
+    if free_via_positions:
+        obstacles.add_free_vias_batch(free_via_positions)
 
 
 def build_diff_pair_obstacles(
@@ -110,6 +132,9 @@ def build_diff_pair_obstacles(
     add_same_net_pad_drill_via_clearance(obstacles, pcb_data, p_net_id, config)
     add_same_net_pad_drill_via_clearance(obstacles, pcb_data, n_net_id, config)
 
+    # Add through-hole pads as free via positions (zero-cost layer change)
+    _add_free_via_positions(obstacles, pcb_data, [p_net_id, n_net_id], config)
+
     # Add own stubs as obstacles if function provided
     if add_own_stubs_func:
         add_own_stubs_func(obstacles, pcb_data, p_net_id, n_net_id, config, extra_clearance)
@@ -196,6 +221,9 @@ def build_single_ended_obstacles(
     # Add same-net pad drill hole-to-hole clearance
     add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
 
+    # Add through-hole pads as free via positions (zero-cost layer change)
+    _add_free_via_positions(obstacles, pcb_data, [net_id], config)
+
     return obstacles, all_stubs
 
 
@@ -263,6 +291,9 @@ def build_incremental_obstacles(
     # Add same-net pad drill hole-to-hole clearance
     add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
 
+    # Add through-hole pads as free via positions (zero-cost layer change)
+    _add_free_via_positions(obstacles, pcb_data, [net_id], config)
+
     return obstacles, all_stubs
 
 
@@ -303,6 +334,7 @@ def prepare_obstacles_inplace(
     working_obstacles.clear_stub_proximity()
     working_obstacles.clear_layer_proximity()
     working_obstacles.clear_cross_layer_tracks()
+    working_obstacles.clear_free_vias()
 
     # Remove current net's obstacles so we can route through our own stubs
     if net_id in net_obstacles_cache:
@@ -340,14 +372,21 @@ def prepare_obstacles_inplace(
                     same_net_via_cells.append((gx + ex, gy + ey))
 
     # Pad drill hole clearance
+    # Skip the pad center - the router can use existing through-holes for layer transitions
     if config.hole_to_hole_clearance > 0:
         hole_clearance_grid = coord.to_grid_dist(config.hole_to_hole_clearance + config.via_drill / 2)
         for pad in pcb_data.pads_by_net.get(net_id, []):
             if pad.drill and pad.drill > 0:
+                # Include pad drill radius in clearance calculation
+                required_dist = pad.drill / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
+                expand = coord.to_grid_dist(required_dist)
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                for ex in range(-hole_clearance_grid, hole_clearance_grid + 1):
-                    for ey in range(-hole_clearance_grid, hole_clearance_grid + 1):
-                        if ex*ex + ey*ey <= hole_clearance_grid * hole_clearance_grid:
+                for ex in range(-expand, expand + 1):
+                    for ey in range(-expand, expand + 1):
+                        if ex*ex + ey*ey <= expand * expand:
+                            # Skip the pad center - allow layer transitions at through-holes
+                            if ex == 0 and ey == 0:
+                                continue
                             same_net_via_cells.append((gx + ex, gy + ey))
 
     # Batch add same-net via clearance (convert to numpy for Rust FFI)
@@ -356,6 +395,9 @@ def prepare_obstacles_inplace(
         working_obstacles.add_blocked_vias_batch(same_net_via_arr)
     else:
         same_net_via_arr = np.empty((0, 2), dtype=np.int32)
+
+    # Add through-hole pads as free via positions (zero-cost layer change)
+    _add_free_via_positions(working_obstacles, pcb_data, [net_id], config)
 
     return all_stubs, same_net_via_arr
 
@@ -382,6 +424,7 @@ def restore_obstacles_inplace(
     working_obstacles.clear_stub_proximity()
     working_obstacles.clear_layer_proximity()
     working_obstacles.clear_cross_layer_tracks()
+    working_obstacles.clear_free_vias()
 
     # Remove same-net via clearance cells
     if len(same_net_via_cells) > 0:

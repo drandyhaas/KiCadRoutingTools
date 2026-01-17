@@ -497,6 +497,10 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
     This blocks via placement near through-hole pads on the same net,
     enforcing manufacturing hole-to-hole clearance even within a single net.
     New vias must maintain hole_to_hole_clearance from existing pad drill holes.
+
+    IMPORTANT: The pad center itself is NOT blocked - the router can use existing
+    through-hole pads for layer transitions without placing a new via. Only the
+    area around the pad (within clearance distance) is blocked for new vias.
     """
     if config.hole_to_hole_clearance <= 0:
         return
@@ -516,7 +520,38 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
         for ex in range(-expand, expand + 1):
             for ey in range(-expand, expand + 1):
                 if ex*ex + ey*ey <= expand*expand:
+                    # Skip the pad center - the router can use the existing
+                    # through-hole for layer transitions without a new via
+                    if ex == 0 and ey == 0:
+                        continue
                     obstacles.add_blocked_via(gx + ex, gy + ey)
+
+
+def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
+                                        config: GridRouteConfig) -> Set[Tuple[int, int]]:
+    """Get grid positions of through-hole pads on this net.
+
+    These positions can be used for layer transitions without placing a new via,
+    since the existing through-hole already connects all layers.
+
+    Args:
+        pcb_data: PCB data with pads_by_net
+        net_id: Net ID to get through-hole positions for
+        config: Grid routing config (for grid_step)
+
+    Returns:
+        Set of (gx, gy) grid coordinates where through-hole pads exist
+    """
+    coord = GridCoord(config.grid_step)
+    positions = set()
+
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    for pad in pads:
+        if pad.drill and pad.drill > 0:
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            positions.add((gx, gy))
+
+    return positions
 
 
 def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,

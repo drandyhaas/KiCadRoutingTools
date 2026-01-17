@@ -5,7 +5,7 @@ Routes individual nets using A* pathfinding on a grid obstacle map.
 """
 
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 # ANSI color codes
 RED = '\033[91m'
@@ -20,7 +20,7 @@ from connectivity import (
     find_closest_point_on_segments,
     compute_mst_edges
 )
-from obstacle_map import build_obstacle_map
+from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
 
 # Import Rust router
 import sys
@@ -279,6 +279,9 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             end_original = (t[3], t[4], layer_names[t[2]])
             break
 
+    # Get through-hole pad positions for this net (layer transitions without via)
+    through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
+
     # Convert path to segments and vias
     new_segments = []
     new_vias = []
@@ -305,14 +308,17 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         x2, y2 = coord.to_float(gx2, gy2)
 
         if layer1 != layer2:
-            via = Via(
-                x=x1, y=y1,
-                size=config.via_size,
-                drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=net_id
-            )
-            new_vias.append(via)
+            # Check if layer change is at an existing through-hole pad
+            # If so, skip creating a via - the pad provides the layer transition
+            if (gx1, gy1) not in through_hole_positions:
+                via = Via(
+                    x=x1, y=y1,
+                    size=config.via_size,
+                    drill=config.via_drill,
+                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    net_id=net_id
+                )
+                new_vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
                 layer_name = layer_names[layer1]
@@ -440,6 +446,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             end_original = (t[3], t[4], layer_names[t[2]])
             break
 
+    # Get through-hole pad positions for this net (layer transitions without via)
+    through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
+
     new_segments = []
     new_vias = []
 
@@ -464,14 +473,17 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         x2, y2 = coord.to_float(gx2, gy2)
 
         if layer1 != layer2:
-            via = Via(
-                x=x1, y=y1,
-                size=config.via_size,
-                drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=net_id
-            )
-            new_vias.append(via)
+            # Check if layer change is at an existing through-hole pad
+            # If so, skip creating a via - the pad provides the layer transition
+            if (gx1, gy1) not in through_hole_positions:
+                via = Via(
+                    x=x1, y=y1,
+                    size=config.via_size,
+                    drill=config.via_drill,
+                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    net_id=net_id
+                )
+                new_vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
                 layer_name = layer_names[layer1]
@@ -653,6 +665,9 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
             end_original = (t[3], t[4], layer_names[t[2]])
             break
 
+    # Get through-hole pad positions for this net (layer transitions without via)
+    through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
+
     new_segments = []
     new_vias = []
 
@@ -677,14 +692,17 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         x2, y2 = coord.to_float(gx2, gy2)
 
         if layer1 != layer2:
-            via = Via(
-                x=x1, y=y1,
-                size=config.via_size,
-                drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=net_id
-            )
-            new_vias.append(via)
+            # Check if layer change is at an existing through-hole pad
+            # If so, skip creating a via - the pad provides the layer transition
+            if (gx1, gy1) not in through_hole_positions:
+                via = Via(
+                    x=x1, y=y1,
+                    size=config.via_size,
+                    drill=config.via_drill,
+                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    net_id=net_id
+                )
+                new_vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
                 layer_name = layer_names[layer1]
@@ -833,11 +851,15 @@ def route_multipoint_main(
         pad_a, pad_b = pad_b, pad_a
         idx_a, idx_b = idx_b, idx_a
 
+    # Get through-hole pad positions for this net (layer transitions without via)
+    through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
+
     # Convert path to segments/vias
     segments, vias = _path_to_segments_vias(
         path, coord, layer_names, net_id, config,
         (pad_a[3], pad_a[4], layer_names[pad_a[2]]),  # start_original
-        (pad_b[3], pad_b[4], layer_names[pad_b[2]])   # end_original
+        (pad_b[3], pad_b[4], layer_names[pad_b[2]]),  # end_original
+        through_hole_positions
     )
 
     print(f"  Phase 1 routed in {total_iterations} iterations, {len(segments)} segments")
@@ -966,6 +988,9 @@ def route_multipoint_taps(
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
+
+    # Get through-hole pad positions for this net (layer transitions without via)
+    through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
 
     # Get remaining MST edges (skip the first one which was routed in Phase 1)
     # MST edges are already sorted longest-first
@@ -1120,7 +1145,8 @@ def route_multipoint_taps(
         segments, vias = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
             (tap_x, tap_y, tap_layer),  # start_original (actual tap point used)
-            (tgt_x, tgt_y, path_end_layer)  # end_original (target pad on actual reached layer)
+            (tgt_x, tgt_y, path_end_layer),  # end_original (target pad on actual reached layer)
+            through_hole_positions
         )
         all_segments.extend(segments)
         all_vias.extend(vias)
@@ -1164,7 +1190,8 @@ def _path_to_segments_vias(
     net_id: int,
     config: GridRouteConfig,
     start_original: Tuple[float, float, str],
-    end_original: Tuple[float, float, str]
+    end_original: Tuple[float, float, str],
+    through_hole_positions: Set[Tuple[int, int]] = None
 ) -> Tuple[List[Segment], List[Via]]:
     """
     Convert a grid path to Segment and Via objects.
@@ -1177,6 +1204,9 @@ def _path_to_segments_vias(
         config: Routing config with track width, via size
         start_original: (x, y, layer) of path start in float coords
         end_original: (x, y, layer) of path end in float coords
+        through_hole_positions: Optional set of (gx, gy) positions where through-hole
+            pads exist on this net. Layer changes at these positions don't need a
+            new via since the existing through-hole provides the layer transition.
 
     Returns:
         (segments, vias): Lists of Segment and Via objects
@@ -1216,14 +1246,20 @@ def _path_to_segments_vias(
         x2, y2 = coord.to_float(gx2, gy2)
 
         if layer1 != layer2:
-            via = Via(
-                x=x1, y=y1,
-                size=config.via_size,
-                drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=net_id
-            )
-            vias.append(via)
+            # Check if layer change is at an existing through-hole pad
+            # If so, skip creating a via - the pad provides the layer transition
+            if through_hole_positions and (gx1, gy1) in through_hole_positions:
+                # No via needed - existing through-hole pad connects all layers
+                pass
+            else:
+                via = Via(
+                    x=x1, y=y1,
+                    size=config.via_size,
+                    drill=config.via_drill,
+                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    net_id=net_id
+                )
+                vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
                 layer_name = layer_names[layer1]

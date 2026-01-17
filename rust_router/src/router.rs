@@ -399,21 +399,27 @@ impl GridRouter {
                         continue;
                     }
 
-                    // Multiply stub proximity cost by via_proximity_cost for vias
+                    // Use zero cost for free via positions (through-hole pads on same net)
+                    let is_free = obstacles.is_free_via(current.gx, current.gy);
+                    let via_cost = if is_free { 0 } else { self.via_cost };
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
-                    let new_g = g + self.via_cost + proximity_cost;
+                    let new_g = g + via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                     if new_g < existing_g {
                         g_costs.insert(neighbor_key, new_g);
                         parents.insert(neighbor_key, current_key);
-                        // Add this via position to the path's via list
+                        // Track via positions (only real vias, not free vias at through-holes)
                         if via_exclusion_radius > 0 {
-                            let mut new_vias = current_vias.clone();
-                            new_vias.push((current.gx, current.gy));
-                            path_vias.insert(neighbor_key, new_vias);
+                            if is_free {
+                                path_vias.insert(neighbor_key, current_vias.clone());
+                            } else {
+                                let mut new_vias = current_vias.clone();
+                                new_vias.push((current.gx, current.gy));
+                                path_vias.insert(neighbor_key, new_vias);
+                            }
                         }
                         // Via doesn't count as a step for direction constraint
                         steps_from_source.insert(neighbor_key, current_steps);
@@ -669,20 +675,27 @@ impl GridRouter {
 
                     if closed.contains(&neighbor_key) { continue; }
 
-                    // Multiply stub proximity cost by via_proximity_cost for vias
+                    // Use zero cost for free via positions (through-hole pads on same net)
+                    let is_free = obstacles.is_free_via(current.gx, current.gy);
+                    let via_cost = if is_free { 0 } else { self.via_cost };
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
-                    let new_g = g + self.via_cost + proximity_cost;
+                    let new_g = g + via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                     if new_g < existing_g {
                         g_costs.insert(neighbor_key, new_g);
                         parents.insert(neighbor_key, current_key);
+                        // Track via positions (only real vias, not free vias at through-holes)
                         if via_exclusion_radius > 0 {
-                            let mut new_vias = current_vias.clone();
-                            new_vias.push((current.gx, current.gy));
-                            path_vias.insert(neighbor_key, new_vias);
+                            if is_free {
+                                path_vias.insert(neighbor_key, current_vias.clone());
+                            } else {
+                                let mut new_vias = current_vias.clone();
+                                new_vias.push((current.gx, current.gy));
+                                path_vias.insert(neighbor_key, new_vias);
+                            }
                         }
                         steps_from_source.insert(neighbor_key, current_steps);
                         let h = self.heuristic_to_targets(&neighbor, &target_states);
