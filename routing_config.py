@@ -108,15 +108,19 @@ class GridRouteConfig:
         2. Layer-specific width (layer_widths, for impedance control)
         3. Default track_width
 
+        The returned width is always at least track_width (power net widths
+        cannot be smaller than the base track width).
+
         Args:
             net_id: The net ID to get width for
             layer: The layer name
 
         Returns:
-            Track width in mm
+            Track width in mm (never less than track_width)
         """
         if net_id in self.power_net_widths:
-            return self.power_net_widths[net_id]
+            # Ensure power net width is at least the base track width
+            return max(self.power_net_widths[net_id], self.track_width)
         return self.get_track_width(layer)
 
 
