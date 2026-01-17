@@ -42,7 +42,8 @@ from connectivity import (
 from net_queries import (
     get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position, find_pad_at_position,
-    expand_net_patterns, find_single_ended_nets, identify_power_nets
+    expand_net_patterns, find_single_ended_nets, identify_power_nets,
+    propagate_power_widths_through_passives
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -249,6 +250,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if len(power_nets) != len(power_nets_widths):
             raise ValueError(f"--power-nets ({len(power_nets)}) and --power-nets-widths ({len(power_nets_widths)}) must have same length")
         power_net_widths = identify_power_nets(pcb_data, power_nets, power_nets_widths)
+        # Propagate power widths through passive components (resistors, inductors, ferrite beads, etc.)
+        # This ensures nets on the other side of series passives also get appropriate widths
+        power_net_widths = propagate_power_widths_through_passives(pcb_data, power_net_widths)
         if power_net_widths:
             config.power_net_widths = power_net_widths
             print(f"\nPower net width assignments ({len(power_net_widths)} nets):")
