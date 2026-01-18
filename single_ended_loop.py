@@ -293,7 +293,9 @@ def route_single_ended_nets(
                         source_xy=single_source_xy,
                         obstacle_cache=obstacle_cache
                     )
-                    print_blocking_analysis(blockers)
+                    print_blocking_analysis(blockers, blocked_cells=blocked_cells,
+                                           pcb_data=pcb_data, config=config,
+                                           nets_to_route=remaining_net_ids)
 
                     # Filter to only rippable blockers (those in routed_results)
                     # and deduplicate by diff pair (P and N count as one)

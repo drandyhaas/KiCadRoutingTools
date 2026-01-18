@@ -306,14 +306,147 @@ def analyze_frontier_blocking(
     return results
 
 
+def analyze_static_blockers(
+    blocked_cells: List[Tuple[int, int, int]],
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    nets_to_route: Optional[Set[int]] = None,
+) -> Dict[str, List[str]]:
+    """
+    Analyze what static obstacles are blocking the given cells.
+
+    Returns a dict with categories of blockers:
+    - 'pads': list of "NetName (pad ref)" strings for blocking pads
+    - 'tracks': list of "NetName" strings for pre-existing tracks
+    - 'zones': count of cells in BGA exclusion zones
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = build_layer_map(config.layers)
+    blocked_set = set(blocked_cells)
+    nets_to_route = nets_to_route or set()
+
+    result = {
+        'pads': [],
+        'tracks': [],
+        'zone_cells': 0,
+    }
+
+    # Track which nets' pads are blocking
+    pad_blockers = {}  # net_name -> set of pad refs
+
+    # Check pads from other nets
+    for net_id, pads in pcb_data.pads_by_net.items():
+        if net_id in nets_to_route:
+            continue
+        net_name = pcb_data.net_names.get(net_id, f"Net {net_id}")
+        for pad in pads:
+            # Get pad grid area
+            pad_gx, pad_gy = coord.to_grid(pad.x, pad.y)
+
+            # Calculate pad expansion (similar to obstacle_map.py)
+            pad_half_w = pad.width / 2
+            pad_half_h = pad.height / 2
+            expansion_mm = max(pad_half_w, pad_half_h) + config.clearance
+            expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+
+            # Check if any blocked cells fall within this pad's area
+            for cell in blocked_set:
+                gx, gy, layer_idx = cell
+                layer_name = config.layers[layer_idx] if layer_idx < len(config.layers) else None
+                if layer_name and layer_name not in pad.layers:
+                    continue
+                if abs(gx - pad_gx) <= expansion_grid and abs(gy - pad_gy) <= expansion_grid:
+                    if net_name not in pad_blockers:
+                        pad_blockers[net_name] = set()
+                    pad_blockers[net_name].add(pad.ref)
+                    break  # Found blocking, move to next pad
+
+    # Format pad blockers
+    for net_name, refs in sorted(pad_blockers.items(), key=lambda x: -len(x[1])):
+        if len(refs) <= 3:
+            result['pads'].append(f"{net_name} ({', '.join(sorted(refs))})")
+        else:
+            result['pads'].append(f"{net_name} ({len(refs)} pads)")
+
+    # Check pre-existing tracks from other nets
+    track_blockers = set()
+    for seg in pcb_data.segments:
+        if seg.net_id in nets_to_route:
+            continue
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        # Get segment grid area
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+        expansion_grid = max(1, coord.to_grid_dist(seg.width / 2 + config.clearance))
+
+        # Check if any blocked cells fall near this segment
+        for cell in blocked_set:
+            gx, gy, cell_layer = cell
+            if cell_layer != layer_idx:
+                continue
+            # Simple bounding box check
+            min_gx = min(gx1, gx2) - expansion_grid
+            max_gx = max(gx1, gx2) + expansion_grid
+            min_gy = min(gy1, gy2) - expansion_grid
+            max_gy = max(gy1, gy2) + expansion_grid
+            if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
+                net_name = pcb_data.net_names.get(seg.net_id, f"Net {seg.net_id}")
+                track_blockers.add(net_name)
+                break
+
+    result['tracks'] = sorted(track_blockers)
+
+    # Check BGA exclusion zones
+    zone_cells = 0
+    for zone in config.bga_exclusion_zones:
+        min_x, min_y, max_x, max_y = zone[:4]
+        gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+        gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+        for cell in blocked_set:
+            gx, gy, _ = cell
+            if gmin_x <= gx <= gmax_x and gmin_y <= gy <= gmax_y:
+                zone_cells += 1
+    result['zone_cells'] = zone_cells
+
+    return result
+
+
 def print_blocking_analysis(
     blockers: List[BlockingInfo],
     max_display: int = 10,
-    prefix: str = "  "
+    prefix: str = "  ",
+    blocked_cells: Optional[List[Tuple[int, int, int]]] = None,
+    pcb_data: Optional[PCBData] = None,
+    config: Optional[GridRouteConfig] = None,
+    nets_to_route: Optional[Set[int]] = None,
 ):
     """Print blocking analysis results."""
     if not blockers:
-        print(f"{prefix}No previously-routed nets blocking (likely blocked by pads/stubs/zones)")
+        msg = f"{prefix}No previously-routed nets blocking"
+        # If we have the data, analyze static blockers
+        if blocked_cells and pcb_data and config:
+            static = analyze_static_blockers(blocked_cells, pcb_data, config, nets_to_route)
+            details = []
+            if static['pads']:
+                details.append(f"pads: {', '.join(static['pads'][:5])}")
+                if len(static['pads']) > 5:
+                    details[-1] += f" (+{len(static['pads'])-5} more)"
+            if static['tracks']:
+                details.append(f"pre-existing tracks: {', '.join(static['tracks'][:3])}")
+                if len(static['tracks']) > 3:
+                    details[-1] += f" (+{len(static['tracks'])-3} more)"
+            if static['zone_cells'] > 0:
+                details.append(f"BGA zone ({static['zone_cells']} cells)")
+            if details:
+                print(f"{msg}")
+                print(f"{prefix}Static blockers: {'; '.join(details)}")
+            else:
+                print(f"{msg} (likely blocked by pads/stubs/zones)")
+        else:
+            print(f"{msg} (likely blocked by pads/stubs/zones)")
         return
 
     total_blocked = sum(b.blocked_count for b in blockers)
