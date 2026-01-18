@@ -21,6 +21,41 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap
 
 
+def _re_add_pad_obstacles_for_net(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    routing_obstacles_cache: Dict[str, GridObstacleMap]
+):
+    """
+    Re-add pad obstacles for a net after its segments were removed.
+
+    When segments are ripped, the segment obstacles are removed from the cache.
+    But pad obstacles that overlap with segment obstacles are also removed.
+    This function re-adds the pad obstacles since pads still exist after rip-up.
+    """
+    coord = GridCoord(config.grid_step)
+    pads = pcb_data.pads_by_net.get(net_id, [])
+
+    for pad in pads:
+        for layer, obstacles in routing_obstacles_cache.items():
+            # Check if pad is on this layer
+            if layer not in pad.layers and "*.Cu" not in pad.layers:
+                continue
+
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            half_width = pad.size_x / 2
+            half_height = pad.size_y / 2
+            margin = config.track_width / 2 + config.clearance
+            expand_x = int((half_width + margin) / config.grid_step)
+            expand_y = int((half_height + margin) / config.grid_step)
+
+            # Re-add pad blocking cells
+            for ex in range(-expand_x, expand_x + 1):
+                for ey in range(-expand_y, expand_y + 1):
+                    obstacles.add_blocked_cell(gx + ex, gy + ey, 0)  # layer_idx=0 for single-layer maps
+
+
 def _point_to_segment_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
     """Calculate squared distance from point (px, py) to line segment (x1,y1)-(x2,y2)."""
     dx = x2 - x1
@@ -425,6 +460,8 @@ def try_place_via_with_ripup(
             if layer in routing_obstacles_cache and len(cells) > 0:
                 cells_3d = np.column_stack([cells, np.zeros(len(cells), dtype=np.int32)])
                 routing_obstacles_cache[layer].remove_blocked_cells_batch(cells_3d)
+        # Re-add pad obstacles for the ripped net (pads still exist, only segments removed)
+        _re_add_pad_obstacles_for_net(pcb_data, blocker, config, routing_obstacles_cache)
         # Update routing_obstacles reference if it's for the current layer
         if pad_layer and pad_layer in routing_obstacles_cache:
             routing_obstacles = routing_obstacles_cache[pad_layer]
