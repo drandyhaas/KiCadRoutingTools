@@ -181,7 +181,14 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
+    # Calculate vertical attraction parameters
+    attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
+    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        vertical_attraction_radius=attraction_radius_grid,
+                        vertical_attraction_bonus=attraction_bonus)
 
     # Calculate track margin for wide power tracks
     # Power nets need extra clearance from obstacles based on their wider track width
@@ -387,7 +394,14 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
+    # Calculate vertical attraction parameters
+    attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
+    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        vertical_attraction_radius=attraction_radius_grid,
+                        vertical_attraction_bonus=attraction_bonus)
 
     # Calculate track margin for wide power tracks
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
@@ -821,8 +835,15 @@ def route_multipoint_main(
     for gx, gy, layer in sources + targets:
         obstacles.add_source_target_cell(gx, gy, layer)
 
+    # Calculate vertical attraction parameters
+    attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
+    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+
     # Route farthest pair with probe routing (same as single-ended)
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        vertical_attraction_radius=attraction_radius_grid,
+                        vertical_attraction_bonus=attraction_bonus)
 
     # Calculate track margin for wide power tracks
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
@@ -1002,7 +1023,14 @@ def route_multipoint_taps(
 
     print(f"  Multi-point net Phase 3: routing {len(remaining_edges)} remaining MST edges (longest first)")
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight, turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost))
+    # Calculate vertical attraction parameters
+    attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
+    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+
+    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        vertical_attraction_radius=attraction_radius_grid,
+                        vertical_attraction_bonus=attraction_bonus)
 
     # Calculate track margin for wide power tracks
     net_track_width = config.get_net_track_width(net_id, config.layers[0])

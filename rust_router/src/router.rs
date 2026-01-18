@@ -14,18 +14,23 @@ pub struct GridRouter {
     h_weight: f32,
     turn_cost: i32,
     via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
+    vertical_attraction_radius: i32,  // Grid units for cross-layer attraction lookup (0 = disabled)
+    vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
+               vertical_attraction_radius: i32, vertical_attraction_bonus: i32) -> Self {
         Self {
             via_cost,
             h_weight,
             turn_cost: turn_cost.unwrap_or(DEFAULT_TURN_COST),
             via_proximity_cost: via_proximity_cost.unwrap_or(1),
+            vertical_attraction_radius,
+            vertical_attraction_bonus,
         }
     }
 
@@ -301,7 +306,11 @@ impl GridRouter {
                 };
                 let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
                     + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
-                let new_g = g + move_cost + turn_cost + proximity_cost;
+                // Subtract attraction bonus for positions aligned with tracks on other layers
+                let attraction_bonus = obstacles.get_cross_layer_attraction(
+                    ngx, ngy, current.layer as usize,
+                    self.vertical_attraction_radius, self.vertical_attraction_bonus);
+                let new_g = g + move_cost + turn_cost + proximity_cost - attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
@@ -617,7 +626,11 @@ impl GridRouter {
                 };
                 let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
                     + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
-                let new_g = g + move_cost + turn_cost + proximity_cost;
+                // Subtract attraction bonus for positions aligned with tracks on other layers
+                let attraction_bonus = obstacles.get_cross_layer_attraction(
+                    ngx, ngy, current.layer as usize,
+                    self.vertical_attraction_radius, self.vertical_attraction_bonus);
+                let new_g = g + move_cost + turn_cost + proximity_cost - attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {

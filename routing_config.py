@@ -64,7 +64,7 @@ class GridRouteConfig:
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
-    vertical_attraction_radius: float = 1.0  # mm - radius for attraction lookup (0 = disabled)
+    vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
     vertical_attraction_cost: float = 0.1  # mm equivalent bonus for aligned positions
     # Length matching for DDR4 signals
     length_match_groups: List[List[str]] = field(default_factory=list)  # Groups of net patterns to match
