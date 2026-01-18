@@ -936,7 +936,8 @@ def create_plane(
                     for rid in result.ripped_net_ids:
                         if rid not in ripped_net_ids:
                             ripped_net_ids.append(rid)
-                    print(f"\033[91mFAILED after {len(result.ripped_net_ids)} rip-ups\033[0m")
+                    # Empty ripped_net_ids means nets were restored after failure
+                    print(f"\033[91mFAILED\033[0m")
 
             elif placement_success:
                 # Fast path succeeded

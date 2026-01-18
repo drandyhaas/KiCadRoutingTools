@@ -12,7 +12,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord
-from route_modification import remove_net_from_pcb_data
+from route_modification import remove_net_from_pcb_data, restore_net_to_pcb_data
 from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
 
 import sys
@@ -332,6 +332,7 @@ def try_place_via_with_ripup(
         route_via_to_pad_fn: Function to route via to pad (injected to avoid circular import)
     """
     ripped_net_ids = []
+    ripped_data = []  # Store (blocker_id, removed_segs, removed_vias) for restoration on failure
     failed_route_positions: Set[Tuple[int, int]] = set()  # Track positions where routing failed
 
     for attempt in range(max_rip_nets):
@@ -412,6 +413,7 @@ def try_place_via_with_ripup(
         print(f"ripping {blocker_name}...", end=" ")
         removed_segs, removed_vias = remove_net_from_pcb_data(pcb_data, blocker)
         ripped_net_ids.append(blocker)
+        ripped_data.append((blocker, removed_segs, removed_vias))
 
         # Incremental update: remove ripped net's obstacles from existing maps
         cache = via_obstacle_cache[blocker]
@@ -427,7 +429,23 @@ def try_place_via_with_ripup(
         if pad_layer and pad_layer in routing_obstacles_cache:
             routing_obstacles = routing_obstacles_cache[pad_layer]
 
+    # Failed - restore all ripped nets to pcb_data and obstacles
+    if ripped_data:
+        for blocker_id, removed_segs, removed_vias in ripped_data:
+            restore_net_to_pcb_data(pcb_data, removed_segs, removed_vias)
+            # Restore obstacles from cache
+            if blocker_id in via_obstacle_cache:
+                cache = via_obstacle_cache[blocker_id]
+                if len(cache.blocked_vias) > 0:
+                    obstacles.add_blocked_vias_batch(cache.blocked_vias)
+                for layer, cells in cache.blocked_cells_by_layer.items():
+                    if layer in routing_obstacles_cache and len(cells) > 0:
+                        cells_3d = np.column_stack([cells, np.zeros(len(cells), dtype=np.int32)])
+                        routing_obstacles_cache[layer].add_blocked_cells_batch(cells_3d)
+        print("(restored) ", end="")
+
     return ViaPlacementResult(
         success=False, via_pos=None, segments=[],
-        ripped_net_ids=ripped_net_ids, via_at_pad_center=False
+        ripped_net_ids=[],  # Empty since we restored them
+        via_at_pad_center=False
     )
