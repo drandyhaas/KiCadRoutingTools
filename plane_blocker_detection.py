@@ -351,7 +351,8 @@ def try_place_via_with_ripup(
     protected_net_ids: Optional[Set[int]] = None,  # Nets that should never be ripped up
     verbose: bool = False,
     find_via_position_fn=None,  # Function to find via position
-    route_via_to_pad_fn=None   # Function to route via to pad
+    route_via_to_pad_fn=None,  # Function to route via to pad
+    pending_pads: Optional[List[Dict]] = None  # Pads that still need vias (for exclusion zones)
 ) -> ViaPlacementResult:
     """
     Try to place a via and route to pad, ripping up blockers as needed.
@@ -395,7 +396,8 @@ def try_place_via_with_ripup(
                 pad_layer=pad_layer,
                 net_id=net_id,
                 verbose=False,
-                failed_route_positions=failed_route_positions
+                failed_route_positions=failed_route_positions,
+                pending_pads=pending_pads
             )
 
             if via_pos:
@@ -465,6 +467,12 @@ def try_place_via_with_ripup(
         # Update routing_obstacles reference if it's for the current layer
         if pad_layer and pad_layer in routing_obstacles_cache:
             routing_obstacles = routing_obstacles_cache[pad_layer]
+
+        # Add ripped net's pads to pending_pads for exclusion zones in subsequent attempts
+        if pending_pads is not None:
+            ripped_pads = pcb_data.pads_by_net.get(blocker, [])
+            for rp in ripped_pads:
+                pending_pads.append({'pad': rp, 'needs_via': True})
 
     # Failed - restore all ripped nets to pcb_data and obstacles
     if ripped_data:

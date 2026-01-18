@@ -116,7 +116,8 @@ def find_via_position(
     pad_layer: str = None,
     net_id: int = None,
     verbose: bool = False,
-    failed_route_positions: Optional[Set[Tuple[int, int]]] = None
+    failed_route_positions: Optional[Set[Tuple[int, int]]] = None,
+    pending_pads: Optional[List[Dict]] = None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the closest valid position for a via near a pad.
@@ -137,6 +138,9 @@ def find_via_position(
         failed_route_positions: Optional set of (gx, gy) positions where routing previously
             failed. Positions within 2x via-size will be skipped. Failed positions from
             this call will be added to the set.
+        pending_pads: Optional list of pad_info dicts for pads that still need vias.
+            Via positions too close to these pads' boundaries will be skipped to ensure
+            routes can still reach them.
 
     Returns:
         (x, y) position for via, or None if no valid position found
@@ -155,6 +159,23 @@ def find_via_position(
     if failed_route_positions is not None and config:
         skip_radius = coord.to_grid_dist(config.via_size * 2)
         skip_radius_sq = skip_radius * skip_radius
+
+    # Precompute pending pad exclusion zones (rectangular, in grid coordinates)
+    # Each zone ensures a route can still reach the pad from any direction
+    # Zone extends: pad_half_size + 1.5*via_size + clearance from pad center
+    # (1.5*via_size = via_size/2 for placed via + via_size/2 for future via + via_size/2 extra margin)
+    pending_pad_zones = []  # List of (min_gx, min_gy, max_gx, max_gy)
+    if pending_pads and config:
+        margin = 1.5 * config.via_size + config.clearance
+        for pad_info in pending_pads:
+            p = pad_info['pad']
+            half_w = p.size_x / 2 + margin
+            half_h = p.size_y / 2 + margin
+            min_gx = coord.to_grid(p.global_x - half_w, 0)[0]
+            max_gx = coord.to_grid(p.global_x + half_w, 0)[0]
+            min_gy = coord.to_grid(0, p.global_y - half_h)[1]
+            max_gy = coord.to_grid(0, p.global_y + half_h)[1]
+            pending_pad_zones.append((min_gx, min_gy, max_gx, max_gy))
 
     # Collect all valid via positions, sorted by distance
     valid_positions = []
@@ -184,6 +205,18 @@ def find_via_position(
                             too_close = True
                             break
                     if too_close:
+                        continue
+
+                # Skip if inside a pending pad's exclusion zone
+                if pending_pad_zones:
+                    in_zone = False
+                    for zone_idx, (min_gx, min_gy, max_gx, max_gy) in enumerate(pending_pad_zones):
+                        if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
+                            in_zone = True
+                            if verbose:
+                                print(f"\n    DEBUG: Skipping ({gx},{gy}) - inside zone {zone_idx}: ({min_gx},{min_gy})-({max_gx},{max_gy})")
+                            break
+                    if in_zone:
                         continue
 
                 # Valid via position - add to list with distance
@@ -730,6 +763,19 @@ def create_plane(
     total_pads_needing_vias = 0
     all_ripped_net_ids: List[int] = []
 
+    # Collect ALL pads from ALL power nets that need vias (for cross-net protection)
+    # This ensures when routing GND, we also protect +3.3V pad zones and vice versa
+    all_power_pads_needing_vias: List[Dict] = []
+    for net_id_tmp, plane_layer_tmp in zip(net_ids, plane_layers):
+        target_pads_tmp = identify_target_pads(pcb_data, net_id_tmp, plane_layer_tmp)
+        for p in target_pads_tmp:
+            if p['needs_via']:
+                p['_net_id'] = net_id_tmp  # Tag with net ID for filtering later
+                all_power_pads_needing_vias.append(p)
+
+    # Set to track pads that have been successfully processed (via placed)
+    processed_pad_ids: Set[Tuple[float, float]] = set()  # (global_x, global_y) as key
+
     # Process each net/layer pair
     for net_idx, (net_name, plane_layer, net_id, should_create_zone) in enumerate(
             zip(net_names, plane_layers, net_ids, should_create_zones)):
@@ -813,12 +859,44 @@ def create_plane(
                     pcb_data, blocker_net_id, config, all_layers
                 )
 
-        for pad_info in target_pads:
-            if not pad_info['needs_via']:
-                continue
+        # Build list of pads needing vias for this net
+        pads_needing_vias = [p for p in target_pads if p['needs_via']]
 
+        # Draw all pad exclusion zones on User.9 once at the start of FIRST net (for debugging)
+        if debug_lines and net_idx == 0 and all_power_pads_needing_vias:
+            margin = 1.5 * via_size + clearance  # via_size/2 for placed via + via_size/2 for future via + via_size/2 extra + clearance
+            for pp_info in all_power_pads_needing_vias:
+                pp = pp_info['pad']
+                half_w = pp.size_x / 2 + margin
+                half_h = pp.size_y / 2 + margin
+                x1, y1 = pp.global_x - half_w, pp.global_y - half_h
+                x2, y2 = pp.global_x + half_w, pp.global_y + half_h
+                all_debug_lines.append(generate_gr_line_sexpr((x1, y1), (x2, y1), 0.05, "User.9"))
+                all_debug_lines.append(generate_gr_line_sexpr((x2, y1), (x2, y2), 0.05, "User.9"))
+                all_debug_lines.append(generate_gr_line_sexpr((x2, y2), (x1, y2), 0.05, "User.9"))
+                all_debug_lines.append(generate_gr_line_sexpr((x1, y2), (x1, y1), 0.05, "User.9"))
+
+        for pad_idx, pad_info in enumerate(pads_needing_vias):
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
+
+            # Pending pads are ALL unprocessed power net pads (cross-net protection)
+            # Plus pads from ripped nets that will need to be rerouted
+            # Exclude the current pad and any already processed pads
+            current_pad_key = (pad.global_x, pad.global_y)
+            pending_pads = [
+                p for p in all_power_pads_needing_vias
+                if (p['pad'].global_x, p['pad'].global_y) != current_pad_key
+                and (p['pad'].global_x, p['pad'].global_y) not in processed_pad_ids
+            ]
+            # Also protect pads from ripped nets (they need to be rerouted later)
+            for ripped_id in all_ripped_net_ids:
+                ripped_pads = pcb_data.pads_by_net.get(ripped_id, [])
+                for rp in ripped_pads:
+                    rp_key = (rp.global_x, rp.global_y)
+                    if rp_key != current_pad_key and rp_key not in processed_pad_ids:
+                        # Create a pad_info dict compatible with pending_pads format
+                        pending_pads.append({'pad': rp, 'needs_via': True})
 
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
 
@@ -857,6 +935,7 @@ def create_plane(
                     print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
 
                 if reuse_success:
+                    processed_pad_ids.add(current_pad_key)
                     continue  # Move to next pad
 
             # Need to place a new via (either no existing via, or reuse failed)
@@ -869,7 +948,8 @@ def create_plane(
                 pad_layer=pad_layer,
                 net_id=net_id,
                 verbose=verbose,
-                failed_route_positions=failed_route_positions
+                failed_route_positions=failed_route_positions,
+                pending_pads=pending_pads
             )
 
             placement_success = False
@@ -911,7 +991,8 @@ def create_plane(
                     protected_net_ids=set(net_ids),  # Protect all nets being routed (don't rip power nets we're routing)
                     verbose=verbose,
                     find_via_position_fn=find_via_position,
-                    route_via_to_pad_fn=route_via_to_pad
+                    route_via_to_pad_fn=route_via_to_pad,
+                    pending_pads=pending_pads
                 )
 
                 if result.success:
@@ -932,6 +1013,7 @@ def create_plane(
                         'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
                     })
                     vias_placed += 1
+                    processed_pad_ids.add(current_pad_key)
                     available_vias.append(result.via_pos)
                     new_segments.extend(result.segments)
                     traces_added += len(result.segments)
@@ -957,6 +1039,7 @@ def create_plane(
                     'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
                 })
                 vias_placed += 1
+                processed_pad_ids.add(current_pad_key)
                 available_vias.append(via_pos)
                 if trace_segments:
                     new_segments.extend(trace_segments)
@@ -986,12 +1069,15 @@ def create_plane(
                             new_segments.extend(trace_segments)
                             traces_added += len(trace_segments)
                             vias_reused += 1
+                            processed_pad_ids.add(current_pad_key)
                             print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments)} segs")
                         else:
                             vias_reused += 1
+                            processed_pad_ids.add(current_pad_key)
                             print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                     else:
                         vias_reused += 1
+                        processed_pad_ids.add(current_pad_key)
                         print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                 else:
                     print(f"\033[91mFAILED - no valid position\033[0m")
@@ -1064,125 +1150,6 @@ def create_plane(
             ))
 
     # End of per-net loop
-
-    # Retry pass for failed pads - now that all nets have been processed,
-    # some pads that were blocked by other plane nets may now be routable
-    if failed_pad_infos and rip_blocker_nets:
-        max_retry_passes = 3
-        for retry_pass in range(max_retry_passes):
-            if not failed_pad_infos:
-                break
-
-            print(f"\n{'='*60}")
-            print(f"Retry pass {retry_pass + 1}: {len(failed_pad_infos)} failed pads")
-            print(f"{'='*60}")
-
-            # Rebuild obstacle maps for retry (they may have changed due to rip-ups)
-            obstacles = build_via_obstacle_map(pcb_data, config, exclude_net_id=-1)  # Don't exclude any net
-            for placed_via in all_new_vias:
-                block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
-                                   hole_to_hole_clearance, via_drill)
-
-            # Clear routing obstacle cache (will be rebuilt per-layer as needed)
-            retry_routing_cache: Dict[str, GridObstacleMap] = {}
-
-            def get_retry_routing_obstacles(layer: str, exclude_net: int) -> GridObstacleMap:
-                """Get routing obstacle map for retry, excluding the target net."""
-                cache_key = f"{layer}_{exclude_net}"
-                if cache_key not in retry_routing_cache:
-                    retry_routing_cache[cache_key] = build_routing_obstacle_map(
-                        pcb_data, config, exclude_net, layer, skip_pad_blocking=False
-                    )
-                return retry_routing_cache[cache_key]
-
-            still_failed = []
-            retry_success = 0
-
-            for retry_net_id, retry_net_name, retry_plane_layer, retry_pad_info in failed_pad_infos:
-                pad = retry_pad_info['pad']
-                pad_layer = retry_pad_info.get('pad_layer')
-
-                print(f"  Retry {pad.component_ref}.{pad.pad_number} ({retry_net_name})...", end=" ")
-
-                # Rebuild via obstacle map excluding this net
-                retry_via_obstacles = build_via_obstacle_map(pcb_data, config, retry_net_id)
-                for placed_via in all_new_vias:
-                    if placed_via['net_id'] != retry_net_id:
-                        block_via_position(retry_via_obstacles, placed_via['x'], placed_via['y'], coord,
-                                           hole_to_hole_clearance, via_drill)
-
-                routing_obs = get_retry_routing_obstacles(pad_layer, retry_net_id) if pad_layer else None
-
-                via_pos = find_via_position(
-                    pad, retry_via_obstacles, coord, max_search_radius,
-                    routing_obstacles=routing_obs,
-                    config=config,
-                    pad_layer=pad_layer,
-                    net_id=retry_net_id,
-                    verbose=False
-                )
-
-                if via_pos:
-                    via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
-                                         abs(via_pos[1] - pad.global_y) < 0.001)
-                    placement_success = False
-                    trace_segments = None
-
-                    if via_at_pad_center:
-                        placement_success = True
-                    elif pad_layer:
-                        trace_segments = route_via_to_pad(via_pos, pad, pad_layer, retry_net_id,
-                                                          routing_obs, config, verbose=False)
-                        if trace_segments is not None:
-                            placement_success = True
-                    else:
-                        placement_success = True
-
-                    if placement_success:
-                        # Add via and segments
-                        new_via = {
-                            'x': via_pos[0], 'y': via_pos[1],
-                            'size': via_size, 'drill': via_drill,
-                            'layers': ['F.Cu', 'B.Cu'], 'net_id': retry_net_id
-                        }
-                        all_new_vias.append(new_via)
-                        pcb_data.vias.append(Via(
-                            x=new_via['x'], y=new_via['y'], size=new_via['size'], drill=new_via['drill'],
-                            layers=new_via['layers'], net_id=new_via['net_id']
-                        ))
-                        total_vias_placed += 1
-                        total_failed_pads -= 1
-                        retry_success += 1
-
-                        if trace_segments:
-                            all_new_segments.extend(trace_segments)
-                            total_traces_added += len(trace_segments)
-                            for s in trace_segments:
-                                start = s['start']
-                                end = s['end']
-                                pcb_data.segments.append(Segment(
-                                    start_x=start[0], start_y=start[1],
-                                    end_x=end[0], end_y=end[1],
-                                    width=s['width'], layer=s['layer'], net_id=s['net_id']
-                                ))
-
-                        if via_at_pad_center:
-                            print(f"\033[92mvia at pad center\033[0m")
-                        else:
-                            print(f"\033[92mvia at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments) if trace_segments else 0} segs\033[0m")
-                        continue
-
-                # Still failed
-                still_failed.append((retry_net_id, retry_net_name, retry_plane_layer, retry_pad_info))
-                print(f"\033[91mstill blocked\033[0m")
-
-            failed_pad_infos = still_failed
-
-            print(f"\nRetry pass {retry_pass + 1} complete: {retry_success} succeeded, {len(still_failed)} still failed")
-
-            if retry_success == 0:
-                print("No progress made, stopping retries")
-                break
 
     # Generate zones for multi-net layers using Voronoi boundaries
     if layer_nets:
