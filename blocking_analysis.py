@@ -343,11 +343,13 @@ def analyze_static_blockers(
             # Get pad grid area
             pad_gx, pad_gy = coord.to_grid(pad.x, pad.y)
 
-            # Calculate pad expansion (similar to obstacle_map.py)
+            # Calculate pad expansion (matches obstacle_map.py formula)
+            # margin = track_width/2 + clearance (route needs half-width from center + clearance from pad edge)
             pad_half_w = pad.width / 2
             pad_half_h = pad.height / 2
-            expansion_mm = max(pad_half_w, pad_half_h) + config.clearance
-            expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+            margin = config.track_width / 2 + config.clearance
+            expand_x = max(1, coord.to_grid_dist(pad_half_w + margin))
+            expand_y = max(1, coord.to_grid_dist(pad_half_h + margin))
 
             # Check if any blocked cells fall within this pad's area
             for cell in blocked_set:
@@ -355,7 +357,7 @@ def analyze_static_blockers(
                 layer_name = config.layers[layer_idx] if layer_idx < len(config.layers) else None
                 if layer_name and layer_name not in pad.layers:
                     continue
-                if abs(gx - pad_gx) <= expansion_grid and abs(gy - pad_gy) <= expansion_grid:
+                if abs(gx - pad_gx) <= expand_x and abs(gy - pad_gy) <= expand_y:
                     if net_name not in pad_blockers:
                         pad_blockers[net_name] = set()
                     pad_blockers[net_name].add(pad.ref)
