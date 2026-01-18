@@ -908,7 +908,9 @@ def create_plane(
                     hole_to_hole_clearance=hole_to_hole_clearance,
                     via_drill=via_drill,
                     protected_net_ids=protected_net_ids,
-                    verbose=verbose
+                    verbose=verbose,
+                    find_via_position_fn=find_via_position,
+                    route_via_to_pad_fn=route_via_to_pad
                 )
 
                 if result.success:
