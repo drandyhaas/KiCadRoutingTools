@@ -276,20 +276,40 @@ def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_marg
 
 
 def point_to_rect_distance(px: float, py: float, cx: float, cy: float,
-                           half_x: float, half_y: float) -> float:
-    """Calculate distance from a point to an axis-aligned rectangle.
+                           half_x: float, half_y: float,
+                           corner_radius: float = 0.0) -> float:
+    """Calculate distance from a point to an axis-aligned rectangle with optional rounded corners.
 
     Args:
         px, py: Point coordinates
         cx, cy: Rectangle center coordinates
         half_x, half_y: Rectangle half-widths
+        corner_radius: Radius of rounded corners (0 for sharp corners)
 
     Returns:
         Distance from point to rectangle edge (0 if point is inside)
     """
-    # Distance from point to rectangle in each axis
-    dx = max(0, abs(px - cx) - half_x)
-    dy = max(0, abs(py - cy) - half_y)
+    # Position relative to rectangle center
+    rel_x = abs(px - cx)
+    rel_y = abs(py - cy)
+
+    if corner_radius > 0:
+        # Inner rectangle bounds (where corners start)
+        inner_half_x = half_x - corner_radius
+        inner_half_y = half_y - corner_radius
+
+        # Check if point is in a corner region
+        if rel_x > inner_half_x and rel_y > inner_half_y:
+            # Distance to corner arc center
+            dx = rel_x - inner_half_x
+            dy = rel_y - inner_half_y
+            dist_to_corner_center = math.sqrt(dx * dx + dy * dy)
+            # Distance to arc edge (negative if inside)
+            return max(0, dist_to_corner_center - corner_radius)
+
+    # Point is along a flat edge - rectangular distance
+    dx = max(0, rel_x - half_x)
+    dy = max(0, rel_y - half_y)
     return math.sqrt(dx * dx + dy * dy)
 
 
@@ -386,11 +406,15 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     if not any(layer.endswith('.Cu') for layer in expanded_layers):
         return False, 0.0
 
-    # Distance from via center to rectangular pad edge
+    # Corner radius for roundrect pads
+    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0.0
+
+    # Distance from via center to pad edge (accounts for rounded corners)
     dist_to_pad = point_to_rect_distance(
         via.x, via.y,
         pad.global_x, pad.global_y,
-        pad.size_x / 2, pad.size_y / 2
+        pad.size_x / 2, pad.size_y / 2,
+        corner_radius
     )
 
     # Required clearance: via half-size + clearance

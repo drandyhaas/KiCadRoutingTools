@@ -399,6 +399,7 @@ def precompute_via_placement_obstacles(
         # Routing clearance for this segment's layer
         route_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
         route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
+        route_expansion_sq = route_expansion_grid * route_expansion_grid
 
         # Walk along segment using Bresenham
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -417,11 +418,12 @@ def precompute_via_placement_obstacles(
                     for ey in range(-seg_expansion_int, seg_expansion_int + 1):
                         if ex*ex + ey*ey <= seg_expansion_sq:
                             blocked_vias_list.append((x + ex, y + ey))
-                # Block routing cells on this segment's layer
+                # Block routing cells on this segment's layer (circular, matching build_routing_obstacle_map)
                 if seg.layer in blocked_cells_by_layer:
                     for ex in range(-route_expansion_grid, route_expansion_grid + 1):
                         for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                            blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
+                            if ex*ex + ey*ey <= route_expansion_sq:
+                                blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
                 err -= dy
                 if err < 0:
                     y += sy
@@ -437,7 +439,8 @@ def precompute_via_placement_obstacles(
                 if seg.layer in blocked_cells_by_layer:
                     for ex in range(-route_expansion_grid, route_expansion_grid + 1):
                         for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                            blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
+                            if ex*ex + ey*ey <= route_expansion_sq:
+                                blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
                 err -= dx
                 if err < 0:
                     x += sx
@@ -451,7 +454,8 @@ def precompute_via_placement_obstacles(
         if seg.layer in blocked_cells_by_layer:
             for ex in range(-route_expansion_grid, route_expansion_grid + 1):
                 for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                    blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
+                    if ex*ex + ey*ey <= route_expansion_sq:
+                        blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
 
     # Process this net's vias - they block via placement and routing on all layers
     via_via_expansion_mm = config.via_size + config.clearance

@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map
+from routing_utils import build_layer_map, iter_pad_blocked_cells
 
 import sys
 import os
@@ -195,16 +195,15 @@ def _add_segment_via_obstacle(obstacles: GridObstacleMap, seg: Segment,
 
 def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
                            coord: GridCoord, config: GridRouteConfig):
-    """Add a pad as via blocking obstacle."""
+    """Add a pad as via blocking obstacle using rectangular shape with rounded corners."""
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    half_width = pad.size_x / 2
+    half_height = pad.size_y / 2
+    margin = config.via_size / 2 + config.clearance
+    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0
 
-    # Use pad size + clearance
-    # Compute squared radius in grid units (avoids precision loss from rounding before squaring)
-    pad_radius = max(pad.size_x, pad.size_y) / 2
-    expansion_mm = pad_radius + config.via_size / 2 + config.clearance
-    radius_sq = (expansion_mm / config.grid_step) ** 2
-
-    block_circle(obstacles, gx, gy, radius_sq, via_mode=True)
+    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+        obstacles.add_blocked_via(cell_gx, cell_gy)
 
 
 def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -320,37 +319,9 @@ def build_routing_obstacle_map(
                     half_width = pad.size_x / 2
                     half_height = pad.size_y / 2
                     margin = config.track_width / 2 + config.clearance
-                    # Use distance-based blocking with rounded corner support
-                    expand_x = int(math.ceil((half_width + margin) / config.grid_step))
-                    expand_y = int(math.ceil((half_height + margin) / config.grid_step))
-                    margin_sq = margin * margin
-                    # Corner radius for roundrect pads (from KiCad file)
                     corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0
-                    # Inner rectangle bounds (excluding corner regions)
-                    inner_half_w = half_width - corner_radius
-                    inner_half_h = half_height - corner_radius
-                    for ex in range(-expand_x, expand_x + 1):
-                        for ey in range(-expand_y, expand_y + 1):
-                            cell_x = ex * config.grid_step
-                            cell_y = ey * config.grid_step
-                            abs_cx, abs_cy = abs(cell_x), abs(cell_y)
-                            # Calculate distance to rounded rectangle
-                            if corner_radius > 0 and abs_cx > inner_half_w and abs_cy > inner_half_h:
-                                # Point is in corner region - distance to corner arc
-                                dx = abs_cx - inner_half_w
-                                dy = abs_cy - inner_half_h
-                                dist_to_corner_center = math.sqrt(dx * dx + dy * dy)
-                                dist = dist_to_corner_center - corner_radius
-                                dist_sq = dist * dist if dist > 0 else 0
-                            else:
-                                # Point is along flat edge - rectangular distance
-                                closest_x = max(-half_width, min(cell_x, half_width))
-                                closest_y = max(-half_height, min(cell_y, half_height))
-                                dx = cell_x - closest_x
-                                dy = cell_y - closest_y
-                                dist_sq = dx * dx + dy * dy
-                            if dist_sq < margin_sq:
-                                obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+                    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+                        obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
 
     # Add segments on this layer as obstacles (excluding target net)
     # Use actual segment width for proper clearance calculation

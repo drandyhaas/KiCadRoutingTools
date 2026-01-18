@@ -12,6 +12,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import iter_pad_blocked_cells
 from route_modification import remove_net_from_pcb_data, restore_net_to_pcb_data
 from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
 
@@ -33,6 +34,8 @@ def _re_add_pad_obstacles_for_net(
     When segments are ripped, the segment obstacles are removed from the cache.
     But pad obstacles that overlap with segment obstacles are also removed.
     This function re-adds the pad obstacles since pads still exist after rip-up.
+
+    Uses the same rectangular-with-rounded-corners pattern as build_routing_obstacle_map.
     """
     coord = GridCoord(config.grid_step)
     pads = pcb_data.pads_by_net.get(net_id, [])
@@ -47,13 +50,10 @@ def _re_add_pad_obstacles_for_net(
             half_width = pad.size_x / 2
             half_height = pad.size_y / 2
             margin = config.track_width / 2 + config.clearance
-            expand_x = int((half_width + margin) / config.grid_step)
-            expand_y = int((half_height + margin) / config.grid_step)
+            corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0
 
-            # Re-add pad blocking cells
-            for ex in range(-expand_x, expand_x + 1):
-                for ey in range(-expand_y, expand_y + 1):
-                    obstacles.add_blocked_cell(gx + ex, gy + ey, 0)  # layer_idx=0 for single-layer maps
+            for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+                obstacles.add_blocked_cell(cell_gx, cell_gy, 0)  # layer_idx=0 for single-layer maps
 
 
 def _point_to_segment_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
