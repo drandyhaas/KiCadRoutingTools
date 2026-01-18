@@ -673,8 +673,9 @@ def create_plane(
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
 
-    # Set of all net IDs being processed - these should never be ripped up
-    protected_net_ids = set(net_ids)
+    # Track failed pads per net for retry passes
+    # Each entry is (net_id, net_name, plane_layer, pad_info)
+    failed_pad_infos: List[Tuple[int, str, str, Dict]] = []
 
     # Step 2: Check for existing zones on each target layer
     existing_zones = extract_zones(input_file)
@@ -907,17 +908,21 @@ def create_plane(
                     new_vias=new_vias,
                     hole_to_hole_clearance=hole_to_hole_clearance,
                     via_drill=via_drill,
-                    protected_net_ids=protected_net_ids,
+                    protected_net_ids={net_id},  # Only protect current net, allow ripping other plane nets
                     verbose=verbose,
                     find_via_position_fn=find_via_position,
                     route_via_to_pad_fn=route_via_to_pad
                 )
 
                 if result.success:
-                    # Track ripped nets
+                    # Track ripped nets and remove their vias/segments from all_new_* lists
                     for rid in result.ripped_net_ids:
                         if rid not in ripped_net_ids:
                             ripped_net_ids.append(rid)
+                        # Remove ripped net's vias and segments from accumulator lists
+                        # (they were removed from pcb_data during rip-up)
+                        all_new_vias[:] = [v for v in all_new_vias if v['net_id'] != rid]
+                        all_new_segments[:] = [s for s in all_new_segments if s['net_id'] != rid]
                     # Note: obstacle maps were already updated incrementally in try_place_via_with_ripup
 
                     # Add via
@@ -935,6 +940,7 @@ def create_plane(
                     print(f"\033[92mvia at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}), ripped {len(result.ripped_net_ids)} nets\033[0m")
                 else:
                     failed_pads += 1
+                    failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
                     for rid in result.ripped_net_ids:
                         if rid not in ripped_net_ids:
                             ripped_net_ids.append(rid)
@@ -975,6 +981,7 @@ def create_plane(
                         if trace_segments is None:
                             print(f"\033[91mROUTING FAILED\033[0m")
                             failed_pads += 1
+                            failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
                         elif trace_segments:
                             new_segments.extend(trace_segments)
                             traces_added += len(trace_segments)
@@ -989,9 +996,11 @@ def create_plane(
                 else:
                     print(f"\033[91mFAILED - no valid position\033[0m")
                     failed_pads += 1
+                    failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
             else:
                 print(f"\033[91mFAILED - no valid position\033[0m")
                 failed_pads += 1
+                failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
 
         # Step 10: Generate zone for this net (if needed)
         # For multi-net layers, defer zone generation until all nets are processed
@@ -1055,6 +1064,125 @@ def create_plane(
             ))
 
     # End of per-net loop
+
+    # Retry pass for failed pads - now that all nets have been processed,
+    # some pads that were blocked by other plane nets may now be routable
+    if failed_pad_infos and rip_blocker_nets:
+        max_retry_passes = 3
+        for retry_pass in range(max_retry_passes):
+            if not failed_pad_infos:
+                break
+
+            print(f"\n{'='*60}")
+            print(f"Retry pass {retry_pass + 1}: {len(failed_pad_infos)} failed pads")
+            print(f"{'='*60}")
+
+            # Rebuild obstacle maps for retry (they may have changed due to rip-ups)
+            obstacles = build_via_obstacle_map(pcb_data, config, exclude_net_id=-1)  # Don't exclude any net
+            for placed_via in all_new_vias:
+                block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
+                                   hole_to_hole_clearance, via_drill)
+
+            # Clear routing obstacle cache (will be rebuilt per-layer as needed)
+            retry_routing_cache: Dict[str, GridObstacleMap] = {}
+
+            def get_retry_routing_obstacles(layer: str, exclude_net: int) -> GridObstacleMap:
+                """Get routing obstacle map for retry, excluding the target net."""
+                cache_key = f"{layer}_{exclude_net}"
+                if cache_key not in retry_routing_cache:
+                    retry_routing_cache[cache_key] = build_routing_obstacle_map(
+                        pcb_data, config, exclude_net, layer, skip_pad_blocking=False
+                    )
+                return retry_routing_cache[cache_key]
+
+            still_failed = []
+            retry_success = 0
+
+            for retry_net_id, retry_net_name, retry_plane_layer, retry_pad_info in failed_pad_infos:
+                pad = retry_pad_info['pad']
+                pad_layer = retry_pad_info.get('pad_layer')
+
+                print(f"  Retry {pad.component_ref}.{pad.pad_number} ({retry_net_name})...", end=" ")
+
+                # Rebuild via obstacle map excluding this net
+                retry_via_obstacles = build_via_obstacle_map(pcb_data, config, retry_net_id)
+                for placed_via in all_new_vias:
+                    if placed_via['net_id'] != retry_net_id:
+                        block_via_position(retry_via_obstacles, placed_via['x'], placed_via['y'], coord,
+                                           hole_to_hole_clearance, via_drill)
+
+                routing_obs = get_retry_routing_obstacles(pad_layer, retry_net_id) if pad_layer else None
+
+                via_pos = find_via_position(
+                    pad, retry_via_obstacles, coord, max_search_radius,
+                    routing_obstacles=routing_obs,
+                    config=config,
+                    pad_layer=pad_layer,
+                    net_id=retry_net_id,
+                    verbose=False
+                )
+
+                if via_pos:
+                    via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
+                                         abs(via_pos[1] - pad.global_y) < 0.001)
+                    placement_success = False
+                    trace_segments = None
+
+                    if via_at_pad_center:
+                        placement_success = True
+                    elif pad_layer:
+                        trace_segments = route_via_to_pad(via_pos, pad, pad_layer, retry_net_id,
+                                                          routing_obs, config, verbose=False)
+                        if trace_segments is not None:
+                            placement_success = True
+                    else:
+                        placement_success = True
+
+                    if placement_success:
+                        # Add via and segments
+                        new_via = {
+                            'x': via_pos[0], 'y': via_pos[1],
+                            'size': via_size, 'drill': via_drill,
+                            'layers': ['F.Cu', 'B.Cu'], 'net_id': retry_net_id
+                        }
+                        all_new_vias.append(new_via)
+                        pcb_data.vias.append(Via(
+                            x=new_via['x'], y=new_via['y'], size=new_via['size'], drill=new_via['drill'],
+                            layers=new_via['layers'], net_id=new_via['net_id']
+                        ))
+                        total_vias_placed += 1
+                        total_failed_pads -= 1
+                        retry_success += 1
+
+                        if trace_segments:
+                            all_new_segments.extend(trace_segments)
+                            total_traces_added += len(trace_segments)
+                            for s in trace_segments:
+                                start = s['start']
+                                end = s['end']
+                                pcb_data.segments.append(Segment(
+                                    start_x=start[0], start_y=start[1],
+                                    end_x=end[0], end_y=end[1],
+                                    width=s['width'], layer=s['layer'], net_id=s['net_id']
+                                ))
+
+                        if via_at_pad_center:
+                            print(f"\033[92mvia at pad center\033[0m")
+                        else:
+                            print(f"\033[92mvia at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments) if trace_segments else 0} segs\033[0m")
+                        continue
+
+                # Still failed
+                still_failed.append((retry_net_id, retry_net_name, retry_plane_layer, retry_pad_info))
+                print(f"\033[91mstill blocked\033[0m")
+
+            failed_pad_infos = still_failed
+
+            print(f"\nRetry pass {retry_pass + 1} complete: {retry_success} succeeded, {len(still_failed)} still failed")
+
+            if retry_success == 0:
+                print("No progress made, stopping retries")
+                break
 
     # Generate zones for multi-net layers using Voronoi boundaries
     if layer_nets:
