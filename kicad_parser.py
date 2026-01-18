@@ -34,6 +34,7 @@ class Pad:
     pinfunction: str = ""
     drill: float = 0.0  # Drill size for through-hole pads (0 for SMD)
     pintype: str = ""
+    roundrect_rratio: float = 0.0  # Corner radius ratio for roundrect pads
 
 
 @dataclass
@@ -487,6 +488,10 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
             drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
             drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
+            # Extract roundrect_rratio for roundrect pads
+            rratio_match = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', pad_text)
+            roundrect_rratio = float(rratio_match.group(1)) if rratio_match else 0.0
+
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
 
@@ -506,7 +511,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
                 rotation=total_rotation,
                 pinfunction=pinfunction,
                 pintype=pintype,
-                drill=drill_size
+                drill=drill_size,
+                roundrect_rratio=roundrect_rratio
             )
 
             footprint.pads.append(pad)
