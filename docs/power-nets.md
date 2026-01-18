@@ -4,11 +4,10 @@ Identify power nets and determine appropriate track widths for routing.
 
 ## Overview
 
-Power nets (GND, VCC, etc.) typically require wider tracks than signal nets to handle higher currents. This document covers three approaches:
+Power nets (GND, VCC, etc.) typically require wider tracks than signal nets to handle higher currents. This document covers two approaches:
 
 1. **Manual patterns** - Specify net patterns and widths via CLI
-2. **Automatic detection** - Use Python helpers to detect from KiCad pintype annotations
-3. **AI-powered analysis** - Use datasheet lookup when annotations are missing or incorrect
+2. **AI-powered analysis** - Use the `/analyze-power-nets` skill for datasheet lookup and component analysis
 
 ## Command-Line Options
 
@@ -35,104 +34,15 @@ Patterns are matched in order - first matching pattern determines the width. Obs
 
 **Note:** Power net widths are automatically enforced to be at least `--track-width`. This prevents accidentally specifying power widths smaller than signal widths.
 
-## Automatic Power Net Detection
-
-Instead of manually specifying patterns, use Python helpers to automatically detect power nets from KiCad's pintype annotations:
-
-```python
-from kicad_parser import parse_kicad_pcb
-from net_queries import identify_power_nets_by_pintype, auto_assign_power_widths
-
-pcb = parse_kicad_pcb("kicad_files/my_board.kicad_pcb")
-
-# Detect power nets from KiCad pintype annotations
-power_nets = identify_power_nets_by_pintype(pcb)
-for net_id, info in power_nets.items():
-    print(f"{info['name']}: {info['type']} ({info['pin_count']} pins)")
-
-# Auto-assign track widths based on net type and fanout
-widths = auto_assign_power_widths(pcb)
-# Returns: {net_id: width_mm, ...}
-```
-
-### How Detection Works
-
-The `identify_power_nets_by_pintype()` function detects power nets using KiCad's `pintype` annotations from schematic symbols:
-- `pintype="power_in"` → supply or ground pins
-- `pintype="power_out"` → regulator outputs
-
-Returns a dict with:
-- `name`: Net name
-- `type`: `'ground'`, `'supply'`, or `'regulator_output'`
-- `pintype`: Original KiCad pintype
-- `components`: Set of component refs connected to this net
-- `pin_count`: Number of power pins on this net
-
-### Auto Width Assignment
-
-The `auto_assign_power_widths()` function assigns track widths based on net type and fanout:
-
-| Net Type | Condition | Default Width |
-|----------|-----------|---------------|
-| Ground | Any | 0.5mm |
-| Regulator output | Any | 0.5mm |
-| Main supply | ≥5 pins | 0.4mm |
-| Low-fanout supply | <5 pins | 0.3mm |
-
-All defaults are configurable via function parameters.
-
-### Automatic Power Width Propagation
-
-The router automatically propagates power net widths through series elements. This ensures that the entire power path uses appropriate track widths, not just the nets directly connected to power pins.
-
-```python
-from net_queries import propagate_power_widths_through_passives
-
-# After identifying power nets
-power_net_widths = identify_power_nets(pcb_data, power_nets, power_nets_widths)
-
-# Propagate through series elements
-power_net_widths = propagate_power_widths_through_passives(pcb_data, power_net_widths)
-```
-
-**What gets propagated through:**
-
-| Component Type | Prefix | Example | Propagates? |
-|----------------|--------|---------|-------------|
-| Inductors | L* | L101 | Yes |
-| Ferrite beads | FB* | FB201 | Yes |
-| Fuses | F* | F1 | Yes |
-| Low-value resistors | R* | R100 (0R, 4R7) | Yes (if ≤ V_max/0.1A) |
-| Voltage regulators | VR*, U* | VR201 | Yes (output → input) |
-| Capacitors | C* | C101 | No (not series elements) |
-| High-value resistors | R* | R100 (10K) | No |
-
-**Voltage regulator detection:**
-
-The propagation automatically detects voltage regulators and propagates widths from output to input. Regulator inputs carry the same current as outputs (plus quiescent current), so they need the same track width capacity.
-
-```
-Example power path:
-DC Jack → F1 (fuse) → D1 (diode) → VR1 (regulator) → +3.3V
-                                        ↑
-                       Input net gets same width as +3.3V
-```
-
-**Voltage-based resistor inclusion:**
-
-Low-value resistors (current sense, etc.) are included based on the formula: R ≤ V_max / 0.1A
-
-The maximum voltage is auto-detected from power net names (e.g., "+5V", "VCC_3V3") with a 5V minimum for safety. At 5V max, resistors ≤50Ω are included in propagation.
-
 ## AI-Powered Power Net Analysis
 
-When KiCad pintype annotations are missing or incorrect, use the `/analyze-power-nets` Claude Code skill for AI-powered datasheet lookup.
+Use the `/analyze-power-nets` Claude Code skill for AI-powered datasheet lookup and component analysis. This is the recommended approach as it catches mislabeled power pins and provides current-based track width recommendations.
 
 ### When to Use AI Analysis
 
-- KiCad symbols have missing or incorrect pintype annotations
+- You need to identify all power nets in a board
 - You need current-based track width recommendations
-- You want to verify power net identification before routing
+- KiCad symbols have missing or incorrect pintype annotations
 - You're working with unfamiliar components
 
 ### How to Invoke
@@ -147,11 +57,16 @@ Analyze the power nets in kicad_files/my_board.kicad_pcb and recommend track wid
 
 ### What the Skill Does
 
-1. **Automated detection** - Finds power nets using KiCad's `pintype` annotations
-2. **Mislabel detection** - Identifies power-named nets that weren't detected (VDDPLL, VCCA, etc.)
-3. **Datasheet lookup** - Searches for component datasheets to verify power pins and current requirements
-4. **Regulator input analysis** - Identifies voltage regulator inputs that need same current capacity as outputs
-5. **Width recommendations** - Calculates track widths based on IPC-2152 and estimated current
+1. **Auto-classify obvious components** - Resistors, capacitors, inductors, ferrite beads, fuses, LEDs are classified automatically
+2. **Identify unknowns** - Components that need datasheet lookup (ICs, connectors, transistors, diodes)
+3. **Datasheet lookup** - Uses WebSearch to look up datasheets for unknown components
+4. **Component classification** - Determines each component's role:
+   - POWER_SOURCE: Regulators, power input connectors
+   - CURRENT_SINK: ICs that consume power (MCUs, CPLDs, FPGAs)
+   - PASS_THROUGH: Series elements (inductors, ferrite beads, fuses, power switches)
+   - SHUNT: Decoupling capacitors, pull-up resistors
+5. **Trace power paths** - Traces current flow from sinks back to sources
+6. **Width recommendations** - Calculates track widths based on IPC-2152 and estimated current
 
 ### Why AI Analysis Helps
 
@@ -173,38 +88,33 @@ Many KiCad symbols have incorrect pintype annotations. Common mislabeling patter
 ```
 ## Power Net Analysis for my_board.kicad_pcb
 
-### Components Analyzed
-| Ref  | Part Number | Function        | Datasheet |
-|------|-------------|-----------------|-----------|
-| U102 | MCF5213     | ColdFire MCU    | [NXP](https://nxp.com/...) |
-| U301 | XCR3256     | CoolRunner CPLD | [Xilinx](https://...) |
-| VR201| LT1129      | 3.3V LDO        | [ADI](https://...) |
+### AI-Classified Components
+| Ref  | Value   | Role          | Current | Notes |
+|------|---------|---------------|---------|-------|
+| J201 | JACK_2P | POWER_SOURCE  | 1000mA  | DC power input |
+| U102 | MCF5213 | CURRENT_SINK  | 200mA   | ColdFire MCU |
+| VR201| LT1129  | POWER_SOURCE  | 700mA   | 3.3V LDO output |
 
-### Identified Power Nets
-| Net Name | Type          | Est. Current | Recommended Width |
-|----------|---------------|--------------|-------------------|
-| GND      | Ground        | 500mA+       | 0.5mm or plane    |
-| +3.3V    | Main supply   | 400mA        | 0.5mm             |
-| /VDDPLL  | PLL supply    | 5mA          | 0.3mm             |
-| /VCCA    | Analog supply | 10mA         | 0.3mm             |
+### Power Paths Traced
+  TB201 (power input) -> SW_ONOFF201 -> F201 -> VR201 -> +3.3V -> U102 (MCU)
 
-### Regulator Power Paths
-| Regulator | Input Net | Output Net | Max Current | Input Width |
-|-----------|-----------|------------|-------------|-------------|
-| VR201 (LT1129) | Net-(D201-K) | +3.3V | 700mA | 0.5mm |
+### Recommended Power Nets
+| Net Name | Width | Reason |
+|----------|-------|--------|
+| Net-(TB201-P1) | 0.5mm | Power input path |
+| Net-(F201-Pad1) | 0.5mm | After fuse |
+| +3.3V | 0.5mm | Main rail, 500mA total |
+| /VDDPLL | 0.3mm | PLL supply, 10mA |
 
-### Ready-to-Use Configuration
+### Routing Command
+--power-nets "GND" "+3.3V" "/VDDPLL" "/VCCA" "Net-(TB201-P1)" --power-nets-widths 0.5 0.5 0.3 0.3 0.5
 ```
---power-nets "GND" "+3.3V" "/VDDPLL" "/VCCA" "GNDA" --power-nets-widths 0.5 0.5 0.3 0.3 0.3
-```
-
-**Note:** The router automatically propagates power widths through series elements (fuses, inductors, ferrite beads) and voltage regulator inputs. You typically only need to specify the main power nets - downstream nets are handled automatically.
 
 ## Track Width Guidelines (IPC-2152)
 
 Use these guidelines to select appropriate track widths based on expected current:
 
-| Current | 1oz Cu, 10°C rise | 1oz Cu, 20°C rise | Recommended |
+| Current | 1oz Cu, 10C rise | 1oz Cu, 20C rise | Recommended |
 |---------|-------------------|-------------------|-------------|
 | <100mA  | 0.15mm (6 mil)    | 0.10mm (4 mil)    | 0.25mm      |
 | 100-500mA | 0.25mm (10 mil) | 0.20mm (8 mil)    | 0.35mm      |
@@ -219,7 +129,7 @@ Use these guidelines to select appropriate track widths based on expected curren
 - **Main power** (3.3V, 5V): 0.35-0.5mm depending on total load
 - **Low-current supplies** (VREF, PLL): 0.25-0.3mm
 - **Regulator outputs**: Size for max output current + margin
-- **Regulator inputs**: Same width as output (input current ≈ output current + quiescent current)
+- **Regulator inputs**: Same width as output (input current = output current + quiescent current)
 
 ### Special Considerations
 

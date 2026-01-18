@@ -33,8 +33,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Impedance-controlled routing** - Specify target impedance (e.g., 50Ω single-ended, 100Ω differential) and track widths are automatically calculated per layer from the board stackup. Uses IPC-2141 formulas for microstrip (outer layers) and stripline (inner layers). Widths adjust automatically when switching layers via vias to maintain target impedance
 - **Power net routing** - Route power nets (GND, VCC, etc.) with wider tracks than signal nets. Specify patterns and corresponding widths (e.g., `--power-nets "*GND*" "*VCC*" --power-nets-widths 0.4 0.5`). First matching pattern determines width for each net. Obstacle clearances automatically adjust for wider power traces. Power net widths are never smaller than the base track width
-- **Automatic power width propagation** - Power net widths automatically propagate through series elements: inductors (L), ferrite beads (FB), fuses (F), voltage regulators (input ← output), and low-value resistors (where I = V/R ≥ 100mA). This ensures filtered supplies (e.g., +3.3V → L101 → VDDPLL) and regulator inputs get appropriate track widths without manual specification
-- **AI-powered power net analysis** - Use the `/analyze-power-nets` skill to automatically identify power nets and recommend track widths based on component datasheets. Combines KiCad pintype detection with AI datasheet lookup to catch mislabeled power pins (e.g., VDDPLL marked as "passive", regulator VIN marked as "input"). See [Power Net Analysis](docs/power-nets.md) for details
+- **AI-powered power net analysis** - Use the `/analyze-power-nets` skill to identify power nets and recommend track widths. The skill uses WebSearch to look up component datasheets, classifies components by their role (power source, current sink, pass-through, shunt), traces current paths, and generates ready-to-use `--power-nets` configurations. See [Power Net Analysis](docs/power-nets.md) for details
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
 - **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
 
@@ -116,43 +115,21 @@ python check_connected.py kicad_files/output.kicad_pcb --component U1
 
 ### 5. Power Net Analysis
 
-Identify power nets and get track width recommendations:
-
-```python
-from kicad_parser import parse_kicad_pcb
-from net_queries import (
-    identify_power_nets_by_pintype, auto_assign_power_widths,
-    identify_power_nets, propagate_power_widths_through_passives
-)
-
-pcb = parse_kicad_pcb("kicad_files/my_board.kicad_pcb")
-
-# Method 1: Automatic detection from pintype annotations
-power_nets = identify_power_nets_by_pintype(pcb)  # Detect from pintype annotations
-widths = auto_assign_power_widths(pcb)            # Auto-assign track widths
-
-# Method 2: Pattern-based with automatic propagation
-patterns = ['GND', '+3.3V', 'GNDA', '/VCCA']
-widths = [0.5, 0.5, 0.3, 0.3]
-power_widths = identify_power_nets(pcb, patterns, widths)
-# Propagate through inductors, ferrite beads, fuses, regulators, low-R resistors
-power_widths = propagate_power_widths_through_passives(pcb, power_widths)
-```
-
-**Automatic propagation** ensures related nets get appropriate widths:
-- `+3.3V → L101 → /VDDPLL`: VDDPLL gets same width as +3.3V
-- `GND → FB101 → GNDA`: GNDA gets same width as GND
-- `+3.3V (VR1 output) → VR1 input`: Regulator input gets output width
-- `VIN → F1 (fuse) → regulator`: Fuse input net gets same width
-
-For AI-powered analysis when KiCad pintype annotations are missing or incorrect:
+Use the `/analyze-power-nets` skill to identify power nets and get track width recommendations:
 
 ```
 # Ask Claude to analyze your board with datasheet lookup
 /analyze-power-nets kicad_files/my_board.kicad_pcb
 ```
 
-See [Power Net Analysis](docs/power-nets.md) for detailed documentation on automatic detection, AI-powered analysis, and IPC-2152 track width guidelines.
+The skill:
+1. Auto-classifies obvious components (resistors, capacitors, inductors, etc.)
+2. Uses WebSearch to look up datasheets for unknown components (ICs, connectors, transistors)
+3. Classifies each component's role (power source, current sink, pass-through, shunt)
+4. Traces power paths from sinks to sources
+5. Generates ready-to-use `--power-nets` configurations
+
+See [Power Net Analysis](docs/power-nets.md) for detailed documentation.
 
 ### 6. Full Integration Test
 
@@ -357,12 +334,16 @@ KiCadRoutingTools/
 | `connectivity.py` | Stub endpoints, connected groups, multi-point net detection |
 
 Key functions in `net_queries.py`:
-- `identify_power_nets(pcb, patterns, widths)` - Pattern-based power net detection
-- `identify_power_nets_by_pintype(pcb)` - Automatic detection using KiCad pintype annotations
-- `auto_assign_power_widths(pcb)` - Automatic track width assignment for power nets
-- `propagate_power_widths_through_passives(pcb, widths)` - Propagate widths through series elements (L, FB, F), voltage regulators, and low-value resistors
-- `parse_voltage_from_net_name(name)` - Extract voltage from net names (e.g., "+3.3V" → 3.3)
-- `parse_resistor_value(value)` - Parse resistor values (e.g., "4K7" → 4700)
+- `identify_power_nets(pcb, patterns, widths)` - Pattern-based power net detection for `--power-nets` CLI option
+- `compute_mps_net_ordering(pcb, net_ids)` - MPS algorithm for optimal net ordering
+- `find_differential_pairs(pcb, patterns)` - Detect P/N pairs from net names
+
+Key functions in `analyze_power_paths.py` (used by `/analyze-power-nets` skill):
+- `analyze_pcb(filepath)` - Load PCB and extract components for analysis
+- `get_components_needing_analysis(components)` - Get components requiring AI classification
+- `classify_component(components, ref, role, current_ma, notes)` - Set component classification
+- `trace_power_paths(pcb, components)` - Trace current from sinks to sources
+- `get_power_net_recommendations(pcb, components, paths)` - Get recommended track widths
 
 ### Optimization
 
