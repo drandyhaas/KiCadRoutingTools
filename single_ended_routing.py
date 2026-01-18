@@ -9,6 +9,7 @@ from typing import List, Optional, Set, Tuple
 
 # ANSI color codes
 RED = '\033[91m'
+YELLOW = '\033[93m'
 RESET = '\033[0m'
 
 from kicad_parser import PCBData, Segment, Via
@@ -1094,7 +1095,7 @@ def route_multipoint_taps(
         if edge_to_route is None:
             unrouted_pads = len(pad_info) - len(routed_indices)
             if unrouted_pads > 0:
-                print(f"  {RED}Warning: {unrouted_pads} pad(s) not connected ({len(failed_edges)} MST edge(s) failed){RESET}")
+                print(f"  {YELLOW}Warning: {unrouted_pads} pad(s) not connected ({len(failed_edges)} MST edge(s) failed){RESET}")
             break
 
         src_idx, tgt_idx, edge_len = edge_to_route
@@ -1171,7 +1172,7 @@ def route_multipoint_taps(
         total_iterations += tap_iterations
 
         if path is None:
-            print(f"      {RED}Failed to route MST edge after {tap_iterations} iterations ({tap_elapsed:.2f}s){RESET}")
+            print(f"      {YELLOW}Failed to route MST edge after {tap_iterations} iterations ({tap_elapsed:.2f}s){RESET}")
             edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
             failed_edges.add(edge_key)
             # Store blocking info for potential rip-up analysis
