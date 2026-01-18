@@ -908,7 +908,7 @@ def create_plane(
                     new_vias=new_vias,
                     hole_to_hole_clearance=hole_to_hole_clearance,
                     via_drill=via_drill,
-                    protected_net_ids={net_id},  # Only protect current net, allow ripping other plane nets
+                    protected_net_ids=set(net_ids),  # Protect all nets being routed (don't rip power nets we're routing)
                     verbose=verbose,
                     find_via_position_fn=find_via_position,
                     route_via_to_pad_fn=route_via_to_pad
