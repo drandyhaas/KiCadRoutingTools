@@ -46,7 +46,7 @@ def main():
 
     power_nets = '--power-nets "GND" "+3.3V" "GNDA" "/VDDPLL" "/VCCA" "Net-(TB201-P1)" "Net-(F201-Pad1)" "Net-(D201-K)" --power-nets-widths 0.5 0.5 0.3 0.3 0.3 0.5 0.5 0.5'
 
-    options = base_options+'--via-proximity-cost 10 --via-cost 50 --track-proximity-distance 0 --vertical-attraction-radius 0 --stub-proximity-cost 1.0 --stub-proximity-radius 4.0 --max-ripup 10 --max-iterations 10000000 '+power_nets
+    options = base_options+'--via-proximity-cost 10 --via-cost 50 --track-proximity-distance 3.0 --track-proximity-cost 0.5 --vertical-attraction-radius 0 --stub-proximity-cost 1.0 --stub-proximity-radius 4.0 --max-ripup 10 --max-iterations 10000000 '+power_nets
 
     # Route some nets from pads (no fanout needed)
     run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options, unbuffered)
