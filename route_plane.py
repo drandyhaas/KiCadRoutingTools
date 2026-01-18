@@ -880,15 +880,20 @@ def create_plane(
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
 
-            # Pending pads are ALL unprocessed power net pads (cross-net protection)
+            # Pending pads are ALL pads from OTHER power nets (cross-net protection)
             # Plus pads from ripped nets that will need to be rerouted
-            # Exclude the current pad and any already processed pads
+            # We protect ALL pads from other nets, not just those needing vias
             current_pad_key = (pad.global_x, pad.global_y)
-            pending_pads = [
-                p for p in all_power_pads_needing_vias
-                if (p['pad'].global_x, p['pad'].global_y) != current_pad_key
-                and (p['pad'].global_x, p['pad'].global_y) not in processed_pad_ids
-            ]
+            pending_pads = []
+            # Add ALL pads from other power nets (not just those needing vias)
+            for other_net_id in net_ids:
+                if other_net_id == net_id:
+                    continue  # Skip current net's pads
+                other_pads = pcb_data.pads_by_net.get(other_net_id, [])
+                for op in other_pads:
+                    op_key = (op.global_x, op.global_y)
+                    if op_key != current_pad_key and op_key not in processed_pad_ids:
+                        pending_pads.append({'pad': op, 'needs_via': False})
             # Also protect pads from ripped nets (they need to be rerouted later)
             for ripped_id in all_ripped_net_ids:
                 ripped_pads = pcb_data.pads_by_net.get(ripped_id, [])
