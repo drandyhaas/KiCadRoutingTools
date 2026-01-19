@@ -434,11 +434,11 @@ def route_disconnected_regions(
 
     for edge_idx, (region_i, region_j, point_i, point_j, dist) in enumerate(mst_edges):
         # Get all anchors from each region for multi-point routing
-        source_anchors = region_anchors[region_i]
-        target_anchors = region_anchors[region_j]
+        anchors_i = region_anchors[region_i]
+        anchors_j = region_anchors[region_j]
 
         # Progress indicator
-        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(source_anchors)} anchors) -> Region {region_j} ({len(target_anchors)} anchors)...", end=" ", flush=True)
+        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors)...", end=" ", flush=True)
 
         # Compute maximum safe track width using closest pair as estimate
         track_width = compute_connection_track_width(
@@ -446,11 +446,11 @@ def route_disconnected_regions(
             zone_clearance, max_track_width, min_track_width
         )
 
-        # Route the connection using ALL anchors from each region as sources/targets
-        # Router will find the best path between ANY source anchor and ANY target anchor
+        # Try routing in both directions - A* can find different paths depending on direction
+        # Direction 1: region_i -> region_j
         result = route_plane_connection_wide(
-            source_anchors,
-            target_anchors,
+            anchors_i,
+            anchors_j,
             plane_layer_idx=plane_layer_idx,
             routing_layers=routing_layers,
             base_obstacles=base_obstacles,
@@ -460,11 +460,27 @@ def route_disconnected_regions(
             verbose=verbose
         )
 
+        # Direction 2: region_j -> region_i (if direction 1 failed)
+        if result is None:
+            if verbose:
+                print(f"trying reverse...", end=" ", flush=True)
+            result = route_plane_connection_wide(
+                anchors_j,
+                anchors_i,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                base_obstacles=base_obstacles,
+                config=config,
+                net_vias=net_vias,
+                max_via_reuse_radius=max_via_reuse_radius,
+                verbose=verbose
+            )
+
         if result is None:
             print(f"{RED}FAILED{RESET}")
             routes_failed += 1
             if verbose:
-                print(f"      Tried {len(source_anchors)} sources x {len(target_anchors)} targets, no path found")
+                print(f"      Tried {len(anchors_i)}x{len(anchors_j)} + {len(anchors_j)}x{len(anchors_i)} combinations, no path found")
             continue
 
         route_points, via_positions = result

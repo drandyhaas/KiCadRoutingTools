@@ -618,7 +618,7 @@ Features:
 - **Auto-detection** - Automatically finds all zones in PCB if nets/layers not specified
 - **Flood-fill region detection** - Uses grid-based flood fill to identify disconnected regions
 - **MST-based connections** - Connects regions using minimum spanning tree for optimal routing
-- **Multi-point routing** - Uses ALL anchors (vias/pads) in each region as potential connection points, allowing the router to find a viable path even when the closest points are blocked
+- **Multi-point routing** - Uses ALL anchors (vias/pads) in each region as potential connection points, trying both directions (A->B and B->A) since A* can find different paths depending on direction
 - **Via reuse** - Reuses existing vias and through-hole pads from the net instead of adding new ones
 - **Hole-to-hole clearance** - Respects drill hole clearances when placing new vias
 - **Multi-layer routing** - Can route through any copper layer to connect regions
