@@ -421,7 +421,7 @@ def _try_phase3_ripup(
 
     # All attempts failed - restore ripped nets
     if ripped_items:
-        print(f"    All rip-up attempts failed, restoring {len(ripped_items)} net(s)...")
+        print(f"    {RED}All rip-up attempts failed, restoring {len(ripped_items)} net(s)...{RESET}")
         for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
             restore_net(
                 rid, saved_result, ripped_ids, was_in_results,
