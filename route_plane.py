@@ -905,7 +905,37 @@ def create_plane(
 
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
 
-            # First, try to place via within pad boundary (preferred - no trace needed)
+            # First, check if there's already a via very close by (within ~2 via diameters)
+            # This handles cases like decoupling caps where both pads are on same net
+            close_via_radius = via_size * 2.5  # Check within ~2.5 via diameters
+            nearby_via = find_existing_via_nearby(pad, available_vias, close_via_radius)
+            if nearby_via:
+                # Via already very close - try to reuse it
+                via_pos = nearby_via
+                dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
+
+                if pad_layer:
+                    routing_obs = get_routing_obstacles(pad_layer)
+                    route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
+                                                   routing_obs, config, verbose=verbose,
+                                                   return_blocked_cells=True)
+                    trace_segments = route_result.segments if route_result.success else None
+                    if trace_segments is not None:
+                        if trace_segments:
+                            new_segments.extend(trace_segments)
+                            traces_added += len(trace_segments)
+                        vias_reused += 1
+                        print(f"reusing nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments) if trace_segments else 0} segs, {dist:.2f}mm")
+                        processed_pad_ids.add(current_pad_key)
+                        continue  # Move to next pad
+                else:
+                    # No pad layer (through-hole) - just count as reused
+                    vias_reused += 1
+                    print(f"reusing nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm")
+                    processed_pad_ids.add(current_pad_key)
+                    continue
+
+            # Next, try to place via within pad boundary (preferred - no trace needed)
             # This avoids creating long traces that block other signals
             # Search from pad center outward within pad bounds
             pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
@@ -939,13 +969,17 @@ def create_plane(
 
             if via_in_pad:
                 # Found position within pad - place via there (no trace needed)
+                # KiCad vias only specify start/end layers, not intermediate
                 new_vias.append({
                     'x': via_in_pad[0], 'y': via_in_pad[1],
                     'size': via_size, 'drill': via_drill,
-                    'layers': all_layers, 'net_id': net_id
+                    'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
                 })
                 available_vias.append(via_in_pad)
                 vias_placed += 1
+                # Block this via position for hole-to-hole clearance
+                block_via_position(obstacles, via_in_pad[0], via_in_pad[1], coord,
+                                   hole_to_hole_clearance, via_drill)
                 if via_in_pad == (pad.global_x, pad.global_y):
                     print(f"via at pad center")
                 else:
