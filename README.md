@@ -575,6 +575,55 @@ Features:
 
 See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
 
+### Disconnected Plane Region Repair (route_disconnected_planes.py)
+
+After creating power planes, regions may become split by vias and traces from other nets cutting through. This script detects disconnected regions within each plane zone and routes wide, short tracks between them.
+
+```bash
+python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [OPTIONS]
+
+# Zone selection (auto-detects all zones if not specified)
+--nets, -n GND +3.3V        # Net name(s) to process
+--plane-layers, -l B.Cu In1.Cu  # Plane layer(s) to process
+--routing-layers, -r F.Cu In1.Cu In2.Cu B.Cu  # Layers available for routing (default: all copper)
+
+# Track width
+--max-track-width 2.0       # Maximum track width for connections (mm)
+--min-track-width 0.2       # Minimum track width for connections (mm)
+--track-width 0.2           # Default track width for routing config (mm)
+
+# Clearance
+--clearance 0.2             # Trace-to-trace clearance (mm)
+--zone-clearance 0.2        # Zone fill clearance around obstacles (mm)
+--track-via-clearance 0.8   # Clearance from tracks to other nets' vias (mm)
+--board-edge-clearance 0.5  # Clearance from board edge (mm)
+--hole-to-hole-clearance 0.3  # Minimum clearance between drill holes (mm)
+
+# Via options
+--via-size 0.5              # Via outer diameter (mm)
+--via-drill 0.4             # Via drill diameter (mm)
+--max-via-reuse-radius      # Max distance to reuse existing via (default: 3 * via-size)
+
+# Grid
+--grid-step 0.1             # Routing grid step (mm)
+--analysis-grid-step 0.5    # Grid step for connectivity analysis (coarser = faster)
+
+# Debug
+--dry-run                   # Analyze without writing output
+--verbose, -v               # Print detailed debug messages
+--debug-lines               # Add debug lines on User.4 layer showing route paths
+```
+
+Features:
+- **Auto-detection** - Automatically finds all zones in PCB if nets/layers not specified
+- **Flood-fill region detection** - Uses grid-based flood fill to identify disconnected regions
+- **MST-based connections** - Connects regions using minimum spanning tree for optimal routing
+- **Multi-point routing** - Uses ALL anchors (vias/pads) in each region as potential connection points, allowing the router to find a viable path even when the closest points are blocked
+- **Via reuse** - Reuses existing vias and through-hole pads from the net instead of adding new ones
+- **Hole-to-hole clearance** - Respects drill hole clearances when placing new vias
+- **Multi-layer routing** - Can route through any copper layer to connect regions
+- **Adaptive track width** - Computes maximum safe track width based on corridor clearance
+
 ## Requirements
 
 - Python 3.7+

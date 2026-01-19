@@ -433,18 +433,24 @@ def route_disconnected_regions(
     previous_routes: List[List[Tuple[float, float]]] = []
 
     for edge_idx, (region_i, region_j, point_i, point_j, dist) in enumerate(mst_edges):
-        # Progress indicator
-        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} -> {region_j} ({dist:.1f}mm)...", end=" ", flush=True)
+        # Get all anchors from each region for multi-point routing
+        source_anchors = region_anchors[region_i]
+        target_anchors = region_anchors[region_j]
 
-        # Compute maximum safe track width for this connection
+        # Progress indicator
+        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(source_anchors)} anchors) -> Region {region_j} ({len(target_anchors)} anchors)...", end=" ", flush=True)
+
+        # Compute maximum safe track width using closest pair as estimate
         track_width = compute_connection_track_width(
             point_i, point_j, plane_layer, net_id, pcb_data, config,
             zone_clearance, max_track_width, min_track_width
         )
 
-        # Route the connection using pre-built obstacles
+        # Route the connection using ALL anchors from each region as sources/targets
+        # Router will find the best path between ANY source anchor and ANY target anchor
         result = route_plane_connection_wide(
-            point_i, point_j,
+            source_anchors,
+            target_anchors,
             plane_layer_idx=plane_layer_idx,
             routing_layers=routing_layers,
             base_obstacles=base_obstacles,
@@ -458,7 +464,7 @@ def route_disconnected_regions(
             print(f"{RED}FAILED{RESET}")
             routes_failed += 1
             if verbose:
-                print(f"      From ({point_i[0]:.2f}, {point_i[1]:.2f}) to ({point_j[0]:.2f}, {point_j[1]:.2f})")
+                print(f"      Tried {len(source_anchors)} sources x {len(target_anchors)} targets, no path found")
             continue
 
         route_points, via_positions = result
@@ -682,7 +688,7 @@ def build_base_obstacles(
     config: GridRouteConfig,
     track_width: float,
     track_via_clearance: float,
-    hole_to_hole_clearance: float = 0.5,
+    hole_to_hole_clearance: float = 0.3,
     proximity_radius: float = 3.0,
     proximity_cost: float = 2.0
 ) -> Tuple[GridObstacleMap, Dict[str, int]]:
@@ -770,9 +776,6 @@ def build_base_obstacles(
 
     # Block existing segments from other nets on each layer
     # Also block vias along segments (vias span all layers, so can't place via where segment exists)
-    via_expansion_mm = config.via_size / 2 + config.clearance
-    via_expansion_grid = max(1, coord.to_grid_dist(via_expansion_mm))
-
     for seg in pcb_data.segments:
         if seg.net_id in exclude_net_ids:
             continue
@@ -782,8 +785,10 @@ def build_base_obstacles(
         seg_expansion_mm = track_width / 2 + seg.width / 2 + config.clearance
         seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
         _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
-        # Also block vias along this segment
-        _block_segment_via_obstacle(obstacles, seg, coord, via_expansion_grid)
+        # Also block vias along this segment - must include segment width for proper clearance
+        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
+        via_seg_expansion_grid = max(1, coord.to_grid_dist(via_seg_expansion_mm))
+        _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_grid)
 
     # Block pads from non-plane nets on their respective layers
     # (plane net pads are excluded here - they're anchors; other plane nets' pads
@@ -872,8 +877,8 @@ def add_route_to_obstacles(
 
 
 def route_plane_connection_wide(
-    via_a: Tuple[float, float],
-    via_b: Tuple[float, float],
+    source_points: List[Tuple[float, float]],
+    target_points: List[Tuple[float, float]],
     plane_layer_idx: int,
     routing_layers: List[str],
     base_obstacles: GridObstacleMap,
@@ -884,10 +889,14 @@ def route_plane_connection_wide(
     verbose: bool = False
 ) -> Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]]:
     """
-    Route a wide trace between two points using pre-built obstacles.
+    Route a wide trace between any source point and any target point.
+
+    The router will find the best path from ANY source to ANY target,
+    allowing flexible connection between disconnected regions.
 
     Args:
-        via_a, via_b: Start and end points
+        source_points: List of (x, y) anchor points in source region
+        target_points: List of (x, y) anchor points in target region
         plane_layer_idx: Index of the plane layer in routing_layers
         routing_layers: List of layer names for routing
         base_obstacles: Pre-built obstacle map (will be cloned)
@@ -908,16 +917,19 @@ def route_plane_connection_wide(
     # Clone the base obstacles for this route (clone_fresh clears source/target cells)
     obstacles = base_obstacles.clone_fresh()
 
-    # Set up source and target - on the plane layer
-    via_a_gx, via_a_gy = coord.to_grid(via_a[0], via_a[1])
-    via_b_gx, via_b_gy = coord.to_grid(via_b[0], via_b[1])
+    # Set up sources - all anchor points from source region
+    sources = []
+    for sx, sy in source_points:
+        gx, gy = coord.to_grid(sx, sy)
+        obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
+        sources.append((gx, gy, plane_layer_idx))
 
-    # Make sure source and target are not blocked on plane layer
-    obstacles.add_source_target_cell(via_a_gx, via_a_gy, plane_layer_idx)
-    obstacles.add_source_target_cell(via_b_gx, via_b_gy, plane_layer_idx)
-
-    sources = [(via_a_gx, via_a_gy, plane_layer_idx)]
-    targets = [(via_b_gx, via_b_gy, plane_layer_idx)]
+    # Set up targets - all anchor points from target region
+    targets = []
+    for tx, ty in target_points:
+        gx, gy = coord.to_grid(tx, ty)
+        obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
+        targets.append((gx, gy, plane_layer_idx))
 
     # Create router and find path
     router = GridRouter(

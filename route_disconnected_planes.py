@@ -84,9 +84,10 @@ def route_planes(
     max_track_width: float = 2.0,
     min_track_width: float = 0.2,
     track_via_clearance: float = 0.8,
+    hole_to_hole_clearance: float = 0.3,
     board_edge_clearance: float = 0.5,
     via_size: float = 0.5,
-    via_drill: float = 0.3,
+    via_drill: float = 0.4,
     max_via_reuse_radius: Optional[float] = None,
     verbose: bool = False,
     dry_run: bool = False,
@@ -108,6 +109,7 @@ def route_planes(
         max_track_width: Maximum track width for region connections (mm)
         min_track_width: Minimum track width for region connections (mm)
         track_via_clearance: Clearance from tracks to other nets' vias (mm)
+        hole_to_hole_clearance: Minimum clearance between drill holes (mm)
         board_edge_clearance: Clearance from board edge (mm)
         via_size: Via outer diameter for config (mm)
         via_drill: Via drill diameter for config (mm)
@@ -195,7 +197,8 @@ def route_planes(
             pcb_data=pcb_data,
             config=config,
             track_width=max_track_width,
-            track_via_clearance=track_via_clearance
+            track_via_clearance=track_via_clearance,
+            hole_to_hole_clearance=hole_to_hole_clearance
         )
         print("done")
 
@@ -375,12 +378,14 @@ Examples:
                         help="Clearance from tracks to other nets' vias in mm (default: 0.8)")
     parser.add_argument("--board-edge-clearance", type=float, default=0.5,
                         help="Clearance from board edge in mm (default: 0.5)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.3,
+                        help="Minimum clearance between drill holes in mm (default: 0.3)")
 
     # Via options (for config)
     parser.add_argument("--via-size", type=float, default=0.5,
                         help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=0.3,
-                        help="Via drill diameter in mm (default: 0.3)")
+    parser.add_argument("--via-drill", type=float, default=0.4,
+                        help="Via drill diameter in mm (default: 0.4)")
     parser.add_argument("--max-via-reuse-radius", type=float, default=None,
                         help="Max distance to reuse existing via instead of adding new one (default: 3 * via-size)")
 
@@ -445,6 +450,7 @@ Examples:
         max_track_width=args.max_track_width,
         min_track_width=args.min_track_width,
         track_via_clearance=args.track_via_clearance,
+        hole_to_hole_clearance=args.hole_to_hole_clearance,
         board_edge_clearance=args.board_edge_clearance,
         via_size=args.via_size,
         via_drill=args.via_drill,
