@@ -608,6 +608,9 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 --grid-step 0.1             # Routing grid step (mm)
 --analysis-grid-step 0.5    # Grid step for connectivity analysis (coarser = faster)
 
+# Routing
+--max-iterations 200000     # Maximum A* iterations per route attempt
+
 # Debug
 --dry-run                   # Analyze without writing output
 --verbose, -v               # Print detailed debug messages

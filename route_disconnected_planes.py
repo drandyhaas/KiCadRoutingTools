@@ -89,6 +89,7 @@ def route_planes(
     via_size: float = 0.5,
     via_drill: float = 0.4,
     max_via_reuse_radius: Optional[float] = None,
+    max_iterations: int = 200000,
     verbose: bool = False,
     dry_run: bool = False,
     debug_lines: bool = False,
@@ -114,6 +115,7 @@ def route_planes(
         via_size: Via outer diameter for config (mm)
         via_drill: Via drill diameter for config (mm)
         max_via_reuse_radius: Max distance to reuse existing via (default: 3 * via_size)
+        max_iterations: Maximum A* iterations per route attempt
         verbose: Print detailed debug info
         dry_run: Analyze without writing output
         routing_layers: List of layers that can be used for routing (if None, auto-detect from PCB)
@@ -215,8 +217,10 @@ def route_planes(
             max_track_width=max_track_width,
             min_track_width=min_track_width,
             track_via_clearance=track_via_clearance,
+            hole_to_hole_clearance=hole_to_hole_clearance,
             analysis_grid_step=analysis_grid_step,
             max_via_reuse_radius=max_via_reuse_radius,
+            max_iterations=max_iterations,
             verbose=verbose
         )
 
@@ -395,6 +399,10 @@ Examples:
     parser.add_argument("--analysis-grid-step", type=float, default=0.5,
                         help="Grid step for connectivity analysis in mm (coarser = faster, default: 0.5)")
 
+    # Routing options
+    parser.add_argument("--max-iterations", type=int, default=200000,
+                        help="Maximum A* iterations per route attempt (default: 200000)")
+
     # Debug options
     parser.add_argument("--dry-run", action="store_true",
                         help="Analyze without writing output")
@@ -455,6 +463,7 @@ Examples:
         via_size=args.via_size,
         via_drill=args.via_drill,
         max_via_reuse_radius=args.max_via_reuse_radius,
+        max_iterations=args.max_iterations,
         verbose=args.verbose,
         dry_run=args.dry_run,
         debug_lines=args.debug_lines,

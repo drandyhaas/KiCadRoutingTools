@@ -340,6 +340,82 @@ def find_region_connection_points(
     return mst_edges
 
 
+def find_open_space_point(
+    anchors: List[Tuple[float, float]],
+    base_obstacles: GridObstacleMap,
+    plane_layer_idx: int,
+    coord: GridCoord,
+    search_radius: float = 5.0
+) -> Optional[Tuple[float, float]]:
+    """
+    Find the most open space near a region's anchors - a point with maximum clearance from obstacles.
+
+    Args:
+        anchors: List of anchor points in the region
+        base_obstacles: Obstacle map to check clearance against
+        plane_layer_idx: Layer index to check for obstacles
+        coord: Grid coordinate converter
+        search_radius: How far from anchors to search (mm)
+
+    Returns:
+        (x, y) of the most open point, or None if no good point found
+    """
+    if not anchors:
+        return None
+
+    # Find centroid of anchors as search center
+    cx = sum(a[0] for a in anchors) / len(anchors)
+    cy = sum(a[1] for a in anchors) / len(anchors)
+
+    search_radius_grid = coord.to_grid_dist(search_radius)
+    center_gx, center_gy = coord.to_grid(cx, cy)
+
+    best_clearance = 0
+    best_point = None
+
+    # Search in a grid around the centroid
+    for dx in range(-search_radius_grid, search_radius_grid + 1):
+        for dy in range(-search_radius_grid, search_radius_grid + 1):
+            gx, gy = center_gx + dx, center_gy + dy
+
+            # Skip if this cell is blocked
+            if base_obstacles.is_blocked(gx, gy, plane_layer_idx):
+                continue
+
+            # Skip if via placement is blocked here
+            if base_obstacles.is_via_blocked(gx, gy):
+                continue
+
+            # Calculate clearance - distance to nearest blocked cell
+            clearance = _calculate_clearance(gx, gy, base_obstacles, plane_layer_idx, max_check=10)
+
+            if clearance > best_clearance:
+                best_clearance = clearance
+                best_point = coord.to_float(gx, gy)
+
+    # Only return if we found a point with meaningful clearance (at least 2 grid steps)
+    if best_clearance >= 2:
+        return best_point
+    return None
+
+
+def _calculate_clearance(
+    gx: int, gy: int,
+    obstacles: GridObstacleMap,
+    layer_idx: int,
+    max_check: int = 10
+) -> int:
+    """Calculate clearance from a grid cell to nearest obstacle."""
+    for r in range(1, max_check + 1):
+        # Check cells at distance r (manhattan approximation for speed)
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if abs(dx) == r or abs(dy) == r:  # Only check perimeter
+                    if obstacles.is_blocked(gx + dx, gy + dy, layer_idx):
+                        return r - 1
+    return max_check
+
+
 # ANSI color codes
 GREEN = '\033[92m'
 RED = '\033[91m'
@@ -360,8 +436,10 @@ def route_disconnected_regions(
     max_track_width: float = 2.0,
     min_track_width: float = 0.2,
     track_via_clearance: float = 0.8,
+    hole_to_hole_clearance: float = 0.3,
     analysis_grid_step: float = 0.5,
     max_via_reuse_radius: float = 1.5,
+    max_iterations: int = 200000,
     verbose: bool = False
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]]]:
     """
@@ -381,6 +459,7 @@ def route_disconnected_regions(
         min_track_width: Minimum track width for connections (mm)
         track_via_clearance: Clearance from track to other nets' vias
         max_via_reuse_radius: Max distance to reuse existing via/pad (mm)
+        max_iterations: Maximum A* iterations per route attempt
         verbose: Print debug info
 
     Returns:
@@ -457,6 +536,7 @@ def route_disconnected_regions(
             config=config,
             net_vias=net_vias,
             max_via_reuse_radius=max_via_reuse_radius,
+            max_iterations=max_iterations,
             verbose=verbose
         )
 
@@ -473,14 +553,55 @@ def route_disconnected_regions(
                 config=config,
                 net_vias=net_vias,
                 max_via_reuse_radius=max_via_reuse_radius,
+                max_iterations=max_iterations,
                 verbose=verbose
             )
+
+        # Fallback: try routing via open-space points (areas with maximum clearance)
+        open_space_via = None
+        if result is None:
+            if verbose:
+                print(f"trying open-space...", end=" ", flush=True)
+
+            # Find most open points in each region
+            open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord)
+            open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord)
+
+            # Try various combinations with open-space points
+            open_attempts = []
+            if open_i:
+                open_attempts.append((anchors_i + [open_i], anchors_j, open_i))
+            if open_j:
+                open_attempts.append((anchors_i, anchors_j + [open_j], open_j))
+            if open_i and open_j:
+                open_attempts.append((anchors_i + [open_i], anchors_j + [open_j], open_i))
+
+            for src, tgt, via_candidate in open_attempts:
+                result = route_plane_connection_wide(
+                    src, tgt,
+                    plane_layer_idx=plane_layer_idx,
+                    routing_layers=routing_layers,
+                    base_obstacles=base_obstacles,
+                    config=config,
+                    net_vias=net_vias,
+                    max_via_reuse_radius=max_via_reuse_radius,
+                    max_iterations=max_iterations,
+                    verbose=verbose
+                )
+                if result:
+                    # Check if the route actually uses the open-space point
+                    route_pts = result[0]
+                    for pt in route_pts:
+                        if abs(pt[0] - via_candidate[0]) < 0.01 and abs(pt[1] - via_candidate[1]) < 0.01:
+                            open_space_via = via_candidate
+                            break
+                    break
 
         if result is None:
             print(f"{RED}FAILED{RESET}")
             routes_failed += 1
             if verbose:
-                print(f"      Tried {len(anchors_i)}x{len(anchors_j)} + {len(anchors_j)}x{len(anchors_i)} combinations, no path found")
+                print(f"      Tried {len(anchors_i)}x{len(anchors_j)} + {len(anchors_j)}x{len(anchors_i)} + open-space combinations, no path found")
             continue
 
         route_points, via_positions = result
@@ -494,14 +615,17 @@ def route_disconnected_regions(
         # Count layers used
         layers_used = set(p[2] for p in route_points)
         layer_info = f", {len(layers_used)} layer(s)" if len(layers_used) > 1 else ""
-        via_info = f", {len(via_positions)} via(s)" if via_positions else ""
+        total_vias = len(via_positions) + (1 if open_space_via else 0)
+        via_info = f", {total_vias} via(s)" if total_vias > 0 else ""
+        open_info = " (via open-space)" if open_space_via else ""
 
-        print(f"{GREEN}OK{RESET} width={track_width:.2f}mm, length={route_length:.1f}mm, {len(route_points)-1} seg(s){layer_info}{via_info}")
+        print(f"{GREEN}OK{RESET} width={track_width:.2f}mm, length={route_length:.1f}mm, {len(route_points)-1} seg(s){layer_info}{via_info}{open_info}")
 
         # Incrementally add this route to base obstacles for subsequent routes
         add_route_to_obstacles(
             base_obstacles, route_points, via_positions, layer_map,
-            track_width, config.clearance, track_via_clearance, config
+            track_width, config.clearance, track_via_clearance, config,
+            hole_to_hole_clearance
         )
 
         # Keep track of route for debug output
@@ -521,15 +645,50 @@ def route_disconnected_regions(
                 })
 
         # Generate vias and add to net_vias for reuse by subsequent routes
+        # Check against existing net_vias for both duplicates AND hole-to-hole clearance
+        # Required minimum distance between via centers = via_drill + hole_to_hole_clearance
+        min_via_distance = config.via_drill + hole_to_hole_clearance
+
+        # First filter via_positions to remove vias too close to each other within this route
+        filtered_via_positions = []
         for vx, vy in via_positions:
-            vias.append({
-                'x': vx,
-                'y': vy,
-                'size': config.via_size,
-                'drill': config.via_drill,
-                'net_id': net_id
-            })
-            net_vias.append((vx, vy))  # Available for reuse
+            too_close_to_filtered = any(
+                math.sqrt((fx - vx)**2 + (fy - vy)**2) < min_via_distance
+                for fx, fy in filtered_via_positions
+            )
+            if not too_close_to_filtered:
+                filtered_via_positions.append((vx, vy))
+
+        for vx, vy in filtered_via_positions:
+            too_close = any(
+                math.sqrt((ex - vx)**2 + (ey - vy)**2) < min_via_distance
+                for ex, ey in net_vias
+            )
+            if not too_close:
+                vias.append({
+                    'x': vx,
+                    'y': vy,
+                    'size': config.via_size,
+                    'drill': config.via_drill,
+                    'net_id': net_id
+                })
+                net_vias.append((vx, vy))  # Available for reuse
+
+        # Add open-space via if one was used and not too close to existing vias
+        if open_space_via:
+            too_close = any(
+                math.sqrt((ex - open_space_via[0])**2 + (ey - open_space_via[1])**2) < min_via_distance
+                for ex, ey in net_vias
+            )
+            if not too_close:
+                vias.append({
+                    'x': open_space_via[0],
+                    'y': open_space_via[1],
+                    'size': config.via_size,
+                    'drill': config.via_drill,
+                    'net_id': net_id
+                })
+                net_vias.append(open_space_via)
 
         routes_added += 1
 
@@ -762,29 +921,27 @@ def build_base_obstacles(
             False
         )
 
-    # Block via placement near OTHER nets' holes for hole-to-hole clearance
-    # Our own net's holes can be used as layer transitions, so don't block them
-    hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + config.via_drill / 2))
+    # Block via placement near holes for hole-to-hole clearance
+    hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + config.via_drill))
 
-    # Block via placement near other nets' vias
+    # Block via placement near ALL vias (including same-net) for hole-to-hole clearance
+    # Via reuse is handled separately by snapping routes to existing vias
     for via in pcb_data.vias:
-        if via.net_id in exclude_net_ids:
-            continue  # Don't block near our own vias
         gx, gy = coord.to_grid(via.x, via.y)
         for ex in range(-hole_clearance_grid, hole_clearance_grid + 1):
             for ey in range(-hole_clearance_grid, hole_clearance_grid + 1):
                 if ex * ex + ey * ey <= hole_clearance_grid * hole_clearance_grid:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
 
-    # Block via placement near other nets' through-hole pad holes
+    # Block via placement near ALL through-hole pad holes (including same-net)
+    # Via reuse at pads is handled separately by snapping routes to pad positions
     for pad_net_id, pads in pcb_data.pads_by_net.items():
-        if pad_net_id in exclude_net_ids:
-            continue  # Don't block near our own pads
         for pad in pads:
             if '*.Cu' in pad.layers and pad.drill > 0:  # Through-hole pad with drill
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                # Use pad's drill size for clearance calculation
-                pad_hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + pad.drill / 2))
+                # Use pad's drill size + via drill for clearance calculation
+                # (need to account for both drill radii: pad.drill/2 + clearance + via_drill/2)
+                pad_hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + pad.drill / 2 + config.via_drill / 2))
                 for ex in range(-pad_hole_clearance_grid, pad_hole_clearance_grid + 1):
                     for ey in range(-pad_hole_clearance_grid, pad_hole_clearance_grid + 1):
                         if ex * ex + ey * ey <= pad_hole_clearance_grid * pad_hole_clearance_grid:
@@ -853,7 +1010,8 @@ def add_route_to_obstacles(
     track_width: float,
     clearance: float,
     via_clearance: float,
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    hole_to_hole_clearance: float = 0.3
 ):
     """Add a completed route (segments and vias) to the obstacle map for subsequent routes to avoid."""
     coord = GridCoord(config.grid_step)
@@ -862,7 +1020,7 @@ def add_route_to_obstacles(
     # Block segments on their layers and also block vias along segments
     route_expansion_mm = track_width + clearance
     route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
-    via_seg_expansion_mm = config.via_size / 2 + clearance
+    via_seg_expansion_mm = config.via_size / 2 + track_width / 2 + clearance
     via_seg_expansion_grid = max(1, coord.to_grid_dist(via_seg_expansion_mm))
 
     for i in range(len(route_points) - 1):
@@ -876,19 +1034,23 @@ def add_route_to_obstacles(
             # Also block vias along this segment
             _block_line_vias(obstacles, gx1, gy1, gx2, gy2, via_seg_expansion_grid)
 
-    # Block vias on all layers (through-hole) and also block via placement
+    # Block vias on all layers (through-hole) for track routing clearance
     via_radius = coord.to_grid_dist(via_clearance)
+    # Block via placement with hole-to-hole clearance (prevents new vias too close to these)
+    hole_clearance_radius = coord.to_grid_dist(hole_to_hole_clearance + config.via_drill)
+
     for vx, vy in via_positions:
         gx, gy = coord.to_grid(vx, vy)
+        # Block track routing around vias
         for layer_idx in range(num_layers):
             for ex in range(-via_radius, via_radius + 1):
                 for ey in range(-via_radius, via_radius + 1):
                     if ex * ex + ey * ey <= via_radius * via_radius:
                         obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-        # Also block via placement at this location
-        for ex in range(-via_radius, via_radius + 1):
-            for ey in range(-via_radius, via_radius + 1):
-                if ex * ex + ey * ey <= via_radius * via_radius:
+        # Block via placement with proper hole-to-hole clearance
+        for ex in range(-hole_clearance_radius, hole_clearance_radius + 1):
+            for ey in range(-hole_clearance_radius, hole_clearance_radius + 1):
+                if ex * ex + ey * ey <= hole_clearance_radius * hole_clearance_radius:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
 
 

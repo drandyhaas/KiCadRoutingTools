@@ -447,7 +447,7 @@ The plane generation code is organized into several modules:
 
 ## Repairing Disconnected Plane Regions
 
-After power planes are created, regions may become effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects these disconnected regions and routes wide, short tracks between them to ensure electrical continuity.
+After power planes are created, regions may become effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects these disconnected regions and routes tracks between them to ensure electrical continuity.
 
 ### Basic Usage
 
@@ -461,19 +461,179 @@ python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
 
 # Customize track width and clearance
 python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
-    --track-width 0.5 --clearance 0.2
+    --max-track-width 1.0 --clearance 0.2
+
+# Increase iterations for difficult routes
+python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
+    --max-iterations 500000
 ```
+
+### Command-Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--nets`, `-n` | auto | Net name(s) to process. If omitted, all nets with zones are processed |
+| `--plane-layers`, `-l` | auto | Layer(s) to process. If omitted, all layers with zones are processed |
+| `--routing-layers`, `-r` | all Cu | Layer(s) available for routing |
+| `--max-track-width` | 2.0 | Maximum track width for connections (mm) |
+| `--min-track-width` | 0.2 | Minimum track width for connections (mm) |
+| `--track-width` | 0.2 | Default track width for routing config (mm) |
+| `--clearance` | 0.2 | Trace-to-trace clearance (mm) |
+| `--zone-clearance` | 0.2 | Zone fill clearance around obstacles (mm) |
+| `--track-via-clearance` | 0.8 | Clearance from tracks to other nets' vias (mm) |
+| `--hole-to-hole-clearance` | 0.3 | Minimum clearance between drill holes (mm) |
+| `--board-edge-clearance` | 0.5 | Clearance from board edge (mm) |
+| `--via-size` | 0.5 | Via outer diameter (mm) |
+| `--via-drill` | 0.4 | Via drill diameter (mm) |
+| `--max-via-reuse-radius` | 3×via-size | Max distance to reuse existing via instead of adding new one |
+| `--grid-step` | 0.1 | Routing grid step (mm) |
+| `--analysis-grid-step` | 0.5 | Grid step for connectivity analysis (coarser = faster) |
+| `--max-iterations` | 200000 | Maximum A* iterations per route attempt |
+| `--dry-run` | off | Analyze without writing output |
+| `--verbose`, `-v` | off | Print detailed debug messages |
+| `--debug-lines` | off | Add debug lines on User.4 layer showing route paths |
 
 ### How It Works
 
-1. **Region detection** - Uses flood fill on a coarse grid to identify disconnected regions within each zone
-2. **Anchor point identification** - Finds vias and pads in each region as connection points
-3. **Region routing** - Routes wide tracks between regions using A* pathfinding
-4. **Iterative repair** - Continues until all regions are connected or no more connections are possible
+#### 1. Region Detection (Flood Fill)
+
+Uses flood fill on a coarse grid (`--analysis-grid-step`) to identify disconnected regions:
+
+1. Build obstacle grid from other nets' vias, traces, and pads
+2. Mark cells blocked by obstacles (with clearance)
+3. Find all anchor points (vias + through-hole pads) for the target net
+4. Flood fill from each anchor to identify connected regions
+5. Group anchors by their connected region
+
+#### 2. MST-Based Region Selection
+
+Uses Kruskal's algorithm to build a Minimum Spanning Tree connecting all regions:
+
+1. For each pair of regions, find the closest anchor points
+2. Sort edges by distance
+3. Build MST using union-find, selecting edges that connect previously unconnected regions
+
+This ensures we connect all regions with minimum total trace length.
+
+#### 3. Multi-Point A* Routing
+
+For each MST edge connecting two regions, the router uses **multi-point A*** with all anchors from each region:
+
+```
+Region A (N anchors) <-> Region B (M anchors)
+```
+
+Instead of routing between the single closest pair, the router:
+1. Sets ALL N anchors from region A as source cells
+2. Sets ALL M anchors from region B as target cells
+3. A* expands from all sources simultaneously, finding the best path to ANY target
+
+This allows the router to find viable paths even when the closest anchor pair is blocked.
+
+#### 4. Bidirectional Routing
+
+If the forward search fails, the router tries the reverse direction:
+
+1. **Direction 1:** Region A sources → Region B targets
+2. **Direction 2:** Region B sources → Region A targets (if direction 1 fails)
+
+A* can find different paths depending on which direction it expands from, so trying both directions increases success rate.
+
+#### 5. Open-Space Fallback
+
+If both directions fail, the router looks for "open space" points with maximum clearance:
+
+1. Search near each region's centroid for cells with maximum distance from obstacles
+2. Add these open-space points as additional anchors
+3. Retry routing with the augmented anchor sets
+
+If successful via an open-space point, a via is placed there to connect the route.
+
+```
+Example output:
+[42/59] Region 6 (37 anchors) <-> Region 23 (2 anchors)... OK width=0.20mm, length=2.1mm (via open-space)
+```
+
+#### 6. Via Reuse
+
+Instead of placing new vias at every layer transition, the router reuses existing vias and through-hole pads from the same net:
+
+1. At each layer transition, check for existing vias within `--max-via-reuse-radius`
+2. If found, snap the route to the existing via position
+3. Remove intermediate route points near the reused via to avoid zigzag paths
+
+This reduces via count and avoids hole-to-hole clearance violations.
+
+#### 7. Incremental Obstacle Updates
+
+After each successful route:
+
+1. Add the route's segments to the obstacle map (blocks future routes)
+2. Add new vias to the obstacle map with proper clearances:
+   - Track-to-via clearance for routing
+   - Hole-to-hole clearance for via placement
+3. Add new vias to the reusable via list for subsequent routes
+
+### Example Output
+
+```
+Loading PCB from input.kicad_pcb...
+Board bounds: (71.12, 55.88) to (228.60, 147.32)
+
+Routing disconnected plane regions
+============================================================
+
+[GND] on B.Cu:
+  Building obstacle map... done
+  Found 12 disconnected regions (47 total anchors)
+  Routing 11 connection(s) to join regions...
+    [1/11] Region 0 (5 anchors) <-> Region 1 (3 anchors)... OK width=0.20mm, length=5.2mm
+    [2/11] Region 0 (5 anchors) <-> Region 2 (8 anchors)... OK width=0.20mm, length=3.1mm
+    [3/11] Region 2 (8 anchors) <-> Region 3 (2 anchors)... OK width=0.20mm, length=8.4mm (via open-space)
+    ...
+  Result: 10/11 routes succeeded, 1 failed
+
+[+3.3V] on In1.Cu:
+  Building obstacle map... done
+  Found 8 disconnected regions (32 total anchors)
+  ...
+
+============================================================
+SUMMARY
+============================================================
+  Zones processed: 2
+  Total routes added: 18
+  Total vias added: 12
+```
+
+### Why Routes Fail
+
+Routes can fail for several reasons:
+
+1. **All anchors blocked** - If every anchor point in a region is surrounded by obstacles with no path out
+2. **Iteration limit reached** - Complex routes may exceed `--max-iterations` before finding a path
+3. **No viable path exists** - Dense obstacle configurations may completely block all paths between regions
+
+Increasing `--max-iterations` can help with complex routes. Reducing `--analysis-grid-step` provides finer region detection but is slower.
 
 ### Code Organization
 
 | Module | Description |
 |--------|-------------|
 | `route_disconnected_planes.py` | CLI and orchestration - loads PCB, detects zones, coordinates region repair |
-| `plane_region_connector.py` | Region detection and routing - flood fill analysis, A* routing between regions |
+| `plane_region_connector.py` | Region detection and routing - flood fill analysis, multi-point A* routing, open-space fallback |
+
+### Key Functions
+
+**route_disconnected_planes.py:**
+- `route_planes()` - Main orchestration: loads PCB, iterates over nets, writes output
+- `auto_detect_zones()` - Scans PCB for existing zones and returns net/layer pairs
+
+**plane_region_connector.py:**
+- `find_disconnected_zone_regions()` - Flood fill to identify regions and their anchors
+- `find_region_connection_points()` - Builds MST edges between regions
+- `route_disconnected_regions()` - Orchestrates routing for one net/layer
+- `route_plane_connection_wide()` - Multi-point A* routing with via reuse
+- `find_open_space_point()` - Finds cell with maximum clearance from obstacles
+- `build_base_obstacles()` - Builds obstacle map for routing
+- `add_route_to_obstacles()` - Incrementally updates obstacles after each route
