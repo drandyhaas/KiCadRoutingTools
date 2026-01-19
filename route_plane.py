@@ -905,7 +905,55 @@ def create_plane(
 
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
 
-            # First check if there's an existing or already-placed via nearby (within reuse radius)
+            # First, try to place via within pad boundary (preferred - no trace needed)
+            # This avoids creating long traces that block other signals
+            # Search from pad center outward within pad bounds
+            pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
+            pad_half_w_grid = max(1, coord.to_grid_dist(pad.size_x / 2))
+            pad_half_h_grid = max(1, coord.to_grid_dist(pad.size_y / 2))
+
+            via_in_pad = None
+            # Check pad center first
+            if not obstacles.is_via_blocked(pad_gx, pad_gy):
+                via_in_pad = (pad.global_x, pad.global_y)
+            else:
+                # Spiral search within pad boundary for closest unblocked position
+                max_r = max(pad_half_w_grid, pad_half_h_grid)
+                for r in range(1, max_r + 1):
+                    if via_in_pad:
+                        break
+                    for dx in range(-r, r + 1):
+                        if via_in_pad:
+                            break
+                        for dy in range(-r, r + 1):
+                            if abs(dx) != r and abs(dy) != r:
+                                continue  # Only check ring edge
+                            # Check if within pad boundary
+                            if abs(dx) > pad_half_w_grid or abs(dy) > pad_half_h_grid:
+                                continue
+                            gx, gy = pad_gx + dx, pad_gy + dy
+                            if not obstacles.is_via_blocked(gx, gy):
+                                # Convert grid back to world coordinates
+                                via_in_pad = (gx * config.grid_step, gy * config.grid_step)
+                                break
+
+            if via_in_pad:
+                # Found position within pad - place via there (no trace needed)
+                new_vias.append({
+                    'x': via_in_pad[0], 'y': via_in_pad[1],
+                    'size': via_size, 'drill': via_drill,
+                    'layers': all_layers, 'net_id': net_id
+                })
+                available_vias.append(via_in_pad)
+                vias_placed += 1
+                if via_in_pad == (pad.global_x, pad.global_y):
+                    print(f"via at pad center")
+                else:
+                    print(f"via at ({via_in_pad[0]:.2f}, {via_in_pad[1]:.2f}) within pad")
+                processed_pad_ids.add(current_pad_key)
+                continue  # Move to next pad
+
+            # Pad center blocked - check if there's an existing via nearby to reuse
             existing_via = find_existing_via_nearby(pad, available_vias, max_via_reuse_radius)
 
             if existing_via:
@@ -943,7 +991,7 @@ def create_plane(
                     processed_pad_ids.add(current_pad_key)
                     continue  # Move to next pad
 
-            # Need to place a new via (either no existing via, or reuse failed)
+            # Need to place a new via (pad center blocked, and either no existing via or reuse failed)
             routing_obs = get_routing_obstacles(pad_layer) if pad_layer else None
             failed_route_positions: Set[Tuple[int, int]] = set()  # Track failed positions for this pad
             via_pos = find_via_position(
