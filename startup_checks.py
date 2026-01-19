@@ -93,57 +93,17 @@ def check_rust_library():
     # Check if rebuild is needed
     needs_rebuild = False
     if installed_version is None:
-        print("Rust router module not found - building...")
+        print("Rust router module not found")
         needs_rebuild = True
     elif installed_version != cargo_version:
         print(f"Rust router version mismatch: installed={installed_version}, Cargo.toml={cargo_version}")
-        print("Rebuilding...")
         needs_rebuild = True
 
     if needs_rebuild:
-        # On Windows, the DLL is locked once imported, so we can't rebuild in-process
-        if sys.platform == 'win32' and installed_version is not None:
-            print("\nERROR: Cannot rebuild while the library is loaded (Windows limitation).")
-            print("Please run the build manually in a new terminal:")
-            print("  python build_router.py")
-            print("\nThen re-run your command.")
-            sys.exit(1)
-
-        # Run build_router.py to rebuild
-        build_script = os.path.join(script_dir, 'build_router.py')
-        if not os.path.exists(build_script):
-            print("ERROR: build_router.py not found!")
-            print("Build the Rust router manually with:")
-            print("  cd rust_router && cargo build --release")
-            sys.exit(1)
-
-        import subprocess
-        result = subprocess.run([sys.executable, build_script], capture_output=False)
-        if result.returncode != 0:
-            print("ERROR: Rust router build failed!")
-            sys.exit(1)
-
-        # Force reimport after rebuild
-        if 'grid_router' in sys.modules:
-            del sys.modules['grid_router']
-
-        try:
-            import grid_router
-            installed_version = getattr(grid_router, '__version__', 'unknown')
-        except ImportError as e:
-            print(f"ERROR: Rust router module still not found after rebuild: {e}")
-            sys.exit(1)
-
-        # Verify version after rebuild
-        if installed_version != cargo_version:
-            print(f"ERROR: Version still mismatched after rebuild!")
-            print(f"  Installed: {installed_version}")
-            print(f"  Expected:  {cargo_version}")
-            print("This may indicate a problem with the Rust library's __version__ attribute.")
-            sys.exit(1)
-
-        print(f"Successfully rebuilt Rust router v{installed_version}")
-
+        print("Please run:")
+        print("  python build_router.py")
+        print("\nThen re-run your command.")
+        sys.exit(1)
     return installed_version
 
 
