@@ -115,7 +115,9 @@ def build_via_obstacle_map(
     obstacles = GridObstacleMap(num_layers)
 
     # Precompute expansion for via-via clearance (squared, in grid units)
-    via_via_expansion_mm = config.via_size + config.clearance
+    # Add half grid step cushion to account for grid discretization
+    grid_cushion = config.grid_step / 2
+    via_via_expansion_mm = config.via_size + config.clearance + grid_cushion
     via_via_radius_sq = (via_via_expansion_mm / config.grid_step) ** 2
     via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
 
@@ -137,7 +139,8 @@ def build_via_obstacle_map(
         if not seg.layer.endswith('.Cu'):
             continue
         # Use actual segment width for clearance calculation (not config.track_width)
-        seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
+        # Include grid cushion for discretization
+        seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance + grid_cushion
         _add_segment_via_obstacle(obstacles, seg, coord, seg_expansion_mm)
 
     # Add pads as obstacles (excluding target net pads)
