@@ -338,15 +338,16 @@ def analyze_static_blockers(
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id in nets_to_route:
             continue
-        net_name = pcb_data.net_names.get(net_id, f"Net {net_id}")
+        net = pcb_data.nets.get(net_id)
+        net_name = net.name if net else f"Net {net_id}"
         for pad in pads:
             # Get pad grid area
-            pad_gx, pad_gy = coord.to_grid(pad.x, pad.y)
+            pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
 
             # Calculate pad expansion (matches obstacle_map.py formula)
             # margin = track_width/2 + clearance (route needs half-width from center + clearance from pad edge)
-            pad_half_w = pad.width / 2
-            pad_half_h = pad.height / 2
+            pad_half_w = pad.size_x / 2
+            pad_half_h = pad.size_y / 2
             margin = config.track_width / 2 + config.clearance
             expand_x = max(1, coord.to_grid_dist(pad_half_w + margin))
             expand_y = max(1, coord.to_grid_dist(pad_half_h + margin))
@@ -360,7 +361,7 @@ def analyze_static_blockers(
                 if abs(gx - pad_gx) <= expand_x and abs(gy - pad_gy) <= expand_y:
                     if net_name not in pad_blockers:
                         pad_blockers[net_name] = set()
-                    pad_blockers[net_name].add(pad.ref)
+                    pad_blockers[net_name].add(pad.component_ref)
                     break  # Found blocking, move to next pad
 
     # Format pad blockers
@@ -395,7 +396,8 @@ def analyze_static_blockers(
             min_gy = min(gy1, gy2) - expansion_grid
             max_gy = max(gy1, gy2) + expansion_grid
             if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
-                net_name = pcb_data.net_names.get(seg.net_id, f"Net {seg.net_id}")
+                net = pcb_data.nets.get(seg.net_id)
+                net_name = net.name if net else f"Net {seg.net_id}"
                 track_blockers.add(net_name)
                 break
 

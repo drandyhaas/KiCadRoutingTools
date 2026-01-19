@@ -36,6 +36,51 @@ except ImportError:
     VisualRouter = None
 
 
+def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: str, print_prefix: str = "", track_margin: int = 0):
+    """
+    Diagnose why routing couldn't start from the given cells.
+
+    Checks blocking status of start cells and their immediate neighbors.
+    """
+    if not cells:
+        print(f"{print_prefix}  {label}: no cells to check")
+        return
+
+    # Check a sample of cells (first few)
+    sample_cells = cells[:3] if len(cells) > 3 else cells
+
+    for gx, gy, layer in sample_cells:
+        # Check if the cell itself is blocked
+        cell_blocked = obstacles.is_blocked(gx, gy, layer)
+
+        # Check neighbors (8-connected)
+        blocked_neighbors = 0
+        total_neighbors = 0
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                total_neighbors += 1
+                # Check with margin if specified
+                if track_margin > 0:
+                    neighbor_blocked = False
+                    for mx in range(-track_margin, track_margin + 1):
+                        for my in range(-track_margin, track_margin + 1):
+                            if obstacles.is_blocked(gx + dx + mx, gy + dy + my, layer):
+                                neighbor_blocked = True
+                                break
+                        if neighbor_blocked:
+                            break
+                else:
+                    neighbor_blocked = obstacles.is_blocked(gx + dx, gy + dy, layer)
+                if neighbor_blocked:
+                    blocked_neighbors += 1
+
+        status = "BLOCKED" if cell_blocked else "ok"
+        margin_str = f" (margin={track_margin})" if track_margin > 0 else ""
+        print(f"{print_prefix}  {label} cell ({gx}, {gy}, layer={layer}): {status}, {blocked_neighbors}/{total_neighbors} neighbors blocked{margin_str}")
+
+
 def _probe_route_with_frontier(
     router: 'GridRouter',
     obstacles: 'GridObstacleMap',
@@ -129,10 +174,14 @@ def _probe_route_with_frontier(
         # At least one probe didn't reach max - that direction is stuck, skip full search
         if not first_reached_max and not second_reached_max:
             print(f"{print_prefix}Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
+            _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin)
+            _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin)
         elif not first_reached_max:
             print(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
+            _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin)
         else:
             print(f"{print_prefix}{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
+            _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin)
         fwd_iters, bwd_iters = get_fwd_bwd_iters()
         return None, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 
@@ -263,10 +312,14 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 # At least one probe didn't reach max - that direction is stuck, skip full search
                 if not first_reached_max and not second_reached_max:
                     print(f"Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
+                    _diagnose_blocked_start(obstacles, first_sources, first_label, "", track_margin)
+                    _diagnose_blocked_start(obstacles, second_sources, second_label, "", track_margin)
                 elif not first_reached_max:
                     print(f"{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
+                    _diagnose_blocked_start(obstacles, first_sources, first_label, "", track_margin)
                 else:
                     print(f"{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
+                    _diagnose_blocked_start(obstacles, second_sources, second_label, "", track_margin)
             else:
                 # Both probes reached max - do full search on first direction
                 print(f"Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
@@ -1107,7 +1160,7 @@ def route_multipoint_taps(
         current_global = global_offset + edges_routed + len(failed_edges) + 1
         total_failed = global_failed + len(failed_edges)
         fail_str = f" ({total_failed} failed)" if total_failed > 0 else ""
-        print(f"    [{current_global}/{global_total}]{fail_str} Routing MST edge: pad {src_idx} -> pad {tgt_idx} (length={edge_len:.2f}mm)")
+        print(f"    [{current_global}/{global_total}]{fail_str} Routing MST edge: pad {src_idx} -> pad {tgt_idx} (length={edge_len:.2f}mm) target=({tgt_pad[3]:.2f}, {tgt_pad[4]:.2f})")
 
         # Get target pad coordinates
         tgt_x, tgt_y = tgt_pad[3], tgt_pad[4]

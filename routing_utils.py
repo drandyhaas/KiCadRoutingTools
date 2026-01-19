@@ -109,14 +109,28 @@ def iter_pad_blocked_cells(
     Yields:
         (gx, gy) tuples for each blocked cell
     """
-    expand_x = int(math.ceil((half_width + margin) / grid_step))
-    expand_y = int(math.ceil((half_height + margin) / grid_step))
+    # Add half grid step buffer in corner regions to account for grid discretization
+    # (a track through a cell could be grid_step/2 closer to the pad than the cell center)
+    corner_buffer = grid_step / 2 if corner_radius > 0 else 0
+    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step))
+    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step))
     margin_sq = margin * margin
+    buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
+
+    # Inner rectangle bounds (where corners start)
+    inner_half_w = half_width - corner_radius if corner_radius > 0 else half_width
+    inner_half_h = half_height - corner_radius if corner_radius > 0 else half_height
 
     for ex in range(-expand_x, expand_x + 1):
         for ey in range(-expand_y, expand_y + 1):
             cell_x = ex * grid_step
             cell_y = ey * grid_step
+            abs_x, abs_y = abs(cell_x), abs(cell_y)
+
+            # Use buffered margin only in corner regions of roundrect pads
+            in_corner = corner_radius > 0 and abs_x > inner_half_w and abs_y > inner_half_h
+            effective_margin_sq = buffered_margin_sq if in_corner else margin_sq
+
             dist_sq = dist_sq_to_rounded_rect(cell_x, cell_y, half_width, half_height, corner_radius)
-            if dist_sq < margin_sq:
+            if dist_sq < effective_margin_sq:
                 yield (pad_gx + ex, pad_gy + ey)

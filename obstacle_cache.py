@@ -11,7 +11,7 @@ import numpy as np
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map
+from routing_utils import build_layer_map, iter_pad_blocked_cells
 from net_queries import expand_pad_layers
 
 # Import Rust router
@@ -205,30 +205,30 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
                             config: GridRouteConfig, extra_clearance: float,
                             blocked_cells: Set[Tuple[int, int, int]],
                             blocked_vias: Set[Tuple[int, int]]):
-    """Collect pad obstacle cells into sets (no obstacle map modification)."""
-    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    """Collect pad obstacle cells into sets (no obstacle map modification).
 
-    half_x_mm = pad.size_x / 2 + config.track_width / 2 + config.clearance + extra_clearance
-    half_y_mm = pad.size_y / 2 + config.track_width / 2 + config.clearance + extra_clearance
-    expand_x = coord.to_grid_dist(half_x_mm)
-    expand_y = coord.to_grid_dist(half_y_mm)
+    Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
+    """
+    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    half_width = pad.size_x / 2
+    half_height = pad.size_y / 2
+    margin = config.track_width / 2 + config.clearance + extra_clearance
+    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0
 
     expanded_layers = expand_pad_layers(pad.layers, config.layers)
 
-    for ex in range(-expand_x, expand_x + 1):
-        for ey in range(-expand_y, expand_y + 1):
-            for layer in expanded_layers:
-                layer_idx = layer_map.get(layer)
-                if layer_idx is not None:
-                    blocked_cells.add((gx + ex, gy + ey, layer_idx))
+    # Use shared utility for consistent pad blocking
+    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+        for layer in expanded_layers:
+            layer_idx = layer_map.get(layer)
+            if layer_idx is not None:
+                blocked_cells.add((cell_gx, cell_gy, layer_idx))
 
+    # Via blocking around pads
     if any(layer.endswith('.Cu') for layer in expanded_layers):
-        via_clear_mm = config.via_size / 2 + config.clearance
-        via_expand_x = int((pad.size_x / 2 + via_clear_mm) / config.grid_step)
-        via_expand_y = int((pad.size_y / 2 + via_clear_mm) / config.grid_step)
-        for ex in range(-via_expand_x, via_expand_x + 1):
-            for ey in range(-via_expand_y, via_expand_y + 1):
-                blocked_vias.add((gx + ex, gy + ey))
+        via_margin = config.via_size / 2 + config.clearance
+        for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin, config.grid_step, corner_radius):
+            blocked_vias.add((cell_gx, cell_gy))
 
 
 def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: GridRouteConfig,

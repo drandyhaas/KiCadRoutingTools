@@ -314,13 +314,15 @@ def point_to_rect_distance(px: float, py: float, cx: float, cy: float,
 
 
 def segment_to_rect_distance(x1: float, y1: float, x2: float, y2: float,
-                             cx: float, cy: float, half_x: float, half_y: float) -> Tuple[float, Tuple[float, float]]:
+                             cx: float, cy: float, half_x: float, half_y: float,
+                             corner_radius: float = 0.0) -> Tuple[float, Tuple[float, float]]:
     """Calculate minimum distance from a segment to an axis-aligned rectangle.
 
     Args:
         x1, y1, x2, y2: Segment endpoints
         cx, cy: Rectangle center coordinates
         half_x, half_y: Rectangle half-widths
+        corner_radius: Radius of rounded corners (0 for sharp corners)
 
     Returns:
         (distance, closest_point_on_segment)
@@ -336,7 +338,7 @@ def segment_to_rect_distance(x1: float, y1: float, x2: float, y2: float,
         t = i / num_samples
         px = x1 + t * (x2 - x1)
         py = y1 + t * (y2 - y1)
-        dist = point_to_rect_distance(px, py, cx, cy, half_x, half_y)
+        dist = point_to_rect_distance(px, py, cx, cy, half_x, half_y, corner_radius)
         if dist < min_dist:
             min_dist = dist
             closest_pt = (px, py)
@@ -366,10 +368,14 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
     if seg.layer not in expanded_layers:
         return False, 0.0, None
 
-    # Calculate distance from segment to rectangular pad
+    # Corner radius for roundrect pads
+    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0.0
+
+    # Calculate distance from segment to rectangular pad (with optional rounded corners)
     dist_to_pad, closest_pt = segment_to_rect_distance(
         seg.start_x, seg.start_y, seg.end_x, seg.end_y,
-        pad.global_x, pad.global_y, pad.size_x / 2, pad.size_y / 2
+        pad.global_x, pad.global_y, pad.size_x / 2, pad.size_y / 2,
+        corner_radius
     )
 
     # Required clearance: segment half-width + clearance
