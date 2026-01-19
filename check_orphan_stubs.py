@@ -19,9 +19,8 @@ Examples:
 """
 
 import argparse
-import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Set, Tuple, Dict, List, Optional
 
 # Add current directory to path for imports
@@ -34,73 +33,26 @@ def load_pcb_data(filename: str):
     return parse_kicad_pcb(filename)
 
 
-def get_net_id(content: str, net_name: str) -> Optional[str]:
-    """Find net ID for a given net name."""
-    match = re.search(rf'\(net (\d+) "{re.escape(net_name)}"\)', content)
-    return match.group(1) if match else None
+class SpatialIndex:
+    """Simple grid-based spatial index for fast proximity queries."""
 
+    def __init__(self, points: Set[Tuple[float, float]], cell_size: float = 0.5):
+        self.cell_size = cell_size
+        self.grid: Dict[Tuple[int, int], List[Tuple[float, float]]] = defaultdict(list)
+        for pt in points:
+            cell = (int(pt[0] / cell_size), int(pt[1] / cell_size))
+            self.grid[cell].append(pt)
 
-def get_vias_for_net(content: str, net_id: str) -> Set[Tuple[float, float]]:
-    """Get all via positions for a given net."""
-    vias = set()
-    pattern = r'\(via\s+\(at\s+([\d.]+)\s+([\d.]+)\)[^(]*(?:\([^)]+\)\s*)*\(net\s+' + net_id + r'\)'
-    for m in re.finditer(pattern, content):
-        vias.add((float(m.group(1)), float(m.group(2))))
-    return vias
-
-
-def get_segments_for_net_layer(content: str, net_id: str, layer: str) -> List[Dict]:
-    """Get all segments for a given net and layer."""
-    segments = []
-    pattern = rf'\(segment\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)\s+\(width[^)]+\)\s+\(layer\s+"{re.escape(layer)}"\)\s+\(net\s+{net_id}\)'
-    for m in re.finditer(pattern, content):
-        segments.append({
-            'start': (float(m.group(1)), float(m.group(2))),
-            'end': (float(m.group(3)), float(m.group(4)))
-        })
-    return segments
-
-
-def get_through_hole_pads(pcb_data, net_name: str) -> Set[Tuple[float, float]]:
-    """Get through-hole pad positions for a given net."""
-    pads = set()
-    for nid, net in pcb_data.nets.items():
-        if net.name == net_name:
-            for pad in net.pads:
-                # Through-hole if has drill or is on all copper layers
-                if pad.drill > 0 or '*.Cu' in pad.layers:
-                    pads.add((pad.global_x, pad.global_y))
-    return pads
-
-
-def get_layer_pads(pcb_data, net_name: str, layer: str) -> Set[Tuple[float, float]]:
-    """Get pad positions for a given net on a specific layer (including SMD pads)."""
-    pads = set()
-    for nid, net in pcb_data.nets.items():
-        if net.name == net_name:
-            for pad in net.pads:
-                # Include pads that are on this specific layer or on all layers
-                if layer in pad.layers or '*.Cu' in pad.layers:
-                    pads.add((pad.global_x, pad.global_y))
-    return pads
-
-
-def find_single_endpoints(segments: List[Dict]) -> List[Tuple[float, float]]:
-    """Find endpoints that appear only once (degree-1 nodes)."""
-    endpoints = Counter()
-    for seg in segments:
-        endpoints[seg['start']] += 1
-        endpoints[seg['end']] += 1
-    return [pt for pt, count in endpoints.items() if count == 1]
-
-
-def is_near_any(pt: Tuple[float, float], points: Set[Tuple[float, float]],
-                tolerance: float = 0.15) -> bool:
-    """Check if point is near any point in the set."""
-    for p in points:
-        if abs(pt[0] - p[0]) < tolerance and abs(pt[1] - p[1]) < tolerance:
-            return True
-    return False
+    def has_nearby(self, pt: Tuple[float, float], tolerance: float = 0.15) -> bool:
+        """Check if any point is within tolerance of pt."""
+        cx, cy = int(pt[0] / self.cell_size), int(pt[1] / self.cell_size)
+        # Check the cell and all 8 neighbors
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for p in self.grid.get((cx + dx, cy + dy), ()):
+                    if abs(pt[0] - p[0]) < tolerance and abs(pt[1] - p[1]) < tolerance:
+                        return True
+        return False
 
 
 def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
@@ -110,58 +62,84 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
 
     Returns dict of net_name -> {layer: set of orphan positions}
     """
-    with open(filename, 'r') as f:
-        content = f.read()
-
     pcb_data = load_pcb_data(filename)
 
+    # Build lookup structures once
+    # Vias by net_id
+    vias_by_net: Dict[int, Set[Tuple[float, float]]] = defaultdict(set)
+    for via in pcb_data.vias:
+        vias_by_net[via.net_id].add((via.x, via.y))
+
+    # Segments by (net_id, layer)
+    segments_by_net_layer: Dict[Tuple[int, str], List[Dict]] = defaultdict(list)
+    for seg in pcb_data.segments:
+        segments_by_net_layer[(seg.net_id, seg.layer)].append({
+            'start': (seg.start_x, seg.start_y),
+            'end': (seg.end_x, seg.end_y)
+        })
+
     # Determine which nets to check
-    nets_to_check = []
     if net_name:
-        nets_to_check = [net_name]
+        # Find net_id for the given name
+        nets_to_check = [(nid, net) for nid, net in pcb_data.nets.items() if net.name == net_name]
     else:
-        # Check all nets
-        for nid, net in pcb_data.nets.items():
-            if net.name:
-                nets_to_check.append(net.name)
+        # Check all nets with segments
+        nets_with_segments = {key[0] for key in segments_by_net_layer.keys()}
+        nets_to_check = [(nid, net) for nid, net in pcb_data.nets.items()
+                         if net.name and nid in nets_with_segments]
 
     # Determine which layers to check
     layers_to_check = [layer] if layer else ['F.Cu', 'B.Cu', 'In1.Cu', 'In2.Cu']
 
     results = {}
 
-    for net in nets_to_check:
-        net_id = get_net_id(content, net)
-        if not net_id:
-            continue
+    for net_id, net in nets_to_check:
+        vias = vias_by_net[net_id]
 
-        vias = get_vias_for_net(content, net_id)
-        through_hole_pads = get_through_hole_pads(pcb_data, net)
+        # Get through-hole pads (drill > 0 or *.Cu in layers)
+        through_hole_pads = set()
+        for pad in net.pads:
+            if pad.drill > 0 or '*.Cu' in pad.layers:
+                through_hole_pads.add((pad.global_x, pad.global_y))
 
         net_results = {}
         for lyr in layers_to_check:
-            segments = get_segments_for_net_layer(content, net_id, lyr)
+            segments = segments_by_net_layer.get((net_id, lyr), [])
             if not segments:
                 continue
 
-            single_endpoints = find_single_endpoints(segments)
+            # Find single endpoints (degree-1 nodes)
+            endpoints = Counter()
+            for seg in segments:
+                endpoints[seg['start']] += 1
+                endpoints[seg['end']] += 1
+            single_endpoints = [pt for pt, count in endpoints.items() if count == 1]
+
+            if not single_endpoints:
+                continue
 
             # Get layer-specific pads (including SMD pads on this layer)
-            layer_pads = get_layer_pads(pcb_data, net, lyr)
+            layer_pads = set()
+            for pad in net.pads:
+                if lyr in pad.layers or '*.Cu' in pad.layers:
+                    layer_pads.add((pad.global_x, pad.global_y))
+
             # Combined valid endpoints: vias, through-hole pads, or layer-specific pads
             all_valid_endpoints = vias | through_hole_pads | layer_pads
 
-            # Find orphans - not near any valid endpoint
-            orphans = set()
-            for pt in single_endpoints:
-                if not is_near_any(pt, all_valid_endpoints):
-                    orphans.add(pt)
+            if not all_valid_endpoints:
+                # All single endpoints are orphans
+                orphans = set(single_endpoints)
+            else:
+                # Use spatial index for fast proximity queries
+                spatial_idx = SpatialIndex(all_valid_endpoints)
+                orphans = {pt for pt in single_endpoints if not spatial_idx.has_nearby(pt)}
 
             if orphans:
                 net_results[lyr] = orphans
 
         if net_results:
-            results[net] = net_results
+            results[net.name] = net_results
 
     return results
 
