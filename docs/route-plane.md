@@ -489,6 +489,8 @@ python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
 | `--grid-step` | 0.1 | Routing grid step (mm) |
 | `--analysis-grid-step` | 0.5 | Grid step for connectivity analysis (coarser = faster) |
 | `--max-iterations` | 200000 | Maximum A* iterations per route attempt |
+| `--open-space-points` | 3 | Number of open-space via candidates to try per region |
+| `--blocked-anchor-alternatives` | 3 | Number of alternative positions to try for blocked anchors |
 | `--dry-run` | off | Analyze without writing output |
 | `--verbose`, `-v` | off | Print detailed debug messages |
 | `--debug-lines` | off | Add debug lines on User.4 layer showing route paths |
@@ -539,13 +541,25 @@ If the forward search fails, the router tries the reverse direction:
 
 A* can find different paths depending on which direction it expands from, so trying both directions increases success rate.
 
-#### 5. Open-Space Fallback
+#### 5. Blocked Anchor Expansion
 
-If both directions fail, the router looks for "open space" points with maximum clearance:
+Before routing, the algorithm checks if any anchor points are blocked (surrounded by other nets' obstacles). For blocked anchors, it searches for nearby unblocked cells:
+
+1. For each anchor, check if its grid cell is blocked
+2. If blocked, search outward in expanding radius for unblocked cells
+3. Add multiple alternative positions per blocked anchor (`--blocked-anchor-alternatives`)
+4. Use these expanded anchor sets for routing
+
+This handles cases where a region's anchors are completely surrounded by other nets but there's open space nearby.
+
+#### 6. Open-Space Fallback
+
+If routing still fails after blocked anchor expansion, the router looks for "open space" points with maximum clearance:
 
 1. Search near each region's centroid for cells with maximum distance from obstacles
-2. Add these open-space points as additional anchors
-3. Retry routing with the augmented anchor sets
+2. Find multiple candidates (`--open-space-points`) in each region
+3. Try various combinations: open points in source region, target region, or both
+4. Retry routing with the augmented anchor sets
 
 If successful via an open-space point, a via is placed there to connect the route.
 
