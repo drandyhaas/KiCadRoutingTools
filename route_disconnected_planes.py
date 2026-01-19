@@ -24,11 +24,11 @@ from typing import List, Tuple, Dict, Optional
 from startup_checks import run_all_checks
 run_all_checks()
 
-from kicad_parser import parse_kicad_pcb, PCBData, Segment
-from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr
+from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via
+from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
-from plane_region_connector import route_disconnected_regions
+from plane_region_connector import route_disconnected_regions, build_base_obstacles, add_route_to_obstacles
 
 
 def auto_detect_zones(
@@ -89,7 +89,8 @@ def route_planes(
     via_drill: float = 0.3,
     verbose: bool = False,
     dry_run: bool = False,
-    debug_lines: bool = False
+    debug_lines: bool = False,
+    routing_layers: Optional[List[str]] = None
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -111,6 +112,7 @@ def route_planes(
         via_drill: Via drill diameter for config (mm)
         verbose: Print detailed debug info
         dry_run: Analyze without writing output
+        routing_layers: List of layers that can be used for routing (if None, auto-detect from PCB)
 
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
@@ -157,10 +159,19 @@ def route_planes(
         grid_step=grid_step
     )
 
+    # Auto-detect routing layers if not specified
+    if routing_layers is None:
+        routing_layers = pcb_data.board_info.copper_layers
+        if not routing_layers:
+            routing_layers = ['F.Cu', 'B.Cu']  # Fallback
+    print(f"Routing layers: {', '.join(routing_layers)}")
+
     all_new_segments: List[Dict] = []
+    all_new_vias: List[Dict] = []
     all_debug_lines: List[str] = []
     total_routes = 0
     total_regions = 0
+    total_vias = 0
 
     print(f"\n{'='*60}")
     print(f"Routing disconnected plane regions")
@@ -169,13 +180,28 @@ def route_planes(
     for net_name, plane_layer, net_id in zip(net_names, plane_layers, net_ids):
         print(f"\n[{net_name}] on {plane_layer}:")
 
-        region_segments, routes_added, route_paths = route_disconnected_regions(
+        # Build obstacle map for this net - exclude only this net's pads (anchors)
+        # but block all other nets' pads including other plane nets
+        print(f"  Building obstacle map...", end=" ", flush=True)
+        base_obstacles, layer_map = build_base_obstacles(
+            exclude_net_ids={net_id},  # Only exclude current net's pads
+            routing_layers=routing_layers,
+            pcb_data=pcb_data,
+            config=config,
+            track_width=max_track_width,
+            track_via_clearance=track_via_clearance
+        )
+        print("done")
+
+        region_segments, region_vias, routes_added, route_paths = route_disconnected_regions(
             net_id=net_id,
             net_name=net_name,
             plane_layer=plane_layer,
             zone_bounds=zone_bounds,
             pcb_data=pcb_data,
             config=config,
+            base_obstacles=base_obstacles,
+            layer_map=layer_map,
             zone_clearance=zone_clearance,
             max_track_width=max_track_width,
             min_track_width=min_track_width,
@@ -186,8 +212,10 @@ def route_planes(
 
         if routes_added > 0:
             all_new_segments.extend(region_segments)
+            all_new_vias.extend(region_vias)
             total_routes += routes_added
             total_regions += routes_added + 1  # N routes connect N+1 regions
+            total_vias += len(region_vias)
 
             # Generate debug lines for this net's routes
             if debug_lines and route_paths:
@@ -206,12 +234,23 @@ def route_planes(
                     width=s['width'], layer=s['layer'], net_id=s['net_id']
                 ))
 
+            # Add vias to pcb_data so subsequent nets see them as obstacles
+            for v in region_vias:
+                pcb_data.vias.append(Via(
+                    x=v['x'], y=v['y'],
+                    size=v['size'], drill=v['drill'],
+                    layers=['F.Cu', 'B.Cu'],  # Through-hole vias
+                    net_id=v['net_id']
+                ))
+
     # Print summary
     print(f"\n{'='*60}")
     print(f"SUMMARY")
     print(f"{'='*60}")
     print(f"  Zones processed: {len(net_names)}")
     print(f"  Total routes added: {total_routes}")
+    if total_vias > 0:
+        print(f"  Total vias added: {total_vias}")
     if debug_lines and all_debug_lines:
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
@@ -219,7 +258,7 @@ def route_planes(
         print("\nDry run - no output file written")
     elif total_routes > 0:
         print(f"\nWriting output to {output_file}...")
-        _write_output(input_file, output_file, all_new_segments, all_debug_lines)
+        _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines)
         print(f"Output written to {output_file}")
         print("Note: Open in KiCad and press 'B' to refill zones")
     else:
@@ -232,8 +271,8 @@ def route_planes(
     return (total_routes, total_regions)
 
 
-def _write_output(input_file: str, output_file: str, segments: List[Dict], debug_lines: List[str] = None):
-    """Write the output PCB file with new segments and optional debug lines."""
+def _write_output(input_file: str, output_file: str, segments: List[Dict], vias: List[Dict] = None, debug_lines: List[str] = None):
+    """Write the output PCB file with new segments, vias, and optional debug lines."""
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -249,7 +288,21 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], debug
         )
         segment_sexprs.append(sexpr)
 
-    routing_text = '\n'.join(segment_sexprs)
+    # Generate via S-expressions
+    via_sexprs = []
+    if vias:
+        for via in vias:
+            sexpr = generate_via_sexpr(
+                x=via['x'],
+                y=via['y'],
+                size=via['size'],
+                drill=via['drill'],
+                layers=['F.Cu', 'B.Cu'],  # Through-hole vias
+                net_id=via['net_id']
+            )
+            via_sexprs.append(sexpr)
+
+    routing_text = '\n'.join(segment_sexprs + via_sexprs)
 
     # Add debug lines if provided
     if debug_lines:
@@ -295,6 +348,8 @@ Examples:
                         help="Net name(s) to process. If omitted, all nets with zones are processed.")
     parser.add_argument("--plane-layers", "-l", nargs="+",
                         help="Plane layer(s) to process. If omitted, all layers with zones are processed.")
+    parser.add_argument("--routing-layers", "-r", nargs="+",
+                        help="Layer(s) available for routing (e.g., F.Cu B.Cu). If omitted, all copper layers are used.")
 
     # Track width options
     parser.add_argument("--max-track-width", type=float, default=2.0,
@@ -386,7 +441,8 @@ Examples:
         via_drill=args.via_drill,
         verbose=args.verbose,
         dry_run=args.dry_run,
-        debug_lines=args.debug_lines
+        debug_lines=args.debug_lines,
+        routing_layers=args.routing_layers
     )
 
 

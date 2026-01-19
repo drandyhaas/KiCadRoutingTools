@@ -36,6 +36,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **AI-powered power net analysis** - Use the `/analyze-power-nets` skill to identify power nets and recommend track widths. The skill uses WebSearch to look up component datasheets, classifies components by their role (power source, current sink, pass-through, shunt), traces current paths, and generates ready-to-use `--power-nets` configurations. See [Power Net Analysis](docs/power-nets.md) for details
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
 - **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
+- **Disconnected plane region repair** - After power planes are created, regions may be effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects disconnected regions and routes wide, short tracks between them to ensure electrical continuity
 
 ## Quick Start
 
@@ -98,6 +99,23 @@ python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb -
 
 # Dry run to see what would be placed
 python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
+```
+
+### 3b. Repair Disconnected Plane Regions
+
+After creating power planes, regions may become split by vias and traces from other nets. Use `route_disconnected_planes.py` to reconnect them:
+
+```bash
+# Auto-detect all zones in PCB and repair disconnected regions
+python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+
+# Specific nets and layers
+python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+    --nets GND --plane-layers B.Cu
+
+# Customize track width and clearance
+python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+    --track-width 0.5 --clearance 0.2
 ```
 
 ### 4. Verify Results
@@ -214,12 +232,14 @@ KiCadRoutingTools/
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
 ├── route_plane.py            # Main CLI - power/ground plane via connections
+├── route_disconnected_planes.py  # CLI - repair disconnected plane regions
 ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
 ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
 ├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
 ├── plane_zone_geometry.py    # Voronoi zone computation for multi-net layers
 ├── plane_resistance.py       # Plane resistance and current capacity calculations
 ├── plane_create_helpers.py   # Helper functions for create_plane
+├── plane_region_connector.py # Detect and route between disconnected plane regions
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building
@@ -304,6 +324,7 @@ KiCadRoutingTools/
 | `route.py` | CLI for single-ended routing |
 | `route_diff.py` | CLI for differential pair routing |
 | `route_plane.py` | CLI for power/ground plane via connections |
+| `route_disconnected_planes.py` | CLI for repairing disconnected plane regions |
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |

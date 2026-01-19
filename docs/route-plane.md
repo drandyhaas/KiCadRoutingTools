@@ -444,3 +444,36 @@ The plane generation code is organized into several modules:
 - `calculate_average_width_along_path()` - Samples polygon width perpendicular to path
 - `calculate_resistance()` - Computes R = ρL/Wt
 - `calculate_max_current_ipc()` - Computes max current using IPC-2152 formula
+
+## Repairing Disconnected Plane Regions
+
+After power planes are created, regions may become effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects these disconnected regions and routes wide, short tracks between them to ensure electrical continuity.
+
+### Basic Usage
+
+```bash
+# Auto-detect all zones in PCB and repair disconnected regions
+python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb
+
+# Specific nets and layers
+python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
+    --nets GND --plane-layers B.Cu
+
+# Customize track width and clearance
+python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
+    --track-width 0.5 --clearance 0.2
+```
+
+### How It Works
+
+1. **Region detection** - Uses flood fill on a coarse grid to identify disconnected regions within each zone
+2. **Anchor point identification** - Finds vias and pads in each region as connection points
+3. **Region routing** - Routes wide tracks between regions using A* pathfinding
+4. **Iterative repair** - Continues until all regions are connected or no more connections are possible
+
+### Code Organization
+
+| Module | Description |
+|--------|-------------|
+| `route_disconnected_planes.py` | CLI and orchestration - loads PCB, detects zones, coordinates region repair |
+| `plane_region_connector.py` | Region detection and routing - flood fill analysis, A* routing between regions |
