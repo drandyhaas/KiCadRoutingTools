@@ -183,6 +183,11 @@ def route_planes(
     total_regions = 0
     total_vias = 0
 
+    # Cache for obstacle map - only rebuild when net changes
+    cached_net_id: Optional[int] = None
+    cached_obstacles: Optional[object] = None
+    cached_layer_map: Optional[Dict] = None
+
     print(f"\n{'='*60}")
     print(f"Routing disconnected plane regions")
     print(f"{'='*60}")
@@ -192,17 +197,26 @@ def route_planes(
 
         # Build obstacle map for this net - exclude only this net's pads (anchors)
         # but block all other nets' pads including other plane nets
-        print(f"  Building obstacle map...", end=" ", flush=True)
-        base_obstacles, layer_map = build_base_obstacles(
-            exclude_net_ids={net_id},  # Only exclude current net's pads
-            routing_layers=routing_layers,
-            pcb_data=pcb_data,
-            config=config,
-            track_width=max_track_width,
-            track_via_clearance=track_via_clearance,
-            hole_to_hole_clearance=hole_to_hole_clearance
-        )
-        print("done")
+        # Skip rebuild if net hasn't changed
+        if net_id != cached_net_id:
+            print(f"  Building obstacle map...", end=" ", flush=True)
+            base_obstacles, layer_map = build_base_obstacles(
+                exclude_net_ids={net_id},  # Only exclude current net's pads
+                routing_layers=routing_layers,
+                pcb_data=pcb_data,
+                config=config,
+                track_width=max_track_width,
+                track_via_clearance=track_via_clearance,
+                hole_to_hole_clearance=hole_to_hole_clearance
+            )
+            cached_net_id = net_id
+            cached_obstacles = base_obstacles
+            cached_layer_map = layer_map
+            print("done")
+        else:
+            print(f"  Reusing obstacle map from previous net")
+            base_obstacles = cached_obstacles
+            layer_map = cached_layer_map
 
         region_segments, region_vias, routes_added, route_paths = route_disconnected_regions(
             net_id=net_id,
