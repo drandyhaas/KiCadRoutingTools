@@ -87,6 +87,7 @@ def route_planes(
     board_edge_clearance: float = 0.5,
     via_size: float = 0.5,
     via_drill: float = 0.3,
+    max_via_reuse_radius: Optional[float] = None,
     verbose: bool = False,
     dry_run: bool = False,
     debug_lines: bool = False,
@@ -110,6 +111,7 @@ def route_planes(
         board_edge_clearance: Clearance from board edge (mm)
         via_size: Via outer diameter for config (mm)
         via_drill: Via drill diameter for config (mm)
+        max_via_reuse_radius: Max distance to reuse existing via (default: 3 * via_size)
         verbose: Print detailed debug info
         dry_run: Analyze without writing output
         routing_layers: List of layers that can be used for routing (if None, auto-detect from PCB)
@@ -159,6 +161,10 @@ def route_planes(
         grid_step=grid_step
     )
 
+    # Set default max_via_reuse_radius if not specified (3 * via_size)
+    if max_via_reuse_radius is None:
+        max_via_reuse_radius = 3 * via_size
+
     # Auto-detect routing layers if not specified
     if routing_layers is None:
         routing_layers = pcb_data.board_info.copper_layers
@@ -207,6 +213,7 @@ def route_planes(
             min_track_width=min_track_width,
             track_via_clearance=track_via_clearance,
             analysis_grid_step=analysis_grid_step,
+            max_via_reuse_radius=max_via_reuse_radius,
             verbose=verbose
         )
 
@@ -374,6 +381,8 @@ Examples:
                         help="Via outer diameter in mm (default: 0.5)")
     parser.add_argument("--via-drill", type=float, default=0.3,
                         help="Via drill diameter in mm (default: 0.3)")
+    parser.add_argument("--max-via-reuse-radius", type=float, default=None,
+                        help="Max distance to reuse existing via instead of adding new one (default: 3 * via-size)")
 
     # Grid step
     parser.add_argument("--grid-step", type=float, default=0.1,
@@ -439,6 +448,7 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         via_size=args.via_size,
         via_drill=args.via_drill,
+        max_via_reuse_radius=args.max_via_reuse_radius,
         verbose=args.verbose,
         dry_run=args.dry_run,
         debug_lines=args.debug_lines,

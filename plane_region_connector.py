@@ -361,6 +361,7 @@ def route_disconnected_regions(
     min_track_width: float = 0.2,
     track_via_clearance: float = 0.8,
     analysis_grid_step: float = 0.5,
+    max_via_reuse_radius: float = 1.5,
     verbose: bool = False
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]]]:
     """
@@ -379,6 +380,7 @@ def route_disconnected_regions(
         max_track_width: Maximum track width for connections (mm)
         min_track_width: Minimum track width for connections (mm)
         track_via_clearance: Clearance from track to other nets' vias
+        max_via_reuse_radius: Max distance to reuse existing via/pad (mm)
         verbose: Print debug info
 
     Returns:
@@ -416,6 +418,14 @@ def route_disconnected_regions(
         return [], [], 0, []
     routing_layers = list(layer_map.keys())
 
+    # Build list of existing vias and through-hole pads from this net (can be reused as layer transitions)
+    net_vias: List[Tuple[float, float]] = [(v.x, v.y) for v in pcb_data.vias if v.net_id == net_id]
+    # Add through-hole pads from this net (they connect all layers like vias)
+    if net_id in pcb_data.pads_by_net:
+        for pad in pcb_data.pads_by_net[net_id]:
+            if '*.Cu' in pad.layers:  # Through-hole pad
+                net_vias.append((pad.global_x, pad.global_y))
+
     segments: List[Dict] = []
     vias: List[Dict] = []
     routes_added = 0
@@ -439,6 +449,8 @@ def route_disconnected_regions(
             routing_layers=routing_layers,
             base_obstacles=base_obstacles,
             config=config,
+            net_vias=net_vias,
+            max_via_reuse_radius=max_via_reuse_radius,
             verbose=verbose
         )
 
@@ -486,7 +498,7 @@ def route_disconnected_regions(
                     'net_id': net_id
                 })
 
-        # Generate vias
+        # Generate vias and add to net_vias for reuse by subsequent routes
         for vx, vy in via_positions:
             vias.append({
                 'x': vx,
@@ -495,6 +507,7 @@ def route_disconnected_regions(
                 'drill': config.via_drill,
                 'net_id': net_id
             })
+            net_vias.append((vx, vy))  # Available for reuse
 
         routes_added += 1
 
@@ -669,6 +682,7 @@ def build_base_obstacles(
     config: GridRouteConfig,
     track_width: float,
     track_via_clearance: float,
+    hole_to_hole_clearance: float = 0.5,
     proximity_radius: float = 3.0,
     proximity_cost: float = 2.0
 ) -> Tuple[GridObstacleMap, Dict[str, int]]:
@@ -682,6 +696,7 @@ def build_base_obstacles(
         config: Routing configuration
         track_width: Track width for clearance calculations
         track_via_clearance: Clearance from tracks to vias
+        hole_to_hole_clearance: Minimum clearance between drill holes (mm)
         proximity_radius: Radius for proximity costs
         proximity_cost: Cost multiplier for proximity
 
@@ -724,6 +739,34 @@ def build_base_obstacles(
             proximity_cost_grid,
             False
         )
+
+    # Block via placement near OTHER nets' holes for hole-to-hole clearance
+    # Our own net's holes can be used as layer transitions, so don't block them
+    hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + config.via_drill / 2))
+
+    # Block via placement near other nets' vias
+    for via in pcb_data.vias:
+        if via.net_id in exclude_net_ids:
+            continue  # Don't block near our own vias
+        gx, gy = coord.to_grid(via.x, via.y)
+        for ex in range(-hole_clearance_grid, hole_clearance_grid + 1):
+            for ey in range(-hole_clearance_grid, hole_clearance_grid + 1):
+                if ex * ex + ey * ey <= hole_clearance_grid * hole_clearance_grid:
+                    obstacles.add_blocked_via(gx + ex, gy + ey)
+
+    # Block via placement near other nets' through-hole pad holes
+    for pad_net_id, pads in pcb_data.pads_by_net.items():
+        if pad_net_id in exclude_net_ids:
+            continue  # Don't block near our own pads
+        for pad in pads:
+            if '*.Cu' in pad.layers and pad.drill > 0:  # Through-hole pad with drill
+                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                # Use pad's drill size for clearance calculation
+                pad_hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + pad.drill / 2))
+                for ex in range(-pad_hole_clearance_grid, pad_hole_clearance_grid + 1):
+                    for ey in range(-pad_hole_clearance_grid, pad_hole_clearance_grid + 1):
+                        if ex * ex + ey * ey <= pad_hole_clearance_grid * pad_hole_clearance_grid:
+                            obstacles.add_blocked_via(gx + ex, gy + ey)
 
     # Block existing segments from other nets on each layer
     # Also block vias along segments (vias span all layers, so can't place via where segment exists)
@@ -835,6 +878,8 @@ def route_plane_connection_wide(
     routing_layers: List[str],
     base_obstacles: GridObstacleMap,
     config: GridRouteConfig,
+    net_vias: List[Tuple[float, float]],
+    max_via_reuse_radius: float = 0.5,
     max_iterations: int = 200000,
     verbose: bool = False
 ) -> Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]]:
@@ -847,13 +892,15 @@ def route_plane_connection_wide(
         routing_layers: List of layer names for routing
         base_obstacles: Pre-built obstacle map (will be cloned)
         config: Routing configuration
+        net_vias: List of existing via positions from this net (can be reused)
+        max_via_reuse_radius: Max distance to reuse an existing via (mm)
         max_iterations: Max routing iterations
         verbose: Print debug info
 
     Returns:
         Tuple of:
         - List of (x, y, layer) tuples for route segments
-        - List of (x, y) tuples for via positions
+        - List of (x, y) tuples for NEW via positions (excluding reused ones)
         Or None if routing failed.
     """
     coord = GridCoord(config.grid_step)
@@ -899,23 +946,97 @@ def route_plane_connection_wide(
 
     # Convert path to float coordinates with layer info
     route_points: List[Tuple[float, float, str]] = []
-    via_positions: List[Tuple[float, float]] = []
-
     for i, (gx, gy, layer_idx) in enumerate(path):
         x, y = coord.to_float(gx, gy)
         layer_name = routing_layers[layer_idx]
         route_points.append((x, y, layer_name))
 
-        # Check for layer change -> need via
-        if i > 0:
-            prev_layer_idx = path[i - 1][2]
-            if layer_idx != prev_layer_idx:
-                # Via at the previous point (where we change layers)
-                prev_gx, prev_gy, _ = path[i - 1]
-                prev_x, prev_y = coord.to_float(prev_gx, prev_gy)
-                via_positions.append((prev_x, prev_y))
+    # Find layer transitions (vias) and check for reuse opportunities
+    # For each via, we'll either keep it or replace the transition with a route to an existing via
+    reuse_radius_sq = max_via_reuse_radius * max_via_reuse_radius
+    new_via_positions: List[Tuple[float, float]] = []
 
-    return route_points, via_positions
+    # Find all layer transition indices
+    layer_transitions: List[int] = []  # Index where layer changes (the "after" point)
+    for i in range(1, len(route_points)):
+        if route_points[i][2] != route_points[i-1][2]:
+            layer_transitions.append(i)
+
+    # Process transitions from end to start (so indices stay valid when we modify)
+    for trans_idx in reversed(layer_transitions):
+        # The via is at the position of the point before the transition
+        via_x, via_y = route_points[trans_idx - 1][0], route_points[trans_idx - 1][1]
+        layer_before = route_points[trans_idx - 1][2]
+        layer_after = route_points[trans_idx][2]
+
+        # Check if there's an existing via from our net nearby to reuse
+        reuse_pos = None
+        for ex_vx, ex_vy in net_vias:
+            dist_sq = (via_x - ex_vx) ** 2 + (via_y - ex_vy) ** 2
+            if dist_sq <= reuse_radius_sq:
+                reuse_pos = (ex_vx, ex_vy)
+                break
+        # Also check against new vias we've already decided to add
+        if reuse_pos is None:
+            for nv_x, nv_y in new_via_positions:
+                dist_sq = (via_x - nv_x) ** 2 + (via_y - nv_y) ** 2
+                if dist_sq <= reuse_radius_sq:
+                    reuse_pos = (nv_x, nv_y)
+                    break
+
+        if reuse_pos and (reuse_pos[0] != via_x or reuse_pos[1] != via_y):
+            # Reuse existing via - replace the transition region with direct route to existing via
+            # Find the extent of the "transition region" - points close to the via on each layer
+            # We want to find the last "far" point before the via and first "far" point after
+
+            # Search backward to find where the route approaches the via
+            start_of_approach = trans_idx - 1
+            while start_of_approach > 0:
+                prev_pt = route_points[start_of_approach - 1]
+                if prev_pt[2] != layer_before:
+                    break  # Different layer, stop
+                dist = math.sqrt((prev_pt[0] - via_x)**2 + (prev_pt[1] - via_y)**2)
+                if dist > max_via_reuse_radius:
+                    break  # Far enough, this is where real route is
+                start_of_approach -= 1
+
+            # Search forward to find where the route leaves the via area
+            end_of_departure = trans_idx
+            while end_of_departure < len(route_points) - 1:
+                next_pt = route_points[end_of_departure + 1]
+                if next_pt[2] != layer_after:
+                    break  # Different layer, stop
+                dist = math.sqrt((next_pt[0] - via_x)**2 + (next_pt[1] - via_y)**2)
+                if dist > max_via_reuse_radius:
+                    break  # Far enough, this is where real route continues
+                end_of_departure += 1
+
+            # Replace the transition region with direct connection to reused via
+            # Keep: route_points[0:start_of_approach+1] + [via on layer_before, via on layer_after] + route_points[end_of_departure:]
+            new_route = (
+                route_points[:start_of_approach + 1] +
+                [(reuse_pos[0], reuse_pos[1], layer_before),
+                 (reuse_pos[0], reuse_pos[1], layer_after)] +
+                route_points[end_of_departure + 1:]
+            )
+            route_points = new_route
+            # Don't add a new via - we're reusing an existing one
+        else:
+            # Add new via at original position (or it's already at reuse_pos)
+            if reuse_pos is None:
+                new_via_positions.append((via_x, via_y))
+            # else: already at the reuse position, no new via needed
+
+    # Remove duplicate consecutive points (same x,y) keeping layer transitions
+    cleaned_points: List[Tuple[float, float, str]] = []
+    for pt in route_points:
+        if cleaned_points:
+            last = cleaned_points[-1]
+            if pt[0] == last[0] and pt[1] == last[1] and pt[2] == last[2]:
+                continue  # Skip duplicate
+        cleaned_points.append(pt)
+
+    return cleaned_points, new_via_positions
 
 
 def _block_segment_obstacle(
