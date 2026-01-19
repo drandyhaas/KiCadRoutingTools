@@ -90,6 +90,7 @@ def route_planes(
     via_drill: float = 0.4,
     max_via_reuse_radius: Optional[float] = None,
     max_iterations: int = 200000,
+    open_space_points: int = 3,
     verbose: bool = False,
     dry_run: bool = False,
     debug_lines: bool = False,
@@ -187,22 +188,31 @@ def route_planes(
     print(f"Routing disconnected plane regions")
     print(f"{'='*60}")
 
+    # Track current obstacle map's net to avoid unnecessary rebuilds
+    current_obstacle_net_id: Optional[int] = None
+    base_obstacles: Optional[GridObstacleMap] = None
+    layer_map: Optional[Dict[str, int]] = None
+
     for net_name, plane_layer, net_id in zip(net_names, plane_layers, net_ids):
         print(f"\n[{net_name}] on {plane_layer}:")
 
-        # Build obstacle map for this net - exclude only this net's pads (anchors)
-        # but block all other nets' pads including other plane nets
-        print(f"  Building obstacle map...", end=" ", flush=True)
-        base_obstacles, layer_map = build_base_obstacles(
-            exclude_net_ids={net_id},  # Only exclude current net's pads
-            routing_layers=routing_layers,
-            pcb_data=pcb_data,
-            config=config,
-            track_width=max_track_width,
-            track_via_clearance=track_via_clearance,
-            hole_to_hole_clearance=hole_to_hole_clearance
-        )
-        print("done")
+        # Only rebuild obstacle map when the net changes
+        # (same net on different layers can reuse the same obstacle map)
+        if net_id != current_obstacle_net_id:
+            print(f"  Building obstacle map...", end=" ", flush=True)
+            base_obstacles, layer_map = build_base_obstacles(
+                exclude_net_ids={net_id},  # Only exclude current net's pads
+                routing_layers=routing_layers,
+                pcb_data=pcb_data,
+                config=config,
+                track_width=max_track_width,
+                track_via_clearance=track_via_clearance,
+                hole_to_hole_clearance=hole_to_hole_clearance
+            )
+            current_obstacle_net_id = net_id
+            print("done")
+        else:
+            print(f"  Reusing obstacle map for {net_name}")
 
         region_segments, region_vias, routes_added, route_paths = route_disconnected_regions(
             net_id=net_id,
@@ -221,6 +231,7 @@ def route_planes(
             analysis_grid_step=analysis_grid_step,
             max_via_reuse_radius=max_via_reuse_radius,
             max_iterations=max_iterations,
+            open_space_points=open_space_points,
             verbose=verbose
         )
 
@@ -402,6 +413,8 @@ Examples:
     # Routing options
     parser.add_argument("--max-iterations", type=int, default=200000,
                         help="Maximum A* iterations per route attempt (default: 200000)")
+    parser.add_argument("--open-space-points", type=int, default=3,
+                        help="Number of open-space via candidates to try per region (default: 3)")
 
     # Debug options
     parser.add_argument("--dry-run", action="store_true",
@@ -464,6 +477,7 @@ Examples:
         via_drill=args.via_drill,
         max_via_reuse_radius=args.max_via_reuse_radius,
         max_iterations=args.max_iterations,
+        open_space_points=args.open_space_points,
         verbose=args.verbose,
         dry_run=args.dry_run,
         debug_lines=args.debug_lines,

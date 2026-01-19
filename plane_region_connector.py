@@ -340,15 +340,17 @@ def find_region_connection_points(
     return mst_edges
 
 
-def find_open_space_point(
+def find_open_space_points(
     anchors: List[Tuple[float, float]],
     base_obstacles: GridObstacleMap,
     plane_layer_idx: int,
     coord: GridCoord,
-    search_radius: float = 5.0
-) -> Optional[Tuple[float, float]]:
+    search_radius: float = 5.0,
+    max_points: int = 3,
+    min_separation: float = 1.0
+) -> List[Tuple[float, float]]:
     """
-    Find the most open space near a region's anchors - a point with maximum clearance from obstacles.
+    Find multiple open space points near a region's anchors - points with maximum clearance from obstacles.
 
     Args:
         anchors: List of anchor points in the region
@@ -356,12 +358,14 @@ def find_open_space_point(
         plane_layer_idx: Layer index to check for obstacles
         coord: Grid coordinate converter
         search_radius: How far from anchors to search (mm)
+        max_points: Maximum number of points to return
+        min_separation: Minimum distance between returned points (mm)
 
     Returns:
-        (x, y) of the most open point, or None if no good point found
+        List of (x, y) points sorted by clearance (best first), or empty list if none found
     """
     if not anchors:
-        return None
+        return []
 
     # Find centroid of anchors as search center
     cx = sum(a[0] for a in anchors) / len(anchors)
@@ -370,8 +374,8 @@ def find_open_space_point(
     search_radius_grid = coord.to_grid_dist(search_radius)
     center_gx, center_gy = coord.to_grid(cx, cy)
 
-    best_clearance = 0
-    best_point = None
+    # Collect all candidates with their clearance
+    candidates: List[Tuple[int, float, float]] = []  # (clearance, x, y)
 
     # Search in a grid around the centroid
     for dx in range(-search_radius_grid, search_radius_grid + 1):
@@ -389,14 +393,28 @@ def find_open_space_point(
             # Calculate clearance - distance to nearest blocked cell
             clearance = _calculate_clearance(gx, gy, base_obstacles, plane_layer_idx, max_check=10)
 
-            if clearance > best_clearance:
-                best_clearance = clearance
-                best_point = coord.to_float(gx, gy)
+            # Only consider points with meaningful clearance (at least 2 grid steps)
+            if clearance >= 2:
+                pt = coord.to_float(gx, gy)
+                candidates.append((clearance, pt[0], pt[1]))
 
-    # Only return if we found a point with meaningful clearance (at least 2 grid steps)
-    if best_clearance >= 2:
-        return best_point
-    return None
+    # Sort by clearance descending
+    candidates.sort(key=lambda c: -c[0])
+
+    # Select up to max_points, ensuring minimum separation
+    result = []
+    for clearance, x, y in candidates:
+        # Check if this point is far enough from already selected points
+        too_close = any(
+            math.sqrt((x - px)**2 + (y - py)**2) < min_separation
+            for px, py in result
+        )
+        if not too_close:
+            result.append((x, y))
+            if len(result) >= max_points:
+                break
+
+    return result
 
 
 def _calculate_clearance(
@@ -440,6 +458,7 @@ def route_disconnected_regions(
     analysis_grid_step: float = 0.5,
     max_via_reuse_radius: float = 1.5,
     max_iterations: int = 200000,
+    open_space_points: int = 3,
     verbose: bool = False
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]]]:
     """
@@ -557,26 +576,45 @@ def route_disconnected_regions(
                 verbose=verbose
             )
 
-        # Fallback: try routing via open-space points (areas with maximum clearance)
-        open_space_via = None
+        # Fallback: Try routing via open-space points (areas with maximum clearance)
+        # This adds NEW via locations that aren't existing anchors
+        open_space_vias = []
         if result is None:
             if verbose:
                 print(f"trying open-space...", end=" ", flush=True)
 
-            # Find most open points in each region
-            open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord)
-            open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord)
+            # Find multiple open points in each region
+            open_pts_i = find_open_space_points(anchors_i, base_obstacles, plane_layer_idx, coord,
+                                                 max_points=open_space_points)
+            open_pts_j = find_open_space_points(anchors_j, base_obstacles, plane_layer_idx, coord,
+                                                 max_points=open_space_points)
 
-            # Try various combinations with open-space points
+            # Try various combinations with open-space points from both regions
+            # Strategy: try adding open points to source, target, and both simultaneously
             open_attempts = []
-            if open_i:
-                open_attempts.append((anchors_i + [open_i], anchors_j, open_i))
-            if open_j:
-                open_attempts.append((anchors_i, anchors_j + [open_j], open_j))
-            if open_i and open_j:
-                open_attempts.append((anchors_i + [open_i], anchors_j + [open_j], open_i))
 
-            for src, tgt, via_candidate in open_attempts:
+            # Try adding each open point from region i to anchors_i
+            for pt_i in open_pts_i:
+                open_attempts.append((anchors_i + [pt_i], anchors_j, [pt_i]))
+
+            # Try adding each open point from region j to anchors_j
+            for pt_j in open_pts_j:
+                open_attempts.append((anchors_i, anchors_j + [pt_j], [pt_j]))
+
+            # Try adding open points from both regions simultaneously
+            for pt_i in open_pts_i:
+                for pt_j in open_pts_j:
+                    open_attempts.append((anchors_i + [pt_i], anchors_j + [pt_j], [pt_i, pt_j]))
+
+            # Try all open points from both regions at once (most flexible)
+            if open_pts_i or open_pts_j:
+                open_attempts.append((
+                    anchors_i + open_pts_i,
+                    anchors_j + open_pts_j,
+                    open_pts_i + open_pts_j
+                ))
+
+            for src, tgt, via_candidates in open_attempts:
                 result = route_plane_connection_wide(
                     src, tgt,
                     plane_layer_idx=plane_layer_idx,
@@ -589,19 +627,20 @@ def route_disconnected_regions(
                     verbose=verbose
                 )
                 if result:
-                    # Check if the route actually uses the open-space point
+                    # Check which open-space points the route actually uses
                     route_pts = result[0]
-                    for pt in route_pts:
-                        if abs(pt[0] - via_candidate[0]) < 0.01 and abs(pt[1] - via_candidate[1]) < 0.01:
-                            open_space_via = via_candidate
-                            break
+                    for via_candidate in via_candidates:
+                        for pt in route_pts:
+                            if abs(pt[0] - via_candidate[0]) < 0.01 and abs(pt[1] - via_candidate[1]) < 0.01:
+                                open_space_vias.append(via_candidate)
+                                break
                     break
 
         if result is None:
             print(f"{RED}FAILED{RESET}")
             routes_failed += 1
             if verbose:
-                print(f"      Tried {len(anchors_i)}x{len(anchors_j)} + {len(anchors_j)}x{len(anchors_i)} + open-space combinations, no path found")
+                print(f"      Tried all combinations including open-space fallback, no path found")
             continue
 
         route_points, via_positions = result
@@ -615,9 +654,9 @@ def route_disconnected_regions(
         # Count layers used
         layers_used = set(p[2] for p in route_points)
         layer_info = f", {len(layers_used)} layer(s)" if len(layers_used) > 1 else ""
-        total_vias = len(via_positions) + (1 if open_space_via else 0)
+        total_vias = len(via_positions) + len(open_space_vias)
         via_info = f", {total_vias} via(s)" if total_vias > 0 else ""
-        open_info = " (via open-space)" if open_space_via else ""
+        open_info = " (via open-space)" if open_space_vias else ""
 
         print(f"{GREEN}OK{RESET} width={track_width:.2f}mm, length={route_length:.1f}mm, {len(route_points)-1} seg(s){layer_info}{via_info}{open_info}")
 
@@ -674,8 +713,8 @@ def route_disconnected_regions(
                 })
                 net_vias.append((vx, vy))  # Available for reuse
 
-        # Add open-space via if one was used and not too close to existing vias
-        if open_space_via:
+        # Add open-space vias if used and not too close to existing vias
+        for open_space_via in open_space_vias:
             too_close = any(
                 math.sqrt((ex - open_space_via[0])**2 + (ey - open_space_via[1])**2) < min_via_distance
                 for ex, ey in net_vias
