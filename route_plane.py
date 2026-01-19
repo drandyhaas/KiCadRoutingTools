@@ -647,6 +647,7 @@ def create_plane(
     grid_step: float = 0.1,
     max_search_radius: float = 10.0,
     max_via_reuse_radius: float = 1.0,
+    close_via_radius: float = None,
     hole_to_hole_clearance: float = 0.2,
     all_layers: List[str] = None,
     verbose: bool = False,
@@ -879,11 +880,16 @@ def create_plane(
         for pad_idx, pad_info in enumerate(pads_needing_vias):
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
+            current_pad_key = (pad.global_x, pad.global_y)
+
+            # Skip pads already processed in previous layer passes
+            # (a via connects ALL layers, so once placed, pad is done)
+            if current_pad_key in processed_pad_ids:
+                continue
 
             # Pending pads are ALL pads from OTHER power nets (cross-net protection)
             # Plus pads from ripped nets that will need to be rerouted
             # We protect ALL pads from other nets, not just those needing vias
-            current_pad_key = (pad.global_x, pad.global_y)
             pending_pads = []
             # Add ALL pads from other power nets (not just those needing vias)
             for other_net_id in net_ids:
@@ -907,8 +913,9 @@ def create_plane(
 
             # First, check if there's already a via very close by (within ~2 via diameters)
             # This handles cases like decoupling caps where both pads are on same net
-            close_via_radius = via_size * 2.5  # Check within ~2.5 via diameters
-            nearby_via = find_existing_via_nearby(pad, available_vias, close_via_radius)
+            # Check for nearby existing via before placing a new one
+            effective_close_via_radius = close_via_radius if close_via_radius is not None else via_size * 2.5
+            nearby_via = find_existing_via_nearby(pad, available_vias, effective_close_via_radius)
             if nearby_via:
                 # Via already very close - try to reuse it
                 via_pos = nearby_via
@@ -1600,6 +1607,7 @@ Examples:
     parser.add_argument("--grid-step", type=float, default=0.1, help="Grid resolution in mm (default: 0.1)")
     parser.add_argument("--max-search-radius", type=float, default=10.0, help="Max radius to search for valid via position in mm (default: 10.0)")
     parser.add_argument("--max-via-reuse-radius", type=float, default=1.0, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
+    parser.add_argument("--close-via-radius", type=float, default=None, help="Radius to check for nearby vias before placing new one (default: 2.5 * via-size)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2, help="Minimum clearance between drill holes in mm (default: 0.2)")
     parser.add_argument("--layers", "-l", nargs="+", default=None,
                         help="All copper layers for routing and via span (default: F.Cu + plane-layers + B.Cu)")
@@ -1688,6 +1696,7 @@ Examples:
         grid_step=args.grid_step,
         max_search_radius=args.max_search_radius,
         max_via_reuse_radius=args.max_via_reuse_radius,
+        close_via_radius=args.close_via_radius,
         hole_to_hole_clearance=args.hole_to_hole_clearance,
         all_layers=args.layers,
         verbose=args.verbose,
