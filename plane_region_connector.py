@@ -340,78 +340,6 @@ def find_region_connection_points(
     return mst_edges
 
 
-def expand_blocked_anchors(
-    anchors: List[Tuple[float, float]],
-    base_obstacles: GridObstacleMap,
-    plane_layer_idx: int,
-    coord: GridCoord,
-    max_search_radius: float = 3.0,
-    max_alternatives: int = 3,
-    min_separation: float = 0.5
-) -> List[Tuple[float, float]]:
-    """
-    For anchors that are blocked, find nearby unblocked cells to use as alternatives.
-
-    Unlike find_open_space_points, this doesn't require minimum clearance -
-    it just finds ANY unblocked cell near a blocked anchor.
-
-    Args:
-        anchors: List of anchor points to check
-        base_obstacles: Obstacle map
-        plane_layer_idx: Layer index to check
-        coord: Grid coordinate converter
-        max_search_radius: Maximum search radius in mm
-        max_alternatives: Maximum number of alternative positions per blocked anchor
-        min_separation: Minimum distance between alternatives in mm
-
-    Returns:
-        List of alternative anchor positions (original unblocked anchors +
-        nearby unblocked cells for blocked anchors)
-    """
-    result = []
-    max_radius_grid = coord.to_grid_dist(max_search_radius)
-
-    for ax, ay in anchors:
-        gx, gy = coord.to_grid(ax, ay)
-
-        # If anchor is not blocked, keep it as-is
-        if not base_obstacles.is_blocked(gx, gy, plane_layer_idx):
-            result.append((ax, ay))
-            continue
-
-        # Anchor is blocked - search for multiple nearby unblocked cells
-        alternatives = []
-        for radius in range(1, max_radius_grid + 1):
-            for dx in range(-radius, radius + 1):
-                for dy in range(-radius, radius + 1):
-                    if abs(dx) != radius and abs(dy) != radius:
-                        continue  # Only check perimeter
-                    cx, cy = gx + dx, gy + dy
-                    if not base_obstacles.is_blocked(cx, cy, plane_layer_idx):
-                        alt_x, alt_y = coord.to_float(cx, cy)
-                        # Check separation from existing alternatives
-                        too_close = any(
-                            math.sqrt((alt_x - ex)**2 + (alt_y - ey)**2) < min_separation
-                            for ex, ey in alternatives
-                        )
-                        if not too_close:
-                            alternatives.append((alt_x, alt_y))
-                            if len(alternatives) >= max_alternatives:
-                                break
-                if len(alternatives) >= max_alternatives:
-                    break
-            if len(alternatives) >= max_alternatives:
-                break
-
-        if alternatives:
-            result.extend(alternatives)
-        else:
-            # No unblocked cell found within radius, add original anchor
-            result.append((ax, ay))
-
-    return result
-
-
 def find_open_space_points(
     anchors: List[Tuple[float, float]],
     base_obstacles: GridObstacleMap,
@@ -531,7 +459,6 @@ def route_disconnected_regions(
     max_via_reuse_radius: float = 1.5,
     max_iterations: int = 200000,
     open_space_points: int = 3,
-    blocked_anchor_alternatives: int = 3,
     verbose: bool = False
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]]]:
     """
@@ -611,13 +538,6 @@ def route_disconnected_regions(
         # Progress indicator
         print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors)...", end=" ", flush=True)
 
-        # Expand blocked anchors to nearby unblocked cells
-        # This helps when anchor points are completely surrounded by other nets
-        expanded_i = expand_blocked_anchors(anchors_i, base_obstacles, plane_layer_idx, coord,
-                                            max_alternatives=blocked_anchor_alternatives)
-        expanded_j = expand_blocked_anchors(anchors_j, base_obstacles, plane_layer_idx, coord,
-                                            max_alternatives=blocked_anchor_alternatives)
-
         # Compute maximum safe track width using closest pair as estimate
         track_width = compute_connection_track_width(
             point_i, point_j, plane_layer, net_id, pcb_data, config,
@@ -627,8 +547,8 @@ def route_disconnected_regions(
         # Try routing in both directions - A* can find different paths depending on direction
         # Direction 1: region_i -> region_j
         result = route_plane_connection_wide(
-            expanded_i,
-            expanded_j,
+            anchors_i,
+            anchors_j,
             plane_layer_idx=plane_layer_idx,
             routing_layers=routing_layers,
             base_obstacles=base_obstacles,
@@ -644,8 +564,8 @@ def route_disconnected_regions(
             if verbose:
                 print(f"trying reverse...", end=" ", flush=True)
             result = route_plane_connection_wide(
-                expanded_j,
-                expanded_i,
+                anchors_j,
+                anchors_i,
                 plane_layer_idx=plane_layer_idx,
                 routing_layers=routing_layers,
                 base_obstacles=base_obstacles,
@@ -663,34 +583,34 @@ def route_disconnected_regions(
             if verbose:
                 print(f"trying open-space...", end=" ", flush=True)
 
-            # Find multiple open points in each region (use expanded anchors as base)
-            open_pts_i = find_open_space_points(expanded_i, base_obstacles, plane_layer_idx, coord,
+            # Find multiple open points in each region
+            open_pts_i = find_open_space_points(anchors_i, base_obstacles, plane_layer_idx, coord,
                                                  max_points=open_space_points)
-            open_pts_j = find_open_space_points(expanded_j, base_obstacles, plane_layer_idx, coord,
+            open_pts_j = find_open_space_points(anchors_j, base_obstacles, plane_layer_idx, coord,
                                                  max_points=open_space_points)
 
             # Try various combinations with open-space points from both regions
             # Strategy: try adding open points to source, target, and both simultaneously
             open_attempts = []
 
-            # Try adding each open point from region i to expanded_i
+            # Try adding each open point from region i to anchors_i
             for pt_i in open_pts_i:
-                open_attempts.append((expanded_i + [pt_i], expanded_j, [pt_i]))
+                open_attempts.append((anchors_i + [pt_i], anchors_j, [pt_i]))
 
-            # Try adding each open point from region j to expanded_j
+            # Try adding each open point from region j to anchors_j
             for pt_j in open_pts_j:
-                open_attempts.append((expanded_i, expanded_j + [pt_j], [pt_j]))
+                open_attempts.append((anchors_i, anchors_j + [pt_j], [pt_j]))
 
             # Try adding open points from both regions simultaneously
             for pt_i in open_pts_i:
                 for pt_j in open_pts_j:
-                    open_attempts.append((expanded_i + [pt_i], expanded_j + [pt_j], [pt_i, pt_j]))
+                    open_attempts.append((anchors_i + [pt_i], anchors_j + [pt_j], [pt_i, pt_j]))
 
             # Try all open points from both regions at once (most flexible)
             if open_pts_i or open_pts_j:
                 open_attempts.append((
-                    expanded_i + open_pts_i,
-                    expanded_j + open_pts_j,
+                    anchors_i + open_pts_i,
+                    anchors_j + open_pts_j,
                     open_pts_i + open_pts_j
                 ))
 

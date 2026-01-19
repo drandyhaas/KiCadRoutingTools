@@ -91,7 +91,6 @@ def route_planes(
     max_via_reuse_radius: Optional[float] = None,
     max_iterations: int = 200000,
     open_space_points: int = 3,
-    blocked_anchor_alternatives: int = 3,
     verbose: bool = False,
     dry_run: bool = False,
     debug_lines: bool = False,
@@ -233,7 +232,6 @@ def route_planes(
             max_via_reuse_radius=max_via_reuse_radius,
             max_iterations=max_iterations,
             open_space_points=open_space_points,
-            blocked_anchor_alternatives=blocked_anchor_alternatives,
             verbose=verbose
         )
 
@@ -417,8 +415,6 @@ Examples:
                         help="Maximum A* iterations per route attempt (default: 200000)")
     parser.add_argument("--open-space-points", type=int, default=3,
                         help="Number of open-space via candidates to try per region (default: 3)")
-    parser.add_argument("--blocked-anchor-alternatives", type=int, default=3,
-                        help="Number of alternative positions to try for blocked anchors (default: 3)")
 
     # Debug options
     parser.add_argument("--dry-run", action="store_true",
@@ -482,7 +478,6 @@ Examples:
         max_via_reuse_radius=args.max_via_reuse_radius,
         max_iterations=args.max_iterations,
         open_space_points=args.open_space_points,
-        blocked_anchor_alternatives=args.blocked_anchor_alternatives,
         verbose=args.verbose,
         dry_run=args.dry_run,
         debug_lines=args.debug_lines,
