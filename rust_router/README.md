@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.8.3**
+**Current Version: 0.8.4**
 
 ## Features
 
