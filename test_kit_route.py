@@ -37,7 +37,7 @@ def main():
     #target = "--component U102"
     #target = "--component U301"
     #target = "--component U204"
-    target = '--nets "/*" "Net-*"'
+    target = '--nets "/*" "Net-*" GNDA '
 
     #if quick: target = '--nets "/IRQ*" "/AN*"'
     if quick: target = '--nets "Net*"'
@@ -52,7 +52,7 @@ def main():
     run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options, unbuffered)
 
     # Route some planes
-    run('python3 route_plane.py kicad_files/kit-out.kicad_pcb kicad_files/kit-out-plane.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
+    run('python3 route_plane.py kicad_files/kit-out.kicad_pcb kicad_files/kit-out-plane.kicad_pcb --net +3.3V GND +3.3V GND --plane-layer F.Cu In1.Cu In2.Cu B.Cu --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
 
     # Check for DRC errors
     run('python3 check_drc.py kicad_files/kit-out-plane.kicad_pcb --clearance 0.15', unbuffered)
