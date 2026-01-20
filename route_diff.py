@@ -87,12 +87,7 @@ from routing_common import (
     run_length_matching, sync_pcb_data_segments, get_common_config_kwargs
 )
 import re
-
-# ANSI color codes for terminal output
-RED = '\033[91m'
-GREEN = '\033[92m'
-YELLOW = '\033[93m'
-RESET = '\033[0m'
+from terminal_colors import RED, GREEN, YELLOW, RESET
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))

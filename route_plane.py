@@ -11,7 +11,6 @@ Usage:
 import sys
 import os
 import argparse
-import math
 from typing import List, Optional, Tuple, Dict, Set
 from dataclasses import dataclass
 
@@ -62,6 +61,7 @@ from plane_create_helpers import (
     generate_multinet_zones,
     write_results_and_reroute
 )
+from terminal_colors import GREEN, RED, RESET
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
@@ -1116,7 +1116,7 @@ def create_plane(
                     traces_added += len(result.segments)
                     block_via_position(obstacles, result.via_pos[0], result.via_pos[1], coord,
                                        hole_to_hole_clearance, via_drill)
-                    print(f"\033[92mvia at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}), ripped {len(result.ripped_net_ids)} nets\033[0m")
+                    print(f"{GREEN}via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}), ripped {len(result.ripped_net_ids)} nets{RESET}")
                 else:
                     failed_pads += 1
                     failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
@@ -1124,7 +1124,7 @@ def create_plane(
                         if rid not in ripped_net_ids:
                             ripped_net_ids.append(rid)
                     # Empty ripped_net_ids means nets were restored after failure
-                    print(f"\033[91mFAILED\033[0m")
+                    print(f"{RED}FAILED{RESET}")
 
             elif placement_success:
                 # Fast path succeeded
@@ -1159,7 +1159,7 @@ def create_plane(
                         trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
                                                            routing_obs, config, verbose=verbose)
                         if trace_segments is None:
-                            print(f"\033[91mROUTING FAILED\033[0m")
+                            print(f"{RED}ROUTING FAILED{RESET}")
                             failed_pads += 1
                             failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
                         elif trace_segments:
@@ -1177,11 +1177,11 @@ def create_plane(
                         processed_pad_ids.add(current_pad_key)
                         print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                 else:
-                    print(f"\033[91mFAILED - no valid position\033[0m")
+                    print(f"{RED}FAILED - no valid position{RESET}")
                     failed_pads += 1
                     failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
             else:
-                print(f"\033[91mFAILED - no valid position\033[0m")
+                print(f"{RED}FAILED - no valid position{RESET}")
                 failed_pads += 1
                 failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
 

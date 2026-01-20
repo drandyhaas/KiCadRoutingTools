@@ -18,6 +18,7 @@ from kicad_writer import generate_zone_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from route import batch_route
 from obstacle_cache import ViaPlacementObstacleData
+from terminal_colors import GREEN, RED, RESET
 
 from plane_io import (
     ZoneInfo,
@@ -224,9 +225,9 @@ def process_pad_via_placement(
             traces_added += len(result.segments)
             block_via_position(obstacles, result.via_pos[0], result.via_pos[1], ctx.coord,
                                ctx.hole_to_hole_clearance, ctx.via_drill)
-            print(f"\033[92mvia at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}), ripped {len(result.ripped_net_ids)} nets\033[0m")
+            print(f"{GREEN}via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}), ripped {len(result.ripped_net_ids)} nets{RESET}")
         else:
-            print(f"\033[91mFAILED after {len(result.ripped_net_ids)} rip-ups\033[0m")
+            print(f"{RED}FAILED after {len(result.ripped_net_ids)} rip-ups{RESET}")
 
     elif placement_success:
         via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
@@ -258,7 +259,7 @@ def process_pad_via_placement(
                 route_result = route_via_to_pad_fn(via_pos, pad, pad_layer, net_id,
                                                     routing_obs, ctx.config, verbose=ctx.verbose)
                 if not route_result.success:
-                    print(f"\033[91mROUTING FAILED\033[0m")
+                    print(f"{RED}ROUTING FAILED{RESET}")
                 elif route_result.segments:
                     new_segments.extend(route_result.segments)
                     traces_added += len(route_result.segments)
@@ -271,9 +272,9 @@ def process_pad_via_placement(
                 vias_reused += 1
                 print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
         else:
-            print(f"\033[91mFAILED - no valid position\033[0m")
+            print(f"{RED}FAILED - no valid position{RESET}")
     else:
-        print(f"\033[91mFAILED - no valid position\033[0m")
+        print(f"{RED}FAILED - no valid position{RESET}")
 
     return (new_via, new_segments, vias_placed, vias_reused, traces_added, ripped_net_ids)
 

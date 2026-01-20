@@ -6,10 +6,80 @@ This module consolidates geometry calculations used across multiple modules:
 - Segment-to-segment distance
 - Segment intersection detection
 - Closest point calculations
+- Union-Find data structure for connectivity
 """
 
 import math
-from typing import Tuple, Optional, TYPE_CHECKING
+from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING
+
+
+class UnionFind:
+    """
+    Union-Find (Disjoint Set Union) data structure with path compression and rank optimization.
+
+    Used for efficiently tracking connected components in graphs.
+    Supports arbitrary hashable keys.
+
+    Example:
+        uf = UnionFind()
+        uf.union('a', 'b')
+        uf.union('b', 'c')
+        assert uf.find('a') == uf.find('c')  # a and c are connected
+    """
+
+    def __init__(self):
+        self.parent: Dict[Any, Any] = {}
+        self.rank: Dict[Any, int] = {}
+
+    def find(self, x: Any) -> Any:
+        """
+        Find the root representative of the set containing x.
+
+        Uses path compression for O(α(n)) amortized time complexity.
+        Creates a new singleton set if x is not yet tracked.
+        """
+        if x not in self.parent:
+            self.parent[x] = x
+            self.rank[x] = 0
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])  # Path compression
+        return self.parent[x]
+
+    def union(self, x: Any, y: Any) -> None:
+        """
+        Merge the sets containing x and y.
+
+        Uses union by rank for O(α(n)) amortized time complexity.
+        """
+        px, py = self.find(x), self.find(y)
+        if px == py:
+            return  # Already in same set
+        # Union by rank - attach smaller tree under larger tree
+        if self.rank[px] < self.rank[py]:
+            px, py = py, px
+        self.parent[py] = px
+        if self.rank[px] == self.rank[py]:
+            self.rank[px] += 1
+
+    def connected(self, x: Any, y: Any) -> bool:
+        """Check if x and y are in the same set."""
+        return self.find(x) == self.find(y)
+
+
+def point_key(x: float, y: float, layer: str, tolerance: float = 0.02) -> Tuple[int, int, str]:
+    """
+    Create a hashable key for a point, quantized to tolerance.
+
+    Args:
+        x: X coordinate in mm
+        y: Y coordinate in mm
+        layer: Layer name
+        tolerance: Quantization tolerance in mm (default 0.02mm = 20 microns)
+
+    Returns:
+        Tuple of (quantized_x, quantized_y, layer) suitable for use as dict key
+    """
+    return (round(x / tolerance), round(y / tolerance), layer)
 
 if TYPE_CHECKING:
     from kicad_parser import Segment

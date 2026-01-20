@@ -48,34 +48,7 @@ def matches_any_pattern(name: str, patterns: List[str]) -> bool:
     return False
 
 
-class UnionFind:
-    """Union-Find data structure for connectivity checking."""
-    def __init__(self):
-        self.parent = {}
-        self.rank = {}
-
-    def find(self, x):
-        if x not in self.parent:
-            self.parent[x] = x
-            self.rank[x] = 0
-        if self.parent[x] != x:
-            self.parent[x] = self.find(self.parent[x])
-        return self.parent[x]
-
-    def union(self, x, y):
-        px, py = self.find(x), self.find(y)
-        if px == py:
-            return
-        if self.rank[px] < self.rank[py]:
-            px, py = py, px
-        self.parent[py] = px
-        if self.rank[px] == self.rank[py]:
-            self.rank[px] += 1
-
-
-def point_key(x: float, y: float, layer: str, tolerance: float = 0.02) -> Tuple[int, int, str]:
-    """Create a hashable key for a point, quantized to tolerance."""
-    return (round(x / tolerance), round(y / tolerance), layer)
+from geometry_utils import UnionFind, point_key
 
 
 def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:

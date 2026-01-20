@@ -29,6 +29,8 @@ def main():
                         help='Quick mode: only route a few nets (default: route all U102 nets)')
     parser.add_argument('-u', '--unbuffered', action='store_true',
                         help='Run python commands with -u (unbuffered output)')
+    parser.add_argument('--planes-only', action='store_true',
+                        help='Skip the routing and just redo the planes')
     args = parser.parse_args()
 
     quick = args.quick
@@ -49,7 +51,8 @@ def main():
     options = base_options+'--via-proximity-cost 10 --via-cost 50 --track-proximity-distance 3.0 --track-proximity-cost 0.2 --vertical-attraction-radius 0 --stub-proximity-cost 2.0 --stub-proximity-radius 4.0 --max-ripup 10 --max-iterations 10000000 '+power_nets
 
     # Route some nets from pads (no fanout needed)
-    run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options, unbuffered)
+    if not args.planes_only:
+        run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options, unbuffered)
 
     # Route some power nets with vias to planes
     run('python3 route_plane.py kicad_files/kit-out.kicad_pcb kicad_files/kit-out-plane.kicad_pcb --net +3.3V GND +3.3V GND --plane-layer F.Cu In1.Cu In2.Cu B.Cu --max-via-reuse-radius 3 --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)

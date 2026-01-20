@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map, iter_pad_blocked_cells
+from routing_utils import iter_pad_blocked_cells
 
 import sys
 import os

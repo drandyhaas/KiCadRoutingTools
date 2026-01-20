@@ -673,11 +673,7 @@ def _calculate_clearance(
     return max_check
 
 
-# ANSI color codes
-GREEN = '\033[92m'
-RED = '\033[91m'
-YELLOW = '\033[93m'
-RESET = '\033[0m'
+from terminal_colors import GREEN, RED, YELLOW, RESET
 
 
 def route_disconnected_regions(

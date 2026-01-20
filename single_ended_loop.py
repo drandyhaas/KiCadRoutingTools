@@ -36,11 +36,7 @@ from routing_context import (
     build_single_ended_obstacles, build_incremental_obstacles,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
-
-# ANSI color codes
-RED = '\033[91m'
-GREEN = '\033[92m'
-RESET = '\033[0m'
+from terminal_colors import RED, GREEN, RESET
 
 
 def route_single_ended_nets(

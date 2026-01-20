@@ -6,11 +6,7 @@ Routes individual nets using A* pathfinding on a grid obstacle map.
 
 import time
 from typing import List, Optional, Set, Tuple
-
-# ANSI color codes
-RED = '\033[91m'
-YELLOW = '\033[93m'
-RESET = '\033[0m'
+from terminal_colors import RED, YELLOW, RESET
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord

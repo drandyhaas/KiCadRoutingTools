@@ -29,10 +29,7 @@ from obstacle_cache import (
     add_net_obstacles_from_cache, precompute_net_obstacles
 )
 from obstacle_costs import compute_track_proximity_for_net
-
-# ANSI color codes for terminal output
-RED = '\033[91m'
-RESET = '\033[0m'
+from terminal_colors import RED, RESET
 
 
 @dataclass

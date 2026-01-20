@@ -34,7 +34,6 @@ from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import pos_key
 from connectivity import (
     get_stub_endpoints, find_stub_free_ends, find_connected_groups,
     is_edge_stub, get_net_endpoints, find_connected_segment_positions
@@ -45,7 +44,6 @@ from net_queries import (
     expand_net_patterns, find_single_ended_nets, identify_power_nets
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
-from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance,
@@ -77,19 +75,15 @@ from memory_debug import (
 from single_ended_loop import route_single_ended_nets
 from reroute_loop import run_reroute_loop
 from phase3_routing import run_phase3_tap_routing
-from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
+from net_ordering import order_nets_mps, order_nets_inside_out
 from routing_common import (
     setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
     build_obstacle_infrastructure, run_length_matching, sync_pcb_data_segments,
     get_common_config_kwargs
 )
 import re
-
-# ANSI color codes for terminal output
-RED = '\033[91m'
-GREEN = '\033[92m'
-YELLOW = '\033[93m'
-RESET = '\033[0m'
+from terminal_colors import RED, RESET
+from routing_constants import DEFAULT_4_LAYER_STACK, POWER_NET_EXCLUSION_PATTERNS
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
@@ -197,7 +191,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
-        layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']  # Default 4-layer signal stack
+        layers = DEFAULT_4_LAYER_STACK
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # Calculate layer-specific widths for impedance-controlled routing
@@ -848,7 +842,7 @@ For differential pair routing, use route_diff.py:
             net_names = [n for n in net_names if n in component_nets]
         else:
             # Use all component nets (excluding power/ground and unconnected pins)
-            exclude_patterns = ['*GND*', '*VCC*', '*VDD*', '+*V', '-*V', 'unconnected-*', '']
+            exclude_patterns = POWER_NET_EXCLUSION_PATTERNS
             filtered = []
             for name in component_nets:
                 excluded = False

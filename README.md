@@ -333,11 +333,13 @@ KiCadRoutingTools/
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
 | `routing_common.py` | Shared utilities for route.py and route_diff.py (BGA zones, net resolution, length matching) |
-| `routing_utils.py` | Shared utilities (`pos_key`, `build_layer_map`, `POSITION_DECIMALS`) |
+| `routing_utils.py` | Shared utilities (`build_layer_map`, `iter_pad_blocked_cells`) |
 | `obstacle_map.py` | Obstacle map building from PCB data |
 | `obstacle_cache.py` | Net obstacle caching for incremental obstacle map builds |
 | `obstacle_costs.py` | Stub and track proximity cost calculations |
-| `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection) |
+| `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, UnionFind) |
+| `routing_constants.py` | Shared constants (default layer stack, power net patterns, tolerances) |
+| `terminal_colors.py` | ANSI color codes for terminal output |
 
 ### Routing Loops
 

@@ -25,11 +25,7 @@ from routing_context import (
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
 from obstacle_cache import update_net_obstacles_after_routing
-
-# ANSI color codes
-RED = '\033[91m'
-GREEN = '\033[92m'
-RESET = '\033[0m'
+from terminal_colors import RED, GREEN, RESET
 
 
 def run_reroute_loop(

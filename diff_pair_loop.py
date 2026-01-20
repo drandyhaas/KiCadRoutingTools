@@ -20,11 +20,7 @@ from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import build_diff_pair_obstacles, restore_ripped_net
-
-# ANSI color codes
-RED = '\033[91m'
-GREEN = '\033[92m'
-RESET = '\033[0m'
+from terminal_colors import RED, GREEN, RESET
 
 
 def route_diff_pairs(
