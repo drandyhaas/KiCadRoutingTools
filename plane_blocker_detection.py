@@ -13,6 +13,7 @@ import numpy as np
 from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
+from bresenham_utils import walk_line
 from route_modification import remove_net_from_pcb_data, restore_net_to_pcb_data
 from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
 
@@ -193,32 +194,14 @@ def find_route_blocker_from_frontier(
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-        # Simple line walk
-        dx = abs(gx2 - gx1)
-        dy = abs(gy2 - gy1)
-        sx = 1 if gx1 < gx2 else -1
-        sy = 1 if gy1 < gy2 else -1
-        err = dx - dy
-
-        gx, gy = gx1, gy1
         count = 0
-        while True:
+        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
             # Check expansion around this point
             for ex in range(-expansion_grid, expansion_grid + 1):
                 for ey in range(-expansion_grid, expansion_grid + 1):
                     cell = (gx + ex, gy + ey, layer_idx)
                     if cell in blocked_set:
                         count += 1
-
-            if gx == gx2 and gy == gy2:
-                break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                gx += sx
-            if e2 < dx:
-                err += dx
-                gy += sy
 
         if count > 0:
             net_block_count[seg.net_id] = net_block_count.get(seg.net_id, 0) + count

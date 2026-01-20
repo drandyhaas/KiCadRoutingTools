@@ -13,6 +13,7 @@ import math
 from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
 from geometry_utils import UnionFind
+from bresenham_utils import walk_line
 
 import sys
 import os
@@ -491,32 +492,8 @@ def _add_segment_cells(
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    gx, gy = gx1, gy1
-
-    if dx > dy:
-        err = dx / 2
-        while gx != gx2:
-            cells.add((gx, gy))
-            err -= dy
-            if err < 0:
-                gy += sy
-                err += dx
-            gx += sx
-    else:
-        err = dy / 2
-        while gy != gy2:
-            cells.add((gx, gy))
-            err -= dx
-            if err < 0:
-                gx += sx
-                err += dy
-            gy += sy
-
-    cells.add((gx2, gy2))
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+        cells.add((gx, gy))
 
 
 def _block_segment_cells(
@@ -528,45 +505,13 @@ def _block_segment_cells(
     """Block grid cells along a segment with given radius."""
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    # Bresenham-like walk along segment
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    gx, gy = gx1, gy1
     radius_sq = block_radius * block_radius
 
-    if dx > dy:
-        err = dx / 2
-        while gx != gx2:
-            for ex in range(-block_radius, block_radius + 1):
-                for ey in range(-block_radius, block_radius + 1):
-                    if ex * ex + ey * ey <= radius_sq:
-                        blocked.add((gx + ex, gy + ey))
-            err -= dy
-            if err < 0:
-                gy += sy
-                err += dx
-            gx += sx
-    else:
-        err = dy / 2
-        while gy != gy2:
-            for ex in range(-block_radius, block_radius + 1):
-                for ey in range(-block_radius, block_radius + 1):
-                    if ex * ex + ey * ey <= radius_sq:
-                        blocked.add((gx + ex, gy + ey))
-            err -= dx
-            if err < 0:
-                gx += sx
-                err += dy
-            gy += sy
-
-    # Block endpoint
-    for ex in range(-block_radius, block_radius + 1):
-        for ey in range(-block_radius, block_radius + 1):
-            if ex * ex + ey * ey <= radius_sq:
-                blocked.add((gx2 + ex, gy2 + ey))
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+        for ex in range(-block_radius, block_radius + 1):
+            for ey in range(-block_radius, block_radius + 1):
+                if ex * ex + ey * ey <= radius_sq:
+                    blocked.add((gx + ex, gy + ey))
 
 
 def _block_pad_cells(
@@ -1449,43 +1394,13 @@ def _block_line_vias(
     expansion_grid: int
 ):
     """Block via placement along a line with given expansion radius."""
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    gx, gy = gx1, gy1
     radius_sq = expansion_grid * expansion_grid
 
-    if dx > dy:
-        err = dx / 2
-        while gx != gx2:
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    if ex * ex + ey * ey <= radius_sq:
-                        obstacles.add_blocked_via(gx + ex, gy + ey)
-            err -= dy
-            if err < 0:
-                gy += sy
-                err += dx
-            gx += sx
-    else:
-        err = dy / 2
-        while gy != gy2:
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    if ex * ex + ey * ey <= radius_sq:
-                        obstacles.add_blocked_via(gx + ex, gy + ey)
-            err -= dx
-            if err < 0:
-                gx += sx
-                err += dy
-            gy += sy
-
-    # Block endpoint
-    for ex in range(-expansion_grid, expansion_grid + 1):
-        for ey in range(-expansion_grid, expansion_grid + 1):
-            if ex * ex + ey * ey <= radius_sq:
-                obstacles.add_blocked_via(gx2 + ex, gy2 + ey)
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+        for ex in range(-expansion_grid, expansion_grid + 1):
+            for ey in range(-expansion_grid, expansion_grid + 1):
+                if ex * ex + ey * ey <= radius_sq:
+                    obstacles.add_blocked_via(gx + ex, gy + ey)
 
 
 def _block_line_cells(
@@ -1496,40 +1411,10 @@ def _block_line_cells(
     expansion_grid: int
 ):
     """Block cells along a line with given expansion radius."""
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    gx, gy = gx1, gy1
     radius_sq = expansion_grid * expansion_grid
 
-    if dx > dy:
-        err = dx / 2
-        while gx != gx2:
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    if ex * ex + ey * ey <= radius_sq:
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-            err -= dy
-            if err < 0:
-                gy += sy
-                err += dx
-            gx += sx
-    else:
-        err = dy / 2
-        while gy != gy2:
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    if ex * ex + ey * ey <= radius_sq:
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-            err -= dx
-            if err < 0:
-                gx += sx
-                err += dy
-            gy += sy
-
-    # Block endpoint
-    for ex in range(-expansion_grid, expansion_grid + 1):
-        for ey in range(-expansion_grid, expansion_grid + 1):
-            if ex * ex + ey * ey <= radius_sq:
-                obstacles.add_blocked_cell(gx2 + ex, gy2 + ey, layer_idx)
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+        for ex in range(-expansion_grid, expansion_grid + 1):
+            for ey in range(-expansion_grid, expansion_grid + 1):
+                if ex * ex + ey * ey <= radius_sq:
+                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)

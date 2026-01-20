@@ -12,6 +12,7 @@ import numpy as np
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map, iter_pad_blocked_cells
+from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 from obstacle_costs import add_bga_proximity_costs
 
@@ -573,23 +574,10 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-    # Bresenham line with expansion
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    err = dx - dy
+    is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
+    effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
 
-    # For diagonal segments, the actual line passes between grid points,
-    # so we need a slightly larger blocking radius to ensure clearance is maintained.
-    # Using +0.25 catches sqrt(10)~3.16 but not sqrt(11)~3.32.
-    is_diagonal = dx > 0 and dy > 0
-    effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
-    # Need to iterate over slightly larger range for diagonal segments
-    via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
-
-    gx, gy = gx1, gy1
-    while True:
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
         for ex in range(-expansion_grid, expansion_grid + 1):
             for ey in range(-expansion_grid, expansion_grid + 1):
                 obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
@@ -601,16 +589,6 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
                     obstacles.add_blocked_via(gx + ex, gy + ey)
                     if blocked_vias is not None:
                         blocked_vias.add((gx + ex, gy + ey))
-
-        if gx == gx2 and gy == gy2:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            gx += sx
-        if e2 < dx:
-            err += dx
-            gy += sy
 
 
 def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,

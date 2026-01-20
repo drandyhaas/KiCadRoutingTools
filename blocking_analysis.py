@@ -28,6 +28,7 @@ from collections import defaultdict
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map
+from bresenham_utils import walk_line
 
 
 def invalidate_obstacle_cache(cache: Dict, net_id: int) -> None:
@@ -95,27 +96,10 @@ def compute_net_obstacle_cells(
                                 via_cells.add((gx1 + ex, gy1 + ey, layer_idx))
             else:
                 # Track segment
-                dx = abs(gx2 - gx1)
-                dy = abs(gy2 - gy1)
-                sx = 1 if gx1 < gx2 else -1
-                sy = 1 if gy1 < gy2 else -1
-                err = dx - dy
-
-                gx, gy = gx1, gy1
-                while True:
+                for gx, gy in walk_line(gx1, gy1, gx2, gy2):
                     for ex in range(-expansion_grid, expansion_grid + 1):
                         for ey in range(-expansion_grid, expansion_grid + 1):
                             track_cells.add((gx + ex, gy + ey, layer1))
-
-                    if gx == gx2 and gy == gy2:
-                        break
-                    e2 = 2 * err
-                    if e2 > -dy:
-                        err -= dy
-                        gx += sx
-                    if e2 < dx:
-                        err += dx
-                        gy += sy
 
     # Add cells from original stubs
     for seg in pcb_data.segments:
@@ -128,27 +112,10 @@ def compute_net_obstacle_cells(
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-        dx = abs(gx2 - gx1)
-        dy = abs(gy2 - gy1)
-        sx = 1 if gx1 < gx2 else -1
-        sy = 1 if gy1 < gy2 else -1
-        err = dx - dy
-
-        gx, gy = gx1, gy1
-        while True:
+        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
             for ex in range(-expansion_grid, expansion_grid + 1):
                 for ey in range(-expansion_grid, expansion_grid + 1):
                     track_cells.add((gx + ex, gy + ey, layer_idx))
-
-            if gx == gx2 and gy == gy2:
-                break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                gx += sx
-            if e2 < dx:
-                err += dx
-                gy += sy
 
     # Add cells from existing vias
     for via in pcb_data.vias:

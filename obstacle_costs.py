@@ -10,6 +10,7 @@ import numpy as np
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
+from bresenham_utils import walk_line
 
 # Module-level cache for pre-computed proximity offset tables
 # Key: (radius_grid, cost_grid) -> List of (ex, ey, cost) tuples
@@ -261,29 +262,9 @@ def _add_segment_cross_layer_track(obstacles: GridObstacleMap, seg, coord: GridC
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    err = dx - dy
-    gx, gy = gx1, gy1
-    step_count = 0
-
-    while True:
+    for step_count, (gx, gy) in enumerate(walk_line(gx1, gy1, gx2, gy2)):
         if step_count % sample_interval == 0:
             obstacles.add_cross_layer_track(gx, gy, layer_idx)
-
-        if gx == gx2 and gy == gy2:
-            break
-
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            gx += sx
-        if e2 < dx:
-            err += dx
-            gy += sy
-        step_count += 1
 
 
 def add_routed_path_cross_layer_tracks(obstacles: GridObstacleMap,

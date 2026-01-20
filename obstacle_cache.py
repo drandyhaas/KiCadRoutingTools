@@ -12,6 +12,7 @@ import numpy as np
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map, iter_pad_blocked_cells
+from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 
 # Import Rust router
@@ -131,18 +132,10 @@ def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    err = dx - dy
+    is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
+    effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
 
-    is_diagonal = dx > 0 and dy > 0
-    effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
-    via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
-
-    gx, gy = gx1, gy1
-    while True:
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
         for ex in range(-expansion_grid, expansion_grid + 1):
             for ey in range(-expansion_grid, expansion_grid + 1):
                 blocked_cells.add((gx + ex, gy + ey, layer_idx))
@@ -150,16 +143,6 @@ def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
             for ey in range(-via_block_range, via_block_range + 1):
                 if ex*ex + ey*ey <= effective_via_block_sq:
                     blocked_vias.add((gx + ex, gy + ey))
-
-        if gx == gx2 and gy == gy2:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            gx += sx
-        if e2 < dx:
-            err += dx
-            gy += sy
 
 
 def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
