@@ -47,7 +47,7 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
 
 
 def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_name: str,
-                          target_net_id: int, verbose: bool = False) -> Tuple[bool, bool]:
+                          target_net_id: int, verbose: bool = False) -> Tuple[bool, bool, Optional[ZoneInfo]]:
     """Check for existing zones on the target layer.
 
     Args:
@@ -58,25 +58,25 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         verbose: Print verbose output
 
     Returns:
-        (should_create_zone, should_continue) tuple
-        - should_create_zone: False if zone already exists on same net
+        (should_create_zone, should_continue, zone_to_replace) tuple
+        - should_create_zone: True to create/replace zone
         - should_continue: False if zone exists on different net (error condition)
+        - zone_to_replace: ZoneInfo of existing zone to replace, or None
     """
     for zone in zones:
         if zone.layer == target_layer:
             if zone.net_id == target_net_id or zone.net_name == target_net_name:
-                # Same net - warn and skip zone creation but continue with vias
-                print(f"Warning: Zone already exists on {target_layer} for net '{zone.net_name}' (ID {zone.net_id})")
-                print("  Skipping zone creation, but will place vias to connect to existing zone.")
-                return (False, True)
+                # Same net - replace existing zone with our parameters
+                print(f"Note: Replacing existing zone on {target_layer} for net '{zone.net_name}' with new parameters")
+                return (True, True, zone)
             else:
                 # Different net - error
                 print(f"Error: Zone already exists on {target_layer} for DIFFERENT net '{zone.net_name}' (ID {zone.net_id})")
                 print(f"  Cannot create {target_net_name} zone on same layer. Aborting.")
-                return (False, False)
+                return (False, False, None)
 
     # No existing zone on this layer
-    return (True, True)
+    return (True, True, None)
 
 
 def resolve_net_id(pcb_data: PCBData, net_name: str) -> Optional[int]:
@@ -157,13 +157,71 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int]) -> str
     return '\n'.join(result_lines)
 
 
+def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str]]) -> str:
+    """
+    Filter out zones for specific (net_id, layer) pairs from PCB file content.
+
+    Args:
+        content: Raw PCB file content
+        zones_to_remove: List of (net_id, layer) tuples to remove
+
+    Returns:
+        Filtered content with those zones removed
+    """
+    if not zones_to_remove:
+        return content
+
+    # Build set for fast lookup
+    remove_set = set(zones_to_remove)
+    lines = content.split('\n')
+    result_lines = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Check if this starts a zone (may be multi-line)
+        if stripped == '(zone' or stripped.startswith('(zone '):
+            # Collect all lines of this zone element
+            element_lines = [line]
+            open_parens = line.count('(') - line.count(')')
+            while open_parens > 0 and i + 1 < len(lines):
+                i += 1
+                element_lines.append(lines[i])
+                open_parens += lines[i].count('(') - lines[i].count(')')
+
+            # Extract net_id and layer from the zone
+            element_text = '\n'.join(element_lines)
+            net_match = re.search(r'\(net\s+(\d+)\)', element_text)
+            layer_match = re.search(r'\(layer\s+"([^"]+)"\)', element_text)
+
+            if net_match and layer_match:
+                zone_net_id = int(net_match.group(1))
+                zone_layer = layer_match.group(1)
+                if (zone_net_id, zone_layer) in remove_set:
+                    # Skip this zone entirely
+                    i += 1
+                    continue
+
+            # Keep this zone
+            result_lines.extend(element_lines)
+        else:
+            result_lines.append(line)
+
+        i += 1
+
+    return '\n'.join(result_lines)
+
+
 def write_plane_output(
     input_file: str,
     output_file: str,
     zone_sexpr: Optional[str],
     new_vias: List[Dict],
     new_segments: List[Dict],
-    exclude_net_ids: List[int] = None
+    exclude_net_ids: List[int] = None,
+    zones_to_replace: List[Tuple[int, str]] = None
 ) -> bool:
     """Write the complete output file with zone (optional), vias, and traces.
 
@@ -175,12 +233,18 @@ def write_plane_output(
         new_segments: List of segment dicts with start, end, width, layer, net_id
         exclude_net_ids: Optional list of net IDs to exclude from output
                          (their segments/vias will be filtered out)
+        zones_to_replace: Optional list of (net_id, layer) tuples for zones to
+                          remove before adding new zones
 
     Returns:
         True if successful, False otherwise
     """
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # Filter out zones to be replaced
+    if zones_to_replace:
+        content = filter_zones_from_content(content, zones_to_replace)
 
     # Filter out excluded nets if specified
     if exclude_net_ids:

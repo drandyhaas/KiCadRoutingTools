@@ -6,7 +6,7 @@ The `route_plane.py` script creates copper pour zones and places vias to connect
 
 When creating a ground or power plane on an inner or bottom layer, SMD pads on other layers need via connections to reach the plane. This tool automates:
 
-1. **Zone creation** - Creates a copper pour zone covering the board (or uses existing zone)
+1. **Zone creation** - Creates a copper pour zone covering the board. Replaces existing zones for the same net/layer with new parameters
 2. **Pad classification** - Identifies which pads need vias vs direct zone connection
 3. **Via placement** - Places vias near pads, avoiding obstacles on all copper layers
 4. **Trace routing** - Routes traces from offset vias to pads using A* pathfinding
@@ -323,7 +323,7 @@ Processing net 'GND' on layer In1.Cu
 ============================================================
 ...
 Results for 'GND':
-  Using existing zone on In1.Cu
+  Zone created on In1.Cu (replaced existing)
   New vias placed: 89
   Existing vias reused: 6
   Traces added: 358
@@ -333,7 +333,7 @@ Processing net '+3.3V' on layer In2.Cu
 ============================================================
 ...
 Results for '+3.3V':
-  Using existing zone on In2.Cu
+  Zone created on In2.Cu (replaced existing)
   New vias placed: 83
   Existing vias reused: 5
   Traces added: 346

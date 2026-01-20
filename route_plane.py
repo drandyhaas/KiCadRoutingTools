@@ -714,14 +714,17 @@ def create_plane(
     # Step 2: Check for existing zones on each target layer
     existing_zones = extract_zones(input_file)
     should_create_zones = []  # Per-net flag for whether to create zone
+    zones_to_replace = []  # List of (net_id, layer) tuples for zones to replace
     for i, (net_name, plane_layer, net_id) in enumerate(zip(net_names, plane_layers, net_ids)):
-        should_create, should_continue = check_existing_zones(
+        should_create, should_continue, zone_to_replace = check_existing_zones(
             existing_zones, plane_layer, net_name, net_id, verbose
         )
         if not should_continue:
             print(f"Error: Zone conflict for net '{net_name}' on layer {plane_layer}")
             return (0, 0, 0)
         should_create_zones.append(should_create)
+        if zone_to_replace:
+            zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
 
     # Step 3: Get board bounds for zone polygon
     board_bounds = pcb_data.board_info.board_bounds
@@ -1205,12 +1208,13 @@ def create_plane(
 
         # Print per-net results
         print(f"\nResults for '{net_name}':")
+        was_replaced = (net_id, plane_layer) in zones_to_replace
         if should_create_zone and is_multi_net_layer:
-            print(f"  Zone on {plane_layer} deferred (multi-net layer)")
+            suffix = " (replaced existing)" if was_replaced else ""
+            print(f"  Zone on {plane_layer} deferred (multi-net layer){suffix}")
         elif should_create_zone:
-            print(f"  Zone created on {plane_layer}")
-        else:
-            print(f"  Using existing zone on {plane_layer}")
+            suffix = " (replaced existing)" if was_replaced else ""
+            print(f"  Zone created on {plane_layer}{suffix}")
         print(f"  New vias placed: {vias_placed}")
         print(f"  Existing vias reused: {vias_reused}")
         print(f"  Traces added: {traces_added}")
@@ -1517,7 +1521,7 @@ def create_plane(
         if all_debug_lines:
             print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
         if write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
-                               exclude_net_ids=all_ripped_net_ids):
+                               exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace):
             print(f"Output written to {output_file}")
             print("Note: Open in KiCad and press 'B' to refill zones")
             if all_ripped_net_ids:

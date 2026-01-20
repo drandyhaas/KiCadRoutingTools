@@ -574,7 +574,7 @@ Features:
 - **Via reuse with fallback** - Prefers nearby vias within reuse radius, falls back to farther vias if placement fails
 - **Blocker rip-up** - When via placement/routing fails, identifies blocking nets and temporarily removes them, then retries
 - **Automatic re-routing** - Optionally re-routes ripped nets after all plane vias are placed
-- **Zone creation** - Creates copper pour zone or uses existing zone if present
+- **Zone creation** - Creates copper pour zone. If an existing zone for the same net/layer is present, it is replaced with new parameters (clearance, min_thickness)
 - **Resistance analysis** - Calculates and displays approximate plane resistance and maximum current capacity (IPC-2152) for each polygon. For multi-net layers, uses the longest MST route path length; for single-net layers, uses the bounding box diagonal. Samples polygon width perpendicular to the current path to estimate effective cross-section. Assumes 1 oz copper and 10°C temperature rise
 
 See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
