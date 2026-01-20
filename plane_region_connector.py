@@ -776,44 +776,65 @@ def route_disconnected_regions(
         # Progress indicator
         print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors)...", end=" ", flush=True)
 
-        # Compute maximum safe track width using closest pair as estimate
-        track_width = compute_connection_track_width(
-            point_i, point_j, plane_layer, net_id, pcb_data, config,
-            zone_clearance, max_track_width, min_track_width
-        )
+        # Try track widths from max to min, preferring wider tracks
+        # Generate width steps: max, max/2, max/4, ..., min
+        track_widths_to_try = []
+        w = max_track_width
+        while w >= min_track_width:
+            track_widths_to_try.append(w)
+            w = w / 2
+        if track_widths_to_try[-1] > min_track_width:
+            track_widths_to_try.append(min_track_width)
 
-        # Try routing in both directions - A* can find different paths depending on direction
-        # Direction 1: region_i -> region_j
-        result = route_plane_connection_wide(
-            anchors_i,
-            anchors_j,
-            plane_layer_idx=plane_layer_idx,
-            routing_layers=routing_layers,
-            base_obstacles=base_obstacles,
-            config=config,
-            net_vias=net_vias,
-            max_iterations=max_iterations,
-            verbose=verbose
-        )
+        result = None
+        track_width = min_track_width
+        open_space_via = None
 
-        # Direction 2: region_j -> region_i (if direction 1 failed)
-        if result is None:
-            if verbose:
-                print(f"trying reverse...", end=" ", flush=True)
+        for try_width in track_widths_to_try:
+            # Compute track_margin: extra cells beyond what's in obstacle map (built for min_track_width)
+            # Obstacle map already accounts for min_track_width/2 + clearance
+            # For wider track, need extra margin = (try_width - min_track_width) / 2
+            extra_margin_mm = (try_width - min_track_width) / 2
+            track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
+
+            # Try routing in both directions - A* can find different paths depending on direction
+            # Direction 1: region_i -> region_j
             result = route_plane_connection_wide(
-                anchors_j,
                 anchors_i,
+                anchors_j,
                 plane_layer_idx=plane_layer_idx,
                 routing_layers=routing_layers,
                 base_obstacles=base_obstacles,
                 config=config,
                 net_vias=net_vias,
+                track_margin=track_margin,
                 max_iterations=max_iterations,
                 verbose=verbose
             )
 
+            # Direction 2: region_j -> region_i (if direction 1 failed)
+            if result is None:
+                result = route_plane_connection_wide(
+                    anchors_j,
+                    anchors_i,
+                    plane_layer_idx=plane_layer_idx,
+                    routing_layers=routing_layers,
+                    base_obstacles=base_obstacles,
+                    config=config,
+                    net_vias=net_vias,
+                    track_margin=track_margin,
+                    max_iterations=max_iterations,
+                    verbose=verbose
+                )
+
+            if result is not None:
+                track_width = try_width
+                if verbose and try_width < max_track_width:
+                    print(f"width={try_width:.2f}mm...", end=" ", flush=True)
+                break
+
         # Fallback: try routing via open-space points (areas with maximum clearance)
-        open_space_via = None
+        # Use minimum track width for open-space routing
         if result is None:
             if verbose:
                 print(f"trying open-space...", end=" ", flush=True)
@@ -822,7 +843,7 @@ def route_disconnected_regions(
             open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord)
             open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord)
 
-            # Try various combinations with open-space points
+            # Try various combinations with open-space points (using min width)
             open_attempts = []
             if open_i:
                 open_attempts.append((anchors_i + [open_i], anchors_j, open_i))
@@ -839,10 +860,12 @@ def route_disconnected_regions(
                     base_obstacles=base_obstacles,
                     config=config,
                     net_vias=net_vias,
+                    track_margin=0,  # min width for open-space
                     max_iterations=max_iterations,
                     verbose=verbose
                 )
                 if result:
+                    track_width = min_track_width
                     # Check if the route actually uses the open-space point
                     route_pts = result[0]
                     for pt in route_pts:
@@ -953,161 +976,6 @@ def route_disconnected_regions(
         print(f"  {GREEN}Result: All {routes_added} route(s) succeeded{RESET}")
 
     return segments, vias, routes_added, previous_routes, connectivity_paths
-
-
-def compute_connection_track_width(
-    point_a: Tuple[float, float],
-    point_b: Tuple[float, float],
-    plane_layer: str,
-    net_id: int,
-    pcb_data: PCBData,
-    config: GridRouteConfig,
-    zone_clearance: float,
-    max_track_width: float,
-    min_track_width: float
-) -> float:
-    """
-    Compute the maximum track width that can be used for a connection
-    while maintaining clearance from obstacles.
-
-    Uses the corridor between points to find the narrowest gap.
-    """
-    # Start with max and reduce based on nearby obstacles
-    track_width = max_track_width
-
-    # Check distance to other nets' vias along the path
-    # Sample points along the line
-    dx = point_b[0] - point_a[0]
-    dy = point_b[1] - point_a[1]
-    length = math.sqrt(dx * dx + dy * dy)
-
-    if length < 0.001:
-        return min_track_width
-
-    # Normalize direction
-    ux, uy = dx / length, dy / length
-    # Perpendicular direction
-    px, py = -uy, ux
-
-    n_samples = max(2, int(length / config.grid_step))
-
-    for via in pcb_data.vias:
-        if via.net_id == net_id:
-            continue
-
-        # Find closest point on line segment to via
-        vx, vy = via.x, via.y
-
-        # Vector from point_a to via
-        ax, ay = vx - point_a[0], vy - point_a[1]
-
-        # Project onto line direction
-        t = (ax * ux + ay * uy) / length
-        t = max(0.0, min(1.0, t))
-
-        # Closest point on segment
-        cx = point_a[0] + t * dx
-        cy = point_a[1] + t * dy
-
-        # Distance from via to closest point
-        dist = math.sqrt((vx - cx)**2 + (vy - cy)**2)
-
-        # Required clearance: via_size/2 + track_width/2 + zone_clearance
-        # So max track_width = 2 * (dist - via_size/2 - zone_clearance)
-        via_radius = config.via_size / 2
-        max_tw_for_via = 2 * (dist - via_radius - zone_clearance)
-
-        if max_tw_for_via < track_width:
-            track_width = max_tw_for_via
-
-    # Check distance to other nets' segments on this layer
-    for seg in pcb_data.segments:
-        if seg.net_id == net_id:
-            continue
-        if seg.layer != plane_layer:
-            continue
-
-        # Find minimum distance between two line segments
-        dist = _segment_to_segment_distance(
-            point_a, point_b,
-            (seg.start_x, seg.start_y), (seg.end_x, seg.end_y)
-        )
-
-        # Required clearance: seg.width/2 + track_width/2 + zone_clearance
-        max_tw_for_seg = 2 * (dist - seg.width / 2 - zone_clearance)
-
-        if max_tw_for_seg < track_width:
-            track_width = max_tw_for_seg
-
-    # Check distance to other nets' pads on this layer
-    for pad_net_id, pads in pcb_data.pads_by_net.items():
-        if pad_net_id == net_id:
-            continue
-        for pad in pads:
-            if plane_layer not in pad.layers and '*.Cu' not in pad.layers:
-                continue
-
-            # Find closest point on our line segment to pad center
-            px, py = pad.global_x, pad.global_y
-            ax, ay = px - point_a[0], py - point_a[1]
-            t = (ax * ux + ay * uy) / length
-            t = max(0.0, min(1.0, t))
-            cx = point_a[0] + t * dx
-            cy = point_a[1] + t * dy
-
-            # Distance from pad center to closest point on line
-            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
-
-            # Approximate pad as circle with radius = max(size_x, size_y) / 2
-            pad_radius = max(pad.size_x, pad.size_y) / 2
-            max_tw_for_pad = 2 * (dist - pad_radius - zone_clearance)
-
-            if max_tw_for_pad < track_width:
-                track_width = max_tw_for_pad
-
-    # Clamp to bounds
-    track_width = max(min_track_width, min(max_track_width, track_width))
-
-    return track_width
-
-
-def _segment_to_segment_distance(
-    a1: Tuple[float, float], a2: Tuple[float, float],
-    b1: Tuple[float, float], b2: Tuple[float, float]
-) -> float:
-    """Compute minimum distance between two line segments."""
-    # Check all endpoint-to-segment and endpoint-to-endpoint distances
-    distances = [
-        _point_to_segment_distance(a1, b1, b2),
-        _point_to_segment_distance(a2, b1, b2),
-        _point_to_segment_distance(b1, a1, a2),
-        _point_to_segment_distance(b2, a1, a2),
-    ]
-    return min(distances)
-
-
-def _point_to_segment_distance(
-    p: Tuple[float, float],
-    s1: Tuple[float, float], s2: Tuple[float, float]
-) -> float:
-    """Compute distance from point p to line segment s1-s2."""
-    dx = s2[0] - s1[0]
-    dy = s2[1] - s1[1]
-    length_sq = dx * dx + dy * dy
-
-    if length_sq < 1e-10:
-        # Degenerate segment
-        return math.sqrt((p[0] - s1[0])**2 + (p[1] - s1[1])**2)
-
-    # Project p onto line
-    t = ((p[0] - s1[0]) * dx + (p[1] - s1[1]) * dy) / length_sq
-    t = max(0.0, min(1.0, t))
-
-    # Closest point on segment
-    cx = s1[0] + t * dx
-    cy = s1[1] + t * dy
-
-    return math.sqrt((p[0] - cx)**2 + (p[1] - cy)**2)
 
 
 def build_base_obstacles(
@@ -1323,6 +1191,7 @@ def route_plane_connection_wide(
     base_obstacles: GridObstacleMap,
     config: GridRouteConfig,
     net_vias: List[Tuple[float, float]],
+    track_margin: int = 0,
     max_iterations: int = 200000,
     verbose: bool = False
 ) -> Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]]:
@@ -1340,6 +1209,7 @@ def route_plane_connection_wide(
         base_obstacles: Pre-built obstacle map (will be cloned)
         config: Routing configuration
         net_vias: List of existing via positions from this net (to avoid duplicates)
+        track_margin: Extra margin in grid cells for wide tracks
         max_iterations: Max routing iterations
         verbose: Print debug info
 
@@ -1405,7 +1275,8 @@ def route_plane_connection_wide(
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction
-        0       # direction_steps
+        0,      # direction_steps
+        track_margin  # extra margin for wide tracks
     )
 
     if path is None:

@@ -51,7 +51,7 @@ def main():
     # Route some nets from pads (no fanout needed)
     run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options, unbuffered)
 
-    # Route some planes
+    # Route some power nets with vias to planes
     run('python3 route_plane.py kicad_files/kit-out.kicad_pcb kicad_files/kit-out-plane.kicad_pcb --net +3.3V GND +3.3V GND --plane-layer F.Cu In1.Cu In2.Cu B.Cu --max-via-reuse-radius 3 --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
 
     # Connect broken plane regions
