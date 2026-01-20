@@ -37,3 +37,11 @@ IPC_2152_EXPONENT_A = 0.44            # Area exponent
 IPC_2152_EXPONENT_B = 0.725           # Temperature rise exponent
 IPC_2152_K_INTERNAL = 0.024           # k-value for internal layers
 IPC_2152_K_EXTERNAL = 0.048           # k-value for external layers
+
+# Polygon/zone geometry tolerances (mm)
+POLYGON_BUFFER_DISTANCE = 0.01        # Buffer distance for polygon shrinking
+POLYGON_EDGE_TOLERANCE = 0.001        # Tolerance for edge-sharing detection
+
+# BGA/component detection (mm)
+BGA_EDGE_DETECTION_TOLERANCE = 0.01   # Tolerance for detecting pad alignment
+BGA_DEFAULT_EDGE_TOLERANCE = 1.6      # Default edge tolerance for BGA pitch detection

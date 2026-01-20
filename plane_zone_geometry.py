@@ -8,6 +8,9 @@ import math
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
+
+from geometry_utils import UnionFind
+from routing_constants import POLYGON_BUFFER_DISTANCE, POLYGON_EDGE_TOLERANCE
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
@@ -151,7 +154,7 @@ def compute_zone_boundaries(
                     # If MultiPolygon, try buffering to merge nearly-touching polygons
                     # (Voronoi cells can have tiny gaps due to floating point precision)
                     if combined.geom_type == 'MultiPolygon':
-                        buffer_dist = 0.01  # 0.01mm buffer to close tiny gaps
+                        buffer_dist = POLYGON_BUFFER_DISTANCE
                         buffered = [p.buffer(buffer_dist) for p in shapely_polys]
                         combined_buffered = unary_union(buffered)
                         if combined_buffered.geom_type == 'Polygon':
@@ -324,7 +327,7 @@ def merge_polygons(polygons: List[List[Tuple[float, float]]], verbose: bool = Fa
 def polygons_share_edge(
     poly1: List[Tuple[float, float]],
     poly2: List[Tuple[float, float]],
-    tolerance: float = 0.001
+    tolerance: float = POLYGON_EDGE_TOLERANCE
 ) -> bool:
     """
     Check if two polygons share a common edge (not just a point).
@@ -367,7 +370,7 @@ def polygons_share_edge(
 
 def find_polygon_groups(
     polygons: List[List[Tuple[float, float]]],
-    tolerance: float = 0.001,
+    tolerance: float = POLYGON_EDGE_TOLERANCE,
     verbose: bool = False
 ) -> List[List[int]]:
     """
@@ -387,17 +390,7 @@ def find_polygon_groups(
         return []
 
     n = len(polygons)
-    parent = list(range(n))
-
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
+    uf = UnionFind()
 
     if verbose:
         print(f"      find_polygon_groups: checking {n} polygons for adjacency")
@@ -412,7 +405,7 @@ def find_polygon_groups(
     for i in range(n):
         for j in range(i + 1, n):
             if polygons_share_edge(polygons[i], polygons[j], tolerance):
-                union(i, j)
+                uf.union(i, j)
                 adjacencies.append((i, j))
 
     if verbose:
@@ -421,7 +414,7 @@ def find_polygon_groups(
     # Group polygons by their root
     groups: Dict[int, List[int]] = {}
     for i in range(n):
-        root = find(i)
+        root = uf.find(i)
         if root not in groups:
             groups[root] = []
         groups[root].append(i)

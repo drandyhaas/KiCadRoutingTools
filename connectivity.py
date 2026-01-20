@@ -11,6 +11,8 @@ from typing import List, Optional, Tuple, Dict, Set
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import pos_key, segment_length, POSITION_DECIMALS, build_layer_map
+from geometry_utils import UnionFind
+from routing_constants import BGA_DEFAULT_EDGE_TOLERANCE, BGA_EDGE_DETECTION_TOLERANCE
 
 
 def _get_pad_coords(p) -> Tuple[float, float]:
@@ -156,9 +158,9 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
     for zone in bga_zones:
         min_x, min_y, max_x, max_y = zone[:4]
         # Use per-zone tolerance if available, else default (0.5mm margin + 1mm pitch * 1.1)
-        edge_tolerance = zone[4] if len(zone) > 4 else 1.6
+        edge_tolerance = zone[4] if len(zone) > 4 else BGA_DEFAULT_EDGE_TOLERANCE
         # Check if pad is INSIDE this zone (with small tolerance for floating point)
-        inside_tolerance = 0.01  # 10 microns
+        inside_tolerance = BGA_EDGE_DETECTION_TOLERANCE
         if (pad_x >= min_x - inside_tolerance and pad_x <= max_x + inside_tolerance and
             pad_y >= min_y - inside_tolerance and pad_y <= max_y + inside_tolerance):
             # Check if it's on an edge (within tolerance of min/max)
@@ -180,17 +182,7 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
         return []
 
     n = len(segments)
-    parent = list(range(n))
-
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
+    uf = UnionFind()
 
     # Spatial hash: map rounded coordinates to (segment_index, x, y) tuples
     # Use tolerance-based grid cells
@@ -217,12 +209,12 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
                         for j, ox, oy in endpoint_map[key]:
                             if i < j:  # Avoid duplicate checks
                                 if abs(x - ox) < tolerance and abs(y - oy) < tolerance:
-                                    union(i, j)
+                                    uf.union(i, j)
 
     # Group segments by their root
     groups: Dict[int, List[Segment]] = {}
     for i in range(n):
-        root = find(i)
+        root = uf.find(i)
         if root not in groups:
             groups[root] = []
         groups[root].append(segments[i])

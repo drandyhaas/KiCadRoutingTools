@@ -12,6 +12,7 @@ import math
 
 from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
+from geometry_utils import UnionFind
 
 import sys
 import os
@@ -266,30 +267,10 @@ def find_disconnected_zone_regions(
         grid_to_crosslayer[gp].append(i)
 
     # Union-find for cross-layer points
-    cl_parent = list(range(len(cross_layer_points)))
+    cl_uf = UnionFind()
 
-    def cl_find(x):
-        if cl_parent[x] != x:
-            cl_parent[x] = cl_find(cl_parent[x])
-        return cl_parent[x]
-
-    def cl_union(x, y):
-        px, py = cl_find(x), cl_find(y)
-        if px != py:
-            cl_parent[px] = py
-
-    # Also union-find for anchors (will merge based on cross-layer connectivity)
-    anchor_parent = list(range(len(anchor_points)))
-
-    def anchor_find(x):
-        if anchor_parent[x] != x:
-            anchor_parent[x] = anchor_find(anchor_parent[x])
-        return anchor_parent[x]
-
-    def anchor_union(x, y):
-        px, py = anchor_find(x), anchor_find(y)
-        if px != py:
-            anchor_parent[px] = py
+    # Union-find for anchors (will merge based on cross-layer connectivity)
+    anchor_uf = UnionFind()
 
     # Debug paths: list of (path_points, layer_name) showing connectivity
     debug_paths: List[Tuple[List[Tuple[float, float]], str]] = []
@@ -298,7 +279,7 @@ def find_disconnected_zone_regions(
     # (e.g., a via and a pad at the same spot)
     for gp, indices in grid_to_crosslayer.items():
         for i in range(1, len(indices)):
-            cl_union(indices[0], indices[i])
+            cl_uf.union(indices[0], indices[i])
 
     # Connect cross-layer points via same-net segments (segments directly connect points)
     for seg in pcb_data.segments:
@@ -314,7 +295,7 @@ def find_disconnected_zone_regions(
             if seg.layer in cross_layer_points[si][2]:
                 for ei in end_cls:
                     if seg.layer in cross_layer_points[ei][2]:
-                        cl_union(si, ei)
+                        cl_uf.union(si, ei)
 
     # For each layer, do flood fill to find connectivity through the plane
     # Cache the blocked set and segment cells for plane_layer to reuse later
@@ -382,7 +363,7 @@ def find_disconnected_zone_regions(
                 if (gx, gy) in layer_grid_to_cl:
                     for cl_idx in layer_grid_to_cl[(gx, gy)]:
                         # Before union, check if this connects previously disconnected components
-                        if debug and cl_find(start_cl_idx) != cl_find(cl_idx):
+                        if debug and cl_uf.find(start_cl_idx) != cl_uf.find(cl_idx):
                             # Reconstruct path from start to this point
                             path_points = []
                             curr = (gx, gy)
@@ -395,7 +376,7 @@ def find_disconnected_zone_regions(
                             path_points.reverse()
                             if len(path_points) > 1:
                                 debug_paths.append((path_points, layer))
-                        cl_union(start_cl_idx, cl_idx)
+                        cl_uf.union(start_cl_idx, cl_idx)
 
                 # Expand to neighbors (4-connected for flood fill)
                 for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
@@ -440,8 +421,8 @@ def find_disconnected_zone_regions(
             cl_i = anchor_to_cl.get(i)
             cl_j = anchor_to_cl.get(j)
             if cl_i is not None and cl_j is not None:
-                if cl_find(cl_i) == cl_find(cl_j):
-                    anchor_union(i, j)
+                if cl_uf.find(cl_i) == cl_uf.find(cl_j):
+                    anchor_uf.union(i, j)
 
     # Flood fill on plane layer to connect anchors not at cross-layer points
     # (in case there are SMD pads or other anchors that aren't vias)
@@ -466,7 +447,7 @@ def find_disconnected_zone_regions(
 
             if (gx, gy) in grid_to_anchors:
                 for anchor_idx in grid_to_anchors[(gx, gy)]:
-                    anchor_union(start_anchor_idx, anchor_idx)
+                    anchor_uf.union(start_anchor_idx, anchor_idx)
 
             for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 nx, ny = gx + dx, gy + dy
@@ -483,7 +464,7 @@ def find_disconnected_zone_regions(
     # Group anchors by their root
     groups: Dict[int, List[int]] = {}
     for i in range(len(anchor_points)):
-        root = anchor_find(i)
+        root = anchor_uf.find(i)
         if root not in groups:
             groups[root] = []
         groups[root].append(i)
@@ -651,24 +632,12 @@ def find_region_connection_points(
     # Sort by distance and build MST using Kruskal's algorithm
     edges.sort(key=lambda e: e[0])
 
-    parent = list(range(n_regions))
-
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-            return True
-        return False
-
+    mst_uf = UnionFind()
     mst_edges: List[Tuple[int, int, Tuple[float, float], Tuple[float, float], float]] = []
 
     for dist, i, j, pi, pj in edges:
-        if union(i, j):
+        if not mst_uf.connected(i, j):
+            mst_uf.union(i, j)
             mst_edges.append((i, j, pi, pj, dist))
             if len(mst_edges) == n_regions - 1:
                 break
