@@ -449,6 +449,11 @@ The plane generation code is organized into several modules:
 
 After power planes are created, regions may become effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects these disconnected regions and routes tracks between them to ensure electrical continuity.
 
+Key features:
+- **Per-net processing** - Zones with the same net on multiple layers (e.g., GND on B.Cu and In1.Cu) are processed together, avoiding redundant routes since vias connect all layers
+- **Cross-layer connectivity** - Uses vias and through-hole pads to track connectivity across all zone layers for a net
+- **Wide track routing** - Tries track widths from max (2.0mm) down to min, using the widest that fits
+
 ### Basic Usage
 
 ```bash
@@ -553,7 +558,25 @@ Example output:
 [42/59] Region 6 (37 anchors) <-> Region 23 (2 anchors)... OK width=0.20mm, length=2.1mm (via open-space)
 ```
 
-#### 6. Via Placement at Layer Transitions
+#### 6. Wide Track Routing
+
+For power plane connections, wider tracks are preferred to minimize resistance. The router tries track widths from max to min:
+
+1. Start with `--max-track-width` (default 2.0mm)
+2. If routing fails, try half the width (1.0mm, 0.5mm, 0.25mm, ...)
+3. Continue until `--min-track-width` (default 0.2mm) is reached
+4. Use the widest width that successfully routes
+
+This uses the Rust router's `track_margin` parameter to check extra clearance around the path without rebuilding the obstacle map, making width attempts fast.
+
+```
+Example output:
+[1/3] Region 0 <-> Region 2... OK width=2.00mm, length=14.4mm
+[2/3] Region 0 <-> Region 1... OK width=0.50mm, length=8.2mm (narrower due to obstacles)
+[3/3] Region 0 <-> Region 3... OK width=1.00mm, length=12.1mm
+```
+
+#### 7. Via Placement at Layer Transitions
 
 At layer transitions, the router checks if a via already exists at the transition point:
 
@@ -563,7 +586,7 @@ At layer transitions, the router checks if a via already exists at the transitio
 
 Since routes can start and end on any layer at via locations, this simple approach avoids duplicate vias while keeping the routing logic straightforward.
 
-#### 7. Incremental Obstacle Updates
+#### 8. Incremental Obstacle Updates
 
 After each successful route:
 
@@ -582,28 +605,33 @@ Board bounds: (71.12, 55.88) to (228.60, 147.32)
 Routing disconnected plane regions
 ============================================================
 
-[GND] on B.Cu:
+[GND] on B.Cu, In1.Cu (clearances: B.Cu=0.3mm, In1.Cu=0.5mm):
   Building obstacle map... done
-  Found 12 disconnected regions (47 total anchors)
-  Routing 11 connection(s) to join regions...
-    [1/11] Region 0 (5 anchors) <-> Region 1 (3 anchors)... OK width=0.20mm, length=5.2mm
-    [2/11] Region 0 (5 anchors) <-> Region 2 (8 anchors)... OK width=0.20mm, length=3.1mm
-    [3/11] Region 2 (8 anchors) <-> Region 3 (2 anchors)... OK width=0.20mm, length=8.4mm (via open-space)
-    ...
-  Result: 10/11 routes succeeded, 1 failed
+  Found 4 disconnected regions (131 total anchors)
+  Routing 3 connection(s) to join regions...
+    [1/3] Region 0 (2 anchors) <-> Region 2 (127 anchors)... OK width=1.00mm, length=52.2mm, 4 via(s)
+    [2/3] Region 0 (2 anchors) <-> Region 1 (1 anchors)... OK width=0.25mm, length=14.4mm, 1 via(s)
+    [3/3] Region 0 (2 anchors) <-> Region 3 (1 anchors)... OK width=0.50mm, length=13.0mm, 1 via(s)
+  Result: All 3 route(s) succeeded
 
-[+3.3V] on In1.Cu:
+[+3.3V] on F.Cu, In2.Cu (clearances: F.Cu=0.2mm, In2.Cu=0.5mm):
   Building obstacle map... done
-  Found 8 disconnected regions (32 total anchors)
-  ...
+  Found 4 disconnected regions (128 total anchors)
+  Routing 3 connection(s) to join regions...
+    [1/3] Region 0 (114 anchors) <-> Region 1 (7 anchors)... OK width=1.00mm, length=10.3mm
+    [2/3] Region 0 (114 anchors) <-> Region 3 (4 anchors)... OK width=2.00mm, length=14.4mm
+    [3/3] Region 0 (114 anchors) <-> Region 2 (3 anchors)... OK width=2.00mm, length=16.5mm, 2 via(s)
+  Result: All 3 route(s) succeeded
 
 ============================================================
 SUMMARY
 ============================================================
-  Zones processed: 2
-  Total routes added: 18
-  Total vias added: 12
+  Zones processed: 4
+  Total routes added: 6
+  Total vias added: 8
 ```
+
+Note: Zones with the same net on multiple layers are processed together (e.g., "GND on B.Cu, In1.Cu") since vias connect all layers. Per-layer zone clearances are shown and used for obstacle map construction.
 
 ### Why Routes Fail
 

@@ -622,13 +622,15 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 
 Features:
 - **Auto-detection** - Automatically finds all zones in PCB if nets/layers not specified
-- **Flood-fill region detection** - Uses grid-based flood fill to identify disconnected regions
+- **Per-net processing** - Zones with the same net on multiple layers are processed together, reducing redundant routes since vias connect all layers
+- **Flood-fill region detection** - Uses grid-based flood fill to identify disconnected regions across all zone layers
+- **Cross-layer connectivity** - Uses vias and through-hole pads to properly track connectivity across multiple zone layers
 - **MST-based connections** - Connects regions using minimum spanning tree for optimal routing
 - **Multi-point routing** - Uses ALL anchors (vias/pads) in each region as potential connection points, trying both directions (A->B and B->A) since A* can find different paths depending on direction
+- **Wide track routing** - Tries track widths from max (2.0mm) down to min (0.2mm), using the widest width that fits without rebuilding obstacle maps
 - **Smart via placement** - Only adds new vias at layer transitions if no via already exists at that position
 - **Hole-to-hole clearance** - Respects drill hole clearances when placing new vias
 - **Multi-layer routing** - Can route through any copper layer to connect regions
-- **Adaptive track width** - Computes maximum safe track width based on corridor clearance
 
 ## Requirements
 

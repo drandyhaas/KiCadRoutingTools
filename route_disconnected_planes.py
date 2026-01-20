@@ -222,18 +222,6 @@ def route_planes(
     total_regions = 0
     total_vias = 0
 
-    # Cache for obstacle map - only rebuild when net changes
-    cached_net_id: Optional[int] = None
-    cached_obstacles: Optional[object] = None
-    cached_layer_map: Optional[Dict] = None
-
-    # Build zone_layers map: net_id -> set of layers that have zones for this net
-    zone_layers_by_net: Dict[int, set] = {}
-    for net_name, plane_layer, net_id in zip(net_names, plane_layers, net_ids):
-        if net_id not in zone_layers_by_net:
-            zone_layers_by_net[net_id] = set()
-        zone_layers_by_net[net_id].add(plane_layer)
-
     # Extract per-zone clearances and min_thickness from PCB file
     zone_props = extract_zone_properties(input_file)
     if verbose:
@@ -245,55 +233,55 @@ def route_planes(
     print(f"Routing disconnected plane regions")
     print(f"{'='*60}")
 
+    # Group zones by net - process each net once with all its zone layers
+    unique_nets: Dict[int, Tuple[str, Set[str]]] = {}  # net_id -> (net_name, set of layers)
     for net_name, plane_layer, net_id in zip(net_names, plane_layers, net_ids):
-        # Get per-zone clearance (fall back to default if not found)
-        zone_key = (net_name, plane_layer)
-        this_zone_clearance = zone_props.get(zone_key, {}).get('clearance', zone_clearance)
-        this_zone_min_thickness = zone_props.get(zone_key, {}).get('min_thickness', 0.1)
+        if net_id not in unique_nets:
+            unique_nets[net_id] = (net_name, set())
+        unique_nets[net_id][1].add(plane_layer)
 
+    for net_id, (net_name, net_zone_layers) in unique_nets.items():
         # Build per-layer zone clearances for all layers with zones for this net
+        # These are used in flood fill to determine what the zone fill connects
         zone_clearances: Dict[str, float] = {}
-        for layer in zone_layers_by_net.get(net_id, set()):
+        for layer in net_zone_layers:
             zk = (net_name, layer)
             if zk in zone_props:
                 zone_clearances[layer] = zone_props[zk]['clearance']
 
-        print(f"\n[{net_name}] on {plane_layer} (clearance={this_zone_clearance}mm, min_thickness={this_zone_min_thickness}mm):")
+        # Use maximum clearance as fallback (per-layer clearances used in flood fill)
+        max_zone_clearance = max(zone_clearances.values()) if zone_clearances else zone_clearance
 
-        # Build obstacle map for this net - exclude only this net's pads (anchors)
-        # but block all other nets' pads including other plane nets
-        # Skip rebuild if net hasn't changed
-        # Use min_track_width for obstacle inflation so narrow paths are available
-        if net_id != cached_net_id:
-            print(f"  Building obstacle map...", end=" ", flush=True)
-            base_obstacles, layer_map = build_base_obstacles(
-                exclude_net_ids={net_id},  # Only exclude current net's pads
-                routing_layers=routing_layers,
-                pcb_data=pcb_data,
-                config=config,
-                track_width=min_track_width,  # Use min width so narrow paths are open
-                track_via_clearance=track_via_clearance,
-                hole_to_hole_clearance=hole_to_hole_clearance
-            )
-            cached_net_id = net_id
-            cached_obstacles = base_obstacles
-            cached_layer_map = layer_map
-            print("done")
-        else:
-            print(f"  Reusing obstacle map from previous net")
-            base_obstacles = cached_obstacles
-            layer_map = cached_layer_map
+        # Pick first zone layer as "primary" (for plane_layer_idx in routing)
+        primary_layer = sorted(net_zone_layers)[0]
+
+        layers_str = ", ".join(sorted(net_zone_layers))
+        clearances_str = ", ".join(f"{l}={zone_clearances.get(l, zone_clearance)}mm" for l in sorted(net_zone_layers))
+        print(f"\n[{net_name}] on {layers_str} (clearances: {clearances_str}):")
+
+        # Build obstacle map for this net
+        print(f"  Building obstacle map...", end=" ", flush=True)
+        base_obstacles, layer_map = build_base_obstacles(
+            exclude_net_ids={net_id},
+            routing_layers=routing_layers,
+            pcb_data=pcb_data,
+            config=config,
+            track_width=min_track_width,
+            track_via_clearance=track_via_clearance,
+            hole_to_hole_clearance=hole_to_hole_clearance
+        )
+        print("done")
 
         region_segments, region_vias, routes_added, route_paths, _ = route_disconnected_regions(
             net_id=net_id,
             net_name=net_name,
-            plane_layer=plane_layer,
+            plane_layer=primary_layer,
             zone_bounds=zone_bounds,
             pcb_data=pcb_data,
             config=config,
             base_obstacles=base_obstacles,
             layer_map=layer_map,
-            zone_clearance=this_zone_clearance,
+            zone_clearance=max_zone_clearance,
             max_track_width=max_track_width,
             min_track_width=min_track_width,
             track_via_clearance=track_via_clearance,
@@ -301,7 +289,7 @@ def route_planes(
             analysis_grid_step=analysis_grid_step,
             max_iterations=max_iterations,
             verbose=verbose,
-            zone_layers=zone_layers_by_net.get(net_id),
+            zone_layers=net_zone_layers,
             zone_clearances=zone_clearances
         )
 

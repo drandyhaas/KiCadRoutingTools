@@ -93,35 +93,42 @@ def find_disconnected_zone_regions(
             return set(routing_layers)
         return set(via_layers)
 
-    # Find anchor points on the plane_layer (vias and pads of our net)
+    # Find anchor points on ANY zone layer (vias and pads of our net)
     anchor_points: List[Tuple[float, float]] = []
     anchor_grid_points: List[Tuple[int, int]] = []
-    anchor_is_multilayer: List[bool] = []  # True if anchor connects multiple layers (via or TH pad)
+    seen_anchors: Set[Tuple[float, float]] = set()  # Avoid duplicates
 
-    # Add vias of our net that touch the plane layer
+    # Add vias of our net that touch any zone layer
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        if not via_connects_layer(via.layers, plane_layer):
+        # Check if via touches any zone layer
+        touches_zone = any(via_connects_layer(via.layers, zl) for zl in zone_layers)
+        if not touches_zone:
             continue
         if min_x <= via.x <= max_x and min_y <= via.y <= max_y:
-            anchor_points.append((via.x, via.y))
-            anchor_grid_points.append(coord.to_grid(via.x, via.y))
-            anchor_is_multilayer.append(True)  # Vias connect all layers
+            key = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS))
+            if key not in seen_anchors:
+                seen_anchors.add(key)
+                anchor_points.append((via.x, via.y))
+                anchor_grid_points.append(coord.to_grid(via.x, via.y))
 
-    # Add pads of our net on this layer
+    # Add pads of our net on any zone layer
     for pad in pcb_data.pads_by_net.get(net_id, []):
-        if plane_layer not in pad.layers and '*.Cu' not in pad.layers:
+        # Check if pad touches any zone layer
+        touches_zone = '*.Cu' in pad.layers or any(zl in pad.layers for zl in zone_layers)
+        if not touches_zone:
             continue
         if min_x <= pad.global_x <= max_x and min_y <= pad.global_y <= max_y:
-            anchor_points.append((pad.global_x, pad.global_y))
-            anchor_grid_points.append(coord.to_grid(pad.global_x, pad.global_y))
-            # Through-hole pads ('*.Cu') connect all layers, SMD pads don't
-            anchor_is_multilayer.append('*.Cu' in pad.layers)
+            key = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
+            if key not in seen_anchors:
+                seen_anchors.add(key)
+                anchor_points.append((pad.global_x, pad.global_y))
+                anchor_grid_points.append(coord.to_grid(pad.global_x, pad.global_y))
 
     if len(anchor_points) < 2:
         # Not enough anchors to have disconnected regions
-        return [anchor_points], [set(anchor_grid_points)]
+        return [anchor_points], [set(anchor_grid_points)], []
 
     # Collect ALL cross-layer connection points (vias and through-hole pads) for our net
     # These can connect regions across different layers
