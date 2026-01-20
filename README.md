@@ -250,6 +250,7 @@ KiCadRoutingTools/
 ├── obstacle_map.py           # Obstacle map building functions
 ├── obstacle_cache.py         # Net obstacle caching for incremental builds
 ├── obstacle_costs.py         # Stub/track proximity cost calculations
+├── bresenham_utils.py        # Bresenham line-walking utilities for grid operations
 │
 ├── diff_pair_loop.py         # Differential pair routing loop
 ├── single_ended_loop.py      # Single-ended routing loop
@@ -336,6 +337,7 @@ KiCadRoutingTools/
 | `obstacle_map.py` | Obstacle map building from PCB data |
 | `obstacle_cache.py` | Net obstacle caching for incremental obstacle map builds |
 | `obstacle_costs.py` | Stub and track proximity cost calculations |
+| `bresenham_utils.py` | Bresenham line-walking utilities for grid-based segment operations |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, UnionFind) |
 | `routing_constants.py` | Shared constants (default layer stack, power net patterns, tolerances) |
 | `terminal_colors.py` | ANSI color codes for terminal output |

@@ -16,6 +16,7 @@ KiCadRoutingTools/
 ├── routing_common.py          # Shared utilities for route.py and route_diff.py
 ├── routing_utils.py           # Shared utilities
 ├── obstacle_map.py            # Obstacle map building
+├── bresenham_utils.py         # Bresenham line-walking utilities
 │
 ├── diff_pair_loop.py          # Diff pair routing main loop
 ├── single_ended_loop.py       # Single-ended routing main loop
@@ -51,6 +52,7 @@ KiCadRoutingTools/
 | `routing_common.py` | Shared utilities: BGA zone setup, net resolution, length matching, pcb_data sync |
 | `routing_utils.py` | Core utilities: `pos_key()`, `segment_length()`, `build_layer_map()`, `POSITION_DECIMALS` |
 | `obstacle_map.py` | Building `GridObstacleMap` from PCB data (segments, vias, pads, BGA zones) |
+| `bresenham_utils.py` | Bresenham line-walking utilities used by obstacle building and blocking analysis |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, closest points) |
 
 #### Routing Loops
