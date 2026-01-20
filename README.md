@@ -241,7 +241,6 @@ KiCadRoutingTools/
 ├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
 ├── plane_zone_geometry.py    # Voronoi zone computation for multi-net layers
 ├── plane_resistance.py       # Plane resistance and current capacity calculations
-├── plane_create_helpers.py   # Helper functions for create_plane
 ├── plane_region_connector.py # Detect and route between disconnected plane regions
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
 ├── routing_state.py          # RoutingState class - tracks routing progress

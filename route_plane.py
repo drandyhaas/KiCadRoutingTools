@@ -54,13 +54,6 @@ from plane_zone_geometry import (
     find_polygon_groups,
     sample_route_for_voronoi
 )
-from plane_create_helpers import (
-    PlaneCreationContext,
-    NetProcessingResult,
-    process_pad_via_placement,
-    generate_multinet_zones,
-    write_results_and_reroute
-)
 from terminal_colors import GREEN, RED, RESET
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
@@ -631,6 +624,362 @@ def route_plane_connection(
         route_points.append((x, y))
 
     return route_points
+
+
+def _generate_multinet_layer_zones(
+    layer: str,
+    nets_on_layer: List[str],
+    pcb_data: PCBData,
+    all_new_vias: List[Dict],
+    zone_polygon: List[Tuple[float, float]],
+    board_bounds: Tuple[float, float, float, float],
+    config: GridRouteConfig,
+    zone_clearance: float,
+    min_thickness: float,
+    plane_proximity_radius: float,
+    plane_proximity_cost: float,
+    plane_track_via_clearance: float,
+    plane_max_iterations: int,
+    voronoi_seed_interval: float,
+    board_edge_clearance: float,
+    debug_lines: bool,
+    verbose: bool
+) -> Tuple[List[str], List[str]]:
+    """
+    Generate Voronoi-based zone boundaries for a multi-net layer.
+
+    Args:
+        layer: Layer name (e.g., 'In1.Cu')
+        nets_on_layer: List of net names sharing this layer
+        pcb_data: PCB data
+        all_new_vias: List of newly placed vias
+        zone_polygon: Default zone polygon (full board)
+        board_bounds: (min_x, min_y, max_x, max_y)
+        config: Routing configuration
+        zone_clearance: Zone clearance
+        min_thickness: Minimum zone thickness
+        plane_proximity_radius: Proximity radius for routing
+        plane_proximity_cost: Proximity cost for routing
+        plane_track_via_clearance: Track-to-via clearance
+        plane_max_iterations: Max A* iterations
+        voronoi_seed_interval: Sample interval for Voronoi seeds
+        board_edge_clearance: Edge clearance for zones
+        debug_lines: Whether to generate debug lines
+        verbose: Verbose output
+
+    Returns:
+        Tuple of (zone_sexprs, debug_line_sexprs)
+    """
+    zone_sexprs = []
+    debug_line_sexprs = []
+
+    # Build vias_by_net for this layer
+    vias_by_net: Dict[int, List[Tuple[float, float]]] = {}
+    net_name_to_id = {}
+    for net_name in nets_on_layer:
+        net_id = next((nid for nid, n in pcb_data.nets.items() if n.name == net_name), None)
+        if net_id is not None:
+            net_name_to_id[net_name] = net_id
+            vias_by_net[net_id] = []
+
+    # Collect via positions for nets on this layer
+    for via in all_new_vias:
+        if via['net_id'] in vias_by_net:
+            vias_by_net[via['net_id']].append((via['x'], via['y']))
+
+    # Also include existing vias from the PCB
+    for via in pcb_data.vias:
+        if via.net_id in vias_by_net:
+            via_pos = (via.x, via.y)
+            if via_pos not in vias_by_net[via.net_id]:
+                vias_by_net[via.net_id].append(via_pos)
+
+    # Check for nets with no vias
+    nets_with_vias = []
+    for net_name in nets_on_layer:
+        net_id = net_name_to_id.get(net_name)
+        if net_id:
+            via_count = len(vias_by_net.get(net_id, []))
+            if via_count == 0:
+                print(f"  Warning: Net '{net_name}' has no vias on layer {layer}, skipping zone")
+            else:
+                nets_with_vias.append(net_name)
+                print(f"  Net '{net_name}': {via_count} vias")
+
+    if len(nets_with_vias) < 2:
+        # Only one net has vias, use full board rectangle
+        if nets_with_vias:
+            net_name = nets_with_vias[0]
+            net_id = net_name_to_id[net_name]
+            print(f"  Only '{net_name}' has vias, using full board rectangle")
+            zone_sexpr = generate_zone_sexpr(
+                net_id=net_id,
+                net_name=net_name,
+                layer=layer,
+                polygon_points=zone_polygon,
+                clearance=zone_clearance,
+                min_thickness=min_thickness,
+                direct_connect=True
+            )
+            zone_sexprs.append(zone_sexpr)
+        return zone_sexprs, debug_line_sexprs
+
+    # Compute MST edges for each net
+    net_mst_edges: Dict[int, List[Tuple[Tuple[float, float], Tuple[float, float]]]] = {}
+    net_debug_layers: Dict[int, str] = {}
+    for net_idx, net_name in enumerate(nets_with_vias):
+        net_id = net_name_to_id[net_name]
+        net_vias = vias_by_net.get(net_id, [])
+        if len(net_vias) >= 2:
+            net_mst_edges[net_id] = compute_mst_segments(net_vias)
+            net_debug_layers[net_id] = f"User.{net_idx + 1}"
+            print(f"  Net '{net_name}': MST with {len(net_mst_edges[net_id])} edges between {len(net_vias)} vias")
+        else:
+            print(f"  Net '{net_name}': only {len(net_vias)} via(s), no MST needed")
+
+    # Iteratively route all nets, reordering to put failed nets first
+    max_mst_iterations = 5
+    net_order = list(net_mst_edges.keys())
+    failed_nets: Set[int] = set()
+    best_result = None
+
+    for mst_iteration in range(max_mst_iterations):
+        if mst_iteration > 0:
+            net_order = sorted(net_order, key=lambda nid: (0 if nid in failed_nets else 1))
+            failed_net_names = [pcb_data.nets[nid].name for nid in failed_nets if nid in pcb_data.nets]
+            print(f"  Retry {mst_iteration + 1}: reordering with failed nets first: {', '.join(failed_net_names)}")
+
+        connection_routes = []
+        routed_paths_by_edge: Dict[int, Dict[Tuple[Tuple[float, float], Tuple[float, float]], List[Tuple[float, float]]]] = {
+            net_id: {} for net_id in net_mst_edges.keys()
+        }
+        augmented_vias_by_net = {net_id: list(vias) for net_id, vias in vias_by_net.items()}
+        debug_lines_for_layer = []
+        failed_nets = set()
+        total_failed_edges = 0
+
+        for net_id in net_order:
+            net = pcb_data.nets.get(net_id)
+            net_name = net.name if net else f"net_{net_id}"
+            mst_edges = net_mst_edges[net_id]
+            debug_layer = net_debug_layers[net_id]
+
+            other_nets_vias: Dict[int, List[Tuple[float, float]]] = {}
+            for other_net_id, other_vias in augmented_vias_by_net.items():
+                if other_net_id != net_id:
+                    other_nets_vias[other_net_id] = other_vias
+
+            routed_count = 0
+            failed_count = 0
+
+            for via_a, via_b in mst_edges:
+                other_nets_routes = [
+                    route for route_net_id, _, route in connection_routes
+                    if route_net_id != net_id
+                ]
+
+                route_path = route_plane_connection(
+                    via_a=via_a,
+                    via_b=via_b,
+                    plane_layer=layer,
+                    net_id=net_id,
+                    other_nets_vias=other_nets_vias,
+                    config=config,
+                    pcb_data=pcb_data,
+                    proximity_radius=plane_proximity_radius,
+                    proximity_cost=plane_proximity_cost,
+                    track_via_clearance=plane_track_via_clearance,
+                    max_iterations=plane_max_iterations,
+                    verbose=verbose,
+                    previous_routes=other_nets_routes
+                )
+
+                if route_path:
+                    routed_count += 1
+                    connection_routes.append((net_id, layer, route_path))
+                    routed_paths_by_edge[net_id][(via_a, via_b)] = route_path
+
+                    if debug_lines and len(route_path) >= 2:
+                        for i in range(len(route_path) - 1):
+                            debug_lines_for_layer.append(generate_gr_line_sexpr(
+                                route_path[i], route_path[i + 1],
+                                width=0.1, layer=debug_layer
+                            ))
+
+                    samples = sample_route_for_voronoi(route_path, sample_interval=voronoi_seed_interval)
+                    if samples:
+                        augmented_vias_by_net[net_id].extend(samples)
+                else:
+                    failed_count += 1
+                    if verbose:
+                        print(f"    {net_name}: ({via_a[0]:.2f},{via_a[1]:.2f}) -> ({via_b[0]:.2f},{via_b[1]:.2f}) FAILED")
+
+            if failed_count > 0:
+                failed_nets.add(net_id)
+                total_failed_edges += failed_count
+                print(f"    {net_name}: {routed_count}/{len(mst_edges)} MST edges ({failed_count} failed)")
+            else:
+                print(f"    {net_name}: all {routed_count} MST edges routed")
+
+        if best_result is None or total_failed_edges < best_result[0]:
+            best_result = (total_failed_edges, connection_routes, augmented_vias_by_net, debug_lines_for_layer, routed_paths_by_edge)
+
+        if total_failed_edges == 0:
+            break
+
+    # Use best result
+    if best_result:
+        _, connection_routes, augmented_vias_by_net, debug_lines_for_layer, routed_paths_by_edge = best_result
+        debug_line_sexprs.extend(debug_lines_for_layer)
+        if best_result[0] > 0:
+            print(f"  Best result: {best_result[0]} failed edge(s)")
+
+    # Compute final Voronoi zones
+    total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
+    print(f"  Computing final Voronoi zones with {total_seeds} seed points")
+
+    try:
+        zone_polygons, _, _ = compute_zone_boundaries(
+            augmented_vias_by_net, board_bounds,
+            return_raw_polygons=True,
+            board_edge_clearance=board_edge_clearance,
+            verbose=verbose
+        )
+    except ValueError as e:
+        print(f"  Error computing zone boundaries: {e}")
+        print(f"  Falling back to full board rectangle for first net")
+        net_name = nets_with_vias[0]
+        net_id = net_name_to_id[net_name]
+        zone_sexpr = generate_zone_sexpr(
+            net_id=net_id,
+            net_name=net_name,
+            layer=layer,
+            polygon_points=zone_polygon,
+            clearance=zone_clearance,
+            min_thickness=min_thickness,
+            direct_connect=True
+        )
+        zone_sexprs.append(zone_sexpr)
+        return zone_sexprs, debug_line_sexprs
+
+    # Generate zones for each net
+    for net_id, polygons in zone_polygons.items():
+        net = pcb_data.nets.get(net_id)
+        net_name = net.name if net else f"net_{net_id}"
+        for poly_idx, polygon in enumerate(polygons):
+            if len(polygons) > 1:
+                print(f"  Creating zone {poly_idx+1}/{len(polygons)} for '{net_name}' with {len(polygon)} vertices")
+            else:
+                print(f"  Creating zone for '{net_name}' with {len(polygon)} vertices")
+            zone_sexpr = generate_zone_sexpr(
+                net_id=net_id,
+                net_name=net_name,
+                layer=layer,
+                polygon_points=polygon,
+                clearance=zone_clearance,
+                min_thickness=min_thickness,
+                direct_connect=True
+            )
+            zone_sexprs.append(zone_sexpr)
+
+    # Calculate and print resistance
+    resistance_results = {}
+    for net_id, polygons in zone_polygons.items():
+        net = pcb_data.nets.get(net_id)
+        net_name = net.name if net else f"net_{net_id}"
+        mst_edges = net_mst_edges.get(net_id, [])
+        edge_routes = routed_paths_by_edge.get(net_id, {})
+        largest_polygon = max(polygons, key=lambda p: len(p))
+        result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer)
+        resistance_results[net_name] = result
+
+    print_multi_net_resistance(resistance_results)
+
+    return zone_sexprs, debug_line_sexprs
+
+
+def _write_output_and_reroute(
+    input_file: str,
+    output_file: str,
+    all_zone_sexprs: List[str],
+    all_debug_lines: List[str],
+    all_new_vias: List[Dict],
+    all_new_segments: List[Dict],
+    all_ripped_net_ids: List[int],
+    zones_to_replace: List[Tuple[int, str]],
+    pcb_data: PCBData,
+    reroute_ripped_nets: bool,
+    all_layers: List[str],
+    plane_layers: List[str],
+    track_width: float,
+    clearance: float,
+    via_size: float,
+    via_drill: float,
+    grid_step: float,
+    hole_to_hole_clearance: float,
+    verbose: bool
+) -> bool:
+    """
+    Write output file and optionally reroute ripped nets.
+
+    Returns:
+        True if output was written successfully
+    """
+    print(f"\nWriting output to {output_file}...")
+    all_sexprs = all_zone_sexprs + all_debug_lines
+    combined_zone_sexpr = '\n'.join(all_sexprs) if all_sexprs else None
+    if all_debug_lines:
+        print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
+
+    if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
+                              exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace):
+        print("Error writing output file")
+        return False
+
+    print(f"Output written to {output_file}")
+    print("Note: Open in KiCad and press 'B' to refill zones")
+
+    if all_ripped_net_ids:
+        ripped_net_names = []
+        for rid in all_ripped_net_ids:
+            net = pcb_data.nets.get(rid)
+            if net:
+                ripped_net_names.append(net.name)
+
+        if reroute_ripped_nets and ripped_net_names:
+            print(f"\n{'='*60}")
+            print(f"Re-routing {len(ripped_net_names)} ripped net(s)...")
+            print(f"{'='*60}")
+            old_recursion_limit = sys.getrecursionlimit()
+            sys.setrecursionlimit(max(old_recursion_limit, 100000))
+            try:
+                routing_layers = [l for l in all_layers if l not in plane_layers]
+                if not routing_layers:
+                    routing_layers = ['F.Cu', 'B.Cu']
+                all_copper_layers = list(set(all_layers + plane_layers))
+                routed, failed, route_time = batch_route(
+                    input_file=output_file,
+                    output_file=output_file,
+                    net_names=ripped_net_names,
+                    layers=all_copper_layers,
+                    track_width=track_width,
+                    clearance=clearance,
+                    via_size=via_size,
+                    via_drill=via_drill,
+                    grid_step=grid_step,
+                    hole_to_hole_clearance=hole_to_hole_clearance,
+                    verbose=verbose,
+                    minimal_obstacle_cache=True
+                )
+                print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
+            finally:
+                sys.setrecursionlimit(old_recursion_limit)
+        else:
+            print(f"WARNING: {len(all_ripped_net_ids)} net(s) were removed from output and need re-routing!")
+            if ripped_net_names:
+                print(f"  Ripped nets: {', '.join(ripped_net_names)}")
+
+    return True
 
 
 def create_plane(
@@ -1258,240 +1607,27 @@ def create_plane(
                 print(f"Nets: {', '.join(nets_on_layer)}")
                 print(f"{'='*60}")
 
-                # Build vias_by_net for this layer
-                vias_by_net: Dict[int, List[Tuple[float, float]]] = {}
-                net_name_to_id = {}
-                for net_name in nets_on_layer:
-                    net_id = next((nid for nid, n in pcb_data.nets.items() if n.name == net_name), None)
-                    if net_id is not None:
-                        net_name_to_id[net_name] = net_id
-                        vias_by_net[net_id] = []
-
-                # Collect via positions for nets on this layer
-                # Include BOTH newly placed vias AND existing vias (for reused ones)
-                for via in all_new_vias:
-                    if via['net_id'] in vias_by_net:
-                        vias_by_net[via['net_id']].append((via['x'], via['y']))
-
-                # Also include existing vias from the PCB (reused vias aren't in all_new_vias)
-                for via in pcb_data.vias:
-                    if via.net_id in vias_by_net:
-                        via_pos = (via.x, via.y)
-                        if via_pos not in vias_by_net[via.net_id]:
-                            vias_by_net[via.net_id].append(via_pos)
-
-                # Check for nets with no vias
-                nets_with_vias = []
-                for net_name in nets_on_layer:
-                    net_id = net_name_to_id.get(net_name)
-                    if net_id:
-                        via_count = len(vias_by_net.get(net_id, []))
-                        if via_count == 0:
-                            print(f"  Warning: Net '{net_name}' has no vias on layer {layer}, skipping zone")
-                        else:
-                            nets_with_vias.append(net_name)
-                            print(f"  Net '{net_name}': {via_count} vias")
-
-                if len(nets_with_vias) < 2:
-                    # Only one net has vias, use full board rectangle
-                    if nets_with_vias:
-                        net_name = nets_with_vias[0]
-                        net_id = net_name_to_id[net_name]
-                        print(f"  Only '{net_name}' has vias, using full board rectangle")
-                        zone_sexpr = generate_zone_sexpr(
-                            net_id=net_id,
-                            net_name=net_name,
-                            layer=layer,
-                            polygon_points=zone_polygon,
-                            clearance=zone_clearance,
-                            min_thickness=min_thickness,
-                            direct_connect=True
-                        )
-                        all_zone_sexprs.append(zone_sexpr)
-                    continue
-
-                # Route MST between all vias for each net, then compute Voronoi zones
-                # Compute MST edges for each net upfront
-                net_mst_edges: Dict[int, List[Tuple[Tuple[float, float], Tuple[float, float]]]] = {}
-                net_debug_layers: Dict[int, str] = {}
-                for net_idx, net_name in enumerate(nets_with_vias):
-                    net_id = net_name_to_id[net_name]
-                    net_vias = vias_by_net.get(net_id, [])
-                    if len(net_vias) >= 2:
-                        net_mst_edges[net_id] = compute_mst_segments(net_vias)
-                        net_debug_layers[net_id] = f"User.{net_idx + 1}"
-                        print(f"  Net '{net_name}': MST with {len(net_mst_edges[net_id])} edges between {len(net_vias)} vias")
-                    else:
-                        print(f"  Net '{net_name}': only {len(net_vias)} via(s), no MST needed")
-
-                # Iteratively route all nets, reordering to put failed nets first
-                max_mst_iterations = 5
-                net_order = list(net_mst_edges.keys())  # Initial order
-                failed_nets: Set[int] = set()
-                best_result = None  # (total_failed, connection_routes, augmented_vias, debug_lines_for_layer)
-
-                for mst_iteration in range(max_mst_iterations):
-                    if mst_iteration > 0:
-                        # Reorder: failed nets first
-                        net_order = sorted(net_order, key=lambda nid: (0 if nid in failed_nets else 1))
-                        failed_net_names = [pcb_data.nets[nid].name for nid in failed_nets if nid in pcb_data.nets]
-                        print(f"  Retry {mst_iteration + 1}: reordering with failed nets first: {', '.join(failed_net_names)}")
-
-                    # Clear and restart routing for this iteration
-                    connection_routes = []
-                    routed_paths_by_edge: Dict[int, Dict[Tuple[Tuple[float, float], Tuple[float, float]], List[Tuple[float, float]]]] = {
-                        net_id: {} for net_id in net_mst_edges.keys()
-                    }
-                    augmented_vias_by_net = {net_id: list(vias) for net_id, vias in vias_by_net.items()}
-                    debug_lines_for_layer = []
-                    failed_nets = set()
-                    total_failed_edges = 0
-
-                    for net_id in net_order:
-                        net = pcb_data.nets.get(net_id)
-                        net_name = net.name if net else f"net_{net_id}"
-                        mst_edges = net_mst_edges[net_id]
-                        debug_layer = net_debug_layers[net_id]
-
-                        # Build other_nets_vias for proximity cost
-                        other_nets_vias: Dict[int, List[Tuple[float, float]]] = {}
-                        for other_net_id, other_vias in augmented_vias_by_net.items():
-                            if other_net_id != net_id:
-                                other_nets_vias[other_net_id] = other_vias
-
-                        routed_count = 0
-                        failed_count = 0
-
-                        for via_a, via_b in mst_edges:
-                            # Collect previous routes from OTHER nets to avoid
-                            other_nets_routes = [
-                                route for route_net_id, _, route in connection_routes
-                                if route_net_id != net_id
-                            ]
-
-                            route_path = route_plane_connection(
-                                via_a=via_a,
-                                via_b=via_b,
-                                plane_layer=layer,
-                                net_id=net_id,
-                                other_nets_vias=other_nets_vias,
-                                config=config,
-                                pcb_data=pcb_data,
-                                proximity_radius=plane_proximity_radius,
-                                proximity_cost=plane_proximity_cost,
-                                track_via_clearance=plane_track_via_clearance,
-                                max_iterations=plane_max_iterations,
-                                verbose=verbose,
-                                previous_routes=other_nets_routes
-                            )
-
-                            if route_path:
-                                routed_count += 1
-                                connection_routes.append((net_id, layer, route_path))
-                                routed_paths_by_edge[net_id][(via_a, via_b)] = route_path
-
-                                # Generate debug lines
-                                if debug_lines and len(route_path) >= 2:
-                                    for i in range(len(route_path) - 1):
-                                        debug_lines_for_layer.append(generate_gr_line_sexpr(
-                                            route_path[i], route_path[i + 1],
-                                            width=0.1, layer=debug_layer
-                                        ))
-
-                                # Sample route path for Voronoi seeding
-                                samples = sample_route_for_voronoi(route_path, sample_interval=voronoi_seed_interval)
-                                if samples:
-                                    augmented_vias_by_net[net_id].extend(samples)
-                            else:
-                                failed_count += 1
-                                if verbose:
-                                    print(f"    {net_name}: ({via_a[0]:.2f},{via_a[1]:.2f}) -> ({via_b[0]:.2f},{via_b[1]:.2f}) FAILED")
-
-                        if failed_count > 0:
-                            failed_nets.add(net_id)
-                            total_failed_edges += failed_count
-                            print(f"    {net_name}: {routed_count}/{len(mst_edges)} MST edges ({failed_count} failed)")
-                        else:
-                            print(f"    {net_name}: all {routed_count} MST edges routed")
-
-                    # Track best result (fewest failures)
-                    if best_result is None or total_failed_edges < best_result[0]:
-                        best_result = (total_failed_edges, connection_routes, augmented_vias_by_net, debug_lines_for_layer, routed_paths_by_edge)
-
-                    # Stop if no failures
-                    if total_failed_edges == 0:
-                        break
-
-                # Use best result
-                if best_result:
-                    _, connection_routes, augmented_vias_by_net, debug_lines_for_layer, routed_paths_by_edge = best_result
-                    all_debug_lines.extend(debug_lines_for_layer)
-                    if best_result[0] > 0:
-                        print(f"  Best result: {best_result[0]} failed edge(s)")
-
-                # Compute final Voronoi zones with augmented seeds
-                total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
-                print(f"  Computing final Voronoi zones with {total_seeds} seed points")
-
-                try:
-                    zone_polygons, _, _ = compute_zone_boundaries(
-                        augmented_vias_by_net, board_bounds,
-                        return_raw_polygons=True,
-                        board_edge_clearance=board_edge_clearance,
-                        verbose=verbose
-                    )
-                except ValueError as e:
-                    print(f"  Error computing zone boundaries: {e}")
-                    print(f"  Falling back to full board rectangle for first net")
-                    net_name = nets_with_vias[0]
-                    net_id = net_name_to_id[net_name]
-                    zone_sexpr = generate_zone_sexpr(
-                        net_id=net_id,
-                        net_name=net_name,
-                        layer=layer,
-                        polygon_points=zone_polygon,
-                        clearance=zone_clearance,
-                        min_thickness=min_thickness,
-                        direct_connect=True
-                    )
-                    all_zone_sexprs.append(zone_sexpr)
-                    continue
-
-                # Generate zones for each net
-                for net_id, polygons in zone_polygons.items():
-                    net = pcb_data.nets.get(net_id)
-                    net_name = net.name if net else f"net_{net_id}"
-                    for poly_idx, polygon in enumerate(polygons):
-                        if len(polygons) > 1:
-                            print(f"  Creating zone {poly_idx+1}/{len(polygons)} for '{net_name}' with {len(polygon)} vertices")
-                        else:
-                            print(f"  Creating zone for '{net_name}' with {len(polygon)} vertices")
-                        zone_sexpr = generate_zone_sexpr(
-                            net_id=net_id,
-                            net_name=net_name,
-                            layer=layer,
-                            polygon_points=polygon,
-                            clearance=zone_clearance,
-                            min_thickness=min_thickness,
-                            direct_connect=True
-                        )
-                        all_zone_sexprs.append(zone_sexpr)
-
-                # Calculate and print resistance for each polygon
-                resistance_results = {}
-                for net_id, polygons in zone_polygons.items():
-                    net = pcb_data.nets.get(net_id)
-                    net_name = net.name if net else f"net_{net_id}"
-
-                    mst_edges = net_mst_edges.get(net_id, [])
-                    edge_routes = routed_paths_by_edge.get(net_id, {})
-
-                    # Use largest polygon for this net
-                    largest_polygon = max(polygons, key=lambda p: len(p))
-                    result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer)
-                    resistance_results[net_name] = result
-
-                print_multi_net_resistance(resistance_results)
+                zone_sexprs, debug_line_sexprs = _generate_multinet_layer_zones(
+                    layer=layer,
+                    nets_on_layer=nets_on_layer,
+                    pcb_data=pcb_data,
+                    all_new_vias=all_new_vias,
+                    zone_polygon=zone_polygon,
+                    board_bounds=board_bounds,
+                    config=config,
+                    zone_clearance=zone_clearance,
+                    min_thickness=min_thickness,
+                    plane_proximity_radius=plane_proximity_radius,
+                    plane_proximity_cost=plane_proximity_cost,
+                    plane_track_via_clearance=plane_track_via_clearance,
+                    plane_max_iterations=plane_max_iterations,
+                    voronoi_seed_interval=voronoi_seed_interval,
+                    board_edge_clearance=board_edge_clearance,
+                    debug_lines=debug_lines,
+                    verbose=verbose
+                )
+                all_zone_sexprs.extend(zone_sexprs)
+                all_debug_lines.extend(debug_line_sexprs)
 
     # Print overall totals
     print(f"\n{'='*60}")
@@ -1514,60 +1650,27 @@ def create_plane(
     if dry_run:
         print("\nDry run - no output file written")
     else:
-        print(f"\nWriting output to {output_file}...")
-        # Combine all zone sexprs and debug lines
-        all_sexprs = all_zone_sexprs + all_debug_lines
-        combined_zone_sexpr = '\n'.join(all_sexprs) if all_sexprs else None
-        if all_debug_lines:
-            print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
-        if write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
-                               exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace):
-            print(f"Output written to {output_file}")
-            print("Note: Open in KiCad and press 'B' to refill zones")
-            if all_ripped_net_ids:
-                ripped_net_names = []
-                for rid in all_ripped_net_ids:
-                    net = pcb_data.nets.get(rid)
-                    if net:
-                        ripped_net_names.append(net.name)
-                if reroute_ripped_nets and ripped_net_names:
-                    # Re-route the ripped nets using the batch router
-                    print(f"\n{'='*60}")
-                    print(f"Re-routing {len(ripped_net_names)} ripped net(s)...")
-                    print(f"{'='*60}")
-                    # Increase recursion limit for large PCBs with many zone segments
-                    old_recursion_limit = sys.getrecursionlimit()
-                    sys.setrecursionlimit(max(old_recursion_limit, 100000))
-                    try:
-                        # Determine routing layers: all copper layers except plane layers
-                        routing_layers = [l for l in all_layers if l not in plane_layers]
-                        if not routing_layers:
-                            routing_layers = ['F.Cu', 'B.Cu']
-                        # Use all copper layers for via obstacle checking
-                        all_copper_layers = list(set(all_layers + plane_layers))
-                        routed, failed, route_time = batch_route(
-                            input_file=output_file,
-                            output_file=output_file,
-                            net_names=ripped_net_names,
-                            layers=all_copper_layers,  # All layers for via clearance
-                            track_width=track_width,
-                            clearance=clearance,
-                            via_size=via_size,
-                            via_drill=via_drill,
-                            grid_step=grid_step,
-                            hole_to_hole_clearance=hole_to_hole_clearance,
-                            verbose=verbose,
-                            minimal_obstacle_cache=True  # Only build cache for nets being routed
-                        )
-                        print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
-                    finally:
-                        sys.setrecursionlimit(old_recursion_limit)
-                else:
-                    print(f"WARNING: {len(all_ripped_net_ids)} net(s) were removed from output and need re-routing!")
-                    if ripped_net_names:
-                        print(f"  Ripped nets: {', '.join(ripped_net_names)}")
-        else:
-            print("Error writing output file")
+        _write_output_and_reroute(
+            input_file=input_file,
+            output_file=output_file,
+            all_zone_sexprs=all_zone_sexprs,
+            all_debug_lines=all_debug_lines,
+            all_new_vias=all_new_vias,
+            all_new_segments=all_new_segments,
+            all_ripped_net_ids=all_ripped_net_ids,
+            zones_to_replace=zones_to_replace,
+            pcb_data=pcb_data,
+            reroute_ripped_nets=reroute_ripped_nets,
+            all_layers=all_layers,
+            plane_layers=plane_layers,
+            track_width=track_width,
+            clearance=clearance,
+            via_size=via_size,
+            via_drill=via_drill,
+            grid_step=grid_step,
+            hole_to_hole_clearance=hole_to_hole_clearance,
+            verbose=verbose
+        )
 
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 

@@ -407,7 +407,6 @@ The plane generation code is organized into several modules:
 | `plane_blocker_detection.py` | Blocker detection and rip-up - identifies which nets are blocking via placement |
 | `plane_zone_geometry.py` | Voronoi zone computation - computes non-overlapping zone polygons for multi-net layers |
 | `plane_resistance.py` | Resistance analysis - calculates plane resistance and max current capacity |
-| `plane_create_helpers.py` | Helper functions for create_plane - pad processing, multi-net zones, result output |
 
 ### Key Functions
 
