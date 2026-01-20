@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple, Dict, Set
 from collections import deque
 import math
 
-from kicad_parser import PCBData, Via, Segment, Pad
+from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
 
 import sys
@@ -26,10 +26,20 @@ def find_disconnected_zone_regions(
     pcb_data: PCBData,
     config: GridRouteConfig,
     zone_clearance: float = 0.2,
-    analysis_grid_step: float = 0.5  # Coarser grid for faster analysis
-) -> Tuple[List[List[Tuple[float, float]]], List[Set[Tuple[int, int]]]]:
+    analysis_grid_step: float = 0.5,  # Coarser grid for faster analysis
+    routing_layers: Optional[List[str]] = None,  # All copper layers to check for cross-layer connectivity
+    zone_layers: Optional[Set[str]] = None,  # Layers that have zones for this net (allow flood fill)
+    debug: bool = False,  # If True, return debug paths showing connectivity
+    zone_clearances: Optional[Dict[str, float]] = None  # Per-layer zone clearances (layer -> clearance)
+) -> Tuple[List[List[Tuple[float, float]]], List[Set[Tuple[int, int]]], List[Tuple[List[Tuple[float, float]], str]]]:
     """
     Find disconnected regions within a zone using flood fill on a grid.
+
+    Checks connectivity across copper layers - regions are considered connected if
+    they can reach each other through vias, through-hole pads, or segments.
+
+    On layers WITH zones: flood fill through unblocked copper
+    On layers WITHOUT zones: only traverse along same-net segments
 
     Args:
         net_id: Net ID of the plane
@@ -37,13 +47,18 @@ def find_disconnected_zone_regions(
         zone_bounds: (min_x, min_y, max_x, max_y) of the zone area
         pcb_data: PCB data with vias, segments, pads
         config: Routing configuration
-        zone_clearance: Clearance for zone fill around obstacles
+        zone_clearance: Default clearance for zone fill around obstacles
         analysis_grid_step: Grid step for connectivity analysis (coarser = faster)
+        routing_layers: All copper layers to check for cross-layer connectivity
+        zone_layers: Layers that have zones for this net (if None, only plane_layer)
+        debug: If True, return debug paths showing how regions are connected
+        zone_clearances: Per-layer zone clearances (layer -> clearance). Falls back to zone_clearance if not specified.
 
     Returns:
         Tuple of:
         - List of anchor point lists (vias/pads positions) per region
         - List of grid cell sets per region (for finding closest points)
+        - List of (path, layer) tuples showing connectivity paths (if debug=True, else empty)
     """
     # Use a coarser grid for connectivity analysis (much faster)
     coord = GridCoord(analysis_grid_step)
@@ -53,51 +68,46 @@ def find_disconnected_zone_regions(
     min_gx, min_gy = coord.to_grid(min_x, min_y)
     max_gx, max_gy = coord.to_grid(max_x, max_y)
 
-    # Create a local blocked set for this analysis
-    blocked: Set[Tuple[int, int]] = set()
+    # If no routing layers specified, just use the plane layer (legacy behavior)
+    if routing_layers is None:
+        routing_layers = [plane_layer]
 
-    # Block cells for other nets' vias (with zone_clearance)
-    via_block_radius = max(1, coord.to_grid_dist(config.via_size / 2 + zone_clearance))
-    for via in pcb_data.vias:
-        if via.net_id == net_id:
-            continue
-        gx, gy = coord.to_grid(via.x, via.y)
-        for dx in range(-via_block_radius, via_block_radius + 1):
-            for dy in range(-via_block_radius, via_block_radius + 1):
-                if dx * dx + dy * dy <= via_block_radius * via_block_radius:
-                    blocked.add((gx + dx, gy + dy))
+    # If no zone layers specified, only the plane_layer has a zone
+    if zone_layers is None:
+        zone_layers = {plane_layer}
 
-    # Block cells for other nets' segments on this layer (with zone_clearance)
-    for seg in pcb_data.segments:
-        if seg.net_id == net_id:
-            continue
-        if seg.layer != plane_layer:
-            continue
-        seg_block_radius = max(1, coord.to_grid_dist(seg.width / 2 + zone_clearance))
-        _block_segment_cells(blocked, seg, coord, seg_block_radius)
+    def via_connects_layer(via_layers: List[str], layer: str) -> bool:
+        """Check if a via connects to a given layer.
+        Through-hole vias (F.Cu to B.Cu) connect ALL copper layers."""
+        if layer in via_layers:
+            return True
+        # Through-hole via connects all layers
+        if 'F.Cu' in via_layers and 'B.Cu' in via_layers:
+            return layer in routing_layers
+        return False
 
-    # Block cells for other nets' pads that touch this layer (with zone_clearance)
-    for pad_net_id, pads in pcb_data.pads_by_net.items():
-        if pad_net_id == net_id:
-            continue
-        for pad in pads:
-            if plane_layer not in pad.layers and '*.Cu' not in pad.layers:
-                continue
-            _block_pad_cells(blocked, pad, coord, zone_clearance)
+    def get_via_connected_layers(via_layers: List[str]) -> Set[str]:
+        """Get all layers a via connects to.
+        Through-hole vias (F.Cu to B.Cu) connect ALL copper layers."""
+        if 'F.Cu' in via_layers and 'B.Cu' in via_layers:
+            return set(routing_layers)
+        return set(via_layers)
 
-    # Find anchor points (vias and pads of our net on this layer)
+    # Find anchor points on the plane_layer (vias and pads of our net)
     anchor_points: List[Tuple[float, float]] = []
     anchor_grid_points: List[Tuple[int, int]] = []
+    anchor_is_multilayer: List[bool] = []  # True if anchor connects multiple layers (via or TH pad)
 
-    # Add vias of our net
+    # Add vias of our net that touch the plane layer
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        if plane_layer not in via.layers:
+        if not via_connects_layer(via.layers, plane_layer):
             continue
         if min_x <= via.x <= max_x and min_y <= via.y <= max_y:
             anchor_points.append((via.x, via.y))
             anchor_grid_points.append(coord.to_grid(via.x, via.y))
+            anchor_is_multilayer.append(True)  # Vias connect all layers
 
     # Add pads of our net on this layer
     for pad in pcb_data.pads_by_net.get(net_id, []):
@@ -106,85 +116,288 @@ def find_disconnected_zone_regions(
         if min_x <= pad.global_x <= max_x and min_y <= pad.global_y <= max_y:
             anchor_points.append((pad.global_x, pad.global_y))
             anchor_grid_points.append(coord.to_grid(pad.global_x, pad.global_y))
+            # Through-hole pads ('*.Cu') connect all layers, SMD pads don't
+            anchor_is_multilayer.append('*.Cu' in pad.layers)
 
     if len(anchor_points) < 2:
         # Not enough anchors to have disconnected regions
         return [anchor_points], [set(anchor_grid_points)]
 
-    # Build map from grid position to list of anchor indices at that position
+    # Collect ALL cross-layer connection points (vias and through-hole pads) for our net
+    # These can connect regions across different layers
+    cross_layer_points: List[Tuple[float, float, Set[str]]] = []  # (x, y, set of layers)
+
+    for via in pcb_data.vias:
+        if via.net_id == net_id:
+            cross_layer_points.append((via.x, via.y, get_via_connected_layers(via.layers)))
+
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if '*.Cu' in pad.layers:  # Through-hole pad
+            cross_layer_points.append((pad.global_x, pad.global_y, set(routing_layers)))
+
+    # Build map from grid position to cross-layer point index
+    grid_to_crosslayer: Dict[Tuple[int, int], List[int]] = {}
+    for i, (x, y, layers) in enumerate(cross_layer_points):
+        gp = coord.to_grid(x, y)
+        if gp not in grid_to_crosslayer:
+            grid_to_crosslayer[gp] = []
+        grid_to_crosslayer[gp].append(i)
+
+    # Union-find for cross-layer points
+    cl_parent = list(range(len(cross_layer_points)))
+
+    def cl_find(x):
+        if cl_parent[x] != x:
+            cl_parent[x] = cl_find(cl_parent[x])
+        return cl_parent[x]
+
+    def cl_union(x, y):
+        px, py = cl_find(x), cl_find(y)
+        if px != py:
+            cl_parent[px] = py
+
+    # Also union-find for anchors (will merge based on cross-layer connectivity)
+    anchor_parent = list(range(len(anchor_points)))
+
+    def anchor_find(x):
+        if anchor_parent[x] != x:
+            anchor_parent[x] = anchor_find(anchor_parent[x])
+        return anchor_parent[x]
+
+    def anchor_union(x, y):
+        px, py = anchor_find(x), anchor_find(y)
+        if px != py:
+            anchor_parent[px] = py
+
+    # Debug paths: list of (path_points, layer_name) showing connectivity
+    debug_paths: List[Tuple[List[Tuple[float, float]], str]] = []
+
+    # First pass: connect cross-layer points that are at the same location
+    # (e.g., a via and a pad at the same spot)
+    for gp, indices in grid_to_crosslayer.items():
+        for i in range(1, len(indices)):
+            cl_union(indices[0], indices[i])
+
+    # Connect cross-layer points via same-net segments (segments directly connect points)
+    for seg in pcb_data.segments:
+        if seg.net_id != net_id:
+            continue
+        # Find cross-layer points at segment endpoints
+        start_gp = coord.to_grid(seg.start_x, seg.start_y)
+        end_gp = coord.to_grid(seg.end_x, seg.end_y)
+        start_cls = grid_to_crosslayer.get(start_gp, [])
+        end_cls = grid_to_crosslayer.get(end_gp, [])
+        # Union any cross-layer points at start with any at end (if segment is on their layer)
+        for si in start_cls:
+            if seg.layer in cross_layer_points[si][2]:
+                for ei in end_cls:
+                    if seg.layer in cross_layer_points[ei][2]:
+                        cl_union(si, ei)
+
+    # For each layer, do flood fill to find connectivity through the plane
+    # Cache the blocked set and segment cells for plane_layer to reuse later
+    blocked_plane: Optional[Set[Tuple[int, int]]] = None
+    net_plane_segment_cells: Optional[Set[Tuple[int, int]]] = None
+
+    for layer in routing_layers:
+        # Get layer-specific clearance (fall back to default zone_clearance)
+        layer_clearance = zone_clearance
+        if zone_clearances and layer in zone_clearances:
+            layer_clearance = zone_clearances[layer]
+
+        # Build blocked set for this layer
+        blocked: Set[Tuple[int, int]] = set()
+
+        # Block cells for other nets' vias (with layer-specific clearance)
+        for via in pcb_data.vias:
+            if via.net_id == net_id:
+                continue
+            via_block_radius = max(1, coord.to_grid_dist(via.size / 2 + layer_clearance))
+            gx, gy = coord.to_grid(via.x, via.y)
+            for dx in range(-via_block_radius, via_block_radius + 1):
+                for dy in range(-via_block_radius, via_block_radius + 1):
+                    if dx * dx + dy * dy <= via_block_radius * via_block_radius:
+                        blocked.add((gx + dx, gy + dy))
+
+        # Block cells for other nets' segments on this layer (with layer-specific clearance)
+        for seg in pcb_data.segments:
+            if seg.net_id == net_id:
+                continue
+            if seg.layer != layer:
+                continue
+            seg_block_radius = max(1, coord.to_grid_dist(seg.width / 2 + layer_clearance))
+            _block_segment_cells(blocked, seg, coord, seg_block_radius)
+
+        # Block cells for other nets' pads that touch this layer (with layer-specific clearance)
+        for pad_net_id, pads in pcb_data.pads_by_net.items():
+            if pad_net_id == net_id:
+                continue
+            for pad in pads:
+                if layer not in pad.layers and '*.Cu' not in pad.layers:
+                    continue
+                _block_pad_cells(blocked, pad, coord, layer_clearance)
+
+        # Mark cells along same-net segments as connected (they create copper paths)
+        net_segment_cells: Set[Tuple[int, int]] = set()
+        for seg in pcb_data.segments:
+            if seg.net_id != net_id:
+                continue
+            if seg.layer != layer:
+                continue
+            _add_segment_cells(net_segment_cells, seg, coord)
+
+        # Cache plane_layer data for reuse in anchor flood fill
+        if layer == plane_layer:
+            blocked_plane = blocked
+            net_plane_segment_cells = net_segment_cells
+
+        # Find cross-layer points on this layer
+        layer_cls: List[int] = []
+        for i, (x, y, layers) in enumerate(cross_layer_points):
+            if layer in layers:
+                layer_cls.append(i)
+
+        if not layer_cls:
+            continue
+
+        # Map grid position to cross-layer indices on this layer
+        layer_grid_to_cl: Dict[Tuple[int, int], List[int]] = {}
+        for i in layer_cls:
+            x, y, _ = cross_layer_points[i]
+            gp = coord.to_grid(x, y)
+            if gp not in layer_grid_to_cl:
+                layer_grid_to_cl[gp] = []
+            layer_grid_to_cl[gp].append(i)
+
+        # Flood fill from each cross-layer point to find which ones connect on this layer
+        layer_visited: Set[Tuple[int, int]] = set()
+        # Track parent pointers for path reconstruction (only if debug)
+        layer_parent: Dict[Tuple[int, int], Tuple[int, int]] = {} if debug else {}
+
+        for start_cl_idx in layer_cls:
+            x, y, _ = cross_layer_points[start_cl_idx]
+            start_gx, start_gy = coord.to_grid(x, y)
+
+            if (start_gx, start_gy) in layer_visited:
+                # Already visited by a previous flood fill - that flood fill
+                # already unioned this point with any reachable cross-layer points.
+                continue
+
+            # Flood fill
+            queue = deque([(start_gx, start_gy)])
+            layer_visited.add((start_gx, start_gy))
+            if debug:
+                layer_parent[(start_gx, start_gy)] = (start_gx, start_gy)  # Self-parent for start
+
+            while queue:
+                gx, gy = queue.popleft()
+
+                # Check if we reached other cross-layer points
+                if (gx, gy) in layer_grid_to_cl:
+                    for cl_idx in layer_grid_to_cl[(gx, gy)]:
+                        # Before union, check if this connects previously disconnected components
+                        if debug and cl_find(start_cl_idx) != cl_find(cl_idx):
+                            # Reconstruct path from start to this point
+                            path_points = []
+                            curr = (gx, gy)
+                            while curr != layer_parent.get(curr, curr) or curr == (start_gx, start_gy):
+                                path_points.append(coord.to_float(curr[0], curr[1]))
+                                parent = layer_parent.get(curr)
+                                if parent is None or parent == curr:
+                                    break
+                                curr = parent
+                            path_points.reverse()
+                            if len(path_points) > 1:
+                                debug_paths.append((path_points, layer))
+                        cl_union(start_cl_idx, cl_idx)
+
+                # Expand to neighbors (4-connected for flood fill)
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = gx + dx, gy + dy
+                    if (nx, ny) in layer_visited:
+                        continue
+                    if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
+                        continue
+                    if layer in zone_layers:
+                        # Layer has a zone: flood through unblocked cells (zone copper)
+                        # or through blocked cells if they're same-net segments
+                        if (nx, ny) in blocked:
+                            if (nx, ny) not in net_segment_cells:
+                                continue
+                    else:
+                        # Layer has no zone: only traverse along same-net segments
+                        if (nx, ny) not in net_segment_cells:
+                            continue
+                    layer_visited.add((nx, ny))
+                    if debug:
+                        layer_parent[(nx, ny)] = (gx, gy)
+                    queue.append((nx, ny))
+
+    # Now map anchor connectivity based on cross-layer point connectivity
+    # Build map from anchor grid position to anchor indices
     grid_to_anchors: Dict[Tuple[int, int], List[int]] = {}
     for i, gp in enumerate(anchor_grid_points):
         if gp not in grid_to_anchors:
             grid_to_anchors[gp] = []
         grid_to_anchors[gp].append(i)
 
-    # Union-find to group anchors
-    parent = list(range(len(anchor_points)))
+    # For each anchor, find which cross-layer point(s) it corresponds to
+    anchor_to_cl: Dict[int, int] = {}
+    for i, gp in enumerate(anchor_grid_points):
+        if gp in grid_to_crosslayer:
+            # Anchor is at a cross-layer point position
+            anchor_to_cl[i] = grid_to_crosslayer[gp][0]
 
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
+    # Union anchors that share the same cross-layer component
+    for i in range(len(anchor_points)):
+        for j in range(i + 1, len(anchor_points)):
+            cl_i = anchor_to_cl.get(i)
+            cl_j = anchor_to_cl.get(j)
+            if cl_i is not None and cl_j is not None:
+                if cl_find(cl_i) == cl_find(cl_j):
+                    anchor_union(i, j)
 
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-
-    # Track which anchors have been visited (by their component)
-    visited_anchors: Set[int] = set()
-    global_visited: Set[Tuple[int, int]] = set()
-
-    # Process each anchor - do ONE flood fill per connected component
+    # Flood fill on plane layer to connect anchors not at cross-layer points
+    # (in case there are SMD pads or other anchors that aren't vias)
+    # Use cached blocked_plane and net_plane_segment_cells from the layer loop above
+    assert blocked_plane is not None, "plane_layer should have been processed in the loop"
+    assert net_plane_segment_cells is not None, "plane_layer should have been processed in the loop"
+    plane_visited: Set[Tuple[int, int]] = set()
     for start_anchor_idx in range(len(anchor_points)):
-        if start_anchor_idx in visited_anchors:
-            continue
-
-        # Start a new flood fill from this anchor
         start_gx, start_gy = anchor_grid_points[start_anchor_idx]
 
-        # Skip if this cell was already visited by a previous flood fill
-        if (start_gx, start_gy) in global_visited:
-            # Find which anchor we connected to and union
-            for other_idx in range(start_anchor_idx):
-                if anchor_grid_points[other_idx] in global_visited:
-                    union(start_anchor_idx, other_idx)
-                    break
-            visited_anchors.add(start_anchor_idx)
+        if (start_gx, start_gy) in plane_visited:
+            # Already visited by a previous flood fill - skip this anchor.
+            # The flood fill that visited this cell already handled union
+            # with any reachable anchors.
             continue
 
         queue = deque([(start_gx, start_gy)])
-        global_visited.add((start_gx, start_gy))
-        component_anchors = [start_anchor_idx]
-        visited_anchors.add(start_anchor_idx)
+        plane_visited.add((start_gx, start_gy))
 
         while queue:
             gx, gy = queue.popleft()
 
-            # Check if we reached anchor(s) at this position
             if (gx, gy) in grid_to_anchors:
                 for anchor_idx in grid_to_anchors[(gx, gy)]:
-                    if anchor_idx not in visited_anchors:
-                        visited_anchors.add(anchor_idx)
-                        component_anchors.append(anchor_idx)
-                        union(start_anchor_idx, anchor_idx)
+                    anchor_union(start_anchor_idx, anchor_idx)
 
-            # Expand to neighbors (4-connected for flood fill)
             for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 nx, ny = gx + dx, gy + dy
-                if (nx, ny) in global_visited:
+                if (nx, ny) in plane_visited:
                     continue
                 if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
                     continue
-                if (nx, ny) in blocked:
-                    continue
-                global_visited.add((nx, ny))
+                if (nx, ny) in blocked_plane:
+                    if (nx, ny) not in net_plane_segment_cells:
+                        continue
+                plane_visited.add((nx, ny))
                 queue.append((nx, ny))
 
     # Group anchors by their root
     groups: Dict[int, List[int]] = {}
     for i in range(len(anchor_points)):
-        root = find(i)
+        root = anchor_find(i)
         if root not in groups:
             groups[root] = []
         groups[root].append(i)
@@ -199,7 +412,44 @@ def find_disconnected_zone_regions(
         region_anchors.append(anchors)
         region_cells.append(cells)
 
-    return region_anchors, region_cells
+    return region_anchors, region_cells, debug_paths
+
+
+def _add_segment_cells(
+    cells: Set[Tuple[int, int]],
+    seg: Segment,
+    coord: GridCoord
+):
+    """Add grid cells along a segment (no expansion, just the segment path)."""
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+    gx, gy = gx1, gy1
+
+    if dx > dy:
+        err = dx / 2
+        while gx != gx2:
+            cells.add((gx, gy))
+            err -= dy
+            if err < 0:
+                gy += sy
+                err += dx
+            gx += sx
+    else:
+        err = dy / 2
+        while gy != gy2:
+            cells.add((gx, gy))
+            err -= dx
+            if err < 0:
+                gx += sx
+                err += dy
+            gy += sy
+
+    cells.add((gx2, gy2))
 
 
 def _block_segment_cells(
@@ -438,10 +688,12 @@ def route_disconnected_regions(
     track_via_clearance: float = 0.8,
     hole_to_hole_clearance: float = 0.3,
     analysis_grid_step: float = 0.5,
-    max_via_reuse_radius: float = 1.5,
     max_iterations: int = 200000,
-    verbose: bool = False
-) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]]]:
+    verbose: bool = False,
+    zone_layers: Optional[Set[str]] = None,
+    debug_connectivity: bool = False,
+    zone_clearances: Optional[Dict[str, float]] = None
+) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]], List[Tuple[List[Tuple[float, float]], str]]]:
     """
     Detect and route between disconnected zone regions.
 
@@ -458,26 +710,31 @@ def route_disconnected_regions(
         max_track_width: Maximum track width for connections (mm)
         min_track_width: Minimum track width for connections (mm)
         track_via_clearance: Clearance from track to other nets' vias
-        max_via_reuse_radius: Max distance to reuse existing via/pad (mm)
         max_iterations: Maximum A* iterations per route attempt
         verbose: Print debug info
+        zone_layers: Layers that have zones for this net (for cross-layer connectivity)
+        debug_connectivity: If True, return connectivity paths from flood fill analysis
+        zone_clearances: Per-layer zone clearances (layer -> clearance)
 
     Returns:
-        Tuple of (list of segment dicts, list of via dicts, number of routes added, list of route paths for debug)
+        Tuple of (list of segment dicts, list of via dicts, number of routes added,
+                  list of route paths for debug, list of connectivity paths (path, layer))
     """
     coord = GridCoord(config.grid_step)
 
-    # Find disconnected regions
-    region_anchors, region_cells = find_disconnected_zone_regions(
+    # Find disconnected regions (checking connectivity across all layers)
+    routing_layers = list(layer_map.keys())
+    region_anchors, region_cells, connectivity_paths = find_disconnected_zone_regions(
         net_id, plane_layer, zone_bounds, pcb_data, config, zone_clearance,
-        analysis_grid_step
+        analysis_grid_step, routing_layers, zone_layers, debug_connectivity,
+        zone_clearances=zone_clearances
     )
 
     n_regions = len(region_anchors)
     if n_regions < 2:
         n_anchors = len(region_anchors[0]) if region_anchors else 0
         print(f"  Zone is fully connected ({n_anchors} anchors in 1 region)")
-        return [], [], 0, []
+        return [], [], 0, [], connectivity_paths
 
     # Count total anchors per region for display
     total_anchors = sum(len(anchors) for anchors in region_anchors)
@@ -535,7 +792,6 @@ def route_disconnected_regions(
             base_obstacles=base_obstacles,
             config=config,
             net_vias=net_vias,
-            max_via_reuse_radius=max_via_reuse_radius,
             max_iterations=max_iterations,
             verbose=verbose
         )
@@ -552,7 +808,6 @@ def route_disconnected_regions(
                 base_obstacles=base_obstacles,
                 config=config,
                 net_vias=net_vias,
-                max_via_reuse_radius=max_via_reuse_radius,
                 max_iterations=max_iterations,
                 verbose=verbose
             )
@@ -584,7 +839,6 @@ def route_disconnected_regions(
                     base_obstacles=base_obstacles,
                     config=config,
                     net_vias=net_vias,
-                    max_via_reuse_radius=max_via_reuse_radius,
                     max_iterations=max_iterations,
                     verbose=verbose
                 )
@@ -698,7 +952,7 @@ def route_disconnected_regions(
     elif routes_added > 0:
         print(f"  {GREEN}Result: All {routes_added} route(s) succeeded{RESET}")
 
-    return segments, vias, routes_added, previous_routes
+    return segments, vias, routes_added, previous_routes, connectivity_paths
 
 
 def compute_connection_track_width(
@@ -982,7 +1236,7 @@ def build_base_obstacles(
             if not pad_layers_on:
                 continue
 
-            # Block rectangular area around pad with clearance
+            # Block rectangular area around pad with clearance for track routing
             pad_expansion_mm = track_width / 2 + config.clearance
             half_w = pad.size_x / 2 + pad_expansion_mm
             half_h = pad.size_y / 2 + pad_expansion_mm
@@ -994,9 +1248,16 @@ def build_base_obstacles(
                 for gx in range(min_gx, max_gx + 1):
                     for gy in range(min_gy, max_gy + 1):
                         obstacles.add_blocked_cell(gx, gy, layer_idx)
-            # Also block vias in pad area
-            for gx in range(min_gx, max_gx + 1):
-                for gy in range(min_gy, max_gy + 1):
+            # Also block vias around pad - need more clearance for via size
+            via_expansion_mm = config.via_size / 2 + track_via_clearance
+            via_half_w = pad.size_x / 2 + via_expansion_mm
+            via_half_h = pad.size_y / 2 + via_expansion_mm
+            via_min_gx, _ = coord.to_grid(pad.global_x - via_half_w, 0)
+            via_max_gx, _ = coord.to_grid(pad.global_x + via_half_w, 0)
+            _, via_min_gy = coord.to_grid(0, pad.global_y - via_half_h)
+            _, via_max_gy = coord.to_grid(0, pad.global_y + via_half_h)
+            for gx in range(via_min_gx, via_max_gx + 1):
+                for gy in range(via_min_gy, via_max_gy + 1):
                     obstacles.add_blocked_via(gx, gy)
 
     return obstacles, layer_map
@@ -1062,7 +1323,6 @@ def route_plane_connection_wide(
     base_obstacles: GridObstacleMap,
     config: GridRouteConfig,
     net_vias: List[Tuple[float, float]],
-    max_via_reuse_radius: float = 0.5,
     max_iterations: int = 200000,
     verbose: bool = False
 ) -> Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]]:
@@ -1079,8 +1339,7 @@ def route_plane_connection_wide(
         routing_layers: List of layer names for routing
         base_obstacles: Pre-built obstacle map (will be cloned)
         config: Routing configuration
-        net_vias: List of existing via positions from this net (can be reused)
-        max_via_reuse_radius: Max distance to reuse an existing via (mm)
+        net_vias: List of existing via positions from this net (to avoid duplicates)
         max_iterations: Max routing iterations
         verbose: Print debug info
 
@@ -1094,20 +1353,43 @@ def route_plane_connection_wide(
 
     # Clone the base obstacles for this route (clone_fresh clears source/target cells)
     obstacles = base_obstacles.clone_fresh()
+    n_layers = len(routing_layers)
+
+    # Build set of via positions for quick lookup
+    via_positions = set((round(vx, POSITION_DECIMALS), round(vy, POSITION_DECIMALS)) for vx, vy in net_vias)
+
+    def is_at_via(x: float, y: float) -> bool:
+        """Check if a point is at a via location (connects all layers)."""
+        return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS)) in via_positions
 
     # Set up sources - all anchor points from source region
+    # For vias (which connect all layers), set source on ALL layers
     sources = []
     for sx, sy in source_points:
         gx, gy = coord.to_grid(sx, sy)
-        obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
-        sources.append((gx, gy, plane_layer_idx))
+        if is_at_via(sx, sy):
+            # Via connects all layers - set source on all layers
+            for layer_idx in range(n_layers):
+                obstacles.add_source_target_cell(gx, gy, layer_idx)
+                sources.append((gx, gy, layer_idx))
+        else:
+            # SMD pad - only on plane layer
+            obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
+            sources.append((gx, gy, plane_layer_idx))
 
     # Set up targets - all anchor points from target region
     targets = []
     for tx, ty in target_points:
         gx, gy = coord.to_grid(tx, ty)
-        obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
-        targets.append((gx, gy, plane_layer_idx))
+        if is_at_via(tx, ty):
+            # Via connects all layers - set target on all layers
+            for layer_idx in range(n_layers):
+                obstacles.add_source_target_cell(gx, gy, layer_idx)
+                targets.append((gx, gy, layer_idx))
+        else:
+            # SMD pad - only on plane layer
+            obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
+            targets.append((gx, gy, plane_layer_idx))
 
     # Create router and find path
     router = GridRouter(
@@ -1141,81 +1423,22 @@ def route_plane_connection_wide(
         layer_name = routing_layers[layer_idx]
         route_points.append((x, y, layer_name))
 
-    # Find layer transitions (vias) and check for reuse opportunities
-    # For each via, we'll either keep it or replace the transition with a route to an existing via
-    reuse_radius_sq = max_via_reuse_radius * max_via_reuse_radius
+    # Find layer transitions and add vias where needed
+    # Routes can now start/end at existing vias on any layer, so we only need to add
+    # new vias where the route transitions between layers at a new location
     new_via_positions: List[Tuple[float, float]] = []
+    added_via_keys: Set[Tuple[float, float]] = set()
 
-    # Find all layer transition indices
-    layer_transitions: List[int] = []  # Index where layer changes (the "after" point)
     for i in range(1, len(route_points)):
         if route_points[i][2] != route_points[i-1][2]:
-            layer_transitions.append(i)
+            # Layer transition - check if we need a new via
+            via_x, via_y = route_points[i - 1][0], route_points[i - 1][1]
+            via_key = (round(via_x, POSITION_DECIMALS), round(via_y, POSITION_DECIMALS))
 
-    # Process transitions from end to start (so indices stay valid when we modify)
-    for trans_idx in reversed(layer_transitions):
-        # The via is at the position of the point before the transition
-        via_x, via_y = route_points[trans_idx - 1][0], route_points[trans_idx - 1][1]
-        layer_before = route_points[trans_idx - 1][2]
-        layer_after = route_points[trans_idx][2]
-
-        # Check if there's an existing via from our net nearby to reuse
-        reuse_pos = None
-        for ex_vx, ex_vy in net_vias:
-            dist_sq = (via_x - ex_vx) ** 2 + (via_y - ex_vy) ** 2
-            if dist_sq <= reuse_radius_sq:
-                reuse_pos = (ex_vx, ex_vy)
-                break
-        # Also check against new vias we've already decided to add
-        if reuse_pos is None:
-            for nv_x, nv_y in new_via_positions:
-                dist_sq = (via_x - nv_x) ** 2 + (via_y - nv_y) ** 2
-                if dist_sq <= reuse_radius_sq:
-                    reuse_pos = (nv_x, nv_y)
-                    break
-
-        if reuse_pos and (reuse_pos[0] != via_x or reuse_pos[1] != via_y):
-            # Reuse existing via - replace the transition region with direct route to existing via
-            # Find the extent of the "transition region" - points close to the via on each layer
-            # We want to find the last "far" point before the via and first "far" point after
-
-            # Search backward to find where the route approaches the via
-            start_of_approach = trans_idx - 1
-            while start_of_approach > 0:
-                prev_pt = route_points[start_of_approach - 1]
-                if prev_pt[2] != layer_before:
-                    break  # Different layer, stop
-                dist = math.sqrt((prev_pt[0] - via_x)**2 + (prev_pt[1] - via_y)**2)
-                if dist > max_via_reuse_radius:
-                    break  # Far enough, this is where real route is
-                start_of_approach -= 1
-
-            # Search forward to find where the route leaves the via area
-            end_of_departure = trans_idx
-            while end_of_departure < len(route_points) - 1:
-                next_pt = route_points[end_of_departure + 1]
-                if next_pt[2] != layer_after:
-                    break  # Different layer, stop
-                dist = math.sqrt((next_pt[0] - via_x)**2 + (next_pt[1] - via_y)**2)
-                if dist > max_via_reuse_radius:
-                    break  # Far enough, this is where real route continues
-                end_of_departure += 1
-
-            # Replace the transition region with direct connection to reused via
-            # Keep: route_points[0:start_of_approach+1] + [via on layer_before, via on layer_after] + route_points[end_of_departure:]
-            new_route = (
-                route_points[:start_of_approach + 1] +
-                [(reuse_pos[0], reuse_pos[1], layer_before),
-                 (reuse_pos[0], reuse_pos[1], layer_after)] +
-                route_points[end_of_departure + 1:]
-            )
-            route_points = new_route
-            # Don't add a new via - we're reusing an existing one
-        else:
-            # Add new via at original position (or it's already at reuse_pos)
-            if reuse_pos is None:
+            # Only add a new via if there isn't already one at this position
+            if via_key not in via_positions and via_key not in added_via_keys:
                 new_via_positions.append((via_x, via_y))
-            # else: already at the reuse position, no new via needed
+                added_via_keys.add(via_key)
 
     # Remove duplicate consecutive points (same x,y) keeping layer transitions
     cleaned_points: List[Tuple[float, float, str]] = []

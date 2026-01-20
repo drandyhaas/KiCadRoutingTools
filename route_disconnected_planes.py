@@ -29,6 +29,51 @@ from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generat
 from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
 from plane_region_connector import route_disconnected_regions, build_base_obstacles, add_route_to_obstacles
+import re
+
+
+def extract_zone_properties(input_file: str) -> Dict[Tuple[str, str], Dict]:
+    """
+    Extract zone properties (clearance, min_thickness) from PCB file.
+
+    Returns:
+        Dict mapping (net_name, layer) -> {'clearance': float, 'min_thickness': float}
+    """
+    with open(input_file, 'r') as f:
+        content = f.read()
+
+    zone_props = {}
+    zone_pattern = r'\(zone\s*\n\s*\(net\s+\d+\)'
+    matches = list(re.finditer(zone_pattern, content))
+
+    for m in matches:
+        start = m.start()
+        depth = 0
+        end = start
+        for i, c in enumerate(content[start:]):
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    end = start + i + 1
+                    break
+
+        zone_text = content[start:end]
+
+        net_name = re.search(r'\(net_name\s+"([^"]*)"\)', zone_text)
+        layer = re.search(r'\(layer\s+"([^"]+)"\)', zone_text)
+        clearance = re.search(r'\(clearance\s+([\d.]+)\)', zone_text)
+        min_thick = re.search(r'\(min_thickness\s+([\d.]+)\)', zone_text)
+
+        if net_name and layer:
+            key = (net_name.group(1), layer.group(1))
+            zone_props[key] = {
+                'clearance': float(clearance.group(1)) if clearance else 0.2,
+                'min_thickness': float(min_thick.group(1)) if min_thick else 0.1
+            }
+
+    return zone_props
 
 
 def auto_detect_zones(
@@ -88,7 +133,6 @@ def route_planes(
     board_edge_clearance: float = 0.5,
     via_size: float = 0.5,
     via_drill: float = 0.4,
-    max_via_reuse_radius: Optional[float] = None,
     max_iterations: int = 200000,
     verbose: bool = False,
     dry_run: bool = False,
@@ -114,7 +158,6 @@ def route_planes(
         board_edge_clearance: Clearance from board edge (mm)
         via_size: Via outer diameter for config (mm)
         via_drill: Via drill diameter for config (mm)
-        max_via_reuse_radius: Max distance to reuse existing via (default: 3 * via_size)
         max_iterations: Maximum A* iterations per route attempt
         verbose: Print detailed debug info
         dry_run: Analyze without writing output
@@ -165,10 +208,6 @@ def route_planes(
         grid_step=grid_step
     )
 
-    # Set default max_via_reuse_radius if not specified (3 * via_size)
-    if max_via_reuse_radius is None:
-        max_via_reuse_radius = 3 * via_size
-
     # Auto-detect routing layers if not specified
     if routing_layers is None:
         routing_layers = pcb_data.board_info.copper_layers
@@ -188,16 +227,43 @@ def route_planes(
     cached_obstacles: Optional[object] = None
     cached_layer_map: Optional[Dict] = None
 
+    # Build zone_layers map: net_id -> set of layers that have zones for this net
+    zone_layers_by_net: Dict[int, set] = {}
+    for net_name, plane_layer, net_id in zip(net_names, plane_layers, net_ids):
+        if net_id not in zone_layers_by_net:
+            zone_layers_by_net[net_id] = set()
+        zone_layers_by_net[net_id].add(plane_layer)
+
+    # Extract per-zone clearances and min_thickness from PCB file
+    zone_props = extract_zone_properties(input_file)
+    if verbose:
+        print(f"Zone properties:")
+        for (net, layer), props in zone_props.items():
+            print(f"  {net} on {layer}: clearance={props['clearance']}mm, min_thickness={props['min_thickness']}mm")
+
     print(f"\n{'='*60}")
     print(f"Routing disconnected plane regions")
     print(f"{'='*60}")
 
     for net_name, plane_layer, net_id in zip(net_names, plane_layers, net_ids):
-        print(f"\n[{net_name}] on {plane_layer}:")
+        # Get per-zone clearance (fall back to default if not found)
+        zone_key = (net_name, plane_layer)
+        this_zone_clearance = zone_props.get(zone_key, {}).get('clearance', zone_clearance)
+        this_zone_min_thickness = zone_props.get(zone_key, {}).get('min_thickness', 0.1)
+
+        # Build per-layer zone clearances for all layers with zones for this net
+        zone_clearances: Dict[str, float] = {}
+        for layer in zone_layers_by_net.get(net_id, set()):
+            zk = (net_name, layer)
+            if zk in zone_props:
+                zone_clearances[layer] = zone_props[zk]['clearance']
+
+        print(f"\n[{net_name}] on {plane_layer} (clearance={this_zone_clearance}mm, min_thickness={this_zone_min_thickness}mm):")
 
         # Build obstacle map for this net - exclude only this net's pads (anchors)
         # but block all other nets' pads including other plane nets
         # Skip rebuild if net hasn't changed
+        # Use min_track_width for obstacle inflation so narrow paths are available
         if net_id != cached_net_id:
             print(f"  Building obstacle map...", end=" ", flush=True)
             base_obstacles, layer_map = build_base_obstacles(
@@ -205,7 +271,7 @@ def route_planes(
                 routing_layers=routing_layers,
                 pcb_data=pcb_data,
                 config=config,
-                track_width=max_track_width,
+                track_width=min_track_width,  # Use min width so narrow paths are open
                 track_via_clearance=track_via_clearance,
                 hole_to_hole_clearance=hole_to_hole_clearance
             )
@@ -218,7 +284,7 @@ def route_planes(
             base_obstacles = cached_obstacles
             layer_map = cached_layer_map
 
-        region_segments, region_vias, routes_added, route_paths = route_disconnected_regions(
+        region_segments, region_vias, routes_added, route_paths, _ = route_disconnected_regions(
             net_id=net_id,
             net_name=net_name,
             plane_layer=plane_layer,
@@ -227,15 +293,16 @@ def route_planes(
             config=config,
             base_obstacles=base_obstacles,
             layer_map=layer_map,
-            zone_clearance=zone_clearance,
+            zone_clearance=this_zone_clearance,
             max_track_width=max_track_width,
             min_track_width=min_track_width,
             track_via_clearance=track_via_clearance,
             hole_to_hole_clearance=hole_to_hole_clearance,
             analysis_grid_step=analysis_grid_step,
-            max_via_reuse_radius=max_via_reuse_radius,
             max_iterations=max_iterations,
-            verbose=verbose
+            verbose=verbose,
+            zone_layers=zone_layers_by_net.get(net_id),
+            zone_clearances=zone_clearances
         )
 
         if routes_added > 0:
@@ -245,7 +312,7 @@ def route_planes(
             total_regions += routes_added + 1  # N routes connect N+1 regions
             total_vias += len(region_vias)
 
-            # Generate debug lines for this net's routes
+            # Generate debug lines for this net's routes (on User.4)
             if debug_lines and route_paths:
                 for route_path in route_paths:
                     for i in range(len(route_path) - 1):
@@ -404,8 +471,6 @@ Examples:
                         help="Via outer diameter in mm (default: 0.5)")
     parser.add_argument("--via-drill", type=float, default=0.4,
                         help="Via drill diameter in mm (default: 0.4)")
-    parser.add_argument("--max-via-reuse-radius", type=float, default=None,
-                        help="Max distance to reuse existing via instead of adding new one (default: 3 * via-size)")
 
     # Grid step
     parser.add_argument("--grid-step", type=float, default=0.1,
@@ -476,7 +541,6 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         via_size=args.via_size,
         via_drill=args.via_drill,
-        max_via_reuse_radius=args.max_via_reuse_radius,
         max_iterations=args.max_iterations,
         verbose=args.verbose,
         dry_run=args.dry_run,

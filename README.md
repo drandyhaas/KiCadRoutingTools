@@ -129,6 +129,9 @@ python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # Check connectivity for all nets on a component
 python check_connected.py kicad_files/output.kicad_pcb --component U1
+
+# Check for orphan stubs (traces ending without proper connection)
+python check_orphan_stubs.py kicad_files/output.kicad_pcb
 ```
 
 ### 5. Power Net Analysis
@@ -281,6 +284,7 @@ KiCadRoutingTools/
 │
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker
+├── check_orphan_stubs.py     # Orphan stub detector
 ├── bga_fanout.py             # BGA fanout CLI wrapper
 ├── bga_fanout/               # BGA fanout package
 │   ├── __init__.py           # Main fanout logic and public API
@@ -602,7 +606,6 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 # Via options
 --via-size 0.5              # Via outer diameter (mm)
 --via-drill 0.4             # Via drill diameter (mm)
---max-via-reuse-radius      # Max distance to reuse existing via (default: 3 * via-size)
 
 # Grid
 --grid-step 0.1             # Routing grid step (mm)
@@ -622,7 +625,7 @@ Features:
 - **Flood-fill region detection** - Uses grid-based flood fill to identify disconnected regions
 - **MST-based connections** - Connects regions using minimum spanning tree for optimal routing
 - **Multi-point routing** - Uses ALL anchors (vias/pads) in each region as potential connection points, trying both directions (A->B and B->A) since A* can find different paths depending on direction
-- **Via reuse** - Reuses existing vias and through-hole pads from the net instead of adding new ones
+- **Smart via placement** - Only adds new vias at layer transitions if no via already exists at that position
 - **Hole-to-hole clearance** - Respects drill hole clearances when placing new vias
 - **Multi-layer routing** - Can route through any copper layer to connect regions
 - **Adaptive track width** - Computes maximum safe track width based on corridor clearance

@@ -485,7 +485,6 @@ python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
 | `--board-edge-clearance` | 0.5 | Clearance from board edge (mm) |
 | `--via-size` | 0.5 | Via outer diameter (mm) |
 | `--via-drill` | 0.4 | Via drill diameter (mm) |
-| `--max-via-reuse-radius` | 3×via-size | Max distance to reuse existing via instead of adding new one |
 | `--grid-step` | 0.1 | Routing grid step (mm) |
 | `--analysis-grid-step` | 0.5 | Grid step for connectivity analysis (coarser = faster) |
 | `--max-iterations` | 200000 | Maximum A* iterations per route attempt |
@@ -554,15 +553,15 @@ Example output:
 [42/59] Region 6 (37 anchors) <-> Region 23 (2 anchors)... OK width=0.20mm, length=2.1mm (via open-space)
 ```
 
-#### 6. Via Reuse
+#### 6. Via Placement at Layer Transitions
 
-Instead of placing new vias at every layer transition, the router reuses existing vias and through-hole pads from the same net:
+At layer transitions, the router checks if a via already exists at the transition point:
 
-1. At each layer transition, check for existing vias within `--max-via-reuse-radius`
-2. If found, snap the route to the existing via position
-3. Remove intermediate route points near the reused via to avoid zigzag paths
+1. At each layer transition, check if an existing via is already at that exact position
+2. If a via exists, no new via is added (the route uses the existing via)
+3. If no via exists, a new via is placed at the transition point
 
-This reduces via count and avoids hole-to-hole clearance violations.
+Since routes can start and end on any layer at via locations, this simple approach avoids duplicate vias while keeping the routing logic straightforward.
 
 #### 7. Incremental Obstacle Updates
 
@@ -633,7 +632,7 @@ Increasing `--max-iterations` can help with complex routes. Reducing `--analysis
 - `find_disconnected_zone_regions()` - Flood fill to identify regions and their anchors
 - `find_region_connection_points()` - Builds MST edges between regions
 - `route_disconnected_regions()` - Orchestrates routing for one net/layer
-- `route_plane_connection_wide()` - Multi-point A* routing with via reuse
+- `route_plane_connection_wide()` - Multi-point A* routing between regions
 - `find_open_space_point()` - Finds cell with maximum clearance from obstacles
 - `build_base_obstacles()` - Builds obstacle map for routing
 - `add_route_to_obstacles()` - Incrementally updates obstacles after each route

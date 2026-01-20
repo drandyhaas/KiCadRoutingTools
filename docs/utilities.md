@@ -146,6 +146,67 @@ DISCONNECTED: Net-(U2A-DATA_5)
   Missing connection between groups
 ```
 
+## Orphan Stub Checker (`check_orphan_stubs.py`)
+
+Detects trace endpoints that end without a proper connection point (via or pad).
+
+### Usage
+
+```bash
+python check_orphan_stubs.py input.kicad_pcb [OPTIONS]
+
+Options:
+  --net NET_NAME       Only check this net
+  --layer LAYER        Only check this layer
+  --compare            Compare two files to find new/removed orphans
+```
+
+### Examples
+
+```bash
+# Check all nets
+python check_orphan_stubs.py board.kicad_pcb
+
+# Check specific net and layer
+python check_orphan_stubs.py board.kicad_pcb --net "+3.3V" --layer F.Cu
+
+# Compare before/after to find new orphans
+python check_orphan_stubs.py original.kicad_pcb modified.kicad_pcb --compare
+```
+
+### What It Detects
+
+An orphan stub is a trace endpoint that:
+1. Has only one connected segment (degree-1 node in the connectivity graph)
+2. Is NOT near a via
+3. Is NOT near a through-hole pad
+
+These represent traces that end without a proper electrical connection.
+
+### Output
+
+```
+Checking for orphan stubs in board.kicad_pcb...
+
+Found 2 orphan stub(s):
+
+Net: +3.3V
+  F.Cu: (142.50, 98.30)
+  B.Cu: (155.20, 102.10)
+```
+
+When comparing two files:
+
+```
+Orphan Stub Comparison
+==================================================
+File 1: 5 orphan stubs
+File 2: 3 orphan stubs
+
+New orphans in file 2: 0
+Removed orphans: 2
+```
+
 ## Net Lister (`list_nets.py`)
 
 Lists all nets connected to a component.

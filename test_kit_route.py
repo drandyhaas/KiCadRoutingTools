@@ -55,13 +55,16 @@ def main():
     run('python3 route_plane.py kicad_files/kit-out.kicad_pcb kicad_files/kit-out-plane.kicad_pcb --net +3.3V GND +3.3V GND --plane-layer F.Cu In1.Cu In2.Cu B.Cu --max-via-reuse-radius 3 --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
 
     # Connect broken plane regions
-    run('python3 route_disconnected_planes.py kicad_files/kit-out-plane.kicad_pcb kicad_files/kit-out-plane-connected.kicad_pcb ')
+    run('python3 route_disconnected_planes.py kicad_files/kit-out-plane.kicad_pcb kicad_files/kit-out-plane-connected.kicad_pcb --analysis-grid-step 0.1 ')
 
     # Check for DRC errors
     run('python3 check_drc.py kicad_files/kit-out-plane-connected.kicad_pcb --clearance 0.15 --hole-to-hole-clearance 0.3', unbuffered)
 
     # Check for connectivity
     run('python3 check_connected.py kicad_files/kit-out-plane-connected.kicad_pcb '+target, unbuffered)
+
+    # Check for orphan stub segments
+    run('python3 check_orphan_stubs.py kicad_files/kit-out-plane-connected.kicad_pcb ')
 
     print("\n=== Test completed ===")
 
