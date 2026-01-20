@@ -19,6 +19,168 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
 
 
+def _collect_anchor_points(
+    net_id: int,
+    zone_bounds: Tuple[float, float, float, float],
+    pcb_data: PCBData,
+    coord: GridCoord,
+    zone_layers: Set[str],
+    routing_layers: List[str]
+) -> Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]:
+    """
+    Collect anchor points (vias and pads) for flood fill connectivity analysis.
+
+    Args:
+        net_id: Net ID of the plane
+        zone_bounds: (min_x, min_y, max_x, max_y) of the zone area
+        pcb_data: PCB data with vias and pads
+        coord: Grid coordinate converter
+        zone_layers: Layers that have zones for this net
+        routing_layers: All copper layers for routing
+
+    Returns:
+        Tuple of (anchor_points, anchor_grid_points)
+    """
+    min_x, min_y, max_x, max_y = zone_bounds
+    anchor_points: List[Tuple[float, float]] = []
+    anchor_grid_points: List[Tuple[int, int]] = []
+    seen_anchors: Set[Tuple[float, float]] = set()
+
+    def via_connects_layer(via_layers: List[str], layer: str) -> bool:
+        """Check if a via connects to a given layer."""
+        if layer in via_layers:
+            return True
+        if 'F.Cu' in via_layers and 'B.Cu' in via_layers:
+            return layer in routing_layers
+        return False
+
+    # Add vias of our net that touch any zone layer
+    for via in pcb_data.vias:
+        if via.net_id != net_id:
+            continue
+        touches_zone = any(via_connects_layer(via.layers, zl) for zl in zone_layers)
+        if not touches_zone:
+            continue
+        if min_x <= via.x <= max_x and min_y <= via.y <= max_y:
+            key = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS))
+            if key not in seen_anchors:
+                seen_anchors.add(key)
+                anchor_points.append((via.x, via.y))
+                anchor_grid_points.append(coord.to_grid(via.x, via.y))
+
+    # Add pads of our net on any zone layer
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        touches_zone = '*.Cu' in pad.layers or any(zl in pad.layers for zl in zone_layers)
+        if not touches_zone:
+            continue
+        if min_x <= pad.global_x <= max_x and min_y <= pad.global_y <= max_y:
+            key = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
+            if key not in seen_anchors:
+                seen_anchors.add(key)
+                anchor_points.append((pad.global_x, pad.global_y))
+                anchor_grid_points.append(coord.to_grid(pad.global_x, pad.global_y))
+
+    return anchor_points, anchor_grid_points
+
+
+def _collect_cross_layer_points(
+    net_id: int,
+    pcb_data: PCBData,
+    routing_layers: List[str]
+) -> List[Tuple[float, float, Set[str]]]:
+    """
+    Collect cross-layer connection points (vias and through-hole pads) for connectivity analysis.
+
+    Args:
+        net_id: Net ID of the plane
+        pcb_data: PCB data with vias and pads
+        routing_layers: All copper layers for routing
+
+    Returns:
+        List of (x, y, connected_layers) tuples
+    """
+    def get_via_connected_layers(via_layers: List[str]) -> Set[str]:
+        """Get all layers a via connects to."""
+        if 'F.Cu' in via_layers and 'B.Cu' in via_layers:
+            return set(routing_layers)
+        return set(via_layers)
+
+    cross_layer_points: List[Tuple[float, float, Set[str]]] = []
+
+    for via in pcb_data.vias:
+        if via.net_id == net_id:
+            cross_layer_points.append((via.x, via.y, get_via_connected_layers(via.layers)))
+
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if '*.Cu' in pad.layers:  # Through-hole pad
+            cross_layer_points.append((pad.global_x, pad.global_y, set(routing_layers)))
+
+    return cross_layer_points
+
+
+def _build_layer_blocked_set(
+    layer: str,
+    net_id: int,
+    pcb_data: PCBData,
+    coord: GridCoord,
+    layer_clearance: float
+) -> Tuple[Set[Tuple[int, int]], Set[Tuple[int, int]]]:
+    """
+    Build blocked set and net segment cells for a single layer.
+
+    Args:
+        layer: Layer name to build blocked set for
+        net_id: Net ID of the plane (excluded from blocking)
+        pcb_data: PCB data
+        coord: Grid coordinate converter
+        layer_clearance: Clearance for zone fill
+
+    Returns:
+        Tuple of (blocked_cells, net_segment_cells)
+    """
+    blocked: Set[Tuple[int, int]] = set()
+
+    # Block cells for other nets' vias
+    for via in pcb_data.vias:
+        if via.net_id == net_id:
+            continue
+        via_block_radius = max(1, coord.to_grid_dist(via.size / 2 + layer_clearance))
+        gx, gy = coord.to_grid(via.x, via.y)
+        for dx in range(-via_block_radius, via_block_radius + 1):
+            for dy in range(-via_block_radius, via_block_radius + 1):
+                if dx * dx + dy * dy <= via_block_radius * via_block_radius:
+                    blocked.add((gx + dx, gy + dy))
+
+    # Block cells for other nets' segments on this layer
+    for seg in pcb_data.segments:
+        if seg.net_id == net_id:
+            continue
+        if seg.layer != layer:
+            continue
+        seg_block_radius = max(1, coord.to_grid_dist(seg.width / 2 + layer_clearance))
+        _block_segment_cells(blocked, seg, coord, seg_block_radius)
+
+    # Block cells for other nets' pads that touch this layer
+    for pad_net_id, pads in pcb_data.pads_by_net.items():
+        if pad_net_id == net_id:
+            continue
+        for pad in pads:
+            if layer not in pad.layers and '*.Cu' not in pad.layers:
+                continue
+            _block_pad_cells(blocked, pad, coord, layer_clearance)
+
+    # Mark cells along same-net segments as connected
+    net_segment_cells: Set[Tuple[int, int]] = set()
+    for seg in pcb_data.segments:
+        if seg.net_id != net_id:
+            continue
+        if seg.layer != layer:
+            continue
+        _add_segment_cells(net_segment_cells, seg, coord)
+
+    return blocked, net_segment_cells
+
+
 def find_disconnected_zone_regions(
     net_id: int,
     plane_layer: str,
@@ -76,71 +238,24 @@ def find_disconnected_zone_regions(
     if zone_layers is None:
         zone_layers = {plane_layer}
 
-    def via_connects_layer(via_layers: List[str], layer: str) -> bool:
-        """Check if a via connects to a given layer.
-        Through-hole vias (F.Cu to B.Cu) connect ALL copper layers."""
-        if layer in via_layers:
-            return True
-        # Through-hole via connects all layers
-        if 'F.Cu' in via_layers and 'B.Cu' in via_layers:
-            return layer in routing_layers
-        return False
-
-    def get_via_connected_layers(via_layers: List[str]) -> Set[str]:
-        """Get all layers a via connects to.
-        Through-hole vias (F.Cu to B.Cu) connect ALL copper layers."""
-        if 'F.Cu' in via_layers and 'B.Cu' in via_layers:
-            return set(routing_layers)
-        return set(via_layers)
-
-    # Find anchor points on ANY zone layer (vias and pads of our net)
-    anchor_points: List[Tuple[float, float]] = []
-    anchor_grid_points: List[Tuple[int, int]] = []
-    seen_anchors: Set[Tuple[float, float]] = set()  # Avoid duplicates
-
-    # Add vias of our net that touch any zone layer
-    for via in pcb_data.vias:
-        if via.net_id != net_id:
-            continue
-        # Check if via touches any zone layer
-        touches_zone = any(via_connects_layer(via.layers, zl) for zl in zone_layers)
-        if not touches_zone:
-            continue
-        if min_x <= via.x <= max_x and min_y <= via.y <= max_y:
-            key = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS))
-            if key not in seen_anchors:
-                seen_anchors.add(key)
-                anchor_points.append((via.x, via.y))
-                anchor_grid_points.append(coord.to_grid(via.x, via.y))
-
-    # Add pads of our net on any zone layer
-    for pad in pcb_data.pads_by_net.get(net_id, []):
-        # Check if pad touches any zone layer
-        touches_zone = '*.Cu' in pad.layers or any(zl in pad.layers for zl in zone_layers)
-        if not touches_zone:
-            continue
-        if min_x <= pad.global_x <= max_x and min_y <= pad.global_y <= max_y:
-            key = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
-            if key not in seen_anchors:
-                seen_anchors.add(key)
-                anchor_points.append((pad.global_x, pad.global_y))
-                anchor_grid_points.append(coord.to_grid(pad.global_x, pad.global_y))
+    # Collect anchor points using helper function
+    anchor_points, anchor_grid_points = _collect_anchor_points(
+        net_id, zone_bounds, pcb_data, coord, zone_layers, routing_layers
+    )
 
     if len(anchor_points) < 2:
         # Not enough anchors to have disconnected regions
         return [anchor_points], [set(anchor_grid_points)], []
 
-    # Collect ALL cross-layer connection points (vias and through-hole pads) for our net
-    # These can connect regions across different layers
-    cross_layer_points: List[Tuple[float, float, Set[str]]] = []  # (x, y, set of layers)
+    # Collect cross-layer connection points using helper function
+    cross_layer_points = _collect_cross_layer_points(net_id, pcb_data, routing_layers)
 
-    for via in pcb_data.vias:
-        if via.net_id == net_id:
-            cross_layer_points.append((via.x, via.y, get_via_connected_layers(via.layers)))
-
-    for pad in pcb_data.pads_by_net.get(net_id, []):
-        if '*.Cu' in pad.layers:  # Through-hole pad
-            cross_layer_points.append((pad.global_x, pad.global_y, set(routing_layers)))
+    # Helper function for via layer connections (still needed for loop below)
+    def get_via_connected_layers(via_layers: List[str]) -> Set[str]:
+        """Get all layers a via connects to."""
+        if 'F.Cu' in via_layers and 'B.Cu' in via_layers:
+            return set(routing_layers)
+        return set(via_layers)
 
     # Build map from grid position to cross-layer point index
     grid_to_crosslayer: Dict[Tuple[int, int], List[int]] = {}
@@ -212,46 +327,10 @@ def find_disconnected_zone_regions(
         if zone_clearances and layer in zone_clearances:
             layer_clearance = zone_clearances[layer]
 
-        # Build blocked set for this layer
-        blocked: Set[Tuple[int, int]] = set()
-
-        # Block cells for other nets' vias (with layer-specific clearance)
-        for via in pcb_data.vias:
-            if via.net_id == net_id:
-                continue
-            via_block_radius = max(1, coord.to_grid_dist(via.size / 2 + layer_clearance))
-            gx, gy = coord.to_grid(via.x, via.y)
-            for dx in range(-via_block_radius, via_block_radius + 1):
-                for dy in range(-via_block_radius, via_block_radius + 1):
-                    if dx * dx + dy * dy <= via_block_radius * via_block_radius:
-                        blocked.add((gx + dx, gy + dy))
-
-        # Block cells for other nets' segments on this layer (with layer-specific clearance)
-        for seg in pcb_data.segments:
-            if seg.net_id == net_id:
-                continue
-            if seg.layer != layer:
-                continue
-            seg_block_radius = max(1, coord.to_grid_dist(seg.width / 2 + layer_clearance))
-            _block_segment_cells(blocked, seg, coord, seg_block_radius)
-
-        # Block cells for other nets' pads that touch this layer (with layer-specific clearance)
-        for pad_net_id, pads in pcb_data.pads_by_net.items():
-            if pad_net_id == net_id:
-                continue
-            for pad in pads:
-                if layer not in pad.layers and '*.Cu' not in pad.layers:
-                    continue
-                _block_pad_cells(blocked, pad, coord, layer_clearance)
-
-        # Mark cells along same-net segments as connected (they create copper paths)
-        net_segment_cells: Set[Tuple[int, int]] = set()
-        for seg in pcb_data.segments:
-            if seg.net_id != net_id:
-                continue
-            if seg.layer != layer:
-                continue
-            _add_segment_cells(net_segment_cells, seg, coord)
+        # Build blocked set and net segment cells using helper function
+        blocked, net_segment_cells = _build_layer_blocked_set(
+            layer, net_id, pcb_data, coord, layer_clearance
+        )
 
         # Cache plane_layer data for reuse in anchor flood fill
         if layer == plane_layer:
@@ -676,6 +755,132 @@ def _calculate_clearance(
 from terminal_colors import GREEN, RED, YELLOW, RESET
 
 
+def _try_route_between_regions(
+    anchors_i: List[Tuple[float, float]],
+    anchors_j: List[Tuple[float, float]],
+    base_obstacles: GridObstacleMap,
+    plane_layer_idx: int,
+    routing_layers: List[str],
+    config: GridRouteConfig,
+    net_vias: List[Tuple[float, float]],
+    max_track_width: float,
+    min_track_width: float,
+    max_iterations: int,
+    coord: GridCoord,
+    verbose: bool = False
+) -> Tuple[Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]], float, Optional[Tuple[float, float]]]:
+    """
+    Try to route between two regions, attempting multiple track widths.
+
+    Tries track widths from max to min, then falls back to open-space routing.
+
+    Args:
+        anchors_i: Anchor points in source region
+        anchors_j: Anchor points in target region
+        base_obstacles: Obstacle map
+        plane_layer_idx: Index of the plane layer
+        routing_layers: All routing layer names
+        config: Routing configuration
+        net_vias: Existing via positions on this net
+        max_track_width: Maximum track width to try
+        min_track_width: Minimum track width to try
+        max_iterations: Max routing iterations
+        coord: Grid coordinate converter
+        verbose: Print debug info
+
+    Returns:
+        Tuple of (route_result, track_width_used, open_space_via_if_used)
+    """
+    # Generate width steps: max, max/2, max/4, ..., min
+    track_widths_to_try = []
+    w = max_track_width
+    while w >= min_track_width:
+        track_widths_to_try.append(w)
+        w = w / 2
+    if track_widths_to_try[-1] > min_track_width:
+        track_widths_to_try.append(min_track_width)
+
+    result = None
+    track_width = min_track_width
+    open_space_via = None
+
+    # Try each track width from widest to narrowest
+    for try_width in track_widths_to_try:
+        extra_margin_mm = (try_width - min_track_width) / 2
+        track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
+
+        # Try routing in both directions - A* can find different paths depending on direction
+        result = route_plane_connection_wide(
+            anchors_i, anchors_j,
+            plane_layer_idx=plane_layer_idx,
+            routing_layers=routing_layers,
+            base_obstacles=base_obstacles,
+            config=config,
+            net_vias=net_vias,
+            track_margin=track_margin,
+            max_iterations=max_iterations,
+            verbose=verbose
+        )
+
+        if result is None:
+            result = route_plane_connection_wide(
+                anchors_j, anchors_i,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                base_obstacles=base_obstacles,
+                config=config,
+                net_vias=net_vias,
+                track_margin=track_margin,
+                max_iterations=max_iterations,
+                verbose=verbose
+            )
+
+        if result is not None:
+            track_width = try_width
+            if verbose and try_width < max_track_width:
+                print(f"width={try_width:.2f}mm...", end=" ", flush=True)
+            break
+
+    # Fallback: try routing via open-space points (areas with maximum clearance)
+    if result is None:
+        if verbose:
+            print(f"trying open-space...", end=" ", flush=True)
+
+        open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord)
+        open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord)
+
+        open_attempts = []
+        if open_i:
+            open_attempts.append((anchors_i + [open_i], anchors_j, open_i))
+        if open_j:
+            open_attempts.append((anchors_i, anchors_j + [open_j], open_j))
+        if open_i and open_j:
+            open_attempts.append((anchors_i + [open_i], anchors_j + [open_j], open_i))
+
+        for src, tgt, via_candidate in open_attempts:
+            result = route_plane_connection_wide(
+                src, tgt,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                base_obstacles=base_obstacles,
+                config=config,
+                net_vias=net_vias,
+                track_margin=0,  # min width for open-space
+                max_iterations=max_iterations,
+                verbose=verbose
+            )
+            if result:
+                track_width = min_track_width
+                route_pts = result[0]
+                for pt in route_pts:
+                    if abs(pt[0] - via_candidate[0]) < 0.01 and abs(pt[1] - via_candidate[1]) < 0.01:
+                        open_space_via = via_candidate
+                        break
+                break
+
+    return result, track_width, open_space_via
+
+
 def route_disconnected_regions(
     net_id: int,
     net_name: str,
@@ -779,103 +984,20 @@ def route_disconnected_regions(
         # Progress indicator
         print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors)...", end=" ", flush=True)
 
-        # Try track widths from max to min, preferring wider tracks
-        # Generate width steps: max, max/2, max/4, ..., min
-        track_widths_to_try = []
-        w = max_track_width
-        while w >= min_track_width:
-            track_widths_to_try.append(w)
-            w = w / 2
-        if track_widths_to_try[-1] > min_track_width:
-            track_widths_to_try.append(min_track_width)
-
-        result = None
-        track_width = min_track_width
-        open_space_via = None
-
-        for try_width in track_widths_to_try:
-            # Compute track_margin: extra cells beyond what's in obstacle map (built for min_track_width)
-            # Obstacle map already accounts for min_track_width/2 + clearance
-            # For wider track, need extra margin = (try_width - min_track_width) / 2
-            extra_margin_mm = (try_width - min_track_width) / 2
-            track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
-
-            # Try routing in both directions - A* can find different paths depending on direction
-            # Direction 1: region_i -> region_j
-            result = route_plane_connection_wide(
-                anchors_i,
-                anchors_j,
-                plane_layer_idx=plane_layer_idx,
-                routing_layers=routing_layers,
-                base_obstacles=base_obstacles,
-                config=config,
-                net_vias=net_vias,
-                track_margin=track_margin,
-                max_iterations=max_iterations,
-                verbose=verbose
-            )
-
-            # Direction 2: region_j -> region_i (if direction 1 failed)
-            if result is None:
-                result = route_plane_connection_wide(
-                    anchors_j,
-                    anchors_i,
-                    plane_layer_idx=plane_layer_idx,
-                    routing_layers=routing_layers,
-                    base_obstacles=base_obstacles,
-                    config=config,
-                    net_vias=net_vias,
-                    track_margin=track_margin,
-                    max_iterations=max_iterations,
-                    verbose=verbose
-                )
-
-            if result is not None:
-                track_width = try_width
-                if verbose and try_width < max_track_width:
-                    print(f"width={try_width:.2f}mm...", end=" ", flush=True)
-                break
-
-        # Fallback: try routing via open-space points (areas with maximum clearance)
-        # Use minimum track width for open-space routing
-        if result is None:
-            if verbose:
-                print(f"trying open-space...", end=" ", flush=True)
-
-            # Find most open points in each region
-            open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord)
-            open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord)
-
-            # Try various combinations with open-space points (using min width)
-            open_attempts = []
-            if open_i:
-                open_attempts.append((anchors_i + [open_i], anchors_j, open_i))
-            if open_j:
-                open_attempts.append((anchors_i, anchors_j + [open_j], open_j))
-            if open_i and open_j:
-                open_attempts.append((anchors_i + [open_i], anchors_j + [open_j], open_i))
-
-            for src, tgt, via_candidate in open_attempts:
-                result = route_plane_connection_wide(
-                    src, tgt,
-                    plane_layer_idx=plane_layer_idx,
-                    routing_layers=routing_layers,
-                    base_obstacles=base_obstacles,
-                    config=config,
-                    net_vias=net_vias,
-                    track_margin=0,  # min width for open-space
-                    max_iterations=max_iterations,
-                    verbose=verbose
-                )
-                if result:
-                    track_width = min_track_width
-                    # Check if the route actually uses the open-space point
-                    route_pts = result[0]
-                    for pt in route_pts:
-                        if abs(pt[0] - via_candidate[0]) < 0.01 and abs(pt[1] - via_candidate[1]) < 0.01:
-                            open_space_via = via_candidate
-                            break
-                    break
+        # Try routing with multiple track widths using helper function
+        result, track_width, open_space_via = _try_route_between_regions(
+            anchors_i, anchors_j,
+            base_obstacles=base_obstacles,
+            plane_layer_idx=plane_layer_idx,
+            routing_layers=routing_layers,
+            config=config,
+            net_vias=net_vias,
+            max_track_width=max_track_width,
+            min_track_width=min_track_width,
+            max_iterations=max_iterations,
+            coord=coord,
+            verbose=verbose
+        )
 
         if result is None:
             print(f"{RED}FAILED{RESET}")
