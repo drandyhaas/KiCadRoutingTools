@@ -14,7 +14,7 @@ def move_copper_text_to_silkscreen(content: str) -> str:
     """
     Move gr_text elements from copper layers to silkscreen layers.
 
-    Text on F.Cu is moved to F.Silkscreen, text on B.Cu is moved to B.Silkscreen.
+    Text on F.Cu is moved to F.SilkS, text on B.Cu is moved to B.SilkS.
     This prevents text from interfering with routing while preserving it visually.
 
     Args:
@@ -55,7 +55,7 @@ def move_copper_text_to_silkscreen(content: str) -> str:
         layer_match = re.search(r'\(layer\s+"(F\.Cu|B\.Cu)"\)', block)
         if layer_match:
             layer = layer_match.group(1)
-            new_layer = 'F.Silkscreen' if layer == 'F.Cu' else 'B.Silkscreen'
+            new_layer = 'F.SilkS' if layer == 'F.Cu' else 'B.SilkS'
             new_block = block.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
 
             # Add content before this block, then the modified block
