@@ -210,7 +210,7 @@ def segments_cross(seg1: Segment, seg2: Segment, tolerance: float = 0.001) -> Tu
     return False, None
 
 
-def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, clearance_margin: float = 0.10):
+def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, clearance_margin: float = 0.05):
     """Check if two segments on the same layer violate clearance.
 
     Args:
@@ -235,7 +235,7 @@ def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, cleara
     return False, 0.0, None, None
 
 
-def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float]:
+def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if a via overlaps with a segment on any common layer.
 
     Args:
@@ -258,7 +258,7 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     return False, 0.0
 
 
-def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float]:
+def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if two vias overlap.
 
     Args:
@@ -348,7 +348,7 @@ def segment_to_rect_distance(x1: float, y1: float, x2: float, y2: float,
 
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
-                               clearance_margin: float = 0.10) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
+                               clearance_margin: float = 0.05) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
     """Check if a segment is too close to a pad on the same layer.
 
     Args:
@@ -392,7 +392,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
 
 def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
                           routing_layers: List[str],
-                          clearance_margin: float = 0.10) -> Tuple[bool, float]:
+                          clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if a via is too close to a pad.
 
     Args:
@@ -436,7 +436,7 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
 
 
 def check_via_drill_overlap(via1: Via, via2: Via, hole_to_hole_clearance: float,
-                            clearance_margin: float = 0.10) -> Tuple[bool, float]:
+                            clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if two via drill holes violate hole-to-hole clearance.
 
     Args:
@@ -459,7 +459,7 @@ def check_via_drill_overlap(via1: Via, via2: Via, hole_to_hole_clearance: float,
 
 
 def check_pad_drill_via_overlap(pad: Pad, via: Via, hole_to_hole_clearance: float,
-                                clearance_margin: float = 0.10) -> Tuple[bool, float]:
+                                clearance_margin: float = 0.05) -> Tuple[bool, float]:
     """Check if a via drill hole is too close to a pad's drill hole.
 
     Args:
@@ -486,7 +486,7 @@ def check_pad_drill_via_overlap(pad: Pad, via: Via, hole_to_hole_clearance: floa
 
 
 def check_segment_board_edge(seg: Segment, board_bounds: Tuple[float, float, float, float],
-                             clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float, str]:
+                             clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float, str]:
     """Check if a segment is too close to the board edge.
 
     Args:
@@ -540,7 +540,7 @@ def check_segment_board_edge(seg: Segment, board_bounds: Tuple[float, float, flo
 
 
 def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, float],
-                         clearance: float, clearance_margin: float = 0.10) -> Tuple[bool, float, str]:
+                         clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float, str]:
     """Check if a via is too close to the board edge.
 
     Args:
@@ -647,7 +647,8 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
 
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
-            hole_to_hole_clearance: float = 0.2, board_edge_clearance: float = 0.0):
+            hole_to_hole_clearance: float = 0.2, board_edge_clearance: float = 0.0,
+            clearance_margin: float = 0.05):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -760,7 +761,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             checked_pairs.add(pair_key)
 
-            has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance)
+            has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance, clearance_margin)
             if has_violation:
                 net1_name = pcb_data.nets.get(net1, None)
                 net2_name = pcb_data.nets.get(net2, None)
@@ -846,7 +847,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if not via_net_matches and not seg_net_matches:
                     continue
 
-                has_violation, overlap = check_via_segment_overlap(via, seg, clearance)
+                has_violation, overlap = check_via_segment_overlap(via, seg, clearance, clearance_margin)
                 if has_violation:
                     via_net_name = pcb_data.nets.get(via_net, None)
                     seg_net_name = pcb_data.nets.get(seg_net, None)
@@ -883,7 +884,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             via_via_checked.add(pair_key)
 
-            has_violation, overlap = check_via_via_overlap(via1, via2, clearance)
+            has_violation, overlap = check_via_via_overlap(via1, via2, clearance, clearance_margin)
             if has_violation:
                 net1_name = pcb_data.nets.get(net1, None)
                 net2_name = pcb_data.nets.get(net2, None)
@@ -918,7 +919,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue
 
                 has_violation, overlap, closest_pt = check_pad_segment_overlap(
-                    pad, seg, clearance, routing_layers
+                    pad, seg, clearance, routing_layers, clearance_margin
                 )
                 if has_violation:
                     pad_net_name = pcb_data.nets.get(pad_net, None)
@@ -955,7 +956,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue
 
                 has_violation, overlap = check_pad_via_overlap(
-                    pad, via, clearance, routing_layers
+                    pad, via, clearance, routing_layers, clearance_margin
                 )
                 if has_violation:
                     pad_net_name = pcb_data.nets.get(pad_net, None)
@@ -1178,6 +1179,8 @@ if __name__ == "__main__":
                         help='Minimum drill hole edge-to-edge clearance in mm (default: 0.2)')
     parser.add_argument('--board-edge-clearance', type=float, default=0.0,
                         help='Minimum clearance from board edge in mm (0 = use --clearance value)')
+    parser.add_argument('--clearance-margin', type=float, default=0.05,
+                        help='Fraction of clearance to use as tolerance (default: 0.05 = 5%%). Violations smaller than clearance*margin are ignored.')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
                         help='Optional net name patterns to focus on (fnmatch wildcards supported, e.g., "*lvds*")')
     parser.add_argument('--debug-lines', '-d', action='store_true',
@@ -1188,5 +1191,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
-                         args.hole_to_hole_clearance, args.board_edge_clearance)
+                         args.hole_to_hole_clearance, args.board_edge_clearance,
+                         args.clearance_margin)
     sys.exit(1 if violations else 0)
