@@ -186,25 +186,42 @@ These represent traces that end without a proper electrical connection.
 ### Output
 
 ```
-Checking for orphan stubs in board.kicad_pcb...
+Loading board.kicad_pcb...
 
-Found 2 orphan stub(s):
+Checking for orphan trace stubs...
 
-Net: +3.3V
-  F.Cu: (142.50, 98.30)
-  B.Cu: (155.20, 102.10)
+============================================================
+FOUND 2 ORPHAN STUBS:
+
+  +3.3V on F.Cu: 1 orphans
+    (142.50, 98.30)
+  +3.3V on B.Cu: 1 orphans
+    (155.20, 102.10)
+============================================================
+```
+
+When no orphans are found:
+
+```
+Loading board.kicad_pcb...
+
+Checking for orphan trace stubs...
+
+============================================================
+NO ORPHAN STUBS FOUND!
+============================================================
 ```
 
 When comparing two files:
 
 ```
 Orphan Stub Comparison
-==================================================
-File 1: 5 orphan stubs
-File 2: 3 orphan stubs
+============================================================
+File 1 (original.kicad_pcb): 5 orphans
+File 2 (modified.kicad_pcb): 3 orphans
 
 New orphans in file 2: 0
-Removed orphans: 2
+Removed orphans (fixed): 2
 ```
 
 ## Net Lister (`list_nets.py`)

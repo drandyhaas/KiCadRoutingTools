@@ -635,8 +635,8 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb [output.kicad_pc
 
 # Zone selection (auto-detects all zones if not specified)
 --nets, -n GND +3.3V        # Net name(s) to process
---plane-layers, -l B.Cu In1.Cu  # Plane layer(s) to process
---routing-layers, -r F.Cu In1.Cu In2.Cu B.Cu  # Layers available for routing (default: all copper)
+--plane-layers, -p B.Cu In1.Cu  # Plane layer(s) to process
+--layers, -l F.Cu In1.Cu In2.Cu B.Cu  # Layers available for routing (default: all copper)
 
 # Track width
 --max-track-width 2.0       # Maximum track width for connections (mm)

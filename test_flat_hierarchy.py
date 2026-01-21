@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description='Test routing on flat_hierarchy board')
     parser.add_argument('-u', '--unbuffered', action='store_true', default=False,
                         help='Run python commands with -u (unbuffered output)')
-    parser.add_argument('--checks', action='store_true', default=False,
+    parser.add_argument('--checks', action='store_true', default=True,
                         help='Run DRC and connectivity checks after routing')
     args = parser.parse_args()
 

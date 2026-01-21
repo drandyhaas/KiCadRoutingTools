@@ -196,7 +196,7 @@ def main():
         result = compare_orphans(args.input, args.compare_file, args.net, args.layer)
 
         print(f"\nOrphan Stub Comparison")
-        print(f"=" * 50)
+        print(f"=" * 60)
         print(f"File 1 ({args.input}): {result['file1_total']} orphans")
         print(f"File 2 ({args.compare_file}): {result['file2_total']} orphans")
         print(f"\nNew orphans in file 2: {len(result['new'])}")
@@ -211,6 +211,7 @@ def main():
         if result['new']:
             sys.exit(1)
     else:
+        print(f"Loading {args.input}...")
         orphans = find_orphan_stubs(args.input, args.net, args.layer)
 
         total = 0
@@ -218,23 +219,26 @@ def main():
             for lyr, pts in layers.items():
                 total += len(pts)
 
-        print(f"\nOrphan Stub Analysis: {args.input}")
-        print(f"=" * 50)
+        print(f"\nChecking for orphan trace stubs...")
 
+        print("\n" + "=" * 60)
         if not orphans:
-            print("No orphan stubs found!")
+            print("NO ORPHAN STUBS FOUND!")
         else:
-            print(f"Total orphan stubs: {total}\n")
+            print(f"FOUND {total} ORPHAN STUBS:\n")
             for net in sorted(orphans.keys()):
                 layers = orphans[net]
                 for lyr in sorted(layers.keys()):
                     pts = layers[lyr]
-                    print(f"{net} on {lyr}: {len(pts)} orphans")
+                    print(f"  {net} on {lyr}: {len(pts)} orphans")
                     for pt in sorted(pts)[:5]:
-                        print(f"  ({pt[0]:.2f}, {pt[1]:.2f})")
+                        print(f"    ({pt[0]:.2f}, {pt[1]:.2f})")
                     if len(pts) > 5:
-                        print(f"  ... and {len(pts) - 5} more")
+                        print(f"    ... and {len(pts) - 5} more")
 
+        print("=" * 60)
+
+        if orphans:
             sys.exit(1)
 
 

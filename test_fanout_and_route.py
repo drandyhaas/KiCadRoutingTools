@@ -150,7 +150,7 @@ def main():
 
         if planes:
             # Check for plane errors and connections
-            run('python3 check_drc.py kicad_files/test_diffpair_ram_planes.kicad_pcb --clearance 0.1"', unbuffered)
+            run('python3 check_drc.py kicad_files/test_diffpair_ram_planes.kicad_pcb --clearance 0.1 --clearance-margin 0.1', unbuffered)
             if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram_planes.kicad_pcb --nets "Net-(U1*)"', unbuffered)
 
 

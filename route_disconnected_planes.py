@@ -431,9 +431,9 @@ Examples:
     # Net and layer specification (now optional)
     parser.add_argument("--nets", "-n", nargs="+",
                         help="Net name(s) to process. If omitted, all nets with zones are processed.")
-    parser.add_argument("--plane-layers", "-l", nargs="+",
+    parser.add_argument("--plane-layers", "-p", nargs="+",
                         help="Plane layer(s) to process. If omitted, all layers with zones are processed.")
-    parser.add_argument("--routing-layers", "-r", nargs="+",
+    parser.add_argument("--layers", "-l", nargs="+",
                         help="Layer(s) available for routing (e.g., F.Cu B.Cu). If omitted, all copper layers are used.")
 
     # Track width options
@@ -545,7 +545,7 @@ Examples:
         verbose=args.verbose,
         dry_run=args.dry_run,
         debug_lines=args.debug_lines,
-        routing_layers=args.routing_layers
+        routing_layers=args.layers
     )
 
 

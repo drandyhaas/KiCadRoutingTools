@@ -489,8 +489,8 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--nets`, `-n` | auto | Net name(s) to process. If omitted, all nets with zones are processed |
-| `--plane-layers`, `-l` | auto | Layer(s) to process. If omitted, all layers with zones are processed |
-| `--routing-layers`, `-r` | all Cu | Layer(s) available for routing |
+| `--plane-layers`, `-p` | auto | Layer(s) to process. If omitted, all layers with zones are processed |
+| `--layers`, `-l` | all Cu | Layer(s) available for routing |
 | `--max-track-width` | 2.0 | Maximum track width for connections (mm) |
 | `--min-track-width` | 0.2 | Minimum track width for connections (mm) |
 | `--track-width` | 0.2 | Default track width for routing config (mm) |
