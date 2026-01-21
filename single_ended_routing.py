@@ -888,13 +888,46 @@ def route_multipoint_main(
             pad_components = get_zone_connected_pad_groups(
                 net_segments, net_vias, pads_list, net_zones, config.layers
             )
-            # Filter edges: keep only those connecting different components
+            # Group pads by component for quick lookup
+            component_pads: dict = {}  # component_id -> list of pad indices
+            for pad_idx, comp_id in pad_components.items():
+                if comp_id not in component_pads:
+                    component_pads[comp_id] = []
+                component_pads[comp_id].append(pad_idx)
+
+            # Filter edges and optimize: for edges crossing components, find closest pad in zone-connected group
             original_count = len(mst_edges)
-            mst_edges = [
-                (a, b, dist) for a, b, dist in mst_edges
-                if pad_components.get(a) != pad_components.get(b)
-            ]
-            if len(mst_edges) < original_count:
+            optimized_edges = []
+            seen_component_pairs = set()  # Track which component pairs we've already connected
+
+            for a, b, dist in mst_edges:
+                comp_a = pad_components.get(a)
+                comp_b = pad_components.get(b)
+                if comp_a == comp_b:
+                    continue  # Skip intra-component edges
+
+                # Normalize component pair to avoid duplicates
+                pair_key = (min(comp_a, comp_b), max(comp_a, comp_b))
+                if pair_key in seen_component_pairs:
+                    continue  # Already have an edge between these components
+                seen_component_pairs.add(pair_key)
+
+                # Optimize: find shortest edge between pads in these two components
+                best_edge = None
+                best_dist = float('inf')
+                for pa in component_pads.get(comp_a, [a]):
+                    for pb in component_pads.get(comp_b, [b]):
+                        px_a, py_a = pad_positions[pa]
+                        px_b, py_b = pad_positions[pb]
+                        d = abs(px_a - px_b) + abs(py_a - py_b)  # Manhattan distance
+                        if d < best_dist:
+                            best_dist = d
+                            best_edge = (pa, pb, d)
+                if best_edge:
+                    optimized_edges.append(best_edge)
+
+            mst_edges = optimized_edges
+            if original_count > len(mst_edges):
                 skipped = original_count - len(mst_edges)
                 print(f"  Skipping {skipped} MST edge(s) already connected through plane")
 
@@ -1204,19 +1237,39 @@ def route_multipoint_taps(
         # Vias are included on ALL layers since they connect all copper layers
         all_tap_points = get_all_segment_tap_points(all_segments, coord, layer_names, vias=all_vias)
 
-        if not all_tap_points:
-            # Fall back to using source pad position directly
-            src_x, src_y = src_pad[3], src_pad[4]
-            src_gx, src_gy = coord.to_grid(src_x, src_y)
-            sources = [(src_gx, src_gy, src_pad[2])]
-            tap_point_map = {(src_gx, src_gy, src_pad[2]): (src_x, src_y, layer_names[src_pad[2]])}
-            print(f"      No tap points found, using pad position directly")
-        else:
-            # Use all segment points as sources - router finds shortest path from any
+        # Always include the designated source pad position as a potential source
+        # This is critical for zone-connected pads that have no segments to them yet
+        src_x, src_y = src_pad[3], src_pad[4]
+        src_gx, src_gy = coord.to_grid(src_x, src_y)
+        src_pad_obj = src_pad[5]
+
+        # Build initial tap point map from segment/via tap points
+        if all_tap_points:
             sources = [(gx, gy, layer_idx) for gx, gy, layer_idx, _, _ in all_tap_points]
-            # Map grid coords back to original coords for segment generation
             tap_point_map = {(gx, gy, layer_idx): (ox, oy, layer_names[layer_idx])
                             for gx, gy, layer_idx, ox, oy in all_tap_points}
+        else:
+            sources = []
+            tap_point_map = {}
+
+        # Add source pad position as a valid source (on all layers for through-hole)
+        if hasattr(src_pad_obj, 'layers') and '*.Cu' in src_pad_obj.layers:
+            # Through-hole pad - can connect on any copper layer
+            for layer_idx in range(len(layer_names)):
+                key = (src_gx, src_gy, layer_idx)
+                if key not in tap_point_map:
+                    sources.append(key)
+                    tap_point_map[key] = (src_x, src_y, layer_names[layer_idx])
+        else:
+            # SMD pad - use specific layer from pad_info
+            key = (src_gx, src_gy, src_pad[2])
+            if key not in tap_point_map:
+                sources.append(key)
+                tap_point_map[key] = (src_x, src_y, layer_names[src_pad[2]])
+
+        if not sources:
+            print(f"      ERROR: No sources available for routing")
+            continue
 
         # For through-hole pads, create targets on ALL layers (router can reach any layer)
         tgt_gx, tgt_gy = tgt_pad[0], tgt_pad[1]
