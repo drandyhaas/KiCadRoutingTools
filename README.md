@@ -86,6 +86,10 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 # Route with wider tracks for power nets
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net*" \
   --power-nets "*GND*" "*VCC*" "+3.3V" --power-nets-widths 0.4 0.5 0.3 --track-width 0.2
+
+# Typical workflow: create GND plane first, then route all signals
+python route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu
+python route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite
 ```
 
 ### 3. Create Power/Ground Planes
