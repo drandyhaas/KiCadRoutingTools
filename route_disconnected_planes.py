@@ -441,12 +441,12 @@ Examples:
                         help="Maximum track width for connections in mm (default: 2.0)")
     parser.add_argument("--min-track-width", type=float, default=0.2,
                         help="Minimum track width for connections in mm (default: 0.2)")
-    parser.add_argument("--track-width", type=float, default=0.2,
-                        help="Default track width for routing config in mm (default: 0.2)")
+    parser.add_argument("--track-width", type=float, default=0.3,
+                        help="Default track width for routing config in mm (default: 0.3)")
 
     # Clearance options
-    parser.add_argument("--clearance", type=float, default=0.2,
-                        help="Trace-to-trace clearance in mm (default: 0.2)")
+    parser.add_argument("--clearance", type=float, default=0.25,
+                        help="Trace-to-trace clearance in mm (default: 0.25)")
     parser.add_argument("--zone-clearance", type=float, default=0.2,
                         help="Zone fill clearance around obstacles in mm (default: 0.2)")
     parser.add_argument("--track-via-clearance", type=float, default=0.8,
@@ -459,8 +459,8 @@ Examples:
     # Via options (for config)
     parser.add_argument("--via-size", type=float, default=0.5,
                         help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=0.4,
-                        help="Via drill diameter in mm (default: 0.4)")
+    parser.add_argument("--via-drill", type=float, default=0.3,
+                        help="Via drill diameter in mm (default: 0.3)")
 
     # Grid step
     parser.add_argument("--grid-step", type=float, default=0.1,

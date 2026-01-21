@@ -1703,10 +1703,10 @@ Examples:
                         help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
 
     # Via and track geometry
-    parser.add_argument("--via-size", type=float, default=0.3, help="Via outer diameter in mm (default: 0.3)")
-    parser.add_argument("--via-drill", type=float, default=0.2, help="Via drill size in mm (default: 0.2)")
-    parser.add_argument("--track-width", type=float, default=0.1, help="Track width for via-to-pad connections in mm (default: 0.1)")
-    parser.add_argument("--clearance", type=float, default=0.1, help="Clearance in mm (default: 0.1)")
+    parser.add_argument("--via-size", type=float, default=0.5, help="Via outer diameter in mm (default: 0.5)")
+    parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm (default: 0.3)")
+    parser.add_argument("--track-width", type=float, default=0.3, help="Track width for via-to-pad connections in mm (default: 0.3)")
+    parser.add_argument("--clearance", type=float, default=0.25, help="Clearance in mm (default: 0.25)")
 
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=0.2, help="Zone clearance from other copper in mm (default: 0.2)")

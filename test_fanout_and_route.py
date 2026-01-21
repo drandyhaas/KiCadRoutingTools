@@ -93,28 +93,28 @@ def main():
 
     if ftdi and not onlychecks:
         # Route the FTDI tracks
-        if quick: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-DATA_11*)" --swappable-nets "Net-(U2A-DATA_*)" --impedance 50 --vertical-attraction-radius 0', unbuffered)
-        else: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)" --swappable-nets "Net-(U2A-DATA_*)" --mps-layer-swap --impedance 50 --vertical-attraction-radius 0', unbuffered)
+        if quick: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-DATA_11*)" --swappable-nets "Net-(U2A-DATA_*)" --impedance 50 --vertical-attraction-radius 0 --clearance 0.1 --via-size 0.3 --via-drill 0.2 --layers F.Cu In1.Cu In2.Cu B.Cu', unbuffered)
+        else: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)" --swappable-nets "Net-(U2A-DATA_*)" --mps-layer-swap --impedance 50 --vertical-attraction-radius 0 --clearance 0.1 --via-size 0.3 --via-drill 0.2 --layers F.Cu In1.Cu In2.Cu B.Cu', unbuffered)
 
     if lvds and not onlychecks:
         # Route LVDS diff pairs
         if quick:
             # Quick test: route just a few rx1_1* pairs
-            run('python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets "*lvds_rx1_1*" --swappable-nets "*lvds_rx1_1*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --impedance 100 ', unbuffered)
+            run('python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets "*lvds_rx1_1*" --swappable-nets "*lvds_rx1_1*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --impedance 100 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
         else:
             # Full test: route all 56 LVDS pairs in two batches - those on bottom and then those on top
-            run('python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/routed_output_diff12.kicad_pcb --nets "*lvds_rx1_*" "*lvds_rx2_*" "*lvds_rx*clkin1*" "*lvds_rx*clkin2*" --swappable-nets "*lvds_rx1_*" "*lvds_rx2_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --impedance 100 ', unbuffered)
-            run('python3 route_diff.py kicad_files/routed_output_diff12.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets "*lvds_rx3_*" "*lvds_rx4_*" "*lvds_rx*clkin3*" "*lvds_rx*clkin4*" --swappable-nets "*lvds_rx3_*" "*lvds_rx4_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --impedance 100 ', unbuffered)
+            run('python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/routed_output_diff12.kicad_pcb --nets "*lvds_rx1_*" "*lvds_rx2_*" "*lvds_rx*clkin1*" "*lvds_rx*clkin2*" --swappable-nets "*lvds_rx1_*" "*lvds_rx2_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --impedance 100 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+            run('python3 route_diff.py kicad_files/routed_output_diff12.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets "*lvds_rx3_*" "*lvds_rx4_*" "*lvds_rx*clkin3*" "*lvds_rx*clkin4*" --swappable-nets "*lvds_rx3_*" "*lvds_rx4_*" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --impedance 100 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
 
     if ram and not onlychecks:
         # Route RAM
-        run('python3 route_diff.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ramdiff.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK_*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group "Net-(U1*DQS*)" "Net-(U1*CK_*)" --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5', unbuffered)
-        if not quick: run('python3 route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1*)" --swappable-nets "Net-(U1*DQ*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group auto --max-iterations 1000000 --no-bga-zones U1', unbuffered)
-        else: run('python3 route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1B-CA*)" --swappable-nets "Net-(U1*DQ*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group auto --max-iterations 1000000 --no-bga-zones U1', unbuffered)
+        run('python3 route_diff.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ramdiff.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK_*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group "Net-(U1*DQS*)" "Net-(U1*CK_*)" --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        if not quick: run('python3 route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1*)" --swappable-nets "Net-(U1*DQ*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group auto --max-iterations 1000000 --no-bga-zones U1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        else: run('python3 route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1B-CA*)" --swappable-nets "Net-(U1*DQ*)" --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu --bga-proximity-radius 1 --stub-proximity-radius 1 --length-match-group auto --max-iterations 1000000 --no-bga-zones U1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
 
     if planes and not onlychecks:
         # Add and route GND plane
-        run('python3 route_planes.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --net "GND" "/fpga_adc/VA19|/fpga_adc/VA11|/fpga_adc/VLVDS|/fpga_adc/VD11" --plane-layer In4.Cu In5.Cu --rip-blocker-nets --reroute-ripped-nets ', unbuffered)
+        run('python3 route_planes.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --net "GND" "/fpga_adc/VA19|/fpga_adc/VA11|/fpga_adc/VLVDS|/fpga_adc/VD11" --plane-layer In4.Cu In5.Cu --rip-blocker-nets --reroute-ripped-nets --clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1', unbuffered)
 
     if checks or onlychecks:
 

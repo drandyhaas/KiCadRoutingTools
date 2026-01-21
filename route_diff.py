@@ -755,20 +755,20 @@ Examples:
     parser.add_argument("--no-bga-zones", nargs="*", default=None,
                         help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
     parser.add_argument("--layers", "-l", nargs="+",
-                        default=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
-                        help="Routing layers to use (default: F.Cu In1.Cu In2.Cu B.Cu)")
+                        default=['F.Cu', 'B.Cu'],
+                        help="Routing layers to use (default: F.Cu B.Cu)")
 
     # Track and via geometry
-    parser.add_argument("--track-width", type=float, default=0.1,
-                        help="Track width in mm (default: 0.1). Ignored if --impedance is specified.")
+    parser.add_argument("--track-width", type=float, default=0.3,
+                        help="Track width in mm (default: 0.3). Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
-    parser.add_argument("--clearance", type=float, default=0.1,
-                        help="Clearance between tracks in mm (default: 0.1)")
-    parser.add_argument("--via-size", type=float, default=0.3,
-                        help="Via outer diameter in mm (default: 0.3)")
-    parser.add_argument("--via-drill", type=float, default=0.2,
-                        help="Via drill size in mm (default: 0.2)")
+    parser.add_argument("--clearance", type=float, default=0.25,
+                        help="Clearance between tracks in mm (default: 0.25)")
+    parser.add_argument("--via-size", type=float, default=0.5,
+                        help="Via outer diameter in mm (default: 0.5)")
+    parser.add_argument("--via-drill", type=float, default=0.3,
+                        help="Via drill size in mm (default: 0.3)")
 
     # Router algorithm parameters
     parser.add_argument("--grid-step", type=float, default=0.1,

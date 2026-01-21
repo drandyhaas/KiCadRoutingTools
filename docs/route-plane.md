@@ -51,10 +51,10 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--via-size` | 0.3 | Via outer diameter in mm |
-| `--via-drill` | 0.2 | Via drill size in mm |
-| `--track-width` | 0.2 | Track width for via-to-pad connections in mm |
-| `--clearance` | 0.1 | Clearance from other copper in mm |
+| `--via-size` | 0.5 | Via outer diameter in mm |
+| `--via-drill` | 0.3 | Via drill size in mm |
+| `--track-width` | 0.3 | Track width for via-to-pad connections in mm |
+| `--clearance` | 0.25 | Clearance from other copper in mm |
 
 ### Zone Options
 
@@ -71,7 +71,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 | `--max-search-radius` | 10.0 | Maximum radius to search for valid via position in mm |
 | `--max-via-reuse-radius` | 1.0 | Prefer reusing existing vias within this radius in mm |
 | `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm |
-| `--layers`, `-l` | F.Cu In1.Cu In2.Cu B.Cu | All copper layers for routing and via span |
+| `--layers`, `-l` | F.Cu + plane-layers + B.Cu | All copper layers for routing and via span (auto-computed) |
 
 ### Multi-net Plane Layer Options
 

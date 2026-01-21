@@ -20,15 +20,14 @@ Power nets (GND, VCC, etc.) typically require wider tracks than signal nets to h
 # Route with wider tracks for power nets
 python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
   --power-nets "*GND*" "*VCC*" "+3.3V" \
-  --power-nets-widths 0.4 0.5 0.3 \
-  --track-width 0.2  # default for non-power nets
+  --power-nets-widths 0.4 0.5 0.35
 ```
 
 This routes:
 - Nets matching `*GND*` with 0.4mm tracks
 - Nets matching `*VCC*` with 0.5mm tracks
-- Nets matching `+3.3V` with 0.3mm tracks
-- All other nets with 0.2mm tracks (the default `--track-width`)
+- Nets matching `+3.3V` with 0.35mm tracks
+- All other nets with 0.3mm tracks (the default `--track-width`)
 
 Patterns are matched in order - first matching pattern determines the width. Obstacle clearances automatically adjust for wider power traces.
 

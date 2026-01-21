@@ -440,11 +440,11 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [OPTION
 --component U1          # Route all nets on U1 (auto-excludes GND/VCC/VDD/unconnected unless --nets given)
 
 # Geometry
---track-width 0.1       # Track width (mm), ignored if --impedance specified
+--track-width 0.3       # Track width (mm), ignored if --impedance specified
 --impedance 50          # Target single-ended impedance (ohms), calculates width per layer from stackup
---clearance 0.1         # Track clearance (mm)
---via-size 0.3          # Via diameter (mm)
---via-drill 0.2         # Via drill (mm)
+--clearance 0.25        # Track clearance (mm)
+--via-size 0.5          # Via diameter (mm)
+--via-drill 0.3         # Via drill (mm)
 
 # Power net routing (wider tracks for power/ground)
 --power-nets "*GND*" "*VCC*"  # Glob patterns for power nets
@@ -464,7 +464,7 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [OPTION
 
 # Strategy
 --ordering mps          # mps | inside_out | original
---layers F.Cu In1.Cu In2.Cu B.Cu
+--layers F.Cu B.Cu      # Routing layers (default: 2-layer)
 --no-bga-zones          # Allow routing through all BGA areas
 --no-bga-zones U1 U3    # Allow routing through specific BGAs only (or all if none given)
 
@@ -554,10 +554,10 @@ python route_planes.py kicad_files/input.kicad_pcb --overwrite --net GND --plane
 --plane-layer, -p In1.Cu In2.Cu  # Plane layer(s), one per net (or one per net group)
 
 # Via/trace geometry
---via-size 0.3          # Via outer diameter (mm)
---via-drill 0.2         # Via drill size (mm)
---track-width 0.2       # Track width for via-to-pad connections (mm)
---clearance 0.1         # Clearance (mm)
+--via-size 0.5          # Via outer diameter (mm)
+--via-drill 0.3         # Via drill size (mm)
+--track-width 0.3       # Track width for via-to-pad connections (mm)
+--clearance 0.25        # Clearance (mm)
 
 # Zone options
 --zone-clearance 0.2    # Zone clearance from other copper (mm)
@@ -622,10 +622,10 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb --overwrite [OPT
 # Track width
 --max-track-width 2.0       # Maximum track width for connections (mm)
 --min-track-width 0.2       # Minimum track width for connections (mm)
---track-width 0.2           # Default track width for routing config (mm)
+--track-width 0.3           # Default track width for routing config (mm)
 
 # Clearance
---clearance 0.2             # Trace-to-trace clearance (mm)
+--clearance 0.25            # Trace-to-trace clearance (mm)
 --zone-clearance 0.2        # Zone fill clearance around obstacles (mm)
 --track-via-clearance 0.8   # Clearance from tracks to other nets' vias (mm)
 --board-edge-clearance 0.5  # Clearance from board edge (mm)
@@ -633,7 +633,7 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb --overwrite [OPT
 
 # Via options
 --via-size 0.5              # Via outer diameter (mm)
---via-drill 0.4             # Via drill diameter (mm)
+--via-drill 0.3             # Via drill diameter (mm)
 
 # Grid
 --grid-step 0.1             # Routing grid step (mm)

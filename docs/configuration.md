@@ -60,8 +60,8 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 # Route with wider tracks for power nets
 python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
   --power-nets "*GND*" "*VCC*" "+3.3V" \
-  --power-nets-widths 0.4 0.5 0.3 \
-  --track-width 0.2  # default for non-power nets
+  --power-nets-widths 0.4 0.5 0.3
+  # default track-width is 0.3 for non-power nets
 ```
 
 Patterns are matched in order - first match determines width. Obstacle clearances automatically adjust for wider power traces.
@@ -89,7 +89,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 |--------|---------|-------------|
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original` |
 | `--direction` / `-d` | forward | Direction: `forward` or `backward` |
-| `--layers` / `-l` | F.Cu In1.Cu In2.Cu B.Cu | Routing layers |
+| `--layers` / `-l` | F.Cu B.Cu | Routing layers |
 | `--no-bga-zones [REFS...]` | (auto-detect) | Disable BGA exclusion zones. No args = all. With refs (U1 U3) = only those |
 
 ### Proximity Penalty Options
