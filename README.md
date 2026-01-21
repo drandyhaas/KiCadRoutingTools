@@ -477,7 +477,7 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 # Strategy
 --ordering mps          # mps | inside_out | original
 --layers F.Cu B.Cu      # Routing layers (default: 2-layer)
---layer-weights 1.0 3.0 # Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0)
+--layer-costs 1.0 3.0   # Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0)
                         # Order matches --layers. Use to prefer certain layers (e.g., keep signals on F.Cu)
 --no-bga-zones          # Allow routing through all BGA areas
 --no-bga-zones U1 U3    # Allow routing through specific BGAs only (or all if none given)

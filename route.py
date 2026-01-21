@@ -141,7 +141,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 minimal_obstacle_cache: bool = False,
                 vis_callback=None,
                 schematic_dir: Optional[str] = None,
-                layer_weights: Optional[List[float]] = None) -> Tuple[int, int, float]:
+                layer_costs: Optional[List[float]] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -195,19 +195,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers = DEFAULT_4_LAYER_STACK
     print(f"Using {len(layers)} routing layers: {layers}")
 
-    # Set default layer weights if not specified: F.Cu=1.0, all others=3.0
-    if not layer_weights:
-        layer_weights = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
+    # Set default layer costs if not specified: F.Cu=1.0, all others=3.0
+    if not layer_costs:
+        layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
 
-    # Validate layer weights are in range [1.0, 1000]
-    for i, weight in enumerate(layer_weights):
-        if weight < 1.0 or weight > 1000:
+    # Validate layer costs are in range [1.0, 1000]
+    for i, cost in enumerate(layer_costs):
+        if cost < 1.0 or cost > 1000:
             layer_name = layers[i] if i < len(layers) else f"layer {i}"
-            print(f"ERROR: Layer weight for {layer_name} must be between 1.0 and 1000, got {weight}")
+            print(f"ERROR: Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
             sys.exit(1)
 
-    weights_str = ', '.join(f"{layers[i]}={layer_weights[i]}x" for i in range(min(len(layers), len(layer_weights))))
-    print(f"  Layer weights: {weights_str}")
+    costs_str = ', '.join(f"{layers[i]}={layer_costs[i]}x" for i in range(min(len(layers), len(layer_costs))))
+    print(f"  Layer costs: {costs_str}")
 
     # Calculate layer-specific widths for impedance-controlled routing
     layer_widths = {}
@@ -251,7 +251,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if layer_widths:
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
-    config_kwargs['layer_weights'] = layer_weights  # Always set (has defaults)
+    config_kwargs['layer_costs'] = layer_costs  # Always set (has defaults)
     config = GridRouteConfig(**config_kwargs)
 
     # Identify power nets and set up per-net widths
@@ -808,9 +808,9 @@ For differential pair routing, use route_diff.py:
                         help="Cost bonus in mm equivalent for tracks aligned with other layers (default: 0.1)")
 
     # Layer preference options
-    parser.add_argument("--layer-weights", nargs="+", type=float, default=[],
+    parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
                         help="Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0). "
-                             "Order matches --layers. Example: --layer-weights 1.0 5.0")
+                             "Order matches --layers. Example: --layer-costs 1.0 5.0")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
@@ -958,4 +958,4 @@ For differential pair routing, use route_diff.py:
                 mps_segment_intersection=args.mps_segment_intersection,
                 vis_callback=vis_callback,
                 schematic_dir=args.schematic_dir,
-                layer_weights=args.layer_weights)
+                layer_costs=args.layer_costs)
