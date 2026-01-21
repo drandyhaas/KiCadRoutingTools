@@ -416,6 +416,10 @@ def run_reroute_loop(
                 if not reroute_succeeded:
                     if not ripped_items:
                         print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
+                    # Remove from pending_multipoint_nets to prevent Phase 3 from
+                    # trying to route taps for a net with no main route.
+                    if ripped_net_id in state.pending_multipoint_nets:
+                        del state.pending_multipoint_nets[ripped_net_id]
                     failed += 1
 
         elif reroute_item[0] == 'diff_pair':
@@ -772,6 +776,12 @@ def run_reroute_loop(
                 if not reroute_succeeded:
                     if not ripped_items:
                         print(f"  {RED}REROUTE FAILED - could not find route{RESET}")
+                    # Remove from pending_multipoint_nets to prevent Phase 3 from
+                    # trying to route taps for a net with no main route.
+                    if ripped_pair.p_net_id in state.pending_multipoint_nets:
+                        del state.pending_multipoint_nets[ripped_pair.p_net_id]
+                    if ripped_pair.n_net_id in state.pending_multipoint_nets:
+                        del state.pending_multipoint_nets[ripped_pair.n_net_id]
                     failed += 1
 
     return successful, failed, total_time, total_iterations, route_index
