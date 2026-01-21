@@ -17,7 +17,10 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 ## Basic Usage
 
 ```bash
-# Create GND plane on bottom layer
+# Create GND plane on bottom layer (overwrite input file)
+python route_planes.py input.kicad_pcb --overwrite --net GND --plane-layer B.Cu
+
+# Create GND plane to separate output file
 python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
@@ -456,7 +459,10 @@ Key features:
 ### Basic Usage
 
 ```bash
-# Auto-detect all zones in PCB and repair disconnected regions
+# Auto-detect all zones in PCB and repair disconnected regions (overwrite input)
+python route_disconnected_planes.py input.kicad_pcb --overwrite
+
+# Auto-detect all zones to separate output file
 python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb
 
 # Specific nets and layers

@@ -676,9 +676,11 @@ For differential pair routing, use route_diff.py:
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
-    parser.add_argument("output_file", help="Output KiCad PCB file")
-    parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (optional if --component or --nets used)")
+    parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (required unless --overwrite)")
+    parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (default: '*' = all nets)")
     parser.add_argument("--nets", "-n", nargs="+", help="Net names or wildcard patterns to route (alternative to positional args)")
+    parser.add_argument("--overwrite", "-O", action="store_true",
+                        help="Overwrite input file (allows omitting output_file)")
     parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
@@ -809,6 +811,14 @@ For differential pair routing, use route_diff.py:
 
     args = parser.parse_args()
 
+    # Handle output file: require either output_file or --overwrite
+    if args.output_file is None:
+        if args.overwrite:
+            args.output_file = args.input_file
+        else:
+            print("Error: Must specify output_file or use --overwrite")
+            sys.exit(1)
+
     # Load PCB to expand wildcards
     print(f"Loading {args.input_file} to expand net patterns...")
     pcb_data = parse_kicad_pcb(args.input_file)
@@ -818,14 +828,15 @@ For differential pair routing, use route_diff.py:
     if args.nets:
         all_patterns.extend(args.nets)
 
+    # Default to "*" (all nets) if no patterns and no component specified
+    if not all_patterns and not args.component:
+        all_patterns = ["*"]
+
     # Get nets from patterns and/or component
     if all_patterns:
         net_names = expand_net_patterns(pcb_data, all_patterns)
-    elif args.component:
-        net_names = []  # Will be populated by component filter below
     else:
-        print("Error: Must specify net patterns or --component")
-        sys.exit(1)
+        net_names = []  # Will be populated by component filter below
 
     # Filter by component if specified
     if args.component:

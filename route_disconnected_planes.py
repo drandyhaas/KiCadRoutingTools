@@ -424,7 +424,9 @@ Examples:
     )
 
     parser.add_argument("input_file", help="Input KiCad PCB file")
-    parser.add_argument("output_file", help="Output KiCad PCB file")
+    parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (required unless --overwrite)")
+    parser.add_argument("--overwrite", "-O", action="store_true",
+                        help="Overwrite input file (allows omitting output_file)")
 
     # Net and layer specification (now optional)
     parser.add_argument("--nets", "-n", nargs="+",
@@ -479,6 +481,14 @@ Examples:
                         help="Add debug lines on User.4 layer showing route paths")
 
     args = parser.parse_args()
+
+    # Handle output file: require either output_file or --overwrite
+    if args.output_file is None:
+        if args.overwrite:
+            args.output_file = args.input_file
+        else:
+            print("Error: Must specify output_file or use --overwrite")
+            sys.exit(1)
 
     # Auto-detect zones if nets/layers not fully specified
     if args.nets and args.plane_layers:

@@ -739,9 +739,11 @@ Examples:
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
-    parser.add_argument("output_file", help="Output KiCad PCB file")
-    parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (optional if --nets used)")
+    parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (required unless --overwrite)")
+    parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (default: '*' = all nets)")
     parser.add_argument("--nets", "-n", nargs="+", help="Net names or wildcard patterns to route (alternative to positional args)")
+    parser.add_argument("--overwrite", "-O", action="store_true",
+                        help="Overwrite input file (allows omitting output_file)")
 
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
@@ -876,6 +878,14 @@ Examples:
 
     args = parser.parse_args()
 
+    # Handle output file: require either output_file or --overwrite
+    if args.output_file is None:
+        if args.overwrite:
+            args.output_file = args.input_file
+        else:
+            print("Error: Must specify output_file or use --overwrite")
+            sys.exit(1)
+
     # Load PCB to expand wildcards
     print(f"Loading {args.input_file} to expand net patterns...")
     pcb_data = parse_kicad_pcb(args.input_file)
@@ -885,9 +895,9 @@ Examples:
     if args.nets:
         all_patterns.extend(args.nets)
 
+    # Default to "*" (all nets) if no patterns specified
     if not all_patterns:
-        print("Error: Must specify net patterns")
-        sys.exit(1)
+        all_patterns = ["*"]
 
     # Expand patterns to net names
     net_names = expand_net_patterns(pcb_data, all_patterns)
