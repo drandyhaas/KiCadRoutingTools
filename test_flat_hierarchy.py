@@ -33,7 +33,7 @@ def main():
     # Common CLI parameter groups
     GEOMETRY = "" #defaults are OK
     #GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1"
-    LAYERS_4 = "--layers F.Cu In1.Cu In2.Cu B.Cu"
+    LAYERS_4 = "--layers F.Cu B.Cu"
 
     # Step 1: Create GND plane on B.Cu
     run(f"python3 route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu {GEOMETRY}", unbuffered)
