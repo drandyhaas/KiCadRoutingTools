@@ -15,7 +15,8 @@ from connectivity import (
     get_net_endpoints,
     get_multipoint_net_pads,
     find_closest_point_on_segments,
-    compute_mst_edges
+    compute_mst_edges,
+    get_zone_connected_pad_groups
 )
 from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
 
@@ -875,6 +876,32 @@ def route_multipoint_main(
     # Compute MST with Manhattan distance (better for PCB routing)
     mst_edges = compute_mst_edges(pad_positions, use_manhattan=True)
 
+    # Filter out MST edges between pads already connected through zones/planes
+    # Also track pad_components for Phase 3 to know which pads are zone-connected
+    pad_components = {i: i for i in range(len(pad_info))}  # Default: each pad is its own component
+    net_zones = [z for z in pcb_data.zones if z.net_id == net_id]
+    if net_zones:
+        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        pads_list = [info[5] for info in pad_info if len(info) > 5]
+        if pads_list:
+            pad_components = get_zone_connected_pad_groups(
+                net_segments, net_vias, pads_list, net_zones, config.layers
+            )
+            # Filter edges: keep only those connecting different components
+            original_count = len(mst_edges)
+            mst_edges = [
+                (a, b, dist) for a, b, dist in mst_edges
+                if pad_components.get(a) != pad_components.get(b)
+            ]
+            if len(mst_edges) < original_count:
+                skipped = original_count - len(mst_edges)
+                print(f"  Skipping {skipped} MST edge(s) already connected through plane")
+
+    if not mst_edges:
+        print(f"  All pads already connected through plane - nothing to route")
+        return None
+
     # Sort MST edges by length (longest first)
     mst_edges = sorted(mst_edges, key=lambda e: -e[2])
 
@@ -967,6 +994,7 @@ def route_multipoint_main(
         'is_multipoint': True,
         'multipoint_pad_info': pad_info,
         'routed_pad_indices': {idx_a, idx_b},
+        'pad_components': pad_components,  # Zone-connected component for each pad
         # Store main pad positions for Phase 3 tap filtering
         'main_pad_a': (pad_a[3], pad_a[4]),  # (orig_x, orig_y) of first main pad
         'main_pad_b': (pad_b[3], pad_b[4]),  # (orig_x, orig_y) of second main pad
@@ -1075,6 +1103,11 @@ def route_multipoint_taps(
     pad_info = main_result['multipoint_pad_info']
     routed_indices = set(main_result['routed_pad_indices'])
     mst_edges = main_result.get('mst_edges', [])
+    pad_components = main_result.get('pad_components', {i: i for i in range(len(pad_info))})
+
+    # Build set of "routed components" - components with at least one explicitly routed pad
+    # Pads in zone-connected components are effectively routed if any pad in that component is routed
+    routed_components = {pad_components.get(idx, idx) for idx in routed_indices}
 
     # Get the current segments (which may have meanders from length matching)
     all_segments = list(main_result['new_segments'])
@@ -1131,8 +1164,11 @@ def route_multipoint_taps(
             if edge_key in failed_edges:
                 continue
 
-            a_routed = idx_a in routed_indices
-            b_routed = idx_b in routed_indices
+            # Check if pad is effectively routed (either explicitly or via zone-connected component)
+            a_component = pad_components.get(idx_a, idx_a)
+            b_component = pad_components.get(idx_b, idx_b)
+            a_routed = idx_a in routed_indices or a_component in routed_components
+            b_routed = idx_b in routed_indices or b_component in routed_components
 
             if a_routed and not b_routed:
                 edge_to_route = (idx_a, idx_b, length)  # Route from a to b
@@ -1142,7 +1178,9 @@ def route_multipoint_taps(
                 break
 
         if edge_to_route is None:
-            unrouted_pads = len(pad_info) - len(routed_indices)
+            # Count effectively unrouted pads (not in routed_indices AND not in a routed component)
+            unrouted_pads = sum(1 for i in range(len(pad_info))
+                               if i not in routed_indices and pad_components.get(i, i) not in routed_components)
             if unrouted_pads > 0:
                 print(f"  {YELLOW}Warning: {unrouted_pads} pad(s) not connected ({len(failed_edges)} MST edge(s) failed){RESET}")
             break
@@ -1255,14 +1293,18 @@ def route_multipoint_taps(
         # Note: We don't add segments as obstacles since they're the same net
         # and future tap routes can overlap with our own traces
 
-        # Mark target pad as routed and remove edge from remaining
+        # Mark target pad as routed and its component as routed
         routed_indices.add(tgt_idx)
+        tgt_component = pad_components.get(tgt_idx, tgt_idx)
+        routed_components.add(tgt_component)
         remaining_edges = [e for e in remaining_edges if not (
             (e[0] == src_idx and e[1] == tgt_idx) or (e[0] == tgt_idx and e[1] == src_idx)
         )]
         edges_routed += 1
 
-    pads_connected = len(routed_indices)
+    # Count pads that are effectively connected (either explicitly routed or zone-connected to a routed pad)
+    pads_connected = sum(1 for i in range(len(pad_info))
+                         if i in routed_indices or pad_components.get(i, i) in routed_components)
     pads_total = len(pad_info)
     pads_failed = pads_total - pads_connected
     print(f"  Phase 3 routing complete: {edges_routed} edges, {len(all_segments)} total segments, {len(all_vias)} total vias")

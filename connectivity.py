@@ -8,7 +8,7 @@ and tracking segment connectivity.
 import math
 from typing import List, Optional, Tuple, Dict, Set
 
-from kicad_parser import PCBData, Segment, Via, Pad
+from kicad_parser import PCBData, Segment, Via, Pad, Zone
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import pos_key, segment_length, POSITION_DECIMALS, build_layer_map
 from geometry_utils import UnionFind
@@ -220,6 +220,261 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
         groups[root].append(segments[i])
 
     return list(groups.values())
+
+
+def _point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
+    """Check if a point (x, y) is inside a polygon using ray casting algorithm."""
+    n = len(polygon)
+    if n < 3:
+        return False
+
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def is_net_connected_via_zones(
+    segments: List[Segment],
+    vias: List[Via],
+    pads: List[Pad],
+    zones: List[Zone],
+    routing_layers: List[str] = None
+) -> bool:
+    """
+    Check if all pads of a net are connected through zones/planes.
+
+    Uses union-find to track connectivity through:
+    - Segments connecting points on same layer
+    - Vias connecting points across layers
+    - Zones connecting all points inside them on the zone's layer
+    - Through-hole pads connecting across all layers
+
+    Args:
+        segments: Track segments for this net
+        vias: Vias for this net
+        pads: Pads for this net (must have at least 2)
+        zones: Zones/planes for this net
+        routing_layers: List of routing layers (for expanding *.Cu pads)
+
+    Returns:
+        True if all pads are connected, False otherwise
+    """
+    if len(pads) < 2:
+        return True  # 0 or 1 pad is trivially connected
+
+    if not zones:
+        return False  # No zones, can't be connected via zones
+
+    # Import expand_pad_layers locally to avoid circular import
+    from net_queries import expand_pad_layers
+
+    uf = UnionFind()
+
+    # Detect all copper layers
+    copper_layers = set()
+    for seg in segments:
+        if seg.layer.endswith('.Cu'):
+            copper_layers.add(seg.layer)
+    for via in vias:
+        if via.layers:
+            for layer in via.layers:
+                if layer.endswith('.Cu'):
+                    copper_layers.add(layer)
+    for zone in zones:
+        if zone.layer.endswith('.Cu'):
+            copper_layers.add(zone.layer)
+    if routing_layers:
+        copper_layers.update(routing_layers)
+    if not copper_layers:
+        copper_layers = {'F.Cu', 'B.Cu'}
+
+    all_copper_layers = sorted(copper_layers)
+
+    # Collect all points: (x, y, layer, point_id)
+    all_points = []
+    point_id = 0
+
+    # Add segment endpoints
+    for seg in segments:
+        start_id = point_id
+        all_points.append((seg.start_x, seg.start_y, seg.layer, start_id))
+        point_id += 1
+        end_id = point_id
+        all_points.append((seg.end_x, seg.end_y, seg.layer, end_id))
+        point_id += 1
+        uf.union(start_id, end_id)  # Connect segment's endpoints
+
+    # Add vias (connect all layers at one location)
+    for via in vias:
+        via_layers = all_copper_layers if (via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers) else (via.layers or all_copper_layers)
+        via_ids = []
+        for layer in via_layers:
+            all_points.append((via.x, via.y, layer, point_id))
+            via_ids.append(point_id)
+            point_id += 1
+        for vid in via_ids[1:]:
+            uf.union(via_ids[0], vid)
+
+    # Add pads (through-hole pads connect across layers)
+    pad_ids = []
+    for pad in pads:
+        expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
+        this_pad_ids = []
+        for layer in expanded_layers:
+            if layer in copper_layers:
+                all_points.append((pad.global_x, pad.global_y, layer, point_id))
+                this_pad_ids.append(point_id)
+                pad_ids.append(point_id)
+                point_id += 1
+        for pid in this_pad_ids[1:]:
+            uf.union(this_pad_ids[0], pid)
+
+    # Connect points through zones
+    for zone in zones:
+        zone_layer = zone.layer
+        points_on_layer = [(x, y, layer, pid) for x, y, layer, pid in all_points if layer == zone_layer]
+        points_in_zone = [pid for x, y, layer, pid in points_on_layer if _point_in_polygon(x, y, zone.polygon)]
+        if len(points_in_zone) > 1:
+            for pid in points_in_zone[1:]:
+                uf.union(points_in_zone[0], pid)
+
+    # Connect nearby points on same layer (tolerance-based)
+    tolerance = 0.02
+    for i, (x1, y1, l1, id1) in enumerate(all_points):
+        for j, (x2, y2, l2, id2) in enumerate(all_points):
+            if i < j and l1 == l2:
+                if abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance:
+                    uf.union(id1, id2)
+
+    # Check if all pads are in the same component
+    if not pad_ids:
+        return True
+    first_root = uf.find(pad_ids[0])
+    return all(uf.find(pid) == first_root for pid in pad_ids)
+
+
+def get_zone_connected_pad_groups(
+    segments: List[Segment],
+    vias: List[Via],
+    pads: List[Pad],
+    zones: List[Zone],
+    routing_layers: List[str] = None
+) -> Dict[int, int]:
+    """
+    Get connected component membership for each pad based on zone/plane connectivity.
+
+    Returns a dict mapping pad index to component ID. Pads with the same component ID
+    are already connected through zones/tracks/vias and don't need MST edges between them.
+
+    Args:
+        segments: Track segments for this net
+        vias: Vias for this net
+        pads: Pads for this net
+        zones: Zones/planes for this net
+        routing_layers: List of routing layers (for expanding *.Cu pads)
+
+    Returns:
+        Dict mapping pad index (0-based) to component ID
+    """
+    if len(pads) < 2:
+        return {i: 0 for i in range(len(pads))}
+
+    from net_queries import expand_pad_layers
+
+    uf = UnionFind()
+
+    # Detect all copper layers
+    copper_layers = set()
+    for seg in segments:
+        if seg.layer.endswith('.Cu'):
+            copper_layers.add(seg.layer)
+    for via in vias:
+        if via.layers:
+            for layer in via.layers:
+                if layer.endswith('.Cu'):
+                    copper_layers.add(layer)
+    for zone in zones:
+        if zone.layer.endswith('.Cu'):
+            copper_layers.add(zone.layer)
+    if routing_layers:
+        copper_layers.update(routing_layers)
+    if not copper_layers:
+        copper_layers = {'F.Cu', 'B.Cu'}
+
+    all_copper_layers = sorted(copper_layers)
+
+    # Collect all points with pad index tracking
+    all_points = []  # (x, y, layer, point_id)
+    point_id = 0
+    pad_point_ids: Dict[int, List[int]] = {}  # pad_index -> list of point_ids
+
+    # Add segment endpoints
+    for seg in segments:
+        start_id = point_id
+        all_points.append((seg.start_x, seg.start_y, seg.layer, start_id))
+        point_id += 1
+        end_id = point_id
+        all_points.append((seg.end_x, seg.end_y, seg.layer, end_id))
+        point_id += 1
+        uf.union(start_id, end_id)
+
+    # Add vias
+    for via in vias:
+        via_layers = all_copper_layers if (via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers) else (via.layers or all_copper_layers)
+        via_ids = []
+        for layer in via_layers:
+            all_points.append((via.x, via.y, layer, point_id))
+            via_ids.append(point_id)
+            point_id += 1
+        for vid in via_ids[1:]:
+            uf.union(via_ids[0], vid)
+
+    # Add pads with index tracking
+    for pad_idx, pad in enumerate(pads):
+        expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
+        this_pad_ids = []
+        for layer in expanded_layers:
+            if layer in copper_layers:
+                all_points.append((pad.global_x, pad.global_y, layer, point_id))
+                this_pad_ids.append(point_id)
+                point_id += 1
+        for pid in this_pad_ids[1:]:
+            uf.union(this_pad_ids[0], pid)
+        pad_point_ids[pad_idx] = this_pad_ids
+
+    # Connect points through zones
+    for zone in zones:
+        zone_layer = zone.layer
+        points_on_layer = [(x, y, layer, pid) for x, y, layer, pid in all_points if layer == zone_layer]
+        points_in_zone = [pid for x, y, layer, pid in points_on_layer if _point_in_polygon(x, y, zone.polygon)]
+        if len(points_in_zone) > 1:
+            for pid in points_in_zone[1:]:
+                uf.union(points_in_zone[0], pid)
+
+    # Connect nearby points on same layer
+    tolerance = 0.02
+    for i, (x1, y1, l1, id1) in enumerate(all_points):
+        for j, (x2, y2, l2, id2) in enumerate(all_points):
+            if i < j and l1 == l2:
+                if abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance:
+                    uf.union(id1, id2)
+
+    # Map each pad index to its component root
+    pad_components = {}
+    for pad_idx, point_ids in pad_point_ids.items():
+        if point_ids:
+            pad_components[pad_idx] = uf.find(point_ids[0])
+        else:
+            # Pad has no valid layers - give it a unique component
+            pad_components[pad_idx] = -pad_idx - 1
+
+    return pad_components
 
 
 def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: float = 0.05) -> List[Tuple[float, float, str]]:

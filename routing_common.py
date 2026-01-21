@@ -13,7 +13,7 @@ from kicad_parser import (
     auto_detect_bga_exclusion_zones
 )
 from routing_config import GridRouteConfig
-from connectivity import get_net_endpoints
+from connectivity import get_net_endpoints, is_net_connected_via_zones
 from obstacle_map import build_base_obstacle_map
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, precompute_net_obstacles,
@@ -132,6 +132,10 @@ def filter_already_routed(
     """
     Filter out nets that are already fully connected.
 
+    Checks both track-based connectivity and plane/zone connectivity.
+    A net is considered fully connected if all its pads are connected
+    through any combination of tracks, vias, and copper zones/planes.
+
     Args:
         pcb_data: Parsed PCB data
         net_ids: List of (net_name, net_id) tuples
@@ -142,14 +146,39 @@ def filter_already_routed(
         - nets_to_route: List of (net_name, net_id) needing routing
         - already_routed: List of (net_name, reason) for skipped nets
     """
+    # Group zones by net for quick lookup
+    zones_by_net: Dict[int, List] = {}
+    for zone in pcb_data.zones:
+        if zone.net_id not in zones_by_net:
+            zones_by_net[zone.net_id] = []
+        zones_by_net[zone.net_id].append(zone)
+
     already_routed = []
     nets_to_route = []
     for net_name, net_id in net_ids:
+        # First check basic track-based connectivity
         _, _, error = get_net_endpoints(pcb_data, net_id, config)
         if error and "already" in error.lower():
             already_routed.append((net_name, error))
-        else:
-            nets_to_route.append((net_name, net_id))
+            continue
+
+        # Check if net is connected through planes/zones
+        net_zones = zones_by_net.get(net_id, [])
+        if net_zones:
+            # Get net's segments, vias, and pads
+            net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+            net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+            net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+            if len(net_pads) >= 2:
+                # Check if all pads are connected through zones/planes
+                if is_net_connected_via_zones(
+                    net_segments, net_vias, net_pads, net_zones, config.layers
+                ):
+                    already_routed.append((net_name, "Already connected through plane/zone"))
+                    continue
+
+        nets_to_route.append((net_name, net_id))
 
     if already_routed:
         print(f"\nSkipping {len(already_routed)} already-routed net(s):")
