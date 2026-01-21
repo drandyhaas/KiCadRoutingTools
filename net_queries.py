@@ -92,24 +92,37 @@ def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float
     return None
 
 
-def expand_net_patterns(pcb_data: PCBData, patterns: List[str]) -> List[str]:
+def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
+                        exclude_unconnected: bool = True) -> List[str]:
     """
     Expand wildcard patterns to matching net names.
 
     Patterns can include * and ? wildcards (fnmatch style).
     Example: "Net-(U2A-DATA_*)" matches Net-(U2A-DATA_0), Net-(U2A-DATA_1), etc.
 
+    Args:
+        pcb_data: PCB data with nets and pads
+        patterns: List of net name patterns (may include wildcards)
+        exclude_unconnected: If True (default), exclude "unconnected-*" nets
+
     Returns list of unique net names in sorted order for patterns,
     preserving order of non-pattern names.
     """
     # Collect net names from both pcb.nets and pads_by_net
-    all_net_names = set(net.name for net in pcb_data.nets.values())
+    all_net_names = set(net.name for net in pcb_data.nets.values() if net.name)
     # Also include net names from pads (for nets not in pcb.nets)
     for pads in pcb_data.pads_by_net.values():
         for pad in pads:
             if pad.net_name:
                 all_net_names.add(pad.net_name)
                 break  # Only need one pad's net_name per net
+
+    # Filter out unconnected nets (KiCad pins not connected in schematic)
+    # and empty net names
+    if exclude_unconnected:
+        all_net_names = {name for name in all_net_names
+                        if name and not name.lower().startswith('unconnected-')}
+
     all_net_names = list(all_net_names)
     result = []
     seen = set()
@@ -127,7 +140,8 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str]) -> List[str]:
                     result.append(name)
                     seen.add(name)
         else:
-            # Literal net name
+            # Literal net name - allow even if it would be excluded
+            # (user explicitly requested it)
             if pattern not in seen:
                 result.append(pattern)
                 seen.add(pattern)
