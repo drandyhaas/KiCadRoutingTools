@@ -34,6 +34,8 @@ def main():
     GEOMETRY = "" #defaults are OK
     #GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1"
     LAYERS_4 = "--layers F.Cu B.Cu"
+
+    # From claude prompt: /analyze-power-nets kicad_files/flat_hierarchy.kicad_pcb
     POWER = '--power-nets "GND" "VCC" "VCC_PIC" "VPP" "Net-(D1-A)" "Net-(D1-K)" --power-nets-widths 0.5 0.5 0.35 0.35 0.5 0.5'
 
     # Step 1: Create GND plane on B.Cu
