@@ -665,7 +665,16 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     margin = config.track_width / 2 + config.clearance + extra_clearance
-    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0
+    # Compute corner radius based on pad shape:
+    # - circle/oval: use min dimension to model as stadium/capsule shape
+    # - roundrect: use the roundrect_rratio from pad
+    # - rect: no rounding
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(half_width, half_height)
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0
 
     # Expand wildcard layers like "*.Cu" to actual routing layers
     expanded_layers = expand_pad_layers(pad.layers, config.layers)

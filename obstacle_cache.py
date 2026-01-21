@@ -196,7 +196,13 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     margin = config.track_width / 2 + config.clearance + extra_clearance
-    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0
+    # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(half_width, half_height)
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0
 
     expanded_layers = expand_pad_layers(pad.layers, config.layers)
 

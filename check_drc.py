@@ -368,8 +368,13 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
     if seg.layer not in expanded_layers:
         return False, 0.0, None
 
-    # Corner radius for roundrect pads
-    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0.0
+    # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(pad.size_x, pad.size_y) / 2
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0.0
 
     # Calculate distance from segment to rectangular pad (with optional rounded corners)
     dist_to_pad, closest_pt = segment_to_rect_distance(
@@ -412,8 +417,13 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     if not any(layer.endswith('.Cu') for layer in expanded_layers):
         return False, 0.0
 
-    # Corner radius for roundrect pads
-    corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0.0
+    # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(pad.size_x, pad.size_y) / 2
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0.0
 
     # Distance from via center to pad edge (accounts for rounded corners)
     dist_to_pad = point_to_rect_distance(

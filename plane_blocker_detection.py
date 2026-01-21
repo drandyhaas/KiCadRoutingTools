@@ -51,7 +51,13 @@ def _re_add_pad_obstacles_for_net(
             half_width = pad.size_x / 2
             half_height = pad.size_y / 2
             margin = config.track_width / 2 + config.clearance
-            corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y) if pad.shape == 'roundrect' else 0
+            # Corner radius based on pad shape
+            if pad.shape in ('circle', 'oval'):
+                corner_radius = min(half_width, half_height)
+            elif pad.shape == 'roundrect':
+                corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+            else:
+                corner_radius = 0
 
             for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
                 obstacles.add_blocked_cell(cell_gx, cell_gy, 0)  # layer_idx=0 for single-layer maps

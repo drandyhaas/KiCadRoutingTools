@@ -136,17 +136,23 @@ def main():
         if ftdi:
             # Check for FTDI errors and connections
             run('python3 check_drc.py kicad_files/routed_output.kicad_pcb --clearance 0.1 --nets "Net-(U2A-*)"', unbuffered)
-            if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram_planes.kicad_pcb --nets "Net-(U2A-*)"', unbuffered)
+            if not quick: run('python3 check_connected.py kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)"', unbuffered)
 
         if lvds:
             # Check LVDS routing for errors and connectivity
             run('python3 check_drc.py kicad_files/test_diffpair.kicad_pcb --clearance 0.1 --nets "*lvds*"', unbuffered)
-            if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram_planes.kicad_pcb --nets "*lvds*"', unbuffered)
+            if not quick: run('python3 check_connected.py kicad_files/test_diffpair.kicad_pcb --nets "*lvds*"', unbuffered)
 
         if ram:
             # Check for RAM errors and connections
             run('python3 check_drc.py kicad_files/test_diffpair_ram.kicad_pcb --clearance 0.1 --nets "Net-(U1*)"', unbuffered)
+            if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1*)"', unbuffered)
+
+        if planes:
+            # Check for plane errors and connections
+            run('python3 check_drc.py kicad_files/test_diffpair_ram_planes.kicad_pcb --clearance 0.1"', unbuffered)
             if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram_planes.kicad_pcb --nets "Net-(U1*)"', unbuffered)
+
 
     print("\n=== All tests completed ===")
 
