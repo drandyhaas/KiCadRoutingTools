@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.8.4**
+**Current Version: 0.9.0**
 
 ## Features
 
@@ -13,6 +13,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - Stub proximity costs to avoid blocking unrouted nets
 - **Turn cost penalty** for direction changes - encourages straighter paths with fewer wiggles
 - **Cross-layer track attraction** for vertical alignment - attracts routes to stack on top of tracks on other layers
+- **Layer cost preferences** - per-layer cost multipliers to prefer certain layers (e.g., keep signals on F.Cu, avoid B.Cu). Default: F.Cu=1.0x, others=3.0x
 - **Pose-based routing with Dubins heuristic** for differential pair centerlines (orientation-aware A*)
 - **Rectangular pad obstacle blocking** with proper rotation handling
 - **Collinear via constraint** for differential pair routing (ensures clean via geometry)
@@ -184,7 +185,8 @@ Methods:
 
 ```python
 router = GridRouter(via_cost: int, h_weight: float, turn_cost: int = 1000, via_proximity_cost: int = 1,
-                    vertical_attraction_radius: int = 0, vertical_attraction_bonus: int = 0)
+                    vertical_attraction_radius: int = 0, vertical_attraction_bonus: int = 0,
+                    layer_costs: List[int] = None)
 ```
 
 Parameters:
@@ -194,6 +196,7 @@ Parameters:
 - `via_proximity_cost`: Multiplier for stub proximity cost when placing vias. Higher values discourage vias near stubs. Use 0 to block vias entirely in stub proximity zones.
 - `vertical_attraction_radius`: Grid units radius for cross-layer track attraction (0 = disabled)
 - `vertical_attraction_bonus`: Cost reduction for positions aligned with tracks on other layers
+- `layer_costs`: Per-layer cost multipliers (1000 = 1.0x, 3000 = 3.0x). Affects movement cost, source initialization, and via transitions. Switching to a cheaper layer discounts via cost (can be free)
 
 Methods:
 - `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0)` - Find path from any source to any target
@@ -269,6 +272,7 @@ src/
 
 ## Version History
 
+- **0.9.0**: Added `layer_costs` parameter to GridRouter and VisualRouter for layer preference routing. Per-layer cost multipliers (1000 = 1.0x) affect movement costs, source initialization penalty for expensive layers, and via transition costs. Switching to a cheaper layer discounts the via cost (can reduce to 0). Default in route.py: F.Cu=1.0x, all others=3.0x. Values must be 1.0-1000x.
 - **0.8.4**: Added `vertical_attraction_radius` and `vertical_attraction_bonus` parameters to GridRouter (previously only in PoseRouter). Single-ended routing can now attract to tracks on other layers, consolidating routing corridors and leaving more room for through-hole vias.
 - **0.8.3**: Added `via_proximity_cost` parameter to GridRouter (was only in PoseRouter). Multiplies stub proximity cost when placing vias - higher values discourage vias near stubs, 0 blocks vias entirely in stub proximity zones. Now both single-ended and diff pair routing respect via proximity costs. Added batch FFI operations (`add_blocked_cells_batch`, `remove_blocked_cells_batch`, `add_stub_proximity_costs_batch`) to reduce Python-Rust call overhead. Changed obstacle map to use reference-counted `HashMap<u64, u16>` instead of `HashSet<u64>` for correct incremental updates when nets share blocked cells.
 - **0.8.2**: Added `turn_cost` parameter to GridRouter - penalizes direction changes to encourage straighter paths with fewer wiggles. Default is 1000 (same as ORTHO_COST). Configurable via `--turn-cost` CLI option.

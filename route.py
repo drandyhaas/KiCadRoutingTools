@@ -140,7 +140,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 mps_segment_intersection: bool = False,
                 minimal_obstacle_cache: bool = False,
                 vis_callback=None,
-                schematic_dir: Optional[str] = None) -> Tuple[int, int, float]:
+                schematic_dir: Optional[str] = None,
+                layer_weights: Optional[List[float]] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -194,6 +195,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers = DEFAULT_4_LAYER_STACK
     print(f"Using {len(layers)} routing layers: {layers}")
 
+    # Set default layer weights if not specified: F.Cu=1.0, all others=3.0
+    if not layer_weights:
+        layer_weights = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
+
+    # Validate layer weights are in range [1.0, 1000]
+    for i, weight in enumerate(layer_weights):
+        if weight < 1.0 or weight > 1000:
+            layer_name = layers[i] if i < len(layers) else f"layer {i}"
+            print(f"ERROR: Layer weight for {layer_name} must be between 1.0 and 1000, got {weight}")
+            sys.exit(1)
+
+    weights_str = ', '.join(f"{layers[i]}={layer_weights[i]}x" for i in range(min(len(layers), len(layer_weights))))
+    print(f"  Layer weights: {weights_str}")
+
     # Calculate layer-specific widths for impedance-controlled routing
     layer_widths = {}
     if impedance is not None:
@@ -236,6 +251,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if layer_widths:
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
+    config_kwargs['layer_weights'] = layer_weights  # Always set (has defaults)
     config = GridRouteConfig(**config_kwargs)
 
     # Identify power nets and set up per-net widths
@@ -791,6 +807,11 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--vertical-attraction-cost", type=float, default=0.1,
                         help="Cost bonus in mm equivalent for tracks aligned with other layers (default: 0.1)")
 
+    # Layer preference options
+    parser.add_argument("--layer-weights", nargs="+", type=float, default=[],
+                        help="Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0). "
+                             "Order matches --layers. Example: --layer-weights 1.0 5.0")
+
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
@@ -936,4 +957,5 @@ For differential pair routing, use route_diff.py:
                 mps_layer_swap=args.mps_layer_swap,
                 mps_segment_intersection=args.mps_segment_intersection,
                 vis_callback=vis_callback,
-                schematic_dir=args.schematic_dir)
+                schematic_dir=args.schematic_dir,
+                layer_weights=args.layer_weights)

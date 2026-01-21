@@ -46,6 +46,7 @@ impl SearchSnapshot {
 pub struct VisualRouter {
     via_cost: i32,
     h_weight: f32,
+    layer_costs: Vec<i32>,  // Per-layer cost multipliers (1000 = 1.0x, 1500 = 1.5x penalty)
     // Search state
     open_set: BinaryHeap<OpenEntry>,
     g_costs: FxHashMap<u64, i32>,
@@ -64,10 +65,12 @@ pub struct VisualRouter {
 #[pymethods]
 impl VisualRouter {
     #[new]
-    pub fn new(via_cost: i32, h_weight: f32) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, layer_costs=None))]
+    pub fn new(via_cost: i32, h_weight: f32, layer_costs: Option<Vec<i32>>) -> Self {
         Self {
             via_cost,
             h_weight,
+            layer_costs: layer_costs.unwrap_or_default(),
             open_set: BinaryHeap::new(),
             g_costs: FxHashMap::default(),
             parents: FxHashMap::default(),
@@ -111,18 +114,24 @@ impl VisualRouter {
             .collect();
 
         // Initialize open set with sources
+        // Find minimum layer cost for initial g penalty
+        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
+            // Penalize starting on expensive layers
+            let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+            let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state);
             self.open_set.push(OpenEntry {
-                f_score: h,
-                g_score: 0,
+                f_score: initial_g + h,
+                g_score: initial_g,
                 state,
                 counter: self.counter,
             });
             self.counter += 1;
-            self.g_costs.insert(key, 0);
+            self.g_costs.insert(key, initial_g);
         }
     }
 
@@ -175,7 +184,10 @@ impl VisualRouter {
                     continue;
                 }
 
-                let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
+                let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
                 let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy);
                 let new_g = g + move_cost + proximity_cost;
 
@@ -215,7 +227,13 @@ impl VisualRouter {
                     }
 
                     let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * 2;
-                    let new_g = g + self.via_cost + proximity_cost;
+                    // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
+                    let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                    let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+                    let layer_transition_cost = dest_layer_cost - current_layer_cost;
+                    // Combined via cost can be as low as 0 when switching to a much cheaper layer
+                    let combined_via_cost = (self.via_cost + layer_transition_cost).max(0);
+                    let new_g = g + combined_via_cost + proximity_cost;
 
                     let existing_g = self.g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                     if new_g < existing_g {
@@ -256,14 +274,21 @@ impl VisualRouter {
 }
 
 impl VisualRouter {
+    /// Octile distance heuristic to nearest target
+    /// Uses minimum layer cost to remain admissible (never overestimate)
     fn heuristic_to_targets(&self, state: &GridState) -> i32 {
+        // Use minimum layer cost for admissibility
+        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+
         let mut min_h = i32::MAX;
         for target in &self.target_states {
             let dx = (state.gx - target.gx).abs();
             let dy = (state.gy - target.gy).abs();
             let diag = dx.min(dy);
             let orth = (dx - dy).abs();
-            let mut h = diag * DIAG_COST + orth * ORTHO_COST;
+            let base_dist = diag * DIAG_COST + orth * ORTHO_COST;
+            // Scale distance by minimum layer cost for admissibility
+            let mut h = (base_dist as i64 * min_layer_cost as i64 / 1000) as i32;
             if state.layer != target.layer {
                 h += self.via_cost;
             }

@@ -374,7 +374,8 @@ def route_via_to_pad(
         via_cost=config.via_cost * 1000,
         h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost,
-        via_proximity_cost=0
+        via_proximity_cost=0,
+        layer_costs=config.get_layer_costs()
     )
 
     path, iterations, blocked_cells = router.route_with_frontier(
@@ -597,7 +598,8 @@ def route_plane_connection(
         via_cost=config.via_cost * 1000,
         h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost,
-        via_proximity_cost=0
+        via_proximity_cost=0,
+        layer_costs=config.get_layer_costs()
     )
 
     path, iterations, _ = router.route_with_frontier(

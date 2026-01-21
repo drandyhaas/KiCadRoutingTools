@@ -16,14 +16,16 @@ pub struct GridRouter {
     via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
     vertical_attraction_radius: i32,  // Grid units for cross-layer attraction lookup (0 = disabled)
     vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
+    layer_costs: Vec<i32>,  // Per-layer cost multipliers (1000 = 1.0x, 1500 = 1.5x penalty)
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
-               vertical_attraction_radius: i32, vertical_attraction_bonus: i32) -> Self {
+               vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
+               layer_costs: Option<Vec<i32>>) -> Self {
         Self {
             via_cost,
             h_weight,
@@ -31,6 +33,7 @@ impl GridRouter {
             via_proximity_cost: via_proximity_cost.unwrap_or(1),
             vertical_attraction_radius,
             vertical_attraction_bonus,
+            layer_costs: layer_costs.unwrap_or_default(),
         }
     }
 
@@ -146,18 +149,24 @@ impl GridRouter {
         };
 
 
+        // Find minimum layer cost for initial g penalty
+        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
+            // Penalize starting on expensive layers
+            let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+            let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state, &target_states);
             open_set.push(OpenEntry {
-                f_score: h,
-                g_score: 0,
+                f_score: initial_g + h,
+                g_score: initial_g,
                 state,
                 counter,
             });
             counter += 1;
-            g_costs.insert(key, 0);
+            g_costs.insert(key, initial_g);
             // Source nodes start with no vias on their path
             if via_exclusion_radius > 0 {
                 path_vias.insert(key, Vec::new());
@@ -296,7 +305,10 @@ impl GridRouter {
                     continue;
                 }
 
-                let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
+                let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
                 // Add turn cost if direction changes (encourages straighter paths)
                 let turn_cost = match prev_direction {
                     Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
@@ -414,7 +426,13 @@ impl GridRouter {
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
-                    let new_g = g + via_cost + proximity_cost;
+                    // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
+                    let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                    let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+                    let layer_transition_cost = dest_layer_cost - current_layer_cost;
+                    // Combined via cost can be as low as 0 when switching to a much cheaper layer
+                    let combined_via_cost = (via_cost + layer_transition_cost).max(0);
+                    let new_g = g + combined_via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                     if new_g < existing_g {
@@ -523,13 +541,19 @@ impl GridRouter {
             false
         };
 
+        // Find minimum layer cost for initial g penalty
+        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
+            // Penalize starting on expensive layers
+            let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+            let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state, &target_states);
-            open_set.push(OpenEntry { f_score: h, g_score: 0, state, counter });
+            open_set.push(OpenEntry { f_score: initial_g + h, g_score: initial_g, state, counter });
             counter += 1;
-            g_costs.insert(key, 0);
+            g_costs.insert(key, initial_g);
             if via_exclusion_radius > 0 { path_vias.insert(key, Vec::new()); }
             steps_from_source.insert(key, 0);
         }
@@ -617,7 +641,10 @@ impl GridRouter {
 
                 if closed.contains(&neighbor_key) { continue; }
 
-                let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
+                let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
                 let turn_cost = match prev_direction {
                     Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
                         if dx != pdx || dy != pdy { self.turn_cost } else { 0 }
@@ -694,7 +721,13 @@ impl GridRouter {
                     let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
-                    let new_g = g + via_cost + proximity_cost;
+                    // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
+                    let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                    let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+                    let layer_transition_cost = dest_layer_cost - current_layer_cost;
+                    // Combined via cost can be as low as 0 when switching to a much cheaper layer
+                    let combined_via_cost = (via_cost + layer_transition_cost).max(0);
+                    let new_g = g + combined_via_cost + proximity_cost;
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                     if new_g < existing_g {
@@ -725,15 +758,21 @@ impl GridRouter {
 
 impl GridRouter {
     /// Octile distance heuristic to nearest target
+    /// Uses minimum layer cost to remain admissible (never overestimate)
     #[inline]
     fn heuristic_to_targets(&self, state: &GridState, targets: &[GridState]) -> i32 {
+        // Use minimum layer cost for admissibility
+        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+
         let mut min_h = i32::MAX;
         for target in targets {
             let dx = (state.gx - target.gx).abs();
             let dy = (state.gy - target.gy).abs();
             let diag = dx.min(dy);
             let orth = (dx - dy).abs();
-            let mut h = diag * DIAG_COST + orth * ORTHO_COST;
+            let base_dist = diag * DIAG_COST + orth * ORTHO_COST;
+            // Scale distance by minimum layer cost for admissibility
+            let mut h = (base_dist as i64 * min_layer_cost as i64 / 1000) as i32;
             if state.layer != target.layer {
                 h += self.via_cost;
             }

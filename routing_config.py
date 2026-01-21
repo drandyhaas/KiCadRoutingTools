@@ -78,6 +78,8 @@ class GridRouteConfig:
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
     # Power net routing - per-net width overrides
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
+    # Layer cost weights - prefer certain layers over others (1.0 = normal, 1.5 = 50% more expensive)
+    layer_weights: List[float] = field(default_factory=list)  # Per-layer cost multipliers
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).
@@ -122,6 +124,20 @@ class GridRouteConfig:
             # Ensure power net width is at least the base track width
             return max(self.power_net_widths[net_id], self.track_width)
         return self.get_track_width(layer)
+
+    def get_layer_costs(self) -> List[int]:
+        """Get layer cost multipliers for the Rust router.
+
+        Returns costs scaled by 1000 (1000 = 1.0x, 1500 = 1.5x penalty).
+        If layer_weights is empty or shorter than layers list, uses 1000 (1.0x) for missing layers.
+        """
+        costs = []
+        for i in range(len(self.layers)):
+            if i < len(self.layer_weights):
+                costs.append(int(self.layer_weights[i] * 1000))
+            else:
+                costs.append(1000)  # Default 1.0x
+        return costs
 
 
 class GridCoord:

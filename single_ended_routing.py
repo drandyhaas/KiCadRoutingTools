@@ -258,7 +258,8 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
-                        vertical_attraction_bonus=attraction_bonus)
+                        vertical_attraction_bonus=attraction_bonus,
+                        layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
     # Power nets need extra clearance from obstacles based on their wider track width
@@ -475,7 +476,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
-                        vertical_attraction_bonus=attraction_bonus)
+                        vertical_attraction_bonus=attraction_bonus,
+                        layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
@@ -669,7 +671,8 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         first_label, second_label = "forward", "backward"
 
     # Create visual router
-    router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
+    router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+                          layer_costs=config.get_layer_costs())
 
     # Try first direction with visualization
     router.init(first_sources, first_targets, config.max_iterations)
@@ -703,7 +706,8 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         print(f"No route found after {total_iterations} iterations ({first_label}), trying {second_label}...")
 
         # Try second direction
-        router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight)
+        router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+                          layer_costs=config.get_layer_costs())
         router.init(second_sources, second_targets, config.max_iterations)
         direction_used = second_label
 
@@ -976,7 +980,8 @@ def route_multipoint_main(
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
-                        vertical_attraction_bonus=attraction_bonus)
+                        vertical_attraction_bonus=attraction_bonus,
+                        layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
@@ -1169,7 +1174,8 @@ def route_multipoint_taps(
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
-                        vertical_attraction_bonus=attraction_bonus)
+                        vertical_attraction_bonus=attraction_bonus,
+                        layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
