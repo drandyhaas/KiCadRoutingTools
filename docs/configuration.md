@@ -90,6 +90,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original` |
 | `--direction` / `-d` | forward | Direction: `forward` or `backward` |
 | `--layers` / `-l` | F.Cu B.Cu | Routing layers |
+| `--layer-costs` | (see below) | Per-layer cost multipliers (1.0-1000). Default: all 1.0 for 4+ layers; F.Cu=1.0, B.Cu=3.0 for 2 layers |
 | `--no-bga-zones [REFS...]` | (auto-detect) | Disable BGA exclusion zones. No args = all. With refs (U1 U3) = only those |
 
 ### Proximity Penalty Options
@@ -226,6 +227,7 @@ class GridRouteConfig:
 
     # Layers
     layers: List[str] = ['F.Cu', 'B.Cu']
+    layer_costs: List[float] = None  # per-layer cost multipliers (default: 1.0 for 4+, F.Cu=1.0/B.Cu=3.0 for 2)
 
     # BGA zones
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = []
@@ -307,6 +309,25 @@ Smaller grid steps allow finer routing but increase computation:
 | 0.05 | Fine-pitch BGAs, tight clearances |
 | 0.1 (default) | General purpose |
 | 0.2 | Fast routing, less detail |
+
+### Layer Costs
+
+The `--layer-costs` parameter controls per-layer routing preferences. Higher costs make the router avoid that layer:
+
+| Value | Effect |
+|-------|--------|
+| 1.0 | No penalty, layer used freely |
+| 3.0 | Moderately avoided (3x cost per grid step) |
+| 10.0+ | Strongly avoided, used only when necessary |
+
+**Defaults:**
+- 4+ layers: all 1.0 (inner layers available for balanced routing)
+- 2 layers: F.Cu=1.0, B.Cu=3.0 (prefer top layer for cleaner assembly)
+
+**Example:** To keep signals on F.Cu and only use B.Cu when necessary:
+```bash
+--layers F.Cu B.Cu --layer-costs 1.0 5.0
+```
 
 ### Stub Proximity
 

@@ -1013,7 +1013,8 @@ def create_plane(
     board_edge_clearance: float = 0.5,
     voronoi_seed_interval: float = 2.0,
     plane_max_iterations: int = 200000,
-    debug_lines: bool = False
+    debug_lines: bool = False,
+    layer_costs: Optional[List[float]] = None
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1095,6 +1096,25 @@ def create_plane(
     ]
 
     # Step 4: Build config and coordinate system
+    # Set default layer costs if not specified
+    # 4+ layers: all 1.0 (inner layers available for routing)
+    # 2 layers: F.Cu=1.0, B.Cu=3.0 (prefer top layer)
+    if not layer_costs:
+        if len(all_layers) >= 4:
+            layer_costs = [1.0] * len(all_layers)
+        else:
+            layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in all_layers]
+
+    # Validate layer costs are in range [1.0, 1000]
+    for i, cost in enumerate(layer_costs):
+        if cost < 1.0 or cost > 1000:
+            layer_name = all_layers[i] if i < len(all_layers) else f"layer {i}"
+            print(f"ERROR: Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
+            return (0, 0, 0)
+
+    costs_str = ', '.join(f"{all_layers[i]}={layer_costs[i]}x" for i in range(min(len(all_layers), len(layer_costs))))
+    print(f"  Layer costs: {costs_str}")
+
     config = GridRouteConfig(
         track_width=track_width,
         clearance=clearance,
@@ -1102,7 +1122,8 @@ def create_plane(
         via_drill=via_drill,
         grid_step=grid_step,
         hole_to_hole_clearance=hole_to_hole_clearance,
-        layers=all_layers
+        layers=all_layers,
+        layer_costs=layer_costs
     )
     coord = GridCoord(grid_step)
 
@@ -1722,6 +1743,9 @@ Examples:
     parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2, help="Minimum clearance between drill holes in mm (default: 0.2)")
     parser.add_argument("--layers", "-l", nargs="+", default=None,
                         help="All copper layers for routing and via span (default: F.Cu + plane-layers + B.Cu)")
+    parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
+                        help="Per-layer routing cost multipliers (1.0-1000). "
+                             "Order matches --layers. Example: --layer-costs 1.0 3.0 3.0 3.0")
 
     # Blocker rip-up options
     parser.add_argument("--rip-blocker-nets", action="store_true",
@@ -1832,7 +1856,8 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         voronoi_seed_interval=args.voronoi_seed_interval,
         plane_max_iterations=args.plane_max_iterations,
-        debug_lines=args.debug_lines
+        debug_lines=args.debug_lines,
+        layer_costs=args.layer_costs
     )
 
 

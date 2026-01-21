@@ -195,9 +195,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers = DEFAULT_4_LAYER_STACK
     print(f"Using {len(layers)} routing layers: {layers}")
 
-    # Set default layer costs if not specified: F.Cu=1.0, all others=3.0
+    # Set default layer costs if not specified
+    # 4+ layers: all 1.0 (inner layers available for routing)
+    # 2 layers: F.Cu=1.0, B.Cu=3.0 (prefer top layer)
     if not layer_costs:
-        layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
+        if len(layers) >= 4:
+            layer_costs = [1.0] * len(layers)
+        else:
+            layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
 
     # Validate layer costs are in range [1.0, 1000]
     for i, cost in enumerate(layer_costs):
@@ -244,14 +249,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         vertical_attraction_radius=vertical_attraction_radius,
         vertical_attraction_cost=vertical_attraction_cost, length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
-        debug_memory=debug_memory
+        debug_memory=debug_memory, layer_costs=layer_costs
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
     if layer_widths:
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
-    config_kwargs['layer_costs'] = layer_costs  # Always set (has defaults)
     config = GridRouteConfig(**config_kwargs)
 
     # Identify power nets and set up per-net widths

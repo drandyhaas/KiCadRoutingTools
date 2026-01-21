@@ -405,7 +405,8 @@ def get_common_config_kwargs(
     length_match_groups: Optional[List[List[str]]],
     length_match_tolerance: float,
     meander_amplitude: float,
-    debug_memory: bool
+    debug_memory: bool,
+    layer_costs: Optional[List[float]] = None
 ) -> Dict:
     """
     Build config kwargs dict from common parameters.
@@ -447,4 +448,5 @@ def get_common_config_kwargs(
         length_match_tolerance=length_match_tolerance,
         meander_amplitude=meander_amplitude,
         debug_memory=debug_memory,
+        layer_costs=layer_costs,
     )

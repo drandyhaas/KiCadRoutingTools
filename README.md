@@ -477,7 +477,8 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 # Strategy
 --ordering mps          # mps | inside_out | original
 --layers F.Cu B.Cu      # Routing layers (default: 2-layer)
---layer-costs 1.0 3.0   # Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0)
+--layer-costs 1.0 3.0   # Per-layer cost multipliers (1.0-1000)
+                        # Default: 4+ layers = all 1.0; 2 layers = F.Cu=1.0, B.Cu=3.0
                         # Order matches --layers. Use to prefer certain layers (e.g., keep signals on F.Cu)
 --no-bga-zones          # Allow routing through all BGA areas
 --no-bga-zones U1 U3    # Allow routing through specific BGAs only (or all if none given)
@@ -584,6 +585,8 @@ python route_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] --nets GND
 --close-via-radius 0.5      # Radius to check for nearby vias before placing new one (default: 2.5 * via-size)
 --hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
 --layers, -l F.Cu In1.Cu In2.Cu B.Cu  # All copper layers for routing and via span
+--layer-costs 1.0 1.0 1.0 1.0  # Per-layer cost multipliers (1.0-1000)
+                               # Default: 4+ layers = all 1.0; 2 layers = F.Cu=1.0, B.Cu=3.0
 --board-edge-clearance 0.5  # Zone clearance from board edge (mm)
 
 # Multi-net plane layers (Voronoi partitioning)

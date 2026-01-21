@@ -75,6 +75,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 | `--max-via-reuse-radius` | 1.0 | Prefer reusing existing vias within this radius in mm |
 | `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm |
 | `--layers`, `-l` | F.Cu + plane-layers + B.Cu | All copper layers for routing and via span (auto-computed) |
+| `--layer-costs` | 1.0 per layer (4+) or F.Cu=1.0/B.Cu=3.0 (2-layer) | Per-layer routing cost multipliers (1.0-1000) |
 
 ### Multi-net Plane Layer Options
 
