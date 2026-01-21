@@ -145,8 +145,8 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 ### 4. Verify Results
 
 ```bash
-# Check for DRC violations
-python check_drc.py kicad_files/output.kicad_pcb --clearance 0.1
+# Check for DRC violations (default clearance: 0.2mm)
+python check_drc.py kicad_files/output.kicad_pcb
 
 # Check connectivity for specific nets
 python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"

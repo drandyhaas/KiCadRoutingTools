@@ -12,7 +12,7 @@ Checks a routed PCB for Design Rule Check violations.
 python check_drc.py output.kicad_pcb [OPTIONS]
 
 Options:
-  --clearance FLOAT    Track-to-track clearance in mm (default: 0.1)
+  --clearance FLOAT    Track-to-track clearance in mm (default: 0.2)
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
   --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm (default: 0.2)
   --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
@@ -74,8 +74,8 @@ Open the PCB in KiCad and enable the `User.7` layer to visualize where clearance
 
 ```
 Checking clearances in routed.kicad_pcb...
-Track clearance: 0.1mm
-Via clearance: 0.1mm
+Track clearance: 0.2mm
+Via clearance: 0.2mm
 
 Checking 1,234 segments and 89 vias...
 
@@ -88,7 +88,7 @@ If violations are found:
 VIOLATION: Track too close to track
   Net-(U2A-DATA_0) segment (10.2, 15.3)-(10.4, 15.5) on F.Cu
   Net-(U2A-DATA_1) segment (10.3, 15.2)-(10.5, 15.4) on F.Cu
-  Distance: 0.085mm (minimum: 0.1mm)
+  Distance: 0.185mm (minimum: 0.2mm)
 ```
 
 ## Connectivity Checker (`check_connected.py`)

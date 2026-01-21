@@ -1172,8 +1172,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Check PCB for DRC violations (clearance errors)')
     parser.add_argument('pcb', help='Input PCB file')
-    parser.add_argument('--clearance', '-c', type=float, default=0.1,
-                        help='Minimum clearance in mm (default: 0.1)')
+    parser.add_argument('--clearance', '-c', type=float, default=0.2,
+                        help='Minimum clearance in mm (default: 0.2)')
     parser.add_argument('--hole-to-hole-clearance', type=float, default=0.2,
                         help='Minimum drill hole edge-to-edge clearance in mm (default: 0.2)')
     parser.add_argument('--board-edge-clearance', type=float, default=0.0,
