@@ -98,6 +98,8 @@ The `--plane-track-via-clearance` parameter ensures MST routes don't pass throug
 | `--rip-blocker-nets` | off | Enable blocker identification and removal |
 | `--max-rip-nets` | 3 | Maximum blocker nets to rip up per pad |
 | `--reroute-ripped-nets` | off | Automatically re-route ripped nets after via placement |
+| `--power-nets` | - | Glob patterns for power nets to route with wider tracks |
+| `--power-nets-widths` | - | Track widths in mm for each power-net pattern |
 
 When `--rip-blocker-nets` is enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad.
 

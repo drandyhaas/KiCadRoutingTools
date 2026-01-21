@@ -34,12 +34,13 @@ def main():
     GEOMETRY = "" #defaults are OK
     #GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1"
     LAYERS_4 = "--layers F.Cu B.Cu"
+    POWER = '--power-nets "GND" "VCC" "VCC_PIC" "VPP" "Net-(D1-A)" "Net-(D1-K)" --power-nets-widths 0.5 0.5 0.35 0.35 0.5 0.5'
 
     # Step 1: Create GND plane on B.Cu
-    run(f"python3 route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu {GEOMETRY}", unbuffered)
+    run(f"python3 route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu {GEOMETRY} {POWER}", unbuffered)
 
     # Step 2: Route all signals
-    run(f"python3 route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite {GEOMETRY} {LAYERS_4}", unbuffered)
+    run(f"python3 route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite {GEOMETRY} {LAYERS_4} {POWER}", unbuffered)
 
     if args.checks:
         # Check for DRC errors

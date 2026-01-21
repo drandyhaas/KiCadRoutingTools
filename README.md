@@ -600,6 +600,8 @@ python route_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] --nets GND
 --rip-blocker-nets      # Rip up nets blocking via placement
 --max-rip-nets 3        # Max blocker nets to rip up per pad (default: 3)
 --reroute-ripped-nets   # Automatically re-route ripped nets after via placement
+--power-nets "*GND*" "*VCC*"  # Glob patterns for power nets (wider tracks when rerouting)
+--power-nets-widths 0.4 0.5   # Track widths for each power-net pattern
 
 # Debug
 --dry-run               # Analyze without writing output

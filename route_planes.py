@@ -919,7 +919,9 @@ def _write_output_and_reroute(
     via_drill: float,
     grid_step: float,
     hole_to_hole_clearance: float,
-    verbose: bool
+    verbose: bool,
+    power_nets: Optional[List[str]] = None,
+    power_nets_widths: Optional[List[float]] = None
 ) -> bool:
     """
     Write output file and optionally reroute ripped nets.
@@ -971,7 +973,9 @@ def _write_output_and_reroute(
                     grid_step=grid_step,
                     hole_to_hole_clearance=hole_to_hole_clearance,
                     verbose=verbose,
-                    minimal_obstacle_cache=True
+                    minimal_obstacle_cache=True,
+                    power_nets=power_nets,
+                    power_nets_widths=power_nets_widths
                 )
                 print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
             finally:
@@ -1014,7 +1018,9 @@ def create_plane(
     voronoi_seed_interval: float = 2.0,
     plane_max_iterations: int = 200000,
     debug_lines: bool = False,
-    layer_costs: Optional[List[float]] = None
+    layer_costs: Optional[List[float]] = None,
+    power_nets: Optional[List[str]] = None,
+    power_nets_widths: Optional[List[float]] = None
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1692,7 +1698,9 @@ def create_plane(
             via_drill=via_drill,
             grid_step=grid_step,
             hole_to_hole_clearance=hole_to_hole_clearance,
-            verbose=verbose
+            verbose=verbose,
+            power_nets=power_nets,
+            power_nets_widths=power_nets_widths
         )
 
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -1754,6 +1762,10 @@ Examples:
                         help="Maximum number of blocker nets to rip up (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
+    parser.add_argument("--power-nets", nargs="+", default=None,
+                        help="Glob patterns for power nets to route with wider tracks (e.g., '*GND*' '*VCC*')")
+    parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,
+                        help="Track widths in mm for each power-net pattern (must match --power-nets length)")
 
     # Multi-net layer connection options
     parser.add_argument("--plane-proximity-radius", type=float, default=3.0,
@@ -1857,7 +1869,9 @@ Examples:
         voronoi_seed_interval=args.voronoi_seed_interval,
         plane_max_iterations=args.plane_max_iterations,
         debug_lines=args.debug_lines,
-        layer_costs=args.layer_costs
+        layer_costs=args.layer_costs,
+        power_nets=args.power_nets,
+        power_nets_widths=args.power_nets_widths
     )
 
 
