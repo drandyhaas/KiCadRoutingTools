@@ -10,6 +10,71 @@ from kicad_parser import Pad
 from routing_utils import pos_key, POSITION_DECIMALS
 
 
+def move_copper_text_to_silkscreen(content: str) -> str:
+    """
+    Move gr_text elements from copper layers to silkscreen layers.
+
+    Text on F.Cu is moved to F.Silkscreen, text on B.Cu is moved to B.Silkscreen.
+    This prevents text from interfering with routing while preserving it visually.
+
+    Args:
+        content: Raw PCB file content
+
+    Returns:
+        Modified content with text layers changed
+    """
+    count = 0
+
+    # Find all gr_text blocks by finding "(gr_text" and matching to closing paren
+    i = 0
+    result_parts = []
+    last_end = 0
+
+    while True:
+        # Find next gr_text
+        start = content.find('(gr_text', i)
+        if start == -1:
+            break
+
+        # Find the matching closing paren by counting nesting
+        depth = 0
+        end = start
+        for j in range(start, len(content)):
+            if content[j] == '(':
+                depth += 1
+            elif content[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+
+        # Extract the gr_text block
+        block = content[start:end]
+
+        # Check if it's on F.Cu or B.Cu
+        layer_match = re.search(r'\(layer\s+"(F\.Cu|B\.Cu)"\)', block)
+        if layer_match:
+            layer = layer_match.group(1)
+            new_layer = 'F.Silkscreen' if layer == 'F.Cu' else 'B.Silkscreen'
+            new_block = block.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
+
+            # Add content before this block, then the modified block
+            result_parts.append(content[last_end:start])
+            result_parts.append(new_block)
+            last_end = end
+            count += 1
+
+        i = end
+
+    # Add remaining content
+    result_parts.append(content[last_end:])
+
+    if count > 0:
+        print(f"  Moved {count} text element(s) from copper layers to silkscreen")
+
+    return ''.join(result_parts)
+
+
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
                            width: float, layer: str, net_id: int) -> str:
     """Generate KiCad S-expression for a track segment."""
@@ -152,6 +217,9 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict]) -> 
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
+    # Move text from copper layers to silkscreen (prevents routing interference)
+    content = move_copper_text_to_silkscreen(content)
+
     # Generate segment S-expressions
     segments = []
     for track in tracks:
@@ -207,6 +275,9 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     """
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # Move text from copper layers to silkscreen (prevents routing interference)
+    content = move_copper_text_to_silkscreen(content)
 
     # Remove existing vias if specified
     if remove_vias:

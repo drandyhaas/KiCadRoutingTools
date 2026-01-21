@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData
-from kicad_writer import generate_via_sexpr, generate_segment_sexpr
+from kicad_writer import generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen
 
 
 @dataclass
@@ -241,6 +241,9 @@ def write_plane_output(
     """
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # Move text from copper layers to silkscreen (prevents routing interference)
+    content = move_copper_text_to_silkscreen(content)
 
     # Filter out zones to be replaced
     if zones_to_replace:

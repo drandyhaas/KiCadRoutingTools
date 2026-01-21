@@ -13,7 +13,8 @@ from typing import List, Dict, Optional
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
-    swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers
+    swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers,
+    move_copper_text_to_silkscreen
 )
 from connectivity import find_connected_segment_positions
 
@@ -62,6 +63,9 @@ def write_routed_output(
     print(f"\nWriting output to {output_file}...")
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # Move text from copper layers to silkscreen (prevents routing interference)
+    content = move_copper_text_to_silkscreen(content)
 
     # Apply target swaps FIRST - layer modifications were recorded with post-swap net IDs,
     # so we need to swap the file content to match before applying layer modifications
