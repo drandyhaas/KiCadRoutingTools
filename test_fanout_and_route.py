@@ -93,8 +93,8 @@ def main():
 
     if ftdi and not onlychecks:
         # Route the FTDI tracks
-        if quick: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-DATA_11*)" --swappable-nets "Net-(U2A-DATA_*)" --impedance 50 ', unbuffered)
-        else: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)" --swappable-nets "Net-(U2A-DATA_*)" --mps-layer-swap --impedance 50 ', unbuffered)
+        if quick: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-DATA_11*)" --swappable-nets "Net-(U2A-DATA_*)" --impedance 50 --vertical-attraction-radius 0', unbuffered)
+        else: run('python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)" --swappable-nets "Net-(U2A-DATA_*)" --mps-layer-swap --impedance 50 --vertical-attraction-radius 0', unbuffered)
 
     if lvds and not onlychecks:
         # Route LVDS diff pairs
