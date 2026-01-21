@@ -46,7 +46,7 @@ from net_queries import (
     expand_net_patterns
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
-from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance,

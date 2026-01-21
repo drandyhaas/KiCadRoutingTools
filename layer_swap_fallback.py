@@ -12,7 +12,7 @@ from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
 from connectivity import get_stub_endpoints, find_stub_free_ends
 from net_queries import get_chip_pad_positions
-from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,

@@ -5,7 +5,7 @@ This module contains the core position and geometry utilities used by all routin
 The bulk of routing functionality has been split into:
 - connectivity.py: Endpoint finding, stub analysis, MST algorithms
 - net_queries.py: Pad/net queries, MPS ordering, route length calculations
-- route_modification.py: Add/remove routes, segment cleanup
+- pcb_modification.py: Add/remove routes, segment cleanup
 """
 
 import math

@@ -22,7 +22,7 @@ from obstacle_cache import (
 )
 from connectivity import get_stub_endpoints
 from net_queries import get_chip_pad_positions
-from route_modification import add_route_to_pcb_data
+from pcb_modification import add_route_to_pcb_data
 
 
 def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):

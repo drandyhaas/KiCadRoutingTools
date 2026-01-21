@@ -5,7 +5,7 @@ Creates a solid copper zone on a specified layer, places vias near target pads,
 and routes short traces to connect vias to pads when direct placement is blocked.
 
 Usage:
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu
+    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu
 """
 
 import sys
@@ -1682,13 +1682,13 @@ def main():
         epilog="""
 Examples:
     # Single net:
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
+    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
 
     # Multiple nets (each net paired with corresponding plane layer):
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
+    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
 
     # With rip-up and automatic re-routing:
-    python route_plane.py input.kicad_pcb output.kicad_pcb --net GND VCC --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND VCC --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")

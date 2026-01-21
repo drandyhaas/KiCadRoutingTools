@@ -83,22 +83,22 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 
 ```bash
 # Create GND zone on B.Cu with via connections to all GND pads
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
 
 # Create VCC plane with larger vias
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Rip up blocking nets and automatically re-route them
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Multiple nets sharing same layer via Voronoi partitioning (use | separator)
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND "VA19|VA11" --plane-layer In4.Cu In5.Cu
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND "VA19|VA11" --plane-layer In4.Cu In5.Cu
 
 # Dry run to see what would be placed
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
 ```
 
 ### 3b. Repair Disconnected Plane Regions
@@ -234,7 +234,7 @@ This script routes nets on the kit-dev-coldfire-xilinx board directly from pads,
 KiCadRoutingTools/
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
-├── route_plane.py            # Main CLI - power/ground plane via connections
+├── route_planes.py           # Main CLI - power/ground plane via connections
 ├── route_disconnected_planes.py  # CLI - repair disconnected plane regions
 ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
 ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
@@ -275,7 +275,7 @@ KiCadRoutingTools/
 ├── kicad_parser.py           # KiCad .kicad_pcb file parser
 ├── kicad_writer.py           # KiCad S-expression generator
 ├── output_writer.py          # Route output and swap application
-├── route_modification.py     # Add/remove routes from PCB data
+├── pcb_modification.py       # Add/remove routes from PCB data
 ├── schematic_updater.py      # Update .kicad_sch files with pad swaps
 ├── chip_boundary.py          # Chip boundary detection
 ├── geometry_utils.py         # Shared geometry calculations
@@ -327,7 +327,7 @@ KiCadRoutingTools/
 |--------|---------|
 | `route.py` | CLI for single-ended routing |
 | `route_diff.py` | CLI for differential pair routing |
-| `route_plane.py` | CLI for power/ground plane via connections |
+| `route_planes.py` | CLI for power/ground plane via connections |
 | `route_disconnected_planes.py` | CLI for repairing disconnected plane regions |
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
@@ -394,7 +394,7 @@ Key functions in `analyze_power_paths.py` (used by `/analyze-power-nets` skill):
 | `kicad_parser.py` | KiCad .kicad_pcb file parser (extracts stackup, footprint values, pintypes) |
 | `kicad_writer.py` | KiCad S-expression generator |
 | `output_writer.py` | Write routed output with swaps and debug geometry |
-| `route_modification.py` | Add/remove routes from PCB data structure |
+| `pcb_modification.py` | Add/remove routes from PCB data structure |
 | `schematic_updater.py` | Update .kicad_sch files with pad swaps from routing |
 | `impedance.py` | Impedance calculations (microstrip/stripline, width from target Z) |
 | `memory_debug.py` | Memory usage statistics and debugging |
@@ -521,10 +521,10 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --
 # All other options from route.py also apply (geometry, strategy, proximity, length matching, etc.)
 ```
 
-### Power/Ground Plane Via Connections (route_plane.py)
+### Power/Ground Plane Via Connections (route_planes.py)
 
 ```bash
-python route_plane.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu [OPTIONS]
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu [OPTIONS]
 
 # Required (can specify multiple nets/plane layers)
 --net, -n GND VCC           # Net name(s) for planes (e.g., GND VCC +3.3V)

@@ -316,12 +316,12 @@ def update_net_obstacles_after_routing(pcb_data, net_id: int, result: Dict,
 # =============================================================================
 # Via Placement Obstacle Cache
 # =============================================================================
-# Separate cache for via placement in route_plane.py. Uses different clearance
+# Separate cache for via placement in route_planes.py. Uses different clearance
 # calculations than routing (actual segment widths vs uniform track width).
 
 @dataclass
 class ViaPlacementObstacleData:
-    """Cached obstacle data for via placement (used by route_plane.py).
+    """Cached obstacle data for via placement (used by route_planes.py).
 
     Stores blocked via positions and routing cells per layer for incremental
     updates when ripping up nets during plane via placement.

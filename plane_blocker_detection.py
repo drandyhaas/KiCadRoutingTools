@@ -14,7 +14,7 @@ from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
 from bresenham_utils import walk_line
-from route_modification import remove_net_from_pcb_data, restore_net_to_pcb_data
+from pcb_modification import remove_net_from_pcb_data, restore_net_to_pcb_data
 from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
 
 import sys

@@ -1,6 +1,6 @@
 # Power/Ground Plane Via Connections
 
-The `route_plane.py` script creates copper pour zones and places vias to connect SMD pads on other layers to the plane.
+The `route_planes.py` script creates copper pour zones and places vias to connect SMD pads on other layers to the plane.
 
 ## Overview
 
@@ -18,19 +18,19 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 
 ```bash
 # Create GND plane on bottom layer
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
+python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
+python route_planes.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
 
 # Create VCC plane on inner layer with larger vias
-python route_plane.py input.kicad_pcb output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
+python route_planes.py input.kicad_pcb output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Rip up blocking nets and automatically re-route them
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+python route_planes.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Preview what would be placed without writing
-python route_plane.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
+python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
 ```
 
 ## Command-Line Options
@@ -401,7 +401,7 @@ The plane generation code is organized into several modules:
 
 | Module | Description |
 |--------|-------------|
-| `route_plane.py` | Main CLI and orchestration - loads PCB, coordinates via placement per-net, and writes output |
+| `route_planes.py` | Main CLI and orchestration - loads PCB, coordinates via placement per-net, and writes output |
 | `plane_io.py` | I/O utilities - zone extraction, PCB file reading/writing, net ID resolution |
 | `plane_obstacle_builder.py` | Obstacle map construction - builds grid-based maps for via placement and routing |
 | `plane_blocker_detection.py` | Blocker detection and rip-up - identifies which nets are blocking via placement |
@@ -410,7 +410,7 @@ The plane generation code is organized into several modules:
 
 ### Key Functions
 
-**route_plane.py:**
+**route_planes.py:**
 - `create_plane()` - Main orchestration function
 - `find_via_position()` - Searches for valid via positions with routing verification
 - `route_via_to_pad()` - A* routing from via to pad

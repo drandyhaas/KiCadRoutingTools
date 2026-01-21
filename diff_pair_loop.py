@@ -13,7 +13,7 @@ from routing_config import DiffPairNet
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_costs import compute_track_proximity_for_net
 from net_queries import calculate_route_length
-from route_modification import add_route_to_pcb_data
+from pcb_modification import add_route_to_pcb_data
 from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net

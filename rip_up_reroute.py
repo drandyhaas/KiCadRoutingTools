@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
-from route_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_costs import compute_track_proximity_for_net
 from obstacle_cache import (
     precompute_net_obstacles, add_net_obstacles_from_cache, remove_net_obstacles_from_cache

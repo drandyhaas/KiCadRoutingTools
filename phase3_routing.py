@@ -22,7 +22,7 @@ from connectivity import get_multipoint_net_pads
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
-from route_modification import add_route_to_pcb_data
+from pcb_modification import add_route_to_pcb_data
 from obstacle_map import add_segments_list_as_obstacles, add_vias_list_as_obstacles
 from obstacle_cache import (
     remove_net_obstacles_from_cache, update_net_obstacles_after_routing,

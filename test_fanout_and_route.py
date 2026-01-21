@@ -114,7 +114,7 @@ def main():
 
     if planes and not onlychecks:
         # Add and route GND plane
-        run('python3 route_plane.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --net "GND" "/fpga_adc/VA19|/fpga_adc/VA11|/fpga_adc/VLVDS|/fpga_adc/VD11" --plane-layer In4.Cu In5.Cu --rip-blocker-nets --reroute-ripped-nets ', unbuffered)
+        run('python3 route_planes.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --net "GND" "/fpga_adc/VA19|/fpga_adc/VA11|/fpga_adc/VLVDS|/fpga_adc/VD11" --plane-layer In4.Cu In5.Cu --rip-blocker-nets --reroute-ripped-nets ', unbuffered)
 
     if checks or onlychecks:
 

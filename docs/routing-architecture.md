@@ -362,4 +362,4 @@ After routing, segments undergo cleanup:
 2. **Appendix collapsing** - Removes short dead-end segments created by grid snapping
 3. **Degenerate segment removal** - Filters segments shorter than 0.01mm
 
-See `route_modification.py` for implementation details.
+See `pcb_modification.py` for implementation details.
