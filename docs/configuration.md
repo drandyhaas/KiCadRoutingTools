@@ -8,12 +8,12 @@ This document describes all configuration options for the KiCad Grid Router.
 
 ```bash
 # Single-ended routing (all nets by default)
-python route.py input.kicad_pcb output.kicad_pcb [OPTIONS]
-python route.py input.kicad_pcb --overwrite [OPTIONS]  # Overwrite input file
+python route.py input.kicad_pcb [output.kicad_pcb] [OPTIONS]  # Default output: input_routed.kicad_pcb
+python route.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite input file
 
 # Differential pair routing (all nets by default)
-python route_diff.py input.kicad_pcb output.kicad_pcb [OPTIONS]
-python route_diff.py input.kicad_pcb --overwrite [OPTIONS]  # Overwrite input file
+python route_diff.py input.kicad_pcb [output.kicad_pcb] [OPTIONS]  # Default output: input_routed.kicad_pcb
+python route_diff.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite input file
 ```
 
 Use `route.py` for single-ended nets and `route_diff.py` for differential pairs. By default, all nets are routed. Use `--nets` to filter specific patterns.

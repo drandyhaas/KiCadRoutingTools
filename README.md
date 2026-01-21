@@ -56,10 +56,13 @@ python build_router.py --clean
 ### 2. Route Nets
 
 ```bash
-# Route all nets (default), overwrite input file
+# Route all nets (default) - outputs to input_routed.kicad_pcb
+python route.py kicad_files/input.kicad_pcb
+
+# Route all nets, overwrite input file
 python route.py kicad_files/input.kicad_pcb --overwrite
 
-# Route all nets to a separate output file
+# Route all nets to a specific output file
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 
 # Route specific nets (using --nets option)
@@ -88,26 +91,29 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 ### 3. Create Power/Ground Planes
 
 ```bash
-# Create GND zone on B.Cu with via connections to all GND pads (overwrite input)
+# Create GND zone on B.Cu with via connections to all GND pads (outputs to input_routed.kicad_pcb)
+python route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
+
+# Create GND zone, overwrite input file
 python route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
 
-# Create GND zone to separate output file
+# Create GND zone to specific output file
 python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+python route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Create VCC plane with larger vias
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
+python route_planes.py kicad_files/input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Rip up blocking nets and automatically re-route them
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+python route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Multiple nets sharing same layer via Voronoi partitioning (use | separator)
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
+python route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
 
 # Dry run to see what would be placed
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
+python route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
 ### 3b. Repair Disconnected Plane Regions
@@ -115,15 +121,17 @@ python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb 
 After creating power planes, regions may become split by vias and traces from other nets. Use `route_disconnected_planes.py` to reconnect them:
 
 ```bash
-# Auto-detect all zones in PCB and repair disconnected regions (overwrite input)
+# Auto-detect all zones in PCB and repair disconnected regions (outputs to input_routed.kicad_pcb)
+python route_disconnected_planes.py kicad_files/input.kicad_pcb
+
+# Auto-detect all zones, overwrite input
 python route_disconnected_planes.py kicad_files/input.kicad_pcb --overwrite
 
-# Auto-detect all zones to separate output file
+# Auto-detect all zones to specific output file
 python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 
 # Specific nets and layers
-python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
-    --nets GND --plane-layers B.Cu
+python route_disconnected_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Customize track width and clearance
 python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
@@ -430,10 +438,10 @@ Rust acceleration provides ~10x speedup vs pure Python.
 ### Single-Ended Routing (route.py)
 
 ```bash
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [OPTIONS]
+python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 
-# Output options
---overwrite, -O         # Overwrite input file (allows omitting output_file)
+# Output options (default: input_routed.kicad_pcb)
+--overwrite, -O         # Overwrite input file instead of creating _routed copy
 
 # Net selection (default: "*" = all nets)
 --nets "pattern" ...    # Net names or wildcard patterns to route
@@ -507,10 +515,10 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [OPTION
 ### Differential Pair Routing (route_diff.py)
 
 ```bash
-python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [OPTIONS]
+python route_diff.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 
-# Output options
---overwrite, -O         # Overwrite input file (allows omitting output_file)
+# Output options (default: input_routed.kicad_pcb)
+--overwrite, -O         # Overwrite input file instead of creating _routed copy
 
 # Net selection (default: "*" = all nets)
 # All nets specified with --nets are treated as differential pairs (P/N naming convention)
@@ -543,10 +551,10 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [O
 ### Power/Ground Plane Via Connections (route_planes.py)
 
 ```bash
-python route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu [OPTIONS]
+python route_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] --nets GND --plane-layers B.Cu [OPTIONS]
 
-# Output options
---overwrite, -O         # Overwrite input file (allows omitting output_file)
+# Output options (default: input_routed.kicad_pcb)
+--overwrite, -O         # Overwrite input file instead of creating _routed copy
 
 # Required (can specify multiple nets/plane layers)
 --nets, -n GND VCC          # Net name(s) for planes (e.g., GND VCC +3.3V)
@@ -609,10 +617,10 @@ See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
 After creating power planes, regions may become split by vias and traces from other nets cutting through. This script detects disconnected regions within each plane zone and routes wide, short tracks between them.
 
 ```bash
-python route_disconnected_planes.py kicad_files/input.kicad_pcb --overwrite [OPTIONS]
+python route_disconnected_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 
-# Output options
---overwrite, -O         # Overwrite input file (allows omitting output_file)
+# Output options (default: input_routed.kicad_pcb)
+--overwrite, -O         # Overwrite input file instead of creating _routed copy
 
 # Zone selection (auto-detects all zones if not specified)
 --nets, -n GND +3.3V        # Net name(s) to process

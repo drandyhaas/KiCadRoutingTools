@@ -1692,9 +1692,9 @@ Examples:
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
-    parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (required unless --overwrite)")
+    parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
     parser.add_argument("--overwrite", "-O", action="store_true",
-                        help="Overwrite input file (allows omitting output_file)")
+                        help="Overwrite input file instead of creating _routed copy")
 
     # Required options (can be multiple)
     parser.add_argument("--nets", "-n", nargs="+", required=True,
@@ -1752,13 +1752,15 @@ Examples:
 
     args = parser.parse_args()
 
-    # Handle output file: require either output_file or --overwrite
+    # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:
         if args.overwrite:
             args.output_file = args.input_file
         else:
-            print("Error: Must specify output_file or use --overwrite")
-            return
+            # Auto-generate output filename: input.kicad_pcb -> input_routed.kicad_pcb
+            base, ext = os.path.splitext(args.input_file)
+            args.output_file = base + '_routed' + ext
+            print(f"Output file: {args.output_file}")
 
     # Default layers to F.Cu + plane-layers + B.Cu (need outer layers to reach pads)
     if args.layers is None:

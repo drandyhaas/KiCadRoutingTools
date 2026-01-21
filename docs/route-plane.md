@@ -17,23 +17,26 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 ## Basic Usage
 
 ```bash
-# Create GND plane on bottom layer (overwrite input file)
+# Create GND plane on bottom layer (outputs to input_routed.kicad_pcb)
+python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
+
+# Create GND plane, overwrite input file
 python route_planes.py input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
 
-# Create GND plane to separate output file
+# Create GND plane to specific output file
 python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+python route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Create VCC plane on inner layer with larger vias
-python route_planes.py input.kicad_pcb output.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
+python route_planes.py input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Rip up blocking nets and automatically re-route them
-python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+python route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Preview what would be placed without writing
-python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
+python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
 ## Command-Line Options
@@ -459,23 +462,23 @@ Key features:
 ### Basic Usage
 
 ```bash
-# Auto-detect all zones in PCB and repair disconnected regions (overwrite input)
+# Auto-detect all zones in PCB and repair disconnected regions (outputs to input_routed.kicad_pcb)
+python route_disconnected_planes.py input.kicad_pcb
+
+# Auto-detect all zones, overwrite input
 python route_disconnected_planes.py input.kicad_pcb --overwrite
 
-# Auto-detect all zones to separate output file
+# Auto-detect all zones to specific output file
 python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb
 
 # Specific nets and layers
-python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
-    --nets GND --plane-layers B.Cu
+python route_disconnected_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Customize track width and clearance
-python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
-    --max-track-width 1.0 --clearance 0.2
+python route_disconnected_planes.py input.kicad_pcb --max-track-width 1.0 --clearance 0.2
 
 # Increase iterations for difficult routes
-python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \
-    --max-iterations 500000
+python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 ```
 
 ### Command-Line Options
