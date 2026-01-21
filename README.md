@@ -89,25 +89,25 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 
 ```bash
 # Create GND zone on B.Cu with via connections to all GND pads (overwrite input)
-python route_planes.py kicad_files/input.kicad_pcb --overwrite --net GND --plane-layer B.Cu
+python route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
 
 # Create GND zone to separate output file
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Create VCC plane with larger vias
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Rip up blocking nets and automatically re-route them
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Multiple nets sharing same layer via Voronoi partitioning (use | separator)
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND "VA19|VA11" --plane-layer In4.Cu In5.Cu
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
 
 # Dry run to see what would be placed
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
+python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
 ### 3b. Repair Disconnected Plane Regions
@@ -543,15 +543,15 @@ python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb [O
 ### Power/Ground Plane Via Connections (route_planes.py)
 
 ```bash
-python route_planes.py kicad_files/input.kicad_pcb --overwrite --net GND --plane-layer B.Cu [OPTIONS]
+python route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu [OPTIONS]
 
 # Output options
 --overwrite, -O         # Overwrite input file (allows omitting output_file)
 
 # Required (can specify multiple nets/plane layers)
---net, -n GND VCC           # Net name(s) for planes (e.g., GND VCC +3.3V)
+--nets, -n GND VCC          # Net name(s) for planes (e.g., GND VCC +3.3V)
                             # Use | to share a layer: "VA19|VA11" creates Voronoi-partitioned zones
---plane-layer, -p In1.Cu In2.Cu  # Plane layer(s), one per net (or one per net group)
+--plane-layers, -p In1.Cu In2.Cu  # Plane layer(s), one per net (or one per net group)
 
 # Via/trace geometry
 --via-size 0.5          # Via outer diameter (mm)

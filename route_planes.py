@@ -5,7 +5,7 @@ Creates a solid copper zone on a specified layer, places vias near target pads,
 and routes short traces to connect vias to pads when direct placement is blocked.
 
 Usage:
-    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --layer B.Cu
+    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 """
 
 import sys
@@ -1682,13 +1682,13 @@ def main():
         epilog="""
 Examples:
     # Single net:
-    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
+    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 
     # Multiple nets (each net paired with corresponding plane layer):
-    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
+    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
     # With rip-up and automatic re-routing:
-    python route_planes.py input.kicad_pcb output.kicad_pcb --net GND VCC --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND VCC --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
@@ -1697,9 +1697,9 @@ Examples:
                         help="Overwrite input file (allows omitting output_file)")
 
     # Required options (can be multiple)
-    parser.add_argument("--net", "-n", nargs="+", required=True,
+    parser.add_argument("--nets", "-n", nargs="+", required=True,
                         help="Net name(s) for the plane(s) (e.g., GND VCC)")
-    parser.add_argument("--plane-layer", "-p", nargs="+", required=True,
+    parser.add_argument("--plane-layers", "-p", nargs="+", required=True,
                         help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
 
     # Via and track geometry
@@ -1762,19 +1762,19 @@ Examples:
 
     # Default layers to F.Cu + plane-layers + B.Cu (need outer layers to reach pads)
     if args.layers is None:
-        layers = ['F.Cu'] + args.plane_layer + ['B.Cu']
+        layers = ['F.Cu'] + args.plane_layers + ['B.Cu']
         # Remove duplicates while preserving order
         seen = set()
         args.layers = [l for l in layers if not (l in seen or seen.add(l))]
 
     # Validate net/plane-layer counts match
-    if len(args.net) != len(args.plane_layer):
-        print(f"Error: Number of net arguments ({len(args.net)}) must match number of plane layers ({len(args.plane_layer)})")
+    if len(args.nets) != len(args.plane_layers):
+        print(f"Error: Number of net arguments ({len(args.nets)}) must match number of plane layers ({len(args.plane_layers)})")
         print("Each net argument needs a corresponding plane layer")
-        print("Use | to separate multiple nets on the same layer (e.g., --net GND 'VA19|VA11' --plane-layer In4.Cu In5.Cu)")
+        print("Use | to separate multiple nets on the same layer (e.g., --nets GND 'VA19|VA11' --plane-layers In4.Cu In5.Cu)")
         return
 
-    # Parse --net arguments: detect | separator for multi-net layers
+    # Parse --nets arguments: detect | separator for multi-net layers
     # Build data structures:
     #   net_names: List[str] - all individual net names (expanded)
     #   plane_layers: List[str] - layer for each net (expanded to match net_names)
@@ -1783,7 +1783,7 @@ Examples:
     plane_layers = []
     layer_nets = {}
 
-    for net_arg, layer in zip(args.net, args.plane_layer):
+    for net_arg, layer in zip(args.nets, args.plane_layers):
         nets_on_layer = [n.strip() for n in net_arg.split('|')]
         for net in nets_on_layer:
             net_names.append(net)

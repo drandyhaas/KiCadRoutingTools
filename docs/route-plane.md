@@ -18,22 +18,22 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 
 ```bash
 # Create GND plane on bottom layer (overwrite input file)
-python route_planes.py input.kicad_pcb --overwrite --net GND --plane-layer B.Cu
+python route_planes.py input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
 
 # Create GND plane to separate output file
-python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu
+python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_planes.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu
+python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Create VCC plane on inner layer with larger vias
-python route_planes.py input.kicad_pcb output.kicad_pcb --net VCC --plane-layer In2.Cu --via-size 0.5 --via-drill 0.4
+python route_planes.py input.kicad_pcb output.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Rip up blocking nets and automatically re-route them
-python route_planes.py input.kicad_pcb output.kicad_pcb --net GND +3.3V --plane-layer In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Preview what would be placed without writing
-python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer B.Cu --dry-run
+python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
 ## Command-Line Options
@@ -42,10 +42,10 @@ python route_planes.py input.kicad_pcb output.kicad_pcb --net GND --plane-layer 
 
 | Option | Description |
 |--------|-------------|
-| `--net`, `-n` | Net name(s) for the plane(s). Can specify multiple (e.g., "GND" "+3.3V") |
-| `--plane-layer`, `-p` | Plane layer(s) for the zone(s), one per net (e.g., "In1.Cu" "In2.Cu") |
+| `--nets`, `-n` | Net name(s) for the plane(s). Can specify multiple (e.g., "GND" "+3.3V") |
+| `--plane-layers`, `-p` | Plane layer(s) for the zone(s), one per net (e.g., "In1.Cu" "In2.Cu") |
 
-When specifying multiple nets, each net is paired with its corresponding plane layer. For example, `--net GND VCC --plane-layer In1.Cu In2.Cu` creates a GND plane on In1.Cu and a VCC plane on In2.Cu.
+When specifying multiple nets, each net is paired with its corresponding plane layer. For example, `--nets GND VCC --plane-layers In1.Cu In2.Cu` creates a GND plane on In1.Cu and a VCC plane on In2.Cu.
 
 ### Via/Trace Geometry
 
@@ -174,7 +174,7 @@ This ensures that ripped nets are re-routed while respecting clearance from the 
 
 ### Multi-Net Layer Zone Generation
 
-When multiple nets share the same plane layer (e.g., `--net "VA19|VA11" --plane-layer In5.Cu`), the tool uses MST-based routing to ensure connected Voronoi zones:
+When multiple nets share the same plane layer (e.g., `--nets "VA19|VA11" --plane-layers In5.Cu`), the tool uses MST-based routing to ensure connected Voronoi zones:
 
 1. **Compute MST** - For each net, computes a Minimum Spanning Tree between all its vias
 2. **Route MST edges** - Routes each MST edge on the plane layer using A* pathfinding, avoiding other nets' vias and previously routed paths
