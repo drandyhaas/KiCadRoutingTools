@@ -12,6 +12,7 @@ from typing import List, Dict, Tuple, Optional
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
+from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
 
 import sys
 import os
@@ -217,7 +218,10 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
 
 def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig):
-    """Block via placement near board edges."""
+    """Block via placement near board edges.
+
+    Supports both rectangular and non-rectangular board outlines.
+    """
     board_bounds = pcb_data.board_info.board_bounds
     if not board_bounds:
         return
@@ -233,13 +237,77 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     grid_margin = via_expand + 5
 
-    # Block edges
-    for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
-        for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            # Outside board + margin
-            if gx < gmin_x + via_expand or gx > gmax_x - via_expand or \
-               gy < gmin_y + via_expand or gy > gmax_y - via_expand:
-                obstacles.add_blocked_via(gx, gy)
+    # Check for non-rectangular board outline
+    board_outline = pcb_data.board_info.board_outline
+    if board_outline and len(board_outline) >= 3:
+        # Polygon-based via blocking for non-rectangular boards
+        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
+            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+                x, y = coord.to_float(gx, gy)
+                inside = point_in_polygon(x, y, board_outline)
+                if not inside:
+                    # Outside board
+                    obstacles.add_blocked_via(gx, gy)
+                else:
+                    # Inside but check distance to edge
+                    edge_dist = point_to_polygon_edge_distance(x, y, board_outline)
+                    if edge_dist < via_edge_clearance:
+                        obstacles.add_blocked_via(gx, gy)
+    else:
+        # Rectangular board - use simple bounding box logic
+        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
+            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+                # Outside board + margin
+                if gx < gmin_x + via_expand or gx > gmax_x - via_expand or \
+                   gy < gmin_y + via_expand or gy > gmax_y - via_expand:
+                    obstacles.add_blocked_via(gx, gy)
+
+
+def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                                     config: GridRouteConfig, layer_idx: int):
+    """Block track routing near board edges on a single layer.
+
+    Supports both rectangular and non-rectangular board outlines.
+    """
+    board_bounds = pcb_data.board_info.board_bounds
+    if not board_bounds:
+        return
+
+    coord = GridCoord(config.grid_step)
+    min_x, min_y, max_x, max_y = board_bounds
+
+    edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
+    track_edge_clearance = edge_clearance + config.track_width / 2
+    track_expand = coord.to_grid_dist(track_edge_clearance)
+
+    gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+    gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+    grid_margin = track_expand + 5
+
+    # Check for non-rectangular board outline
+    board_outline = pcb_data.board_info.board_outline
+    if board_outline and len(board_outline) >= 3:
+        # Polygon-based track blocking for non-rectangular boards
+        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
+            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+                x, y = coord.to_float(gx, gy)
+                inside = point_in_polygon(x, y, board_outline)
+                if not inside:
+                    # Outside board
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+                else:
+                    # Inside but check distance to edge
+                    edge_dist = point_to_polygon_edge_distance(x, y, board_outline)
+                    if edge_dist < track_edge_clearance:
+                        obstacles.add_blocked_cell(gx, gy, layer_idx)
+    else:
+        # Rectangular board - use simple bounding box logic
+        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
+            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+                # Outside board + margin
+                if gx < gmin_x + track_expand or gx > gmax_x - track_expand or \
+                   gy < gmin_y + track_expand or gy > gmax_y - track_expand:
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
 
 
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -360,6 +428,9 @@ def build_routing_obstacle_map(
             for ey in range(-via_expansion, via_expansion + 1):
                 if ex*ex + ey*ey <= via_expansion * via_expansion:
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+
+    # Add board edge track blocking (supports non-rectangular boards)
+    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
 
     return obstacles
 

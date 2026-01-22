@@ -25,7 +25,7 @@ def main():
     run("python3 route.py kicad_files/interf_u_plane.kicad_pcb kicad_files/interf_u_routed.kicad_pcb --no-bga-zone --layer-costs 1 1 --max-ripup 30 --stub-proximity-radius 10 --stub-proximity-cost 3.0 --track-proximity-cost 1.0 --max-iterations 10000000 --board-edge-clearance 0.55", unbuffered)
 
     # Step 3: Connect disconnected plane regions
-    run("python3 route_disconnected_planes.py kicad_files/interf_u_routed.kicad_pcb kicad_files/interf_u_connected.kicad_pcb", unbuffered)
+    run("python3 route_disconnected_planes.py kicad_files/interf_u_routed.kicad_pcb kicad_files/interf_u_connected.kicad_pcb --board-edge-clearance 0.6", unbuffered)
 
     if args.checks:
         # Check for DRC errors

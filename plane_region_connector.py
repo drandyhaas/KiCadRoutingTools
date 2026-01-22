@@ -14,6 +14,7 @@ from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
 from geometry_utils import UnionFind
 from bresenham_utils import walk_line
+from obstacle_map import add_board_edge_obstacles
 
 import sys
 import os
@@ -1166,6 +1167,9 @@ def build_base_obstacles(
             for gx in range(via_min_gx, via_max_gx + 1):
                 for gy in range(via_min_gy, via_max_gy + 1):
                     obstacles.add_blocked_via(gx, gy)
+
+    # Block areas outside the board outline (supports non-rectangular boards)
+    add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)
 
     return obstacles, layer_map
 

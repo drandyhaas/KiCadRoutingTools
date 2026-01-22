@@ -205,7 +205,8 @@ def route_planes(
         clearance=clearance,
         via_size=via_size,
         via_drill=via_drill,
-        grid_step=grid_step
+        grid_step=grid_step,
+        board_edge_clearance=board_edge_clearance
     )
 
     # Auto-detect routing layers if not specified

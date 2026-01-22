@@ -190,7 +190,8 @@ def point_to_polygon_edge_distance(x: float, y: float, polygon: List[Tuple[float
 
 
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
-                              config: GridRouteConfig, extra_clearance: float = 0.0):
+                              config: GridRouteConfig, extra_clearance: float = 0.0,
+                              layers: Optional[List[str]] = None):
     """Block tracks and vias near the board edge.
 
     Supports both rectangular and non-rectangular board outlines. For non-rectangular
@@ -202,13 +203,15 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         pcb_data: PCB data containing board bounds and optional board_outline polygon
         config: Routing configuration
         extra_clearance: Additional clearance to add
+        layers: Optional list of layer names (overrides config.layers if provided)
     """
     board_bounds = pcb_data.board_info.board_bounds
     if not board_bounds:
         return
 
     coord = GridCoord(config.grid_step)
-    num_layers = len(config.layers)
+    layer_list = layers if layers is not None else config.layers
+    num_layers = len(layer_list)
     min_x, min_y, max_x, max_y = board_bounds
 
     # Use board_edge_clearance if set, otherwise use track clearance
@@ -1034,6 +1037,12 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         for pad in pads:
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
                               blocked_cells, blocked_vias)
+
+    # Add board edge clearance
+    add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
+
+    # Add hole-to-hole clearance blocking for existing drills
+    add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set)
 
     vis_data = VisualizationData(
         blocked_cells=blocked_cells,

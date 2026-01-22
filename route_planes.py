@@ -41,7 +41,8 @@ from plane_obstacle_builder import (
     build_via_obstacle_map,
     build_routing_obstacle_map,
     block_via_position,
-    _add_segment_routing_obstacle
+    _add_segment_routing_obstacle,
+    _add_board_edge_track_obstacles
 )
 from plane_blocker_detection import (
     ViaPlacementResult,
@@ -581,6 +582,9 @@ def route_plane_connection(
                     for ey in range(-route_expansion_grid, route_expansion_grid + 1):
                         if ex*ex + ey*ey <= radius_sq:
                             obstacles.add_blocked_cell(gx2 + ex, gy2 + ey, layer_idx)
+
+    # Block board edges (supports non-rectangular boards)
+    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
 
     # Set up source and target
     via_a_gx, via_a_gy = coord.to_grid(via_a[0], via_a[1])
