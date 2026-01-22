@@ -117,6 +117,7 @@ class BoardInfo:
     copper_layers: List[str]
     board_bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, min_y, max_x, max_y
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
+    board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
 
 
 @dataclass
@@ -234,10 +235,13 @@ def extract_layers(content: str) -> BoardInfo:
     # Extract board bounds from Edge.Cuts
     bounds = extract_board_bounds(content)
 
+    # Extract board outline polygon for non-rectangular boards
+    outline = extract_board_outline(content)
+
     # Extract stackup information
     stackup = extract_stackup(content)
 
-    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds, stackup=stackup)
+    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds, stackup=stackup, board_outline=outline)
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
@@ -331,6 +335,89 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
     if found:
         return (min_x, min_y, max_x, max_y)
     return None
+
+
+def extract_board_outline(content: str) -> List[Tuple[float, float]]:
+    """Extract board outline polygon from Edge.Cuts layer.
+
+    Parses gr_line segments and assembles them into a closed polygon.
+    Returns an empty list if no outline is found or if it's a simple rectangle.
+    """
+    # Collect all line segments as (start, end) tuples
+    segments = []
+
+    # Look for gr_line on Edge.Cuts (multi-line format)
+    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    for m in re.finditer(line_pattern, content, re.DOTALL):
+        x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+        segments.append(((x1, y1), (x2, y2)))
+
+    if len(segments) < 3:
+        return []  # Need at least 3 segments for a polygon
+
+    # Check if this is a simple 4-segment rectangle (no need for polygon handling)
+    if len(segments) == 4:
+        # Get all unique vertices
+        vertices = set()
+        for seg in segments:
+            vertices.add((round(seg[0][0], 3), round(seg[0][1], 3)))
+            vertices.add((round(seg[1][0], 3), round(seg[1][1], 3)))
+        if len(vertices) == 4:
+            # 4 segments with 4 vertices - likely a simple rectangle
+            xs = [v[0] for v in vertices]
+            ys = [v[1] for v in vertices]
+            # Check if all edges are axis-aligned
+            all_axis_aligned = all(
+                abs(s[0][0] - s[1][0]) < 0.001 or abs(s[0][1] - s[1][1]) < 0.001
+                for s in segments
+            )
+            if all_axis_aligned:
+                return []  # Simple rectangle, use bounding box
+
+    # Build polygon by chaining segments
+    # Start with first segment
+    polygon = [segments[0][0], segments[0][1]]
+    used = {0}
+
+    # Round for comparison
+    def approx_equal(p1, p2, tol=0.01):
+        return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
+
+    # Chain remaining segments
+    max_iterations = len(segments) * 2
+    iteration = 0
+    while len(used) < len(segments) and iteration < max_iterations:
+        iteration += 1
+        current_end = polygon[-1]
+        found_next = False
+
+        for i, seg in enumerate(segments):
+            if i in used:
+                continue
+
+            if approx_equal(seg[0], current_end):
+                polygon.append(seg[1])
+                used.add(i)
+                found_next = True
+                break
+            elif approx_equal(seg[1], current_end):
+                polygon.append(seg[0])
+                used.add(i)
+                found_next = True
+                break
+
+        if not found_next:
+            break
+
+    # Remove duplicate last point if polygon is closed
+    if len(polygon) > 1 and approx_equal(polygon[0], polygon[-1]):
+        polygon = polygon[:-1]
+
+    # Only return polygon if we used all segments (complete outline)
+    if len(used) == len(segments) and len(polygon) >= 3:
+        return polygon
+
+    return []  # Incomplete outline, fall back to bounding box
 
 
 def extract_nets(content: str) -> Dict[int, Net]:

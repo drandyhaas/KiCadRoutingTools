@@ -8,6 +8,7 @@ vias, pads, BGA exclusion zones, and routed paths.
 from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass, field
 import numpy as np
+import math
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
@@ -109,13 +110,96 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     return obstacles
 
 
+def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
+    """Test if a point is inside a polygon using ray casting algorithm.
+
+    Args:
+        x, y: Point coordinates
+        polygon: List of (x, y) vertices defining the polygon
+
+    Returns:
+        True if point is inside the polygon
+    """
+    n = len(polygon)
+    if n < 3:
+        return False
+
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+
+        # Check if ray from point crosses this edge
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+
+    return inside
+
+
+def point_to_segment_distance(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Calculate minimum distance from point to line segment.
+
+    Args:
+        px, py: Point coordinates
+        x1, y1, x2, y2: Line segment endpoints
+
+    Returns:
+        Minimum distance from point to the line segment
+    """
+    # Vector from p1 to p2
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Handle degenerate case (segment is a point)
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq < 1e-10:
+        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+
+    # Project point onto line, clamping to segment
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
+
+    # Find closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+
+    return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+
+def point_to_polygon_edge_distance(x: float, y: float, polygon: List[Tuple[float, float]]) -> float:
+    """Calculate minimum distance from point to any polygon edge.
+
+    Args:
+        x, y: Point coordinates
+        polygon: List of (x, y) vertices
+
+    Returns:
+        Minimum distance to any edge
+    """
+    min_dist = float('inf')
+    n = len(polygon)
+
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        dist = point_to_segment_distance(x, y, x1, y1, x2, y2)
+        min_dist = min(min_dist, dist)
+
+    return min_dist
+
+
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, extra_clearance: float = 0.0):
     """Block tracks and vias near the board edge.
 
+    Supports both rectangular and non-rectangular board outlines. For non-rectangular
+    boards (defined by a polygon in board_outline), uses point-in-polygon testing
+    to properly block areas outside the board shape.
+
     Args:
         obstacles: The obstacle map to add to
-        pcb_data: PCB data containing board bounds
+        pcb_data: PCB data containing board bounds and optional board_outline polygon
         config: Routing configuration
         extra_clearance: Additional clearance to add
     """
@@ -141,9 +225,25 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
 
-    # Block cells outside the board (with clearance margin)
-    # We block a margin around the entire grid range
-    grid_margin = max(track_expand, via_expand) + 5  # Extra margin for safety
+    # Check if we have a non-rectangular board outline
+    board_outline = pcb_data.board_info.board_outline
+    if board_outline and len(board_outline) >= 3:
+        # Use polygon-based blocking for non-rectangular boards
+        _add_polygon_edge_obstacles(obstacles, board_outline, coord, num_layers,
+                                     track_edge_clearance, via_edge_clearance,
+                                     gmin_x, gmin_y, gmax_x, gmax_y, track_expand, via_expand)
+    else:
+        # Use simple rectangular blocking
+        _add_rectangular_edge_obstacles(obstacles, coord, num_layers,
+                                         gmin_x, gmin_y, gmax_x, gmax_y,
+                                         track_expand, via_expand)
+
+
+def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
+                                     gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
+                                     track_expand: int, via_expand: int):
+    """Add obstacles for simple rectangular board outline."""
+    grid_margin = max(track_expand, via_expand) + 5
 
     # Block left edge
     for gx in range(gmin_x - grid_margin, gmin_x + track_expand + 1):
@@ -176,6 +276,46 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                 obstacles.add_blocked_cell(gx, gy, layer_idx)
             if gy > gmax_y - via_expand:
                 obstacles.add_blocked_via(gx, gy)
+
+
+def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[float, float]],
+                                 coord: GridCoord, num_layers: int,
+                                 track_edge_clearance: float, via_edge_clearance: float,
+                                 gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
+                                 track_expand: int, via_expand: int):
+    """Add obstacles for non-rectangular board outline using polygon testing.
+
+    For each grid cell in the bounding box area, checks if it's outside the board
+    polygon or too close to the polygon edge (within clearance distance).
+    """
+    grid_margin = max(track_expand, via_expand) + 5
+
+    # Iterate over the extended bounding box
+    for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
+        for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+            # Convert grid coords to board coords
+            x, y = coord.to_float(gx, gy)
+
+            # Check if point is inside the polygon
+            inside = point_in_polygon(x, y, polygon)
+
+            if not inside:
+                # Point is outside the board - block for all layers and vias
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+                obstacles.add_blocked_via(gx, gy)
+            else:
+                # Point is inside - check distance to edges for clearance
+                edge_dist = point_to_polygon_edge_distance(x, y, polygon)
+
+                # Block tracks if too close to edge
+                if edge_dist < track_edge_clearance:
+                    for layer_idx in range(num_layers):
+                        obstacles.add_blocked_cell(gx, gy, layer_idx)
+
+                # Block vias if too close to edge
+                if edge_dist < via_edge_clearance:
+                    obstacles.add_blocked_via(gx, gy)
 
 
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,

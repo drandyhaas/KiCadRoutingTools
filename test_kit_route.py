@@ -5,23 +5,8 @@ Routes nets directly from pads without fanout.
 """
 
 import argparse
-import shlex
-import subprocess
+from test_utils import run
 
-def run(cmd: str, unbuffered: bool = False) -> None:
-    """Run a command string and exit if it fails.
-
-    Args:
-        cmd: Command string to run (will be parsed using shell-style splitting)
-        unbuffered: If True, add -u flag to python commands
-    """
-    if unbuffered and cmd.startswith('python3 '):
-        cmd = 'python3 -u ' + cmd[8:]
-    print(f"\n>>> {cmd}")
-    args = shlex.split(cmd)
-    result = subprocess.run(args)
-    if result.returncode != 0:
-        print(f"Command failed with exit code {result.returncode}")
 
 def main():
     parser = argparse.ArgumentParser(description='Test routing on kit-dev-coldfire-xilinx board')

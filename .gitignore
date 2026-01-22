@@ -47,3 +47,4 @@ rust_router/target/
 /kicad_files/fp-info-cache
 /kicad_files/kit-out*.kicad_pcb
 /kicad_files/flat_hierarchy_*.kicad_pcb
+/kicad_files/interf_u_*.kicad_pcb
