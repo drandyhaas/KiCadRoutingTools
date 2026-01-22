@@ -425,21 +425,29 @@ def get_power_net_recommendations(pcb_data: PCBData,
                             net_currents[net_name] = 0.0
                         net_currents[net_name] += current
 
-    # Convert current to track width using IPC-2152 guidelines
+    # Convert current to track width using IPC-2152 guidelines with 2x safety factor
     def current_to_width(current_ma: float) -> float:
-        """Convert current in mA to recommended track width in mm."""
-        if current_ma < 100:
-            return 0.25
+        """Convert current in mA to recommended track width in mm.
+
+        Applies a 2x safety factor beyond IPC-2152 guidelines for:
+        - Manufacturing tolerance margin
+        - Thermal headroom
+        - Trace resistance reduction
+        """
+        if current_ma < 50:
+            return 0.30   # IPC: 0.15 -> 2x = 0.30
+        elif current_ma < 100:
+            return 0.50   # IPC: 0.25 -> 2x = 0.50
         elif current_ma < 500:
-            return 0.35
+            return 0.70   # IPC: 0.35 -> 2x = 0.70
         elif current_ma < 1000:
-            return 0.50
+            return 1.00   # IPC: 0.50 -> 2x = 1.00
         elif current_ma < 2000:
-            return 0.60
+            return 1.20   # IPC: 0.60 -> 2x = 1.20
         elif current_ma < 5000:
-            return 1.00
+            return 2.00   # IPC: 1.00 -> 2x = 2.00
         else:
-            return 1.50  # Consider using planes
+            return 3.00   # IPC: 1.50 -> 2x = 3.00; consider using planes
 
     # Generate recommendations
     recommendations = {}
@@ -447,10 +455,20 @@ def get_power_net_recommendations(pcb_data: PCBData,
         if current_ma >= min_current_ma:
             recommendations[net_name] = current_to_width(current_ma)
 
-    # Also add ground nets with wide traces
+    # Calculate total return current for GND nets based on all current sinks
+    total_sink_current = sum(
+        comp.current_rating_ma or 100.0
+        for comp in components.values()
+        if comp.role == ComponentRole.CURRENT_SINK
+    )
+
+    # Add ground nets sized for return current
     for net_id, net in pcb_data.nets.items():
-        if 'GND' in net.name.upper() and net.name not in recommendations:
-            recommendations[net.name] = 0.50
+        if 'GND' in net.name.upper():
+            # Use total sink current for main GND, or existing calculated current if higher
+            gnd_current = max(net_currents.get(net.name, 0), total_sink_current)
+            if gnd_current >= min_current_ma:
+                recommendations[net.name] = current_to_width(gnd_current)
 
     return recommendations
 

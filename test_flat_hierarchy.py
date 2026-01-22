@@ -24,7 +24,7 @@ def main():
     LAYERS_4 = "--layers F.Cu B.Cu"
 
     # From claude prompt: /analyze-power-nets kicad_files/flat_hierarchy.kicad_pcb
-    POWER = '--power-nets "GND" "VCC" "VCC_PIC" "VPP" "Net-(D1-A)" "Net-(D1-K)" --power-nets-widths 0.5 0.5 0.35 0.35 0.5 0.5'
+    POWER = '--power-nets "GND" "VCC" "VCC_PIC" "VPP" "Net-(D1-A)" "Net-(D1-K)" --power-nets-widths 1.0 1.0 0.7 0.7 1.0 1.0'
 
     # Step 1: Create GND plane on B.Cu
     run(f"python3 route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu {GEOMETRY} {POWER}", unbuffered)
