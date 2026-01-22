@@ -186,7 +186,8 @@ def find_route_blocker_from_frontier(
     net_block_count: Dict[int, int] = {}
 
     # Check segments
-    expansion_mm = config.track_width / 2 + config.clearance
+    # expansion = existing_track_half + clearance + routing_track_half
+    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
 
     for seg in pcb_data.segments:

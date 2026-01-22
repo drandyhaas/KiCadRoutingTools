@@ -73,10 +73,11 @@ def compute_net_obstacle_cells(
     num_layers = len(config.layers)
 
     # Match the expansion used in obstacle_map.py add_net_stubs_as_obstacles
-    expansion_mm = config.track_width / 2 + config.clearance + extra_clearance
+    # expansion = existing_track_half + clearance + routing_track_half
+    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
     expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
     via_expansion_grid = max(1, coord.to_grid_dist(
-        config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
+        config.via_size / 2 + config.track_width / 2 + config.clearance + config.track_width / 2 + extra_clearance))
 
     track_cells = set()
     via_cells = set()
