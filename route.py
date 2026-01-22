@@ -566,12 +566,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         else:
             failed_single.append(net_name)
 
-    # Collect multi-point tap routing stats
+    # Collect multi-point tap routing stats and failed pad details
     tap_pads_connected = 0
     tap_pads_total = 0
     tap_edges_routed = 0
     tap_edges_failed = 0
     multipoint_nets = 0
+    failed_multipoint = []  # List of {net_name, net_id, failed_pads: [{pad_idx, x, y, component_ref, pad_number}]}
     for net_id, result in routed_results.items():
         if result.get('is_multipoint'):
             multipoint_nets += 1
@@ -579,6 +580,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             tap_pads_total += result.get('tap_pads_total', 0)
             tap_edges_routed += result.get('tap_edges_routed', 0)
             tap_edges_failed += result.get('tap_edges_failed', 0)
+            # Collect failed pad details for this net
+            failed_pads_info = result.get('failed_pads_info', [])
+            if failed_pads_info:
+                net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+                failed_multipoint.append({
+                    'net_name': net_name,
+                    'net_id': net_id,
+                    'failed_pads': failed_pads_info
+                })
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
@@ -607,9 +617,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
+
+    # Print detailed failure summary
+    if failed_single:
+        print(f"\n{RED}Failed single-ended nets:{RESET}")
+        for net_name in failed_single:
+            print(f"  {RED}{net_name}{RESET}")
+    if failed_multipoint:
+        print(f"\n{RED}Failed multi-point connections:{RESET}")
+        for item in failed_multipoint:
+            net_name = item['net_name']
+            for pad in item['failed_pads']:
+                print(f"  {RED}{net_name}: {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+
     summary = {
         'routed_single': routed_single,
         'failed_single': failed_single,
+        'failed_multipoint': [
+            {
+                'net_name': item['net_name'],
+                'failed_pads': [
+                    {'component_ref': p['component_ref'], 'pad_number': p['pad_number'], 'x': p['x'], 'y': p['y']}
+                    for p in item['failed_pads']
+                ]
+            }
+            for item in failed_multipoint
+        ],
         'multipoint_nets': multipoint_nets,
         'multipoint_pads_connected': tap_pads_connected,
         'multipoint_pads_total': tap_pads_total,

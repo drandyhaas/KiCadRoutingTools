@@ -173,6 +173,13 @@ def run_phase3_tap_routing(
                 if retry_result is not None:
                     completed_result = retry_result
 
+            # Print red final failure message if still have failures after all rip-up attempts
+            final_failed_pads = completed_result.get('failed_pads_info', [])
+            if final_failed_pads:
+                net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+                for pad in final_failed_pads:
+                    print(f"  {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+
             # Extract only the NEW tap segments (after the length-matched main route)
             tap_segments = completed_result['new_segments'][len(lm_segments):]
             tap_vias = completed_result['new_vias'][len(lm_vias):]
@@ -556,6 +563,13 @@ def _reroute_phase3_ripped_nets(
                         results.remove(result)
                     results.append(tap_result)
                     routed_results[ripped_net_id] = tap_result
+
+                    # Print red final failure message if re-routed net still has unconnected pads
+                    final_failed_pads = tap_result.get('failed_pads_info', [])
+                    if final_failed_pads:
+                        net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
+                        for pad in final_failed_pads:
+                            print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
 
                     # Remove from pending_multipoint_nets since Phase 3 is now complete
                     if ripped_net_id in state.pending_multipoint_nets:

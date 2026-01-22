@@ -135,6 +135,12 @@ def run_reroute_loop(
                         tap_segments = len(result['new_segments']) - main_segments_count
                         tap_vias = len(result.get('new_vias', [])) - main_vias_count
                         print(f"    Tap routing: {tap_segments} segments, {tap_vias} vias")
+                        # Print red final failure message if there are unconnected pads
+                        final_failed_pads = tap_result.get('failed_pads_info', [])
+                        if final_failed_pads:
+                            net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
+                            for pad in final_failed_pads:
+                                print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
                         # Remove from pending_multipoint_nets since Phase 3 is now complete
                         if ripped_net_id in state.pending_multipoint_nets:
                             del state.pending_multipoint_nets[ripped_net_id]
@@ -327,6 +333,12 @@ def run_reroute_loop(
                                     tap_result = route_multipoint_taps(pcb_data, ripped_net_id, config, retry_obstacles, retry_result)
                                     if tap_result:
                                         retry_result = tap_result
+                                        # Print red final failure message if there are unconnected pads
+                                        final_failed_pads = tap_result.get('failed_pads_info', [])
+                                        if final_failed_pads:
+                                            net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
+                                            for pad in final_failed_pads:
+                                                print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
                                         # Remove from pending_multipoint_nets since Phase 3 is now complete
                                         if ripped_net_id in state.pending_multipoint_nets:
                                             del state.pending_multipoint_nets[ripped_net_id]

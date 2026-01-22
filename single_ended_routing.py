@@ -1366,6 +1366,21 @@ def route_multipoint_taps(
                          if i in routed_indices or pad_components.get(i, i) in routed_components)
     pads_total = len(pad_info)
     pads_failed = pads_total - pads_connected
+
+    # Collect detailed info about failed (unconnected) pads
+    failed_pads_info = []
+    for i in range(len(pad_info)):
+        if i not in routed_indices and pad_components.get(i, i) not in routed_components:
+            pad = pad_info[i]
+            pad_obj = pad[5] if len(pad) > 5 else None
+            failed_pads_info.append({
+                'pad_idx': i,
+                'x': pad[3],  # orig_x
+                'y': pad[4],  # orig_y
+                'component_ref': getattr(pad_obj, 'component_ref', '?') if pad_obj else '?',
+                'pad_number': getattr(pad_obj, 'pad_number', '?') if pad_obj else '?',
+            })
+
     print(f"  Phase 3 routing complete: {edges_routed} edges, {len(all_segments)} total segments, {len(all_vias)} total vias")
 
     # Update result - preserve original fields, update segments/vias
@@ -1379,6 +1394,8 @@ def route_multipoint_taps(
     updated_result['tap_edges_failed'] = main_result.get('tap_edges_failed', 0) + len(failed_edges)
     updated_result['tap_pads_connected'] = pads_connected
     updated_result['tap_pads_total'] = pads_total
+    # Detailed info about unconnected pads (for summary)
+    updated_result['failed_pads_info'] = failed_pads_info
     # Blocking info for failed edges (for rip-up analysis)
     updated_result['failed_edge_blocking'] = failed_edge_blocking
 
