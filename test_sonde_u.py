@@ -5,7 +5,7 @@ Tests track-to-track clearance with wider than default track widths.
 """
 
 import argparse
-from test_utils import run
+from run_utils import run
 
 
 def main():

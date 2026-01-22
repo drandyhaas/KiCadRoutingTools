@@ -372,7 +372,7 @@ KiCadRoutingTools/
 ├── test_kit_route.py         # Pad-to-pad routing test (no fanout)
 ├── test_flat_hierarchy.py    # 2-layer board with GND plane test
 ├── test_interf_u.py          # 2-layer board with non-rectangular outline test
-├── test_utils.py             # Shared test utilities (run command helper)
+├── run_utils.py             # Shared test utilities (run command helper)
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization

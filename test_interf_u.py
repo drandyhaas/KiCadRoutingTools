@@ -5,7 +5,7 @@ Creates VCC/GND planes first, routes all signals, then connects disconnected pla
 """
 
 import argparse
-from test_utils import run
+from run_utils import run
 
 
 def main():

@@ -5,7 +5,7 @@ Routes nets directly from pads without fanout.
 """
 
 import argparse
-from test_utils import run
+from run_utils import run
 
 
 def main():

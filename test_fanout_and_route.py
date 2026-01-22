@@ -5,7 +5,7 @@ All inputs/outputs go in the "kicad_files" directory.
 """
 
 import argparse
-from test_utils import run
+from run_utils import run
 
 
 def main():
@@ -121,7 +121,7 @@ def main():
 
         if lvds:
             # Check LVDS routing for errors and connectivity
-            run('python3 check_drc.py kicad_files/test_diffpair.kicad_pcb --clearance 0.1 --nets "*lvds*"', unbuffered)
+            run('python3 check_drc.py kicad_files/test_diffpair.kicad_pcb --clearance 0.1 --nets "*lvds*" --clearance-margin 0.1', unbuffered)
             if not quick: run('python3 check_connected.py kicad_files/test_diffpair.kicad_pcb --nets "*lvds*"', unbuffered)
 
         if ram:
