@@ -53,6 +53,7 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
         # Check neighbors (8-connected)
         blocked_neighbors = 0
         total_neighbors = 0
+        blocked_details = []
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
                 if dx == 0 and dy == 0:
@@ -72,10 +73,14 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                     neighbor_blocked = obstacles.is_blocked(gx + dx, gy + dy, layer)
                 if neighbor_blocked:
                     blocked_neighbors += 1
+                    blocked_details.append(f"({gx+dx},{gy+dy})")
 
         status = "BLOCKED" if cell_blocked else "ok"
         margin_str = f" (margin={track_margin})" if track_margin > 0 else ""
         print(f"{print_prefix}  {label} cell ({gx}, {gy}, layer={layer}): {status}, {blocked_neighbors}/{total_neighbors} neighbors blocked{margin_str}")
+        # Show which specific neighbors are blocked for debugging
+        if blocked_neighbors == total_neighbors and blocked_neighbors > 0:
+            print(f"{print_prefix}    ALL neighbors blocked: {', '.join(blocked_details)}")
 
 
 def _probe_route_with_frontier(

@@ -610,6 +610,130 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid)
 
 
+def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: list,
+                                         config: GridRouteConfig,
+                                         extra_clearance: float = 0.0):
+    """Remove a list of Segment objects from the obstacle map.
+
+    This reverses the effect of add_segments_list_as_obstacles. It collects all cells
+    that would be blocked and removes them using batch operations.
+
+    Args:
+        obstacles: The obstacle map to remove from
+        segments: List of Segment objects to remove as obstacles
+        config: Routing configuration
+        extra_clearance: Additional clearance that was used when adding (for diff pairs)
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = build_layer_map(config.layers)
+
+    # Precompute per-layer grid expansions (same as add function)
+    expansion_grid_by_layer = {}
+    via_block_grid_by_layer = {}
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
+        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance
+        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
+
+    # Collect all cells and vias to remove
+    cells_to_remove = []  # (gx, gy, layer_idx) tuples
+    vias_to_remove = []   # (gx, gy) tuples
+
+    for seg in segments:
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
+
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+        is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
+        effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
+
+        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+            # Track blocking cells
+            for ex in range(-expansion_grid, expansion_grid + 1):
+                for ey in range(-expansion_grid, expansion_grid + 1):
+                    cells_to_remove.append((gx + ex, gy + ey, layer_idx))
+            # Via blocking cells
+            for ex in range(-via_block_range, via_block_range + 1):
+                for ey in range(-via_block_range, via_block_range + 1):
+                    if ex*ex + ey*ey <= effective_via_block_sq:
+                        vias_to_remove.append((gx + ex, gy + ey))
+
+    # Batch remove cells and vias
+    if cells_to_remove:
+        cells_array = np.array(cells_to_remove, dtype=np.int32)
+        obstacles.remove_blocked_cells_batch(cells_array)
+    if vias_to_remove:
+        vias_array = np.array(vias_to_remove, dtype=np.int32)
+        obstacles.remove_blocked_vias_batch(vias_array)
+
+
+def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
+                                     config: GridRouteConfig,
+                                     extra_clearance: float = 0.0,
+                                     diagonal_margin: float = 0.0):
+    """Remove a list of Via objects from the obstacle map.
+
+    This reverses the effect of add_vias_list_as_obstacles. It collects all cells
+    that would be blocked and removes them using batch operations.
+
+    Args:
+        obstacles: The obstacle map to remove from
+        vias: List of Via objects to remove as obstacles
+        config: Routing configuration
+        extra_clearance: Additional clearance that was used when adding (for diff pairs)
+        diagonal_margin: Extra margin that was used when adding
+    """
+    coord = GridCoord(config.grid_step)
+    num_layers = len(config.layers)
+
+    # Compute per-layer expansion (same as add function)
+    via_track_expansion_grid_list = []
+    for layer_name in config.layers:
+        layer_width = config.get_track_width(layer_name)
+        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
+    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+
+    # Collect all cells and vias to remove
+    cells_to_remove = []  # (gx, gy, layer_idx) tuples
+    vias_to_remove = []   # (gx, gy) tuples
+
+    for via in vias:
+        gx, gy = coord.to_grid(via.x, via.y)
+
+        # Per-layer track blocking
+        for layer_idx in range(num_layers):
+            layer_expansion = via_track_expansion_grid_list[layer_idx]
+            effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
+            track_block_range = layer_expansion + 1
+            for ex in range(-track_block_range, track_block_range + 1):
+                for ey in range(-track_block_range, track_block_range + 1):
+                    if ex*ex + ey*ey <= effective_track_block_sq:
+                        cells_to_remove.append((gx + ex, gy + ey, layer_idx))
+
+        # Via blocking cells
+        for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
+            for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
+                if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
+                    vias_to_remove.append((gx + ex, gy + ey))
+
+    # Batch remove cells and vias
+    if cells_to_remove:
+        cells_array = np.array(cells_to_remove, dtype=np.int32)
+        obstacles.remove_blocked_cells_batch(cells_array)
+    if vias_to_remove:
+        vias_array = np.array(vias_to_remove, dtype=np.int32)
+        obstacles.remove_blocked_vias_batch(vias_array)
+
+
 def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig):
     """Add via-via clearance blocking for same-net vias.

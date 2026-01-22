@@ -23,7 +23,8 @@ from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
 from pcb_modification import add_route_to_pcb_data
-from obstacle_map import add_segments_list_as_obstacles, add_vias_list_as_obstacles
+from obstacle_map import (add_segments_list_as_obstacles, add_vias_list_as_obstacles,
+                         remove_segments_list_from_obstacles, remove_vias_list_from_obstacles)
 from obstacle_cache import (
     remove_net_obstacles_from_cache, update_net_obstacles_after_routing,
     add_net_obstacles_from_cache, precompute_net_obstacles
@@ -388,16 +389,27 @@ def _try_phase3_ripup(
             if retry_failed < original_failed_count:
                 print(f"    Retry SUCCESS (N={N}): {original_failed_count} -> {retry_failed} failed edges")
 
-                # IMPORTANT: Add retry result's NEW tap segments to obstacles BEFORE re-routing ripped nets
-                # Otherwise, ripped nets might route through the same area as our new taps
-                # Note: We add directly to working_obstacles since PCB hasn't been updated yet
-                if state.working_obstacles is not None:
-                    tap_segments = retry_result['new_segments'][len(lm_segments):]
-                    tap_vias = retry_result['new_vias'][len(lm_vias):]
-                    if tap_segments or tap_vias:
-                        print(f"    Adding {len(tap_segments)} tap segments, {len(tap_vias)} tap vias to obstacles before re-routing...")
-                        add_segments_list_as_obstacles(state.working_obstacles, tap_segments, config)
-                        add_vias_list_as_obstacles(state.working_obstacles, tap_vias, config)
+                # Add retry result's tap segments to obstacles TEMPORARILY for re-routing ripped nets.
+                # This prevents ripped nets from routing through our tap area.
+                # We will REMOVE them before returning, since the caller will add them properly
+                # via the obstacle cache (which handles ref-counting correctly).
+                #
+                # EXCEPTION: If net_id is in ripped_items, DON'T add its tap segments.
+                # The tap routing was based on the OLD Phase 1 path (from completed_result),
+                # but when the net is re-routed, Phase 1 will be re-done with a potentially
+                # different path.
+                ripped_net_ids = {item[0] for item in ripped_items}
+                tap_segments_added = []
+                tap_vias_added = []
+                if state.working_obstacles is not None and net_id not in ripped_net_ids:
+                    tap_segments_added = retry_result['new_segments'][len(lm_segments):]
+                    tap_vias_added = retry_result['new_vias'][len(lm_vias):]
+                    if tap_segments_added or tap_vias_added:
+                        print(f"    Adding {len(tap_segments_added)} tap segments, {len(tap_vias_added)} tap vias to obstacles before re-routing...")
+                        add_segments_list_as_obstacles(state.working_obstacles, tap_segments_added, config)
+                        add_vias_list_as_obstacles(state.working_obstacles, tap_vias_added, config)
+                elif net_id in ripped_net_ids:
+                    print(f"    Skipping tap obstacle addition - net will be re-routed")
 
                 # Re-route ripped nets IMMEDIATELY (not deferred) to prevent subsequent
                 # Phase 3 nets from routing through the ripped area
@@ -408,6 +420,15 @@ def _try_phase3_ripup(
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id
                     )
+
+                # IMPORTANT: Remove the temporarily added tap segments before returning.
+                # The caller will add them properly via obstacle cache update, which handles
+                # ref-counting correctly. If we don't remove them here, they'll be added twice
+                # and won't be properly removed when the net is later ripped.
+                if tap_segments_added or tap_vias_added:
+                    remove_segments_list_from_obstacles(state.working_obstacles, tap_segments_added, config)
+                    remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config)
+
                 return retry_result
             else:
                 print(f"    Retry FAILED (N={N}): still {retry_failed} failed edges")
