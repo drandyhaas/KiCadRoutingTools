@@ -148,11 +148,17 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 # Check for DRC violations (default clearance: 0.2mm)
 python check_drc.py kicad_files/output.kicad_pcb
 
+# Check connectivity (detects both unrouted nets and broken routes)
+python check_connected.py kicad_files/output.kicad_pcb
+
 # Check connectivity for specific nets
 python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # Check connectivity for all nets on a component
 python check_connected.py kicad_files/output.kicad_pcb --component U1
+
+# Only check routed nets (skip unrouted net detection)
+python check_connected.py kicad_files/output.kicad_pcb --routed-only
 
 # Check for orphan stubs (traces ending without proper connection)
 python check_orphan_stubs.py kicad_files/output.kicad_pcb

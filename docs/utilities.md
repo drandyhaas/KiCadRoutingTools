@@ -93,7 +93,10 @@ VIOLATION: Track too close to track
 
 ## Connectivity Checker (`check_connected.py`)
 
-Verifies that all nets are fully connected after routing.
+Verifies that all nets are fully connected after routing. Detects two types of issues:
+
+1. **Unrouted nets** - Nets with pads but no tracks (routing was never attempted or failed)
+2. **Broken routes** - Nets with tracks that don't connect all pads (incomplete routing)
 
 ### Usage
 
@@ -106,12 +109,13 @@ Options:
   --tolerance FLOAT    Connection tolerance in mm (default: 0.02)
   --verbose            Show detailed break location info
   --quiet              Only print summary line unless issues found
+  --routed-only, -r    Only check routed nets (skip unrouted net detection)
 ```
 
 ### Examples
 
 ```bash
-# Check all nets
+# Check all nets (detects both unrouted and broken routes)
 python check_connected.py routed.kicad_pcb
 
 # Check specific nets
@@ -122,6 +126,9 @@ python check_connected.py routed.kicad_pcb --component U102
 
 # Check specific patterns on a component
 python check_connected.py routed.kicad_pcb --component U1 --nets "*DATA*"
+
+# Only check connectivity of routed nets (skip unrouted detection)
+python check_connected.py routed.kicad_pcb --routed-only
 
 # Verbose output with break locations
 python check_connected.py routed.kicad_pcb --verbose
@@ -137,13 +144,24 @@ Checking 64 nets...
 All nets are fully connected!
 ```
 
-If disconnected nets are found:
+If issues are found:
 
 ```
-DISCONNECTED: Net-(U2A-DATA_5)
-  Group 1: 3 segments near (10.2, 15.3)
-  Group 2: 2 segments near (25.1, 30.4)
-  Missing connection between groups
+============================================================
+FOUND 3 ISSUES:
+
+  Unrouted nets (2):
+    /PROG- (2 pads)
+    /PC-A3 (3 pads)
+
+  Connectivity issues (1):
+
+  Net-(U2A-DATA_5) (net 42):
+    Segments: 12, Vias: 2, Pads: 3
+    Disconnected components: 2
+    Disconnected pads:
+      (25.10, 30.40) on F.Cu [U2A]
+============================================================
 ```
 
 ## Orphan Stub Checker (`check_orphan_stubs.py`)

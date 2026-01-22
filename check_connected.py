@@ -375,7 +375,8 @@ def find_gap_between_components(debug_info: Dict, tolerance: float) -> Optional[
 
 def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = None,
                            tolerance: float = 0.02, quiet: bool = False,
-                           verbose: bool = False, component: Optional[str] = None) -> List[Dict]:
+                           verbose: bool = False, component: Optional[str] = None,
+                           routed_only: bool = False) -> List[Dict]:
     """Run connectivity checks on the PCB file.
 
     Args:
@@ -385,6 +386,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         quiet: If True, only print a summary line unless there are issues
         verbose: If True, show detailed info about where breaks are
         component: Optional component reference to filter nets (e.g., "U1")
+        routed_only: If True, only check routed nets (skip unrouted net detection)
 
     Returns:
         List of connectivity issues found
@@ -452,6 +454,26 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             if net_id in segments_by_net and net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
 
+    # Find unrouted nets (pads but no segments) unless routed_only
+    unrouted_nets = []
+    if not routed_only:
+        for net_id, net_info in pcb_data.nets.items():
+            # Skip power nets (GND, VCC, etc.) - they're often connected via zones
+            if net_info.name in ('', 'GND', 'VCC', '+5V', '+3V3', '+3.3V'):
+                continue
+            # Filter by component if specified
+            if component_net_ids is not None and net_id not in component_net_ids:
+                continue
+            # Filter by pattern if specified
+            if net_patterns and not matches_any_pattern(net_info.name, net_patterns):
+                continue
+            # Check if net has pads but no segments
+            has_pads = net_id in pads_by_net and len(pads_by_net[net_id]) >= 2
+            has_segments = net_id in segments_by_net
+            has_zones = net_id in zones_by_net
+            if has_pads and not has_segments and not has_zones:
+                unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
+
     if not quiet:
         if net_patterns and component:
             print(f"Checking {len(nets_to_check)} nets on {component} matching: {net_patterns}")
@@ -463,6 +485,20 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             print(f"Checking {len(nets_to_check)} routed nets")
 
     issues = []
+
+    # Report unrouted nets as issues
+    for net_id, net_name, num_pads in unrouted_nets:
+        issues.append({
+            'net_id': net_id,
+            'net_name': net_name,
+            'num_segments': 0,
+            'num_vias': 0,
+            'num_pads': num_pads,
+            'num_components': num_pads,  # Each pad is its own component
+            'disconnected_pads': [],
+            'unrouted': True,
+            'message': f'Unrouted net with {num_pads} pads'
+        })
 
     for net_id, net_name in nets_to_check:
         segments = segments_by_net.get(net_id, [])
@@ -505,34 +541,46 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     if not quiet or issues:
         print("\n" + "=" * 60 if not quiet else "=" * 60)
         if issues:
-            print(f"FOUND {len(issues)} CONNECTIVITY ISSUES:\n")
+            # Separate unrouted from connectivity issues
+            unrouted_issues = [i for i in issues if i.get('unrouted')]
+            connectivity_issues = [i for i in issues if not i.get('unrouted')]
 
-            for issue in issues:
-                print(f"\n  {issue['net_name']} (net {issue['net_id']}):")
-                print(f"    Segments: {issue['num_segments']}, Vias: {issue['num_vias']}, Pads: {issue['num_pads']}")
-                print(f"    Disconnected components: {issue['num_components']}")
-                if issue['disconnected_pads']:
-                    print(f"    Disconnected pads:")
-                    for loc in issue['disconnected_pads'][:5]:
-                        print(f"      ({loc[0]:.2f}, {loc[1]:.2f}) on {loc[2]} [{loc[3]}]")
-                    if len(issue['disconnected_pads']) > 5:
-                        print(f"      ... and {len(issue['disconnected_pads']) - 5} more")
-                if issue.get('gap_info'):
-                    gap = issue['gap_info']
-                    print(f"    Break location: {gap['message']}")
-                    if verbose and gap.get('type') == 'gap_on_layer':
-                        debug = issue.get('debug_info')
-                        if debug:
-                            # Show component details
-                            for root, summary in debug['components'].items():
-                                is_main = root == debug['main_root']
-                                print(f"    Component {'(main)' if is_main else '(disconnected)'}: "
-                                      f"layers={summary['layers']}, "
-                                      f"has_pads={summary['has_pads']}, has_vias={summary['has_vias']}")
-                                if verbose:
-                                    print(f"      Points by layer: {summary['points_by_layer']}")
-                if issue.get('message'):
-                    print(f"    Note: {issue['message']}")
+            print(f"FOUND {len(issues)} ISSUES:\n")
+
+            if unrouted_issues:
+                print(f"  Unrouted nets ({len(unrouted_issues)}):")
+                for issue in unrouted_issues:
+                    print(f"    {issue['net_name']} ({issue['num_pads']} pads)")
+                print()
+
+            if connectivity_issues:
+                print(f"  Connectivity issues ({len(connectivity_issues)}):")
+                for issue in connectivity_issues:
+                    print(f"\n  {issue['net_name']} (net {issue['net_id']}):")
+                    print(f"    Segments: {issue['num_segments']}, Vias: {issue['num_vias']}, Pads: {issue['num_pads']}")
+                    print(f"    Disconnected components: {issue['num_components']}")
+                    if issue['disconnected_pads']:
+                        print(f"    Disconnected pads:")
+                        for loc in issue['disconnected_pads'][:5]:
+                            print(f"      ({loc[0]:.2f}, {loc[1]:.2f}) on {loc[2]} [{loc[3]}]")
+                        if len(issue['disconnected_pads']) > 5:
+                            print(f"      ... and {len(issue['disconnected_pads']) - 5} more")
+                    if issue.get('gap_info'):
+                        gap = issue['gap_info']
+                        print(f"    Break location: {gap['message']}")
+                        if verbose and gap.get('type') == 'gap_on_layer':
+                            debug = issue.get('debug_info')
+                            if debug:
+                                # Show component details
+                                for root, summary in debug['components'].items():
+                                    is_main = root == debug['main_root']
+                                    print(f"    Component {'(main)' if is_main else '(disconnected)'}: "
+                                          f"layers={summary['layers']}, "
+                                          f"has_pads={summary['has_pads']}, has_vias={summary['has_vias']}")
+                                    if verbose:
+                                        print(f"      Points by layer: {summary['points_by_layer']}")
+                    if issue.get('message'):
+                        print(f"    Note: {issue['message']}")
         else:
             print("ALL NETS FULLY CONNECTED!")
 
@@ -553,8 +601,10 @@ if __name__ == "__main__":
                         help='Only print a summary line unless there are issues')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Show detailed break location info for disconnected nets')
+    parser.add_argument('--routed-only', '-r', action='store_true',
+                        help='Only check routed nets (skip unrouted net detection)')
 
     args = parser.parse_args()
 
-    issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet, args.verbose, args.component)
+    issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet, args.verbose, args.component, args.routed_only)
     sys.exit(1 if issues else 0)
