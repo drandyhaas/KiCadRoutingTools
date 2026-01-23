@@ -295,38 +295,53 @@ Nets on U2A:
 
 ## BGA Fanout Generator (`bga_fanout.py`)
 
-Generates stub tracks for BGA differential pair fanout.
+Generates escape routing for BGA packages with support for differential pairs.
 
 ### Usage
 
 ```bash
-python bga_fanout.py input.kicad_pcb output.kicad_pcb REFERENCE [OPTIONS]
+python bga_fanout.py input.kicad_pcb --component REFERENCE --output output.kicad_pcb [OPTIONS]
 
 Options:
-  --pattern GLOB      Net pattern to fanout
-  --stub-length FLOAT Stub length in mm (default: 0.5)
-  --layer LAYER       Target layer (default: F.Cu)
+  --component, -c     Component reference (auto-detect BGA if not specified)
+  --output, -o        Output PCB file (default: fanout_test.kicad_pcb)
+  --layers, -l        Routing layers (default: F.Cu B.Cu)
+  --track-width, -w   Track width in mm (default: 0.3)
+  --clearance         Track clearance in mm (default: 0.25)
+  --via-size          Via outer diameter in mm (default: 0.5)
+  --via-drill         Via drill size in mm (default: 0.3)
+  --nets, -n          Net patterns to include
+  --diff-pairs, -d    Differential pair patterns (e.g., "*lvds*")
+  --diff-pair-gap     Gap between P/N traces in mm (default: 0.1)
+  --primary-escape    Primary escape direction: horizontal or vertical (default: horizontal)
+  --check-for-previous  Skip pads that already have fanouts
+  --no-inner-top-layer  Prevent inner pads from using F.Cu
 ```
 
 ### Example
 
 ```bash
-# Generate fanout stubs for LVDS nets on U2A
-python bga_fanout.py board.kicad_pcb fanout.kicad_pcb U2A --pattern "*lvds*"
+# Generate fanout for LVDS differential pairs on IC1
+python bga_fanout.py board.kicad_pcb --component IC1 --output fanout.kicad_pcb \
+    --nets "*lvds*" --diff-pairs "*lvds*" --primary-escape vertical
+
+# Generate fanout for data nets on U3 with 4 layers
+python bga_fanout.py board.kicad_pcb --component U3 --output fanout.kicad_pcb \
+    --nets "*DATA*" --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
 
 ### What It Does
 
-Creates short stub tracks from BGA pads pointing outward:
+Creates escape routing from BGA pads through channels between pad rows:
 
 ```
 Before:        After:
-  o o o          o─ o─ o─
-  o o o    =>    o─ o─ o─
-  o o o          o─ o─ o─
+  o o o          o─┐ o─┐ o─┐
+  o o o    =>    o─┘ o─┘ o─┘
+  o o o          o── o── o──
 ```
 
-These stubs give the router starting points for escape routing.
+See [bga_fanout/README.md](../bga_fanout/README.md) for detailed documentation.
 
 ## QFN/QFP Fanout Generator (`qfn_fanout.py`)
 
@@ -533,10 +548,11 @@ python check_connected.py routed.kicad_pcb --component U1
 
 ```bash
 # 1. Generate fanout stubs
-python bga_fanout.py board.kicad_pcb fanout.kicad_pcb U2A --pattern "*lvds*"
+python bga_fanout.py board.kicad_pcb --component U2A --output fanout.kicad_pcb \
+    --nets "*lvds*" --diff-pairs "*lvds*"
 
 # 2. Route differential pairs
-python route.py fanout.kicad_pcb routed.kicad_pcb "*lvds*" \
+python route.py fanout.kicad_pcb routed.kicad_pcb --nets "*lvds*" \
     --diff-pairs "*lvds*" \
     --ordering inside_out
 

@@ -332,7 +332,7 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
                         track_width: float = 0.1,
                         clearance: float = 0.1,
                         diff_pair_gap: float = 0.1,
-                        via_size: float = 0.3,
+                        via_size: float = 0.5,
                         rebalance: bool = False,
                         pre_occupied: Dict[Tuple[str, str, float], str] = None,
                         force_escape_direction: bool = False) -> Dict[str, Tuple[Optional[Channel], str]]:

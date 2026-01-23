@@ -35,9 +35,11 @@ python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_f
 |--------|-------------|---------|
 | `--component`, `-c` | Component reference | Auto-detect BGA |
 | `--output`, `-o` | Output PCB file | fanout_test.kicad_pcb |
-| `--layers`, `-l` | Routing layers | F.Cu In1.Cu In2.Cu B.Cu |
-| `--width`, `-w` | Track width (mm) | 0.1 |
-| `--clearance` | Track clearance (mm) | 0.1 |
+| `--layers`, `-l` | Routing layers | F.Cu B.Cu |
+| `--track-width`, `-w` | Track width (mm) | 0.3 |
+| `--clearance` | Track clearance (mm) | 0.25 |
+| `--via-size` | Via outer diameter (mm) | 0.5 |
+| `--via-drill` | Via drill size (mm) | 0.3 |
 | `--nets`, `-n` | Net patterns to include | All nets |
 | `--diff-pairs`, `-d` | Differential pair patterns | None |
 | `--diff-pair-gap` | Gap between P/N traces (mm) | 0.1 |

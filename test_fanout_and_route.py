@@ -59,23 +59,23 @@ def main():
         run('python3 qfn_fanout.py kicad_files/haasoscope_pro_max_test.kicad_pcb --output kicad_files/qfn_fanned_out.kicad_pcb --component U2 --nets "Net-(U2*)"', unbuffered)
 
         # Fan out FTDI nets, first DATA nets, then others (to test "--check-for-previous")
-        run('python3 bga_fanout.py kicad_files/qfn_fanned_out.kicad_pcb --component U3 --output kicad_files/fanout_starting_point.kicad_pcb --nets "*U2A*DATA*" --primary-escape horizontal --force-escape-direction', unbuffered)
-        run('python3 bga_fanout.py kicad_files/fanout_starting_point.kicad_pcb --component U3 --output kicad_files/fanout_output1.kicad_pcb --nets "*U2A*" --primary-escape horizontal --check-for-previous --force-escape-direction', unbuffered)
+        run(f'python3 bga_fanout.py kicad_files/qfn_fanned_out.kicad_pcb --component U3 --output kicad_files/fanout_starting_point.kicad_pcb --nets "*U2A*DATA*" --primary-escape horizontal --force-escape-direction {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f'python3 bga_fanout.py kicad_files/fanout_starting_point.kicad_pcb --component U3 --output kicad_files/fanout_output1.kicad_pcb --nets "*U2A*" --primary-escape horizontal --check-for-previous --force-escape-direction {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
 
         # Fan out LVDS from ADC
-        run(f"python3 bga_fanout.py kicad_files/fanout_output1.kicad_pcb --component IC1 --output kicad_files/fanout_output2.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer", unbuffered)
+        run(f"python3 bga_fanout.py kicad_files/fanout_output1.kicad_pcb --component IC1 --output kicad_files/fanout_output2.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
 
         # Fan out LVDS on FPGA
-        run(f"python3 bga_fanout.py kicad_files/fanout_output2.kicad_pcb --component U3 --output kicad_files/fanout_output3.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer", unbuffered)
+        run(f"python3 bga_fanout.py kicad_files/fanout_output2.kicad_pcb --component U3 --output kicad_files/fanout_output3.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
 
         # Fan out DDR on FPGA
-        run('python3 bga_fanout.py kicad_files/fanout_output3.kicad_pcb --component U3 --output kicad_files/fanout_output4.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal', unbuffered)
-        run('python3 bga_fanout.py kicad_files/fanout_output4.kicad_pcb --component U3 --output kicad_files/fanout_output5.kicad_pcb --nets "*U1A*" "*U1B*" --check-for-previous --primary-escape horizontal', unbuffered)
+        run(f'python3 bga_fanout.py kicad_files/fanout_output3.kicad_pcb --component U3 --output kicad_files/fanout_output4.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f'python3 bga_fanout.py kicad_files/fanout_output4.kicad_pcb --component U3 --output kicad_files/fanout_output5.kicad_pcb --nets "*U1A*" "*U1B*" --check-for-previous --primary-escape horizontal {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
 
         # Fan out DDR on DDR chip
-        run('python3 bga_fanout.py kicad_files/fanout_output5.kicad_pcb --component U1 --output kicad_files/fanout_output6.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal --no-inner-top-layer', unbuffered)
-        run(f"python3 bga_fanout.py kicad_files/fanout_output6.kicad_pcb --component U1 --output kicad_files/fanout_output7.kicad_pcb --nets '*U1A*' --check-for-previous --primary-escape horizontal {LAYERS_5} --no-inner-top-layer", unbuffered)
-        run(f"python3 bga_fanout.py kicad_files/fanout_output7.kicad_pcb --component U1 --output kicad_files/fanout_output.kicad_pcb --nets '*U1B*' --check-for-previous {LAYERS_5} --no-inner-top-layer", unbuffered)
+        run(f'python3 bga_fanout.py kicad_files/fanout_output5.kicad_pcb --component U1 --output kicad_files/fanout_output6.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal --no-inner-top-layer {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f"python3 bga_fanout.py kicad_files/fanout_output6.kicad_pcb --component U1 --output kicad_files/fanout_output7.kicad_pcb --nets '*U1A*' --check-for-previous --primary-escape horizontal {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
+        run(f"python3 bga_fanout.py kicad_files/fanout_output7.kicad_pcb --component U1 --output kicad_files/fanout_output.kicad_pcb --nets '*U1B*' --check-for-previous {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
 
     if ftdi and not onlychecks:
         # Route the FTDI tracks

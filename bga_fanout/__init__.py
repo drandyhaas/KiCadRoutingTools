@@ -328,8 +328,8 @@ def generate_bga_fanout(footprint: Footprint,
                         primary_escape: str = 'horizontal',
                         force_escape_direction: bool = False,
                         rebalance_escape: bool = False,
-                        via_size: float = 0.3,
-                        via_drill: float = 0.2,
+                        via_size: float = 0.5,
+                        via_drill: float = 0.3,
                         check_for_previous: bool = False,
                         no_inner_top_layer: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
@@ -361,7 +361,7 @@ def generate_bga_fanout(footprint: Footprint,
         Tuple of (tracks, vias_to_add, vias_to_remove)
     """
     if layers is None:
-        layers = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        layers = ["F.Cu", "B.Cu"]
 
     grid = analyze_bga_grid(footprint)
     if grid is None:
@@ -1211,12 +1211,16 @@ def main():
                         help='Output PCB file')
     parser.add_argument('--component', '-c', default=None,
                         help='Component reference (auto-detected if not specified)')
-    parser.add_argument('--layers', '-l', nargs='+', default=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
-                        help='Routing layers')
-    parser.add_argument('--width', '-w', type=float, default=0.1,
-                        help='Track width in mm')
-    parser.add_argument('--clearance', type=float, default=0.1,
-                        help='Track clearance in mm')
+    parser.add_argument('--layers', '-l', nargs='+', default=['F.Cu', 'B.Cu'],
+                        help='Routing layers (default: F.Cu B.Cu)')
+    parser.add_argument('--track-width', '-w', type=float, default=0.3,
+                        help='Track width in mm (default: 0.3)')
+    parser.add_argument('--clearance', type=float, default=0.25,
+                        help='Track clearance in mm (default: 0.25)')
+    parser.add_argument('--via-size', type=float, default=0.5,
+                        help='Via outer diameter in mm (default: 0.5)')
+    parser.add_argument('--via-drill', type=float, default=0.3,
+                        help='Via drill size in mm (default: 0.3)')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
     parser.add_argument('--diff-pairs', '-d', nargs='*',
@@ -1279,13 +1283,15 @@ def main():
         net_filter=args.nets,
         diff_pair_patterns=args.diff_pairs,
         layers=args.layers,
-        track_width=args.width,
+        track_width=args.track_width,
         clearance=args.clearance,
         diff_pair_gap=args.diff_pair_gap,
         exit_margin=args.exit_margin,
         primary_escape=args.primary_escape,
         force_escape_direction=args.force_escape_direction,
         rebalance_escape=args.rebalance_escape,
+        via_size=args.via_size,
+        via_drill=args.via_drill,
         check_for_previous=args.check_for_previous,
         no_inner_top_layer=args.no_inner_top_layer
     )
