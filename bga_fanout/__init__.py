@@ -178,6 +178,224 @@ def print_route_statistics(routes: List[FanoutRoute]) -> None:
         print(f"    {name}")
 
 
+POSITION_TOLERANCE = 0.01  # mm tolerance for position comparisons
+
+
+def reassign_on_channel_pads(
+    routes: List[FanoutRoute],
+    channels: List[Channel],
+    grid: BGAGrid,
+    num_layers: int,
+    exit_margin: float,
+    footprint: 'Footprint' = None
+) -> int:
+    """
+    Reassign on-channel pads to adjacent channels when their straight path is blocked.
+
+    When a pad is exactly on a channel (stub_end == pad_pos), a straight track
+    to the exit may pass through other pads. This function checks each on-channel
+    pad for blocking pads and assigns jogs to adjacent channels as needed.
+
+    Through-hole pads (including unconnected ones) block tracks on all layers,
+    so we need to consider ALL pads in the footprint as potential blockers.
+
+    Args:
+        routes: List of routes (modified in-place)
+        channels: Available routing channels
+        grid: BGA grid info
+        num_layers: Number of available layers (unused but kept for API compatibility)
+        exit_margin: Distance past BGA boundary
+        footprint: The footprint containing all pads (including unconnected)
+
+    Returns:
+        Number of routes reassigned to adjacent channels
+    """
+    reassigned = 0
+
+    # Build a set of all pad positions - use footprint pads if available (includes unconnected)
+    # otherwise fall back to route pad positions
+    all_pad_positions = set()
+    if footprint is not None:
+        for pad in footprint.pads:
+            px = round(pad.global_x, 3)
+            py = round(pad.global_y, 3)
+            all_pad_positions.add((px, py))
+    else:
+        for route in routes:
+            # Round to avoid floating point issues
+            px = round(route.pad_pos[0], 3)
+            py = round(route.pad_pos[1], 3)
+            all_pad_positions.add((px, py))
+
+    # Find on-channel pads (zero-length stubs) that need to be reassigned
+    routes_to_reassign = []
+    for route in routes:
+        if route.is_edge or route.pair_id is not None:
+            continue
+        dx = abs(route.stub_end[0] - route.pad_pos[0])
+        dy = abs(route.stub_end[1] - route.pad_pos[1])
+        if dx >= POSITION_TOLERANCE or dy >= POSITION_TOLERANCE:
+            continue  # Not an on-channel pad
+
+        if route.channel is None:
+            continue
+
+        # Check if there are any pads blocking the straight path to exit
+        has_blocking_pad = False
+        px, py = route.pad_pos
+
+        if route.escape_dir == 'left':
+            # Check for pads at same Y but smaller X (between pad and left exit)
+            for other_x, other_y in all_pad_positions:
+                if abs(other_y - py) < POSITION_TOLERANCE and other_x < px - POSITION_TOLERANCE:
+                    has_blocking_pad = True
+                    break
+        elif route.escape_dir == 'right':
+            # Check for pads at same Y but larger X
+            for other_x, other_y in all_pad_positions:
+                if abs(other_y - py) < POSITION_TOLERANCE and other_x > px + POSITION_TOLERANCE:
+                    has_blocking_pad = True
+                    break
+        elif route.escape_dir == 'up':
+            # Check for pads at same X but smaller Y
+            for other_x, other_y in all_pad_positions:
+                if abs(other_x - px) < POSITION_TOLERANCE and other_y < py - POSITION_TOLERANCE:
+                    has_blocking_pad = True
+                    break
+        else:  # down
+            # Check for pads at same X but larger Y
+            for other_x, other_y in all_pad_positions:
+                if abs(other_x - px) < POSITION_TOLERANCE and other_y > py + POSITION_TOLERANCE:
+                    has_blocking_pad = True
+                    break
+
+        if has_blocking_pad:
+            routes_to_reassign.append(route)
+
+    if not routes_to_reassign:
+        return 0
+
+    # Reassign each blocked route to an adjacent channel
+    # Sort h_channels and v_channels once for efficiency
+    h_channels = sorted([c for c in channels if c.orientation == 'horizontal'],
+                       key=lambda c: c.position)
+    v_channels = sorted([c for c in channels if c.orientation == 'vertical'],
+                       key=lambda c: c.position)
+
+    for route in routes_to_reassign:
+        orientation = route.channel.orientation
+        channel_pos = route.channel.position
+        escape_dir = route.escape_dir
+
+        if orientation == 'horizontal':
+            # Find current channel index
+            current_idx = None
+            for i, c in enumerate(h_channels):
+                if abs(c.position - channel_pos) < POSITION_TOLERANCE:
+                    current_idx = i
+                    break
+
+            if current_idx is None:
+                continue
+
+            # Determine which adjacent channel to use based on pad position relative to grid center
+            # Pads above center jog down, pads below center jog up
+            if route.pad_pos[1] < grid.center_y:
+                # Pad is above center, jog down (higher Y = higher index)
+                new_idx = current_idx + 1
+            else:
+                # Pad is below center, jog up (lower Y = lower index)
+                new_idx = current_idx - 1
+
+            # Bounds check and fallback
+            if new_idx < 0:
+                new_idx = current_idx + 1
+            elif new_idx >= len(h_channels):
+                new_idx = current_idx - 1
+
+            if new_idx < 0 or new_idx >= len(h_channels):
+                continue  # No valid adjacent channel
+
+            new_channel = h_channels[new_idx]
+
+            # Create 45° jog from pad to new channel
+            dy = new_channel.position - route.pad_pos[1]
+            if escape_dir == 'right':
+                dx = abs(dy)  # Move right while jogging
+            else:  # left
+                dx = -abs(dy)  # Move left while jogging
+
+            jog_point = (route.pad_pos[0] + dx, new_channel.position)
+
+            # Calculate new exit position
+            if escape_dir == 'right':
+                new_exit = (grid.max_x + exit_margin, new_channel.position)
+            else:  # left
+                new_exit = (grid.min_x - exit_margin, new_channel.position)
+
+            # Update route
+            route.stub_end = route.pad_pos  # No initial stub
+            route.pre_channel_jog = jog_point
+            route.exit_pos = new_exit
+            route.channel = new_channel
+            reassigned += 1
+
+        else:  # vertical channels
+            # Find current channel index
+            current_idx = None
+            for i, c in enumerate(v_channels):
+                if abs(c.position - channel_pos) < POSITION_TOLERANCE:
+                    current_idx = i
+                    break
+
+            if current_idx is None:
+                continue
+
+            # Determine which adjacent channel to use based on pad position relative to grid center
+            # Pads left of center jog right, pads right of center jog left
+            if route.pad_pos[0] < grid.center_x:
+                # Pad is left of center, jog right (higher X = higher index)
+                new_idx = current_idx + 1
+            else:
+                # Pad is right of center, jog left (lower X = lower index)
+                new_idx = current_idx - 1
+
+            # Bounds check and fallback
+            if new_idx < 0:
+                new_idx = current_idx + 1
+            elif new_idx >= len(v_channels):
+                new_idx = current_idx - 1
+
+            if new_idx < 0 or new_idx >= len(v_channels):
+                continue
+
+            new_channel = v_channels[new_idx]
+
+            # Create 45° jog from pad to new channel
+            dx = new_channel.position - route.pad_pos[0]
+            if escape_dir == 'down':
+                dy = abs(dx)  # Move down while jogging
+            else:  # up
+                dy = -abs(dx)  # Move up while jogging
+
+            jog_point = (new_channel.position, route.pad_pos[1] + dy)
+
+            # Calculate new exit position
+            if escape_dir == 'down':
+                new_exit = (new_channel.position, grid.max_y + exit_margin)
+            else:  # up
+                new_exit = (new_channel.position, grid.min_y - exit_margin)
+
+            # Update route
+            route.stub_end = route.pad_pos
+            route.pre_channel_jog = jog_point
+            route.exit_pos = new_exit
+            route.channel = new_channel
+            reassigned += 1
+
+    return reassigned
+
+
 def create_single_ended_route(
     pad: Pad,
     grid: BGAGrid,
@@ -288,6 +506,9 @@ def manage_vias(
         pad_x, pad_y = route.pad_pos
         existing_via = find_nearby_via(pad_x, pad_y, route.net_id, via_proximity_threshold)
 
+        # Through-hole pads (drill > 0) already connect all layers, no via needed
+        is_through_hole = route.pad.drill > 0
+
         if route.layer == top_layer:
             # Routing on top layer - no via needed at pad
             if existing_via:
@@ -296,8 +517,8 @@ def manage_vias(
                     'y': existing_via.y
                 })
         else:
-            # Routing on inner/bottom layer - via needed
-            if not existing_via:
+            # Routing on inner/bottom layer - via needed only for SMD pads
+            if not is_through_hole and not existing_via:
                 if not would_overlap_existing_via(pad_x, pad_y, via_size):
                     vias_to_add.append({
                         'x': pad_x,
@@ -1132,6 +1353,11 @@ def generate_bga_fanout(footprint: Footprint,
 
     # Convert existing PCB segments to track format for collision checking
     existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
+
+    # Reassign on-channel pads to adjacent channels when too many share the same channel
+    reassigned_count = reassign_on_channel_pads(routes, channels, grid, len(layers), exit_margin, footprint)
+    if reassigned_count > 0:
+        print(f"  Reassigned {reassigned_count} on-channel pads to adjacent channels")
 
     # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
     assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks, no_inner_top_layer)

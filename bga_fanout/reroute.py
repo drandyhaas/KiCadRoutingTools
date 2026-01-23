@@ -511,6 +511,7 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         route = r
                         break
 
+                alt_channels = []
                 if route and route.channel is not None:
                     # Get THE alternate channel (only one - on the opposite side)
                     alt_channels = get_alternate_channels_for_pad(

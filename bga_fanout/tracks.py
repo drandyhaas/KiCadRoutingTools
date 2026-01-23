@@ -164,16 +164,15 @@ def generate_tracks_from_routes(
                                            route.layer, route.net_id, route.pair_id))
             else:
                 # Normal inner pad: single 45° stub to channel, then straight to exit
-                # Skip zero-length stubs
+                # Check for zero-length stubs (pad is exactly on channel)
                 dx = abs(route.stub_end[0] - route.pad_pos[0])
                 dy = abs(route.stub_end[1] - route.pad_pos[1])
-                if dx < POSITION_TOLERANCE and dy < POSITION_TOLERANCE:
-                    inner_count += 1
-                    continue
+                has_stub = dx >= POSITION_TOLERANCE or dy >= POSITION_TOLERANCE
 
-                # 45-degree stub: pad -> stub_end
-                tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
-                                           route.layer, route.net_id, route.pair_id))
+                if has_stub:
+                    # 45-degree stub: pad -> stub_end
+                    tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
+                                               route.layer, route.net_id, route.pair_id))
 
                 if route.pre_channel_jog:
                     # Jogged route: stub_end -> jog_point -> exit
