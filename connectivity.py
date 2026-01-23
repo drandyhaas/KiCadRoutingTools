@@ -173,10 +173,22 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
     return False
 
 
-def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> List[List[Segment]]:
+def find_connected_groups(segments: List[Segment], tolerance: float = 0.01,
+                          layer_aware: bool = True, vias: List = None) -> List[List[Segment]]:
     """Find groups of connected segments using union-find with spatial hashing.
 
     Uses O(n) spatial hashing instead of O(n²) pairwise comparison.
+
+    Args:
+        segments: List of segments to group
+        tolerance: Position tolerance for endpoint matching
+        layer_aware: If True, only connect segments on the same layer (default).
+                    If False, connect segments regardless of layer.
+        vias: Optional list of vias. If provided with layer_aware=True, segments
+              on different layers at the same position are connected if there's a via.
+
+    Returns:
+        List of segment groups, where each group is a list of connected segments.
     """
     if not segments:
         return []
@@ -184,10 +196,16 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
     n = len(segments)
     uf = UnionFind()
 
-    # Spatial hash: map rounded coordinates to (segment_index, x, y) tuples
+    # Build via position set for quick lookup
+    via_positions = set()
+    if vias:
+        for via in vias:
+            via_positions.add((round(via.x, 3), round(via.y, 3)))
+
+    # Spatial hash: map rounded coordinates to (segment_index, x, y, layer) tuples
     # Use tolerance-based grid cells
     inv_tol = 1.0 / tolerance
-    endpoint_map: Dict[Tuple[int, int], List[Tuple[int, float, float]]] = {}
+    endpoint_map: Dict[Tuple[int, int], List[Tuple[int, float, float, str]]] = {}
 
     # First pass: build spatial hash with actual coordinates
     for i, seg in enumerate(segments):
@@ -195,7 +213,7 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
             key = (int(x * inv_tol), int(y * inv_tol))
             if key not in endpoint_map:
                 endpoint_map[key] = []
-            endpoint_map[key].append((i, x, y))
+            endpoint_map[key].append((i, x, y, seg.layer))
 
     # Second pass: check each endpoint against neighbors (handles bucket boundary issues)
     for i, seg in enumerate(segments):
@@ -206,9 +224,15 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01) -> L
                 for dy in (-1, 0, 1):
                     key = (gx + dx, gy + dy)
                     if key in endpoint_map:
-                        for j, ox, oy in endpoint_map[key]:
+                        for j, ox, oy, other_layer in endpoint_map[key]:
                             if i < j:  # Avoid duplicate checks
                                 if abs(x - ox) < tolerance and abs(y - oy) < tolerance:
+                                    # Check layer connectivity
+                                    if layer_aware and seg.layer != other_layer:
+                                        # Different layers - only connect if there's a via
+                                        pos_key = (round(x, 3), round(y, 3))
+                                        if pos_key not in via_positions:
+                                            continue  # Not connected without via
                                     uf.union(i, j)
 
     # Group segments by their root
@@ -977,6 +1001,64 @@ def get_multipoint_net_pads(
                             y,
                             {'x': x, 'y': y, 'layer': layer, 'layers': [layer]}  # dict with layers attr for compatibility
                         ))
+            return endpoint_info if len(endpoint_info) >= 3 else None
+
+    # Case 3: Segment group(s) + unconnected pads totaling 3+ endpoints
+    # This handles the case where some pads have fanout stubs and others don't
+    if len(net_segments) >= 1:
+        groups = find_connected_groups(net_segments)
+
+        # Find pads NOT connected to any segment group
+        seg_points = set()
+        for seg in net_segments:
+            seg_points.add((round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)))
+            seg_points.add((round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS)))
+
+        unconnected_pads = []
+        for pad in net_pads:
+            pad_pos = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
+            connected = False
+            for sp in seg_points:
+                if abs(pad_pos[0] - sp[0]) < 0.05 and abs(pad_pos[1] - sp[1]) < 0.05:
+                    connected = True
+                    break
+            if not connected:
+                unconnected_pads.append(pad)
+
+        # Total endpoints = segment groups (via free ends) + unconnected pads
+        total_endpoints = len(groups) + len(unconnected_pads)
+        if total_endpoints >= 3:
+            endpoint_info = []
+
+            # Add stub free ends from each segment group
+            for group in groups:
+                free_ends = find_stub_free_ends(group, net_pads)
+                if free_ends:
+                    x, y, layer = free_ends[0]
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is not None:
+                        endpoint_info.append((
+                            coord.to_grid(x, y)[0],
+                            coord.to_grid(x, y)[1],
+                            layer_idx,
+                            x,
+                            y,
+                            {'x': x, 'y': y, 'layer': layer, 'layers': [layer]}
+                        ))
+
+            # Add unconnected pads
+            for pad in unconnected_pads:
+                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                expanded_layers = expand_pad_layers(pad.layers, config.layers)
+                for layer in expanded_layers:
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is not None:
+                        endpoint_info.append((gx, gy, layer_idx, pad.global_x, pad.global_y, pad))
+                        break  # Only one entry per physical pad for MST
+                else:
+                    if config.layers:
+                        endpoint_info.append((gx, gy, 0, pad.global_x, pad.global_y, pad))
+
             return endpoint_info if len(endpoint_info) >= 3 else None
 
     return None
