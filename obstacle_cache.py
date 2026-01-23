@@ -215,7 +215,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
     # Via blocking around pads
     if any(layer.endswith('.Cu') for layer in expanded_layers):
-        via_margin = config.via_size / 2 + config.clearance
+        # Add half grid step buffer to account for grid quantization errors
+        via_margin = config.via_size / 2 + config.clearance + config.grid_step / 2
         for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin, config.grid_step, corner_radius):
             blocked_vias.add((cell_gx, cell_gy))
 

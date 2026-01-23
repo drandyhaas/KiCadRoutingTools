@@ -203,7 +203,8 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    margin = config.via_size / 2 + config.clearance
+    # Add half grid step buffer to account for grid quantization errors
+    margin = config.via_size / 2 + config.clearance + config.grid_step / 2
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)

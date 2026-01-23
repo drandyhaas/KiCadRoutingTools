@@ -46,7 +46,7 @@ def main():
     run('python3 route_disconnected_planes.py kicad_files/kit-out-plane.kicad_pcb kicad_files/kit-out-plane-connected.kicad_pcb --analysis-grid-step 0.1 '+base_options)
 
     # Check for DRC errors
-    run('python3 check_drc.py kicad_files/kit-out-plane-connected.kicad_pcb --clearance 0.15 --hole-to-hole-clearance 0.3', unbuffered)
+    run('python3 check_drc.py kicad_files/kit-out-plane-connected.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.3', unbuffered)
 
     # Check for connectivity
     run('python3 check_connected.py kicad_files/kit-out-plane-connected.kicad_pcb '+target, unbuffered)
