@@ -8,8 +8,9 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 - **Differential pair routing** - P/N pairs routed together on same layer
 - **Collision-free routing** - Automatic layer assignment to avoid conflicts
 - **Multi-layer support** - Distributes routes evenly across available layers
+- **Adjacent same-net optimization** - Connects neighboring pads on same net directly
 - **Existing fanout detection** - Skips pads that already have fanouts
-- **Via management** - Adds/removes vias as needed for layer changes
+- **Via management** - Adds vias only for SMD pads on non-top layers (through-hole pads connect all layers)
 
 ## Usage
 
@@ -86,8 +87,9 @@ bga_fanout/
 1. **Grid Analysis** - Detect BGA pitch, grid size, and boundary
 2. **Channel Calculation** - Identify routing channels between pad rows/columns
 3. **Escape Direction Assignment** - Determine which edge each pad exits toward
-4. **Layer Assignment** - Distribute routes across layers to avoid collisions
-5. **Track Generation** - Create 45° stubs, channel segments, and exit jogs
-6. **Collision Resolution** - Reassign layers or reroute to resolve conflicts
-7. **Layer Rebalancing** - Even out route distribution across layers
-8. **Via Management** - Add vias for non-top-layer routes
+4. **Adjacent Pad Connection** - Connect neighboring pads on same net directly
+5. **Layer Assignment** - Distribute routes across layers to avoid collisions
+6. **Track Generation** - Create 45° stubs, channel segments, and exit jogs
+7. **Collision Resolution** - Reassign layers or reroute to resolve conflicts
+8. **Layer Rebalancing** - Even out route distribution across layers
+9. **Via Management** - Add vias for SMD pads on non-top layers

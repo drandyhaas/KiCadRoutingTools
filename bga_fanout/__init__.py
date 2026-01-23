@@ -396,6 +396,85 @@ def reassign_on_channel_pads(
     return reassigned
 
 
+def connect_adjacent_same_net_pads(
+    routes: List[FanoutRoute],
+    grid: BGAGrid,
+    track_width: float,
+    clearance: float
+) -> int:
+    """
+    Connect adjacent pads on the same net directly instead of separate fanouts.
+
+    When two pads on the same net are adjacent (within 1 pitch), one can connect
+    directly to the other's fanout instead of having its own full fanout to the
+    BGA boundary. This simplifies routing by avoiding disconnected stubs.
+
+    Args:
+        routes: List of routes (modified in-place)
+        grid: BGA grid info
+        track_width: Track width for clearance calculations
+        clearance: Minimum clearance between tracks
+
+    Returns:
+        Number of routes modified to connect to neighbors
+    """
+    # Group routes by net_id
+    routes_by_net: Dict[int, List[FanoutRoute]] = {}
+    for route in routes:
+        net_id = route.net_id
+        if net_id not in routes_by_net:
+            routes_by_net[net_id] = []
+        routes_by_net[net_id].append(route)
+
+    connected = 0
+    pitch = max(grid.pitch_x, grid.pitch_y)
+    adjacency_threshold = pitch * 1.5  # Adjacent = within ~1.5 pitch
+
+    for net_id, net_routes in routes_by_net.items():
+        if len(net_routes) < 2:
+            continue
+
+        # Find adjacent pairs
+        # Keep track of which routes have been connected as "secondary"
+        connected_as_secondary = set()
+
+        for i, route1 in enumerate(net_routes):
+            if i in connected_as_secondary:
+                continue
+
+            for j, route2 in enumerate(net_routes[i+1:], i+1):
+                if j in connected_as_secondary:
+                    continue
+
+                # Check if pads are adjacent
+                dx = abs(route1.pad_pos[0] - route2.pad_pos[0])
+                dy = abs(route1.pad_pos[1] - route2.pad_pos[1])
+                dist = (dx**2 + dy**2) ** 0.5
+
+                if dist > adjacency_threshold:
+                    continue
+
+                # Pads are adjacent - connect route2 directly to route1's pad
+                # Use a simple direct connection (may be diagonal)
+                # The "secondary" route just goes pad2 -> pad1 (no fanout)
+
+                # Mark route2 as connecting to route1
+                # Set route2's exit to route1's pad position
+                # This creates a short link between the two pads
+                route2.stub_end = route1.pad_pos
+                route2.exit_pos = route1.pad_pos
+                route2.channel = None  # No channel needed
+                route2.is_edge = True  # Treat as edge (direct connection)
+                route2.neighbor_connection = True  # Mark as neighbor connection
+                # Use same layer as route1 for the connection
+                route2.layer = route1.layer
+
+                connected_as_secondary.add(j)
+                connected += 1
+
+    return connected
+
+
 def create_single_ended_route(
     pad: Pad,
     grid: BGAGrid,
@@ -1350,6 +1429,11 @@ def generate_bga_fanout(footprint: Footprint,
 
     if not routes:
         return [], [], []
+
+    # Connect adjacent same-net pads directly (before layer assignment)
+    neighbor_connections = connect_adjacent_same_net_pads(routes, grid, track_width, clearance)
+    if neighbor_connections > 0:
+        print(f"  Connected {neighbor_connections} adjacent same-net pads directly")
 
     # Convert existing PCB segments to track format for collision checking
     existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []

@@ -62,6 +62,7 @@ class FanoutRoute:
     layer: str = "F.Cu"
     pair_id: Optional[str] = None  # Differential pair base name if part of a pair
     is_p: bool = True  # True for P, False for N in differential pair
+    neighbor_connection: bool = False  # True if this connects directly to adjacent same-net pad
 
     @property
     def net_id(self) -> int:

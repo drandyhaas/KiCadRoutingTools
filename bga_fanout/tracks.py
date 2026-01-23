@@ -106,8 +106,17 @@ def generate_tracks_from_routes(
     tracks = []
     edge_count = 0
     inner_count = 0
+    neighbor_count = 0
 
     for route in routes:
+        # Neighbor connection: direct link to adjacent same-net pad
+        if getattr(route, 'neighbor_connection', False):
+            # Simple direct connection from this pad to neighbor pad
+            tracks.append(create_track(route.pad_pos, route.exit_pos, track_width,
+                                       route.layer, route.net_id, route.pair_id))
+            neighbor_count += 1
+            continue
+
         if route.is_edge:
             # Edge pad: Check if stub_end differs from pad_pos (differential pair convergence)
             if route.pair_id and (abs(route.stub_end[0] - route.pad_pos[0]) > POSITION_TOLERANCE or
@@ -205,5 +214,7 @@ def generate_tracks_from_routes(
     print(f"  Generated {len(tracks)} track segments")
     print(f"    Edge pads: {edge_count} (direct H/V on {top_layer})")
     print(f"    Inner pads: {inner_count} (45° stub + channel)")
+    if neighbor_count > 0:
+        print(f"    Neighbor links: {neighbor_count} (direct pad-to-pad)")
 
     return tracks, edge_count, inner_count
