@@ -8,7 +8,7 @@ during diff pair or single-ended routing, extracted from route.py.
 import time
 from typing import List, Tuple
 
-from routing_state import RoutingState
+from routing_state import RoutingState, record_net_event
 from obstacle_costs import compute_track_proximity_for_net
 from connectivity import get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
 from net_queries import calculate_route_length
@@ -163,6 +163,11 @@ def run_reroute_loop(
                     remaining_net_ids, routed_net_ids, routed_net_paths,
                     routed_results, track_proximity_cache, layer_map
                 )
+                record_net_event(state, ripped_net_id, "reroute_succeeded", {
+                    "context": "reroute_loop",
+                    "segments": len(result['new_segments']),
+                    "vias": len(result.get('new_vias', []))
+                })
                 # Allow re-queuing if this net gets ripped again later
                 queued_net_ids.discard(ripped_net_id)
                 # Update net obstacles cache with new route, then restore working obstacles
@@ -292,9 +297,15 @@ def run_reroute_loop(
                                 ripped_items.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 new_ripped_this_level.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
-                                # Invalidate obstacle cache for ripped nets
+                                # Invalidate obstacle cache for ripped nets and record rip events
                                 for rid in ripped_ids:
                                     invalidate_obstacle_cache(obstacle_cache, rid)
+                                    record_net_event(state, rid, "ripped_by", {
+                                        "ripping_net_id": ripped_net_id,
+                                        "ripping_net_name": ripped_net_name,
+                                        "reason": f"reroute_loop rip-up retry N={N}",
+                                        "N": N
+                                    })
                                 if was_in_results:
                                     successful -= 1
 
@@ -359,6 +370,12 @@ def run_reroute_loop(
                                     remaining_net_ids.remove(ripped_net_id)
                                 routed_net_ids.append(ripped_net_id)
                                 routed_results[ripped_net_id] = retry_result
+                                record_net_event(state, ripped_net_id, "reroute_succeeded", {
+                                    "context": "reroute_loop",
+                                    "N": N,
+                                    "segments": len(retry_result['new_segments']),
+                                    "vias": len(retry_result.get('new_vias', []))
+                                })
                                 if retry_result.get('path'):
                                     routed_net_paths[ripped_net_id] = retry_result['path']
                                 track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(pcb_data, ripped_net_id, config, layer_map)
@@ -625,9 +642,15 @@ def run_reroute_loop(
                                 ripped_items.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 new_ripped_this_level.append((blocker.net_id, saved_result_tmp, ripped_ids, was_in_results))
                                 ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
-                                # Invalidate obstacle cache for ripped nets
+                                # Invalidate obstacle cache for ripped nets and record rip events
                                 for rid in ripped_ids:
                                     invalidate_obstacle_cache(obstacle_cache, rid)
+                                    record_net_event(state, rid, "ripped_by", {
+                                        "ripping_net_id": ripped_pair.p_net_id,
+                                        "ripping_net_name": ripped_pair_name,
+                                        "reason": f"reroute_loop diff-pair rip-up retry N={N}",
+                                        "N": N
+                                    })
                                 if was_in_results:
                                     successful -= 1
 

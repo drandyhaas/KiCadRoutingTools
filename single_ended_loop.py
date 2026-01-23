@@ -8,7 +8,7 @@ extracted from route.py for better maintainability.
 import time
 from typing import List, Tuple, Optional, Any
 
-from routing_state import RoutingState
+from routing_state import RoutingState, record_net_event
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -220,6 +220,12 @@ def route_single_ended_nets(
                 remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
             routed_results[net_id] = result
+            record_net_event(state, net_id, "initial_route", {
+                "type": "single-ended",
+                "segments": len(result['new_segments']),
+                "vias": len(result.get('new_vias', [])),
+                "iterations": result['iterations']
+            })
             if result.get('path'):
                 routed_net_paths[net_id] = result['path']
             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
@@ -399,6 +405,13 @@ def route_single_ended_nets(
                             # Invalidate cache for ripped nets
                             for rid in ripped_ids:
                                 invalidate_obstacle_cache(obstacle_cache, rid)
+                                # Record rip event for the ripped net
+                                record_net_event(state, rid, "ripped_by", {
+                                    "ripping_net_id": net_id,
+                                    "ripping_net_name": net_name,
+                                    "reason": f"rip-up retry N={N}",
+                                    "N": N
+                                })
                             ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                             new_ripped_this_level.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
                             ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
@@ -459,6 +472,11 @@ def route_single_ended_nets(
                                 remaining_net_ids.remove(net_id)
                             routed_net_ids.append(net_id)
                             routed_results[net_id] = retry_result
+                            record_net_event(state, net_id, "reroute_succeeded", {
+                                "N": N,
+                                "segments": len(retry_result['new_segments']),
+                                "vias": len(retry_result.get('new_vias', []))
+                            })
                             if retry_result.get('path'):
                                 routed_net_paths[net_id] = retry_result['path']
                             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
@@ -521,6 +539,13 @@ def route_single_ended_nets(
 
                     # If all N levels failed, restore all ripped nets
                     if not retry_succeeded and ripped_items:
+                        # Get top blockers from last analysis for history
+                        top_blocker_names = [b.net_name for b in rippable_blockers[:3]] if rippable_blockers else []
+                        record_net_event(state, net_id, "reroute_failed", {
+                            "reason": "all rip-up attempts failed",
+                            "max_N": len(ripped_items),
+                            "top_blockers": top_blocker_names
+                        })
                         print(f"  {RED}All rip-up attempts failed: Restoring {len(ripped_items)} net(s){RESET}")
                         for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
                             restore_net(rid, saved_result, ripped_ids, was_in_results,
@@ -532,6 +557,9 @@ def route_single_ended_nets(
                                 successful += 1
 
             if not ripped_up:
+                record_net_event(state, net_id, "reroute_failed", {
+                    "reason": "no rippable blockers found"
+                })
                 print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 failed += 1
 

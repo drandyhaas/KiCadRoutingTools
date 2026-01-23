@@ -15,7 +15,7 @@ from typing import List, Dict, Set, Optional, Tuple, Any
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig
-from routing_state import RoutingState
+from routing_state import RoutingState, record_net_event
 from routing_context import build_single_ended_obstacles, build_incremental_obstacles
 from single_ended_routing import route_multipoint_taps, route_net_with_obstacles, route_multipoint_main
 from connectivity import get_multipoint_net_pads
@@ -258,6 +258,8 @@ def _try_phase3_ripup(
     Returns updated completed_result if retry succeeded, None otherwise.
     Appends ripped nets to phase3_ripped_nets for later re-routing.
     """
+    net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
+
     # Collect all blocked cells from failed edges
     all_blocked_cells = []
     for edge_key, (blocked_cells, tgt_xy) in failed_edge_blocking.items():
@@ -345,10 +347,17 @@ def _try_phase3_ripup(
 
         ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
         ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
-        # Invalidate obstacle cache for ripped nets
-        if obstacle_cache is not None:
-            for rid in ripped_ids:
+        # Invalidate obstacle cache for ripped nets and record rip events
+        for rid in ripped_ids:
+            if obstacle_cache is not None:
                 invalidate_obstacle_cache(obstacle_cache, rid)
+            # Record rip event for the ripped net
+            record_net_event(state, rid, "ripped_by", {
+                "ripping_net_id": net_id,
+                "ripping_net_name": net_name,
+                "reason": f"Phase 3 tap rip-up N={N}",
+                "N": N
+            })
 
         # Rebuild obstacles after rip-up
         if state.working_obstacles is not None and state.net_obstacles_cache:
@@ -388,7 +397,7 @@ def _try_phase3_ripup(
         if retry_result:
             retry_failed = retry_result.get('tap_edges_failed', 0)
             if retry_failed < original_failed_count:
-                print(f"    Retry SUCCESS (N={N}): {original_failed_count} -> {retry_failed} failed edges")
+                print(f"    {net_name}: Retry SUCCESS (N={N}): {original_failed_count} -> {retry_failed} failed edges")
 
                 # Add retry result's tap segments to obstacles TEMPORARILY for re-routing ripped nets.
                 # This prevents ripped nets from routing through our tap area.
@@ -433,7 +442,7 @@ def _try_phase3_ripup(
 
                 return retry_result
             else:
-                print(f"    Retry FAILED (N={N}): still {retry_failed} failed edges")
+                print(f"    {net_name}: Retry FAILED (N={N}): still {retry_failed} failed edges")
                 # Store blocked cells from retry for next iteration's analysis
                 retry_blocking = retry_result.get('failed_edge_blocking', {})
                 if retry_blocking:
@@ -443,12 +452,12 @@ def _try_phase3_ripup(
                     if last_retry_blocked_cells:
                         print(f"      Retry had {len(last_retry_blocked_cells)} blocked cells")
         else:
-            print(f"    Retry FAILED (N={N}): no result")
+            print(f"    {net_name}: Retry FAILED (N={N}): no result")
             break
 
     # All attempts failed - restore ripped nets
     if ripped_items:
-        print(f"    {RED}All rip-up attempts failed, restoring {len(ripped_items)} net(s)...{RESET}")
+        print(f"    {RED}{net_name}: All rip-up attempts failed, restoring {len(ripped_items)} net(s)...{RESET}")
         for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
             restore_net(
                 rid, saved_result, ripped_ids, was_in_results,
@@ -520,6 +529,10 @@ def _reroute_phase3_ripped_nets(
                 remaining_net_ids.remove(ripped_net_id)
             routed_net_paths[ripped_net_id] = result['path']
             routed_results[ripped_net_id] = result
+            record_net_event(state, ripped_net_id, "reroute_succeeded", {
+                "segments": len(result['new_segments']),
+                "vias": len(main_vias)
+            })
             track_proximity_cache[ripped_net_id] = compute_track_proximity_for_net(
                 pcb_data, ripped_net_id, config, layer_map
             )
@@ -568,7 +581,7 @@ def _reroute_phase3_ripped_nets(
                             all_blocked_cells.extend(blocked_cells)
 
                         if all_blocked_cells:
-                            print(f"    Attempting rip-up retry for {original_failed_count} failed tap edge(s)...")
+                            print(f"    {net_name}: Attempting rip-up retry for {original_failed_count} failed tap edge(s)...")
 
                             # lm_segments/lm_vias = Phase 1 segments (before taps)
                             lm_segments = result['new_segments']
@@ -584,7 +597,7 @@ def _reroute_phase3_ripped_nets(
                             )
 
                             if retry_result is not None:
-                                print(f"    Rip-up retry succeeded!")
+                                print(f"    {net_name}: Rip-up retry succeeded!")
                                 tap_result = retry_result
 
                 if tap_result:
@@ -630,6 +643,9 @@ def _reroute_phase3_ripped_nets(
                     if ripped_net_id in state.pending_multipoint_nets:
                         del state.pending_multipoint_nets[ripped_net_id]
         else:
+            record_net_event(state, ripped_net_id, "reroute_failed", {
+                "reason": "no path found during Phase 3 re-route"
+            })
             print(f"    {RED}Failed to re-route{RESET}")
             # CRITICAL: Remove from pending_multipoint_nets when re-route fails
             # If we don't remove it, Phase 3 will later process this net and start with

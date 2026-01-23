@@ -66,7 +66,7 @@ from routing_context import (
     record_single_ended_success,
     restore_ripped_net
 )
-from routing_state import RoutingState, create_routing_state
+from routing_state import RoutingState, create_routing_state, print_failed_net_histories
 from memory_debug import (
     get_process_memory_mb, format_memory_stats,
     estimate_net_obstacles_cache_mb, estimate_track_proximity_cache_mb,
@@ -560,11 +560,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     import json
     routed_single = []
     failed_single = []
+    failed_single_ids = []  # Track IDs for history output
     for net_name, net_id in single_ended_nets:
         if net_id in routed_results:
             routed_single.append(net_name)
         else:
             failed_single.append(net_name)
+            failed_single_ids.append(net_id)
 
     # Collect multi-point tap routing stats and failed pad details
     tap_pads_connected = 0
@@ -629,6 +631,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             net_name = item['net_name']
             for pad in item['failed_pads']:
                 print(f"  {RED}{net_name}: {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+
+    # Print history for all failed nets (helps debug why they failed)
+    if failed_single_ids:
+        print_failed_net_histories(state, failed_single_ids, pcb_data)
 
     summary = {
         'routed_single': routed_single,

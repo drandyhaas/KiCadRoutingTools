@@ -96,6 +96,10 @@ class RoutingState:
     total_routes: int = 0
     total_layer_swaps: int = 0
 
+    # Net history tracking for debugging failed routes
+    # Maps net_id -> list of event dicts with keys: event, details, sequence
+    net_history: Dict[int, List[Dict]] = field(default_factory=dict)
+
     def __post_init__(self):
         """Initialize layer_map if not provided."""
         if not self.layer_map and self.config:
@@ -152,3 +156,92 @@ def create_routing_state(
         net_obstacles_cache=net_obstacles_cache or {},
         working_obstacles=working_obstacles,
     )
+
+
+def record_net_event(state: RoutingState, net_id: int, event: str, details: Dict = None):
+    """
+    Record an event in a net's history for debugging.
+
+    Events:
+      - "initial_route": Net was first routed successfully
+      - "ripped_by": Net was ripped due to another net's routing
+      - "reroute_attempt": Re-route was attempted
+      - "reroute_failed": Re-route failed (details has blocking info)
+      - "reroute_succeeded": Re-route succeeded
+    """
+    if net_id not in state.net_history:
+        state.net_history[net_id] = []
+
+    state.net_history[net_id].append({
+        "event": event,
+        "sequence": state.route_index,
+        "details": details or {}
+    })
+
+
+def get_net_history_summary(state: RoutingState, net_id: int, pcb_data: 'PCBData') -> str:
+    """
+    Get a human-readable summary of a net's routing history.
+
+    Returns a string describing what happened to the net.
+    """
+    if net_id not in state.net_history:
+        return "No history recorded"
+
+    history = state.net_history[net_id]
+    net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
+
+    lines = []
+    for entry in history:
+        event = entry["event"]
+        details = entry.get("details", {})
+        seq = entry.get("sequence", "?")
+
+        if event == "initial_route":
+            route_type = details.get("type", "single-ended")
+            lines.append(f"[{seq}] Initially routed ({route_type})")
+
+        elif event == "ripped_by":
+            ripper = details.get("ripping_net_name", "unknown")
+            reason = details.get("reason", "rip-up retry")
+            lines.append(f"[{seq}] Ripped by {ripper} ({reason})")
+
+        elif event == "reroute_attempt":
+            n_val = details.get("N", "?")
+            lines.append(f"[{seq}] Re-route attempt (N={n_val})")
+
+        elif event == "reroute_failed":
+            reason = details.get("reason", "no path found")
+            blockers = details.get("top_blockers", [])
+            blocker_str = ", ".join(blockers[:3]) if blockers else "unknown"
+            lines.append(f"[{seq}] Re-route FAILED: {reason}")
+            if blockers:
+                lines.append(f"       Blocked by: {blocker_str}")
+
+        elif event == "reroute_succeeded":
+            lines.append(f"[{seq}] Re-route succeeded")
+
+        else:
+            lines.append(f"[{seq}] {event}")
+
+    return "\n".join(lines) if lines else "No events"
+
+
+def print_failed_net_histories(state: RoutingState, failed_net_ids: List[int], pcb_data: 'PCBData'):
+    """
+    Print history summaries for all failed nets.
+    """
+    if not failed_net_ids:
+        return
+
+    print("\n" + "=" * 60)
+    print("FAILED NET HISTORIES")
+    print("=" * 60)
+
+    for net_id in failed_net_ids:
+        net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
+        print(f"\n{net_name}:")
+        summary = get_net_history_summary(state, net_id, pcb_data)
+        # Indent each line
+        for line in summary.split("\n"):
+            print(f"  {line}")
