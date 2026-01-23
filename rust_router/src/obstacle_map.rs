@@ -43,6 +43,9 @@ pub struct GridObstacleMap {
     /// Free via positions: positions where layer changes have zero cost
     /// (e.g., through-hole pads on the same net - reuse existing holes instead of adding vias)
     pub free_via_positions: FxHashSet<u64>,
+    /// Proximity zone centers for direction-aware cost calculation
+    /// Each entry is (gx, gy, radius_squared) - we store radius^2 to avoid sqrt in hot path
+    pub proximity_zone_centers: Vec<(i32, i32, i32)>,
 }
 
 #[pymethods]
@@ -63,6 +66,7 @@ impl GridObstacleMap {
             endpoint_exempt_positions: Vec::new(),
             endpoint_exempt_radius: 0,
             free_via_positions: FxHashSet::default(),
+            proximity_zone_centers: Vec::new(),
         }
     }
 
@@ -115,6 +119,7 @@ impl GridObstacleMap {
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
+            proximity_zone_centers: self.proximity_zone_centers.clone(),
         }
     }
 
@@ -137,6 +142,7 @@ impl GridObstacleMap {
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
+            proximity_zone_centers: self.proximity_zone_centers.clone(),
         }
     }
 
@@ -156,9 +162,10 @@ impl GridObstacleMap {
          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
     }
 
-    /// Clear stub proximity costs (for reuse with different stubs)
+    /// Clear stub proximity costs and zone centers (for reuse with different stubs)
     pub fn clear_stub_proximity(&mut self) {
         self.stub_proximity.clear();
+        self.proximity_zone_centers.clear();
     }
 
     /// Shrink all internal collections to fit their contents.
@@ -593,5 +600,84 @@ impl GridObstacleMap {
         for (gx, gy) in positions {
             self.free_via_positions.insert(pack_xy(gx, gy));
         }
+    }
+
+    /// Add a proximity zone center for direction-aware cost calculation
+    /// radius is in grid units
+    pub fn add_proximity_zone_center(&mut self, gx: i32, gy: i32, radius: i32) {
+        self.proximity_zone_centers.push((gx, gy, radius * radius));
+    }
+
+    /// Batch add proximity zone centers from a list of (gx, gy, radius) tuples
+    pub fn add_proximity_zone_centers_batch(&mut self, centers: Vec<(i32, i32, i32)>) {
+        for (gx, gy, radius) in centers {
+            self.proximity_zone_centers.push((gx, gy, radius * radius));
+        }
+    }
+
+    /// Clear all proximity zone centers
+    pub fn clear_proximity_zone_centers(&mut self) {
+        self.proximity_zone_centers.clear();
+    }
+
+    /// Get direction-aware stub proximity cost for a step from (from_gx, from_gy) to (to_gx, to_gy)
+    /// Returns reduced cost when moving away from zone centers, full cost when moving towards them.
+    /// The cost reduction is proportional to how directly we're moving away.
+    #[inline]
+    pub fn get_directional_proximity_cost(&self, from_gx: i32, from_gy: i32, to_gx: i32, to_gy: i32) -> i32 {
+        // Get base cost at destination
+        let base_cost = self.get_stub_proximity_cost(to_gx, to_gy);
+        if base_cost == 0 {
+            return 0;
+        }
+
+        // If no zone centers registered, return base cost
+        if self.proximity_zone_centers.is_empty() {
+            return base_cost;
+        }
+
+        // Find the zone center that this position is closest to (within radius)
+        // and compute direction-based cost adjustment
+        let mut best_factor: f32 = 1.0;  // 1.0 = full cost, 0.0 = no cost
+
+        for &(cx, cy, radius_sq) in &self.proximity_zone_centers {
+            // Distance squared from destination to zone center
+            let dx_to = to_gx - cx;
+            let dy_to = to_gy - cy;
+            let dist_sq_to = dx_to * dx_to + dy_to * dy_to;
+
+            // Only consider if destination is within zone radius
+            if dist_sq_to > radius_sq {
+                continue;
+            }
+
+            // Distance squared from source to zone center
+            let dx_from = from_gx - cx;
+            let dy_from = from_gy - cy;
+            let dist_sq_from = dx_from * dx_from + dy_from * dy_from;
+
+            // Calculate cost factor based on movement direction
+            // Moving away (dist increases): lower cost
+            // Moving towards (dist decreases): full cost
+            if dist_sq_to > dist_sq_from {
+                // Moving away from this zone center
+                // Cost factor = 0.0 (no cost) when moving directly away
+                // Use the ratio of distances to compute factor
+                // When moving away, the further we get, the less the penalty
+                let dist_to = (dist_sq_to as f32).sqrt();
+                let dist_from = (dist_sq_from as f32).sqrt();
+                let radius = (radius_sq as f32).sqrt();
+
+                // Factor based on how much of the movement is "away"
+                // At zone center moving out: factor approaches 0
+                // At edge moving out: factor is already low due to base cost falloff
+                let outward_progress = (dist_to - dist_from) / radius;
+                let factor = (1.0 - outward_progress * 2.0).max(0.0);
+                best_factor = best_factor.min(factor);
+            }
+            // If moving towards or parallel, keep factor at 1.0 (full cost)
+        }
+
+        (base_cost as f32 * best_factor) as i32
     }
 }

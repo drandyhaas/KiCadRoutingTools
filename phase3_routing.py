@@ -248,7 +248,8 @@ def _try_phase3_ripup(
     diff_pair_by_net_id, results, track_proximity_cache, layer_map,
     base_obstacles, gnd_net_id, phase3_ripped_nets,
     global_tap_offset=0, global_tap_total=0, global_tap_failed=0,
-    obstacle_cache=None
+    obstacle_cache=None,
+    reroute_depth: int = 0
 ):
     """
     Try progressive rip-up and retry for failed Phase 3 tap routes.
@@ -418,7 +419,8 @@ def _try_phase3_ripup(
                     _reroute_phase3_ripped_nets(
                         ripped_items, pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
-                        results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id
+                        results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
+                        reroute_depth=reroute_depth + 1
                     )
 
                 # IMPORTANT: Remove the temporarily added tap segments before returning.
@@ -462,12 +464,14 @@ def _try_phase3_ripup(
 def _reroute_phase3_ripped_nets(
     phase3_ripped_nets, pcb_data, config, state, routed_net_ids, remaining_net_ids,
     all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
-    results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id
+    results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
+    reroute_depth: int = 0
 ):
     """
     Re-route nets that were ripped during Phase 3 tap routing.
 
     This includes routing their main route and any tap connections.
+    If tap routing fails, attempts rip-up retry (up to config.max_rip_up_count depth).
     """
     for ripped_net_id, saved_result, ripped_ids, was_in_results in phase3_ripped_nets:
         net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"net_{ripped_net_id}"
@@ -552,6 +556,36 @@ def _reroute_phase3_ripped_nets(
                     pcb_data, ripped_net_id, config, tap_obstacles, result,
                     global_offset=0, global_total=0, global_failed=0
                 )
+
+                # Try rip-up retry for failed tap edges (if within depth limit)
+                if tap_result:
+                    failed_edge_blocking = tap_result.get('failed_edge_blocking', {})
+                    original_failed_count = tap_result.get('tap_edges_failed', 0)
+
+                    if failed_edge_blocking and original_failed_count > 0 and reroute_depth < config.max_rip_up_count and config.max_rip_up_count > 0:
+                        all_blocked_cells = []
+                        for edge_key, (blocked_cells, tgt_xy) in failed_edge_blocking.items():
+                            all_blocked_cells.extend(blocked_cells)
+
+                        if all_blocked_cells:
+                            print(f"    Attempting rip-up retry for {original_failed_count} failed tap edge(s)...")
+
+                            # lm_segments/lm_vias = Phase 1 segments (before taps)
+                            lm_segments = result['new_segments']
+                            lm_vias = result.get('new_vias', [])
+
+                            retry_result = _try_phase3_ripup(
+                                ripped_net_id, tap_result, failed_edge_blocking, lm_segments, lm_vias,
+                                pcb_data, config, state, routed_net_ids, remaining_net_ids,
+                                all_unrouted_net_ids, routed_net_paths, routed_results,
+                                diff_pair_by_net_id, results, track_proximity_cache, layer_map,
+                                base_obstacles, gnd_net_id, [],  # unused parameter
+                                reroute_depth=reroute_depth + 1
+                            )
+
+                            if retry_result is not None:
+                                print(f"    Rip-up retry succeeded!")
+                                tap_result = retry_result
 
                 if tap_result:
                     tap_segments = tap_result['new_segments'][len(result['new_segments']):]

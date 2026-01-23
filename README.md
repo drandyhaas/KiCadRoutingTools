@@ -19,7 +19,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 - **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance; uses segment intersection with MST for non-BGA boards), inside-out (BGA), or original order
 - **MPS layer swap** - When MPS detects crossing conflicts (nets in Round 2+), attempts layer swaps to eliminate same-layer crossings. Tries swapping both the conflicting Round 2 unit and Round 1 unit. Re-runs MPS after swaps to verify conflict resolution
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
-- **Stub proximity avoidance** - Penalizes routes near unrouted stubs
+- **Stub proximity avoidance** - Penalizes routes near unrouted stubs, with direction-aware costs (moving away from stubs costs less)
+- **BGA proximity avoidance** - Penalizes routes near BGA edges, with direction-aware costs (moving away from BGA zones costs less)
 - **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
 - **Vertical track alignment** - Attracts tracks on different layers to stack vertically (on top of each other), consolidating routing corridors and leaving more room for through-hole vias
 - **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced. Uses 0° when clearance to the nearest stub is sufficient (≥2× spacing), only angling away when stubs are too close

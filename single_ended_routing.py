@@ -33,6 +33,22 @@ except ImportError:
     VisualRouter = None
 
 
+def _print_obstacle_map(obstacles: 'GridObstacleMap', center_gx: int, center_gy: int, layer: int, radius: int = 20, print_prefix: str = ""):
+    """Print a visual map of blocking around a center point."""
+    print(f"{print_prefix}  Obstacle map around ({center_gx}, {center_gy}) layer={layer} (radius={radius}):")
+    for dy in range(-radius, radius + 1):
+        row = []
+        for dx in range(-radius, radius + 1):
+            cx, cy = center_gx + dx, center_gy + dy
+            if dx == 0 and dy == 0:
+                row.append('T')
+            elif obstacles.is_blocked(cx, cy, layer):
+                row.append('#')
+            else:
+                row.append('.')
+        print(f"{print_prefix}    {''.join(row)}")
+
+
 def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: str, print_prefix: str = "", track_margin: int = 0):
     """
     Diagnose why routing couldn't start from the given cells.
@@ -184,6 +200,10 @@ def _probe_route_with_frontier(
         else:
             print(f"{print_prefix}{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
             _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin)
+            # Print visual obstacle map around the stuck target
+            if forward_targets and config.debug_lines:
+                tgt = forward_targets[0]
+                _print_obstacle_map(obstacles, tgt[0], tgt[1], tgt[2], radius=15, print_prefix=print_prefix)
         fwd_iters, bwd_iters = get_fwd_bwd_iters()
         return None, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 

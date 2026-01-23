@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.9.0**
+**Current Version: 0.10.0**
 
 ## Features
 
@@ -11,6 +11,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - Via cost and layer transitions
 - BGA exclusion zone with allowed cell overrides
 - Stub proximity costs to avoid blocking unrouted nets
+- **Direction-aware proximity costs** - steps moving away from zone centers cost less, encouraging efficient zone exit
 - **Turn cost penalty** for direction changes - encourages straighter paths with fewer wiggles
 - **Cross-layer track attraction** for vertical alignment - attracts routes to stack on top of tracks on other layers
 - **Layer cost preferences** - per-layer cost multipliers to prefer certain layers (e.g., keep signals on F.Cu, avoid B.Cu). Default: F.Cu=1.0x, others=3.0x
@@ -176,6 +177,10 @@ Methods:
 - `is_blocked(gx, gy, layer)` - Check if cell is blocked
 - `is_via_blocked(gx, gy)` - Check if via position is blocked
 - `get_stub_proximity_cost(gx, gy)` - Get proximity cost for a cell
+- `get_directional_proximity_cost(from_gx, from_gy, to_gx, to_gy)` - Get direction-aware proximity cost (reduced when moving away from zone centers)
+- `add_proximity_zone_center(gx, gy, radius)` - Register a proximity zone center for direction-aware costs
+- `add_proximity_zone_centers_batch(centers)` - Batch register zone centers. `centers` is a list of `(gx, gy, radius)` tuples
+- `clear_proximity_zone_centers()` - Clear all registered zone centers
 - `add_cross_layer_track(gx, gy, layer)` - Mark a position as having a track on specified layer (for vertical attraction)
 - `get_cross_layer_attraction(gx, gy, current_layer, radius, bonus)` - Get attraction bonus for positions near tracks on other layers
 - `clear_cross_layer_tracks()` - Clear all cross-layer track data
@@ -272,6 +277,7 @@ src/
 
 ## Version History
 
+- **0.10.0**: Added direction-aware proximity costs. When routing within stub or BGA proximity zones, steps moving away from zone centers cost less than steps moving towards them. This encourages the router to exit proximity zones efficiently. New methods: `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, `get_directional_proximity_cost()`. Zone centers are automatically registered when adding stub/BGA proximity costs in Python (`add_stub_proximity_costs()`, `add_bga_proximity_costs()`). `clear_stub_proximity()` now also clears zone centers.
 - **0.9.0**: Added `layer_costs` parameter to GridRouter and VisualRouter for layer preference routing. Per-layer cost multipliers (1000 = 1.0x) affect movement costs, source initialization penalty for expensive layers, and via transition costs. Switching to a cheaper layer discounts the via cost (can reduce to 0). Default in route.py: F.Cu=1.0x, all others=3.0x. Values must be 1.0-1000x.
 - **0.8.4**: Added `vertical_attraction_radius` and `vertical_attraction_bonus` parameters to GridRouter (previously only in PoseRouter). Single-ended routing can now attract to tracks on other layers, consolidating routing corridors and leaving more room for through-hole vias.
 - **0.8.3**: Added `via_proximity_cost` parameter to GridRouter (was only in PoseRouter). Multiplies stub proximity cost when placing vias - higher values discourage vias near stubs, 0 blocks vias entirely in stub proximity zones. Now both single-ended and diff pair routing respect via proximity costs. Added batch FFI operations (`add_blocked_cells_batch`, `remove_blocked_cells_batch`, `add_stub_proximity_costs_batch`) to reduce Python-Rust call overhead. Changed obstacle map to use reference-counted `HashMap<u64, u16>` instead of `HashSet<u64>` for correct incremental updates when nets share blocked cells.

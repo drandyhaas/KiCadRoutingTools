@@ -61,6 +61,7 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
 
     When via_proximity_cost == 0, vias are blocked within stub proximity radius.
     Uses batch Rust method for performance.
+    Also registers zone centers for direction-aware cost calculation.
     """
     if not unrouted_stubs:
         return
@@ -72,15 +73,20 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
 
     # Convert stub positions to grid coordinates
     stub_grid_positions = []
+    zone_centers = []
     for stub in unrouted_stubs:
         stub_x, stub_y = stub[0], stub[1]
         gcx, gcy = coord.to_grid(stub_x, stub_y)
         stub_grid_positions.append((gcx, gcy))
+        zone_centers.append((gcx, gcy, stub_radius_grid))
 
     # Use batch Rust method for performance
     obstacles.add_stub_proximity_costs_batch(
         stub_grid_positions, stub_radius_grid, stub_cost_grid, block_vias
     )
+
+    # Register zone centers for direction-aware cost calculation
+    obstacles.add_proximity_zone_centers_batch(zone_centers)
 
 
 def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig):
@@ -88,6 +94,7 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
 
     Penalizes routing near BGA edges with linear falloff from max cost at edge
     to zero at bga_proximity_radius distance.
+    Also registers zone centers for direction-aware cost calculation.
     """
     if config.bga_proximity_radius <= 0:
         return  # Feature disabled
@@ -100,6 +107,15 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
         min_x, min_y, max_x, max_y = zone[:4]
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+
+        # Register the BGA zone center for direction-aware cost calculation
+        # Using zone center as the proximity center point
+        center_gx = (gmin_x + gmax_x) // 2
+        center_gy = (gmin_y + gmax_y) // 2
+        # Use a radius that covers from zone center to proximity edge
+        zone_half_diag = int(((gmax_x - gmin_x) ** 2 + (gmax_y - gmin_y) ** 2) ** 0.5 / 2)
+        effective_radius = zone_half_diag + radius_grid
+        obstacles.add_proximity_zone_center(center_gx, center_gy, effective_radius)
 
         # Iterate over cells within radius of BGA zone edges (outside the zone)
         for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):

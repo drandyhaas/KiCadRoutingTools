@@ -316,7 +316,8 @@ impl GridRouter {
                     }
                     _ => 0, // No previous direction (source node or via)
                 };
-                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
+                // Use direction-aware proximity cost (lower when moving away from zone centers)
+                let proximity_cost = obstacles.get_directional_proximity_cost(current.gx, current.gy, ngx, ngy)
                     + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
                 // Subtract attraction bonus for positions aligned with tracks on other layers
                 let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -651,7 +652,8 @@ impl GridRouter {
                     }
                     _ => 0,
                 };
-                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
+                // Use direction-aware proximity cost (lower when moving away from zone centers)
+                let proximity_cost = obstacles.get_directional_proximity_cost(current.gx, current.gy, ngx, ngy)
                     + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
                 // Subtract attraction bonus for positions aligned with tracks on other layers
                 let attraction_bonus = obstacles.get_cross_layer_attraction(
