@@ -56,6 +56,39 @@ def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 
     return abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance
 
 
+def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:
+    """Check if point (px, py) lies on the segment from (x1, y1) to (x2, y2) within tolerance.
+
+    This detects T-junctions where a track endpoint meets another track mid-segment.
+    """
+    # Quick bounding box check first (with tolerance)
+    min_x, max_x = (min(x1, x2) - tolerance, max(x1, x2) + tolerance)
+    min_y, max_y = (min(y1, y2) - tolerance, max(y1, y2) + tolerance)
+    if not (min_x <= px <= max_x and min_y <= py <= max_y):
+        return False
+
+    # Calculate distance from point to line segment
+    # Vector from segment start to end
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Handle degenerate case (zero-length segment)
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq < 1e-10:
+        return points_match(px, py, x1, y1, tolerance)
+
+    # Project point onto line, clamped to segment
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
+
+    # Closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+
+    # Check if point is within tolerance of the closest point on segment
+    dist_sq = (px - closest_x) ** 2 + (py - closest_y) ** 2
+    return dist_sq <= tolerance * tolerance
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
@@ -214,6 +247,24 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_tolerance = max(max(size1, size2) / 4, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
                 uf.union(id1, id2)
+
+    # Check for T-junctions: points that lie on the middle of a segment (same layer)
+    # This handles cases where a track endpoint meets another track mid-segment
+    for px, py, player, pid, psize in all_points:
+        for seg_idx, seg in enumerate(segments):
+            if seg.layer != player:
+                continue
+            # Get the segment's endpoint IDs (each segment has 2 consecutive point IDs)
+            seg_start_id = seg_idx * 2
+            seg_end_id = seg_idx * 2 + 1
+            # Skip if this point IS one of the segment's endpoints
+            if pid == seg_start_id or pid == seg_end_id:
+                continue
+            # Check if point lies on this segment
+            seg_tolerance = max(seg.width / 2, tolerance)
+            if point_on_segment(px, py, seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg_tolerance):
+                # Connect this point to the segment (via one of its endpoints)
+                uf.union(pid, seg_start_id)
 
     # Check if all pads are in the same component
     if not pad_ids:
