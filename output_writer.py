@@ -14,7 +14,7 @@ from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
     swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers,
-    move_copper_text_to_silkscreen
+    move_copper_text_to_silkscreen, add_teardrops_to_pads
 )
 from connectivity import find_connected_segment_positions
 
@@ -32,7 +32,8 @@ def write_routed_output(
     debug_lines: bool = False,
     exclusion_zone_lines: List = None,
     boundary_debug_labels: List = None,
-    skip_routing: bool = False
+    skip_routing: bool = False,
+    add_teardrops: bool = False
 ) -> bool:
     """
     Write the routed PCB output file.
@@ -51,6 +52,7 @@ def write_routed_output(
         exclusion_zone_lines: Debug lines for exclusion zones
         boundary_debug_labels: Debug labels for boundary positions
         skip_routing: Whether routing was skipped (debug only mode)
+        add_teardrops: Whether to add teardrop settings to all pads
 
     Returns:
         True if output was written successfully
@@ -66,6 +68,15 @@ def write_routed_output(
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
+
+    # Add teardrops to all pads if requested
+    if add_teardrops:
+        print("Adding teardrop settings to pads...")
+        content, teardrop_count = add_teardrops_to_pads(content)
+        if teardrop_count > 0:
+            print(f"  Added teardrops to {teardrop_count} pads")
+        else:
+            print("  All pads already have teardrop settings")
 
     # Apply target swaps FIRST - layer modifications were recorded with post-swap net IDs,
     # so we need to swap the file content to match before applying layer modifications

@@ -925,7 +925,8 @@ def _write_output_and_reroute(
     hole_to_hole_clearance: float,
     verbose: bool,
     power_nets: Optional[List[str]] = None,
-    power_nets_widths: Optional[List[float]] = None
+    power_nets_widths: Optional[List[float]] = None,
+    add_teardrops: bool = False
 ) -> bool:
     """
     Write output file and optionally reroute ripped nets.
@@ -940,7 +941,8 @@ def _write_output_and_reroute(
         print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
 
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
-                              exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace):
+                              exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace,
+                              add_teardrops=add_teardrops):
         print("Error writing output file")
         return False
 
@@ -1024,7 +1026,8 @@ def create_plane(
     debug_lines: bool = False,
     layer_costs: Optional[List[float]] = None,
     power_nets: Optional[List[str]] = None,
-    power_nets_widths: Optional[List[float]] = None
+    power_nets_widths: Optional[List[float]] = None,
+    add_teardrops: bool = False
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1704,7 +1707,8 @@ def create_plane(
             hole_to_hole_clearance=hole_to_hole_clearance,
             verbose=verbose,
             power_nets=power_nets,
-            power_nets_widths=power_nets_widths
+            power_nets_widths=power_nets_widths,
+            add_teardrops=add_teardrops
         )
 
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -1791,6 +1795,7 @@ Examples:
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
     parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
+    parser.add_argument("--add-teardrops", action="store_true", help="Add teardrop settings to all pads in output file")
 
     args = parser.parse_args()
 
@@ -1875,7 +1880,8 @@ Examples:
         debug_lines=args.debug_lines,
         layer_costs=args.layer_costs,
         power_nets=args.power_nets,
-        power_nets_widths=args.power_nets_widths
+        power_nets_widths=args.power_nets_widths,
+        add_teardrops=args.add_teardrops
     )
 
 

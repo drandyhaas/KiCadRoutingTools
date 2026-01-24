@@ -73,6 +73,8 @@ class GridRouteConfig:
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
     debug_memory: bool = False  # Print memory usage statistics at key points
+    # Output options
+    add_teardrops: bool = False  # Add teardrop settings to all pads in output file
     # Impedance-controlled routing
     impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control

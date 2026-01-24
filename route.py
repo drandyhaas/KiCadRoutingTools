@@ -141,7 +141,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 minimal_obstacle_cache: bool = False,
                 vis_callback=None,
                 schematic_dir: Optional[str] = None,
-                layer_costs: Optional[List[float]] = None) -> Tuple[int, int, float]:
+                layer_costs: Optional[List[float]] = None,
+                add_teardrops: bool = False) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -680,7 +681,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         debug_lines=debug_lines,
         exclusion_zone_lines=exclusion_zone_lines,
         boundary_debug_labels=boundary_debug_labels,
-        skip_routing=skip_routing
+        skip_routing=skip_routing,
+        add_teardrops=add_teardrops
     )
 
     # Update schematics with swap info if directory specified
@@ -864,6 +866,8 @@ For differential pair routing, use route_diff.py:
                         help="Skip actual routing, only do swaps and write debug info")
     parser.add_argument("--debug-memory", action="store_true",
                         help="Print memory usage statistics at key points during routing")
+    parser.add_argument("--add-teardrops", action="store_true",
+                        help="Add teardrop settings to all pads in output file")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",
@@ -1001,4 +1005,5 @@ For differential pair routing, use route_diff.py:
                 mps_segment_intersection=args.mps_segment_intersection,
                 vis_callback=vis_callback,
                 schematic_dir=args.schematic_dir,
-                layer_costs=args.layer_costs)
+                layer_costs=args.layer_costs,
+                add_teardrops=args.add_teardrops)

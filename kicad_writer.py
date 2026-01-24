@@ -548,6 +548,96 @@ def swap_via_nets_at_positions(content: str, positions: set,
     return result, count
 
 
+def add_teardrops_to_pads(content: str,
+                          best_length_ratio: float = 0.5,
+                          max_length: float = 1.0,
+                          best_width_ratio: float = 1.0,
+                          max_width: float = 2.0,
+                          curved_edges: bool = False,
+                          filter_ratio: float = 0.9,
+                          allow_two_segments: bool = True,
+                          prefer_zone_connections: bool = True) -> tuple[str, int]:
+    """
+    Add teardrop settings to all pads that don't already have them.
+
+    Teardrops are added before the (uuid ...) line in each pad definition.
+
+    Args:
+        content: KiCad PCB file content
+        best_length_ratio: Target length as ratio of track width (default 0.5)
+        max_length: Maximum teardrop length in mm (default 1.0)
+        best_width_ratio: Target width as ratio of pad size (default 1.0)
+        max_width: Maximum teardrop width in mm (default 2.0)
+        curved_edges: Use curved teardrop edges (default False)
+        filter_ratio: Min ratio of teardrop to pad size to apply (default 0.9)
+        allow_two_segments: Allow teardrops with two segments (default True)
+        prefer_zone_connections: Prefer zone connections over teardrops (default True)
+
+    Returns:
+        (modified_content, count_of_pads_with_teardrops_added)
+    """
+    curved_str = "yes" if curved_edges else "no"
+    two_seg_str = "yes" if allow_two_segments else "no"
+    zone_str = "yes" if prefer_zone_connections else "no"
+
+    teardrop_block = f'''(teardrops
+				(best_length_ratio {best_length_ratio})
+				(max_length {max_length})
+				(best_width_ratio {best_width_ratio})
+				(max_width {max_width})
+				(curved_edges {curved_str})
+				(filter_ratio {filter_ratio})
+				(enabled yes)
+				(allow_two_segments {two_seg_str})
+				(prefer_zone_connections {zone_str})
+			)
+			'''
+
+    count = 0
+    result_parts = []
+    last_end = 0
+    i = 0
+
+    while True:
+        # Find next pad definition
+        pad_start = content.find('(pad ', i)
+        if pad_start == -1:
+            break
+
+        # Find the end of this pad block by counting parens
+        depth = 0
+        pad_end = pad_start
+        for j in range(pad_start, len(content)):
+            if content[j] == '(':
+                depth += 1
+            elif content[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    pad_end = j + 1
+                    break
+
+        pad_block = content[pad_start:pad_end]
+
+        # Check if this pad already has teardrops
+        if '(teardrops' not in pad_block:
+            # Find the (uuid line to insert before it
+            uuid_pos = pad_block.find('(uuid ')
+            if uuid_pos != -1:
+                # Insert teardrop block before uuid
+                new_pad_block = pad_block[:uuid_pos] + teardrop_block + pad_block[uuid_pos:]
+                result_parts.append(content[last_end:pad_start])
+                result_parts.append(new_pad_block)
+                last_end = pad_end
+                count += 1
+
+        i = pad_end
+
+    # Add remaining content
+    result_parts.append(content[last_end:])
+
+    return ''.join(result_parts), count
+
+
 def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
     """
     Swap the net assignments of two pads in the KiCad PCB file content.

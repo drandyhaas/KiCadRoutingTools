@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData
-from kicad_writer import generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen
+from kicad_writer import generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen, add_teardrops_to_pads
 
 
 @dataclass
@@ -221,7 +221,8 @@ def write_plane_output(
     new_vias: List[Dict],
     new_segments: List[Dict],
     exclude_net_ids: List[int] = None,
-    zones_to_replace: List[Tuple[int, str]] = None
+    zones_to_replace: List[Tuple[int, str]] = None,
+    add_teardrops: bool = False
 ) -> bool:
     """Write the complete output file with zone (optional), vias, and traces.
 
@@ -235,6 +236,7 @@ def write_plane_output(
                          (their segments/vias will be filtered out)
         zones_to_replace: Optional list of (net_id, layer) tuples for zones to
                           remove before adding new zones
+        add_teardrops: Add teardrop settings to all pads
 
     Returns:
         True if successful, False otherwise
@@ -244,6 +246,15 @@ def write_plane_output(
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
+
+    # Add teardrops to all pads if requested
+    if add_teardrops:
+        print("Adding teardrop settings to pads...")
+        content, teardrop_count = add_teardrops_to_pads(content)
+        if teardrop_count > 0:
+            print(f"  Added teardrops to {teardrop_count} pads")
+        else:
+            print("  All pads already have teardrop settings")
 
     # Filter out zones to be replaced
     if zones_to_replace:

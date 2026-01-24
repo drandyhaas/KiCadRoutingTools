@@ -149,7 +149,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 mps_reverse_rounds: bool = False,
                 mps_layer_swap: bool = False,
                 mps_segment_intersection: bool = False,
-                schematic_dir: Optional[str] = None) -> Tuple[int, int, float]:
+                schematic_dir: Optional[str] = None,
+                add_teardrops: bool = False) -> Tuple[int, int, float]:
     """
     Route differential pairs using the Rust router.
 
@@ -659,7 +660,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         debug_lines=debug_lines,
         exclusion_zone_lines=exclusion_zone_lines,
         boundary_debug_labels=boundary_debug_labels,
-        skip_routing=skip_routing
+        skip_routing=skip_routing,
+        add_teardrops=add_teardrops
     )
 
     # Update schematics with swap info if directory specified
@@ -875,6 +877,8 @@ Examples:
                         help="Skip actual routing, only do swaps and write debug info")
     parser.add_argument("--debug-memory", action="store_true",
                         help="Print memory usage statistics at key points during routing")
+    parser.add_argument("--add-teardrops", action="store_true",
+                        help="Add teardrop settings to all pads in output file")
 
     args = parser.parse_args()
 
@@ -963,4 +967,5 @@ Examples:
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
                 mps_segment_intersection=args.mps_segment_intersection,
-                schematic_dir=args.schematic_dir)
+                schematic_dir=args.schematic_dir,
+                add_teardrops=args.add_teardrops)

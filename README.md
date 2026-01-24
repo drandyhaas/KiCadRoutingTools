@@ -149,7 +149,7 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 # Check for DRC violations (default clearance: 0.2mm)
 python check_drc.py kicad_files/output.kicad_pcb
 
-# Check connectivity (detects both unrouted nets and broken routes)
+# Check connectivity (detects unrouted nets, broken routes, and T-junctions)
 python check_connected.py kicad_files/output.kicad_pcb
 
 # Check connectivity for specific nets
@@ -349,7 +349,7 @@ KiCadRoutingTools/
 ├── memory_debug.py           # Memory usage statistics
 │
 ├── check_drc.py              # DRC violation checker
-├── check_connected.py        # Connectivity checker
+├── check_connected.py        # Connectivity checker (with T-junction detection)
 ├── check_orphan_stubs.py     # Orphan stub detector
 ├── bga_fanout.py             # BGA fanout CLI wrapper
 ├── bga_fanout/               # BGA fanout package
@@ -562,6 +562,7 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --debug-lines           # Output debug geometry on User layers
 --skip-routing          # Skip routing, only do swaps and write debug info
 --debug-memory          # Print memory usage statistics during routing
+--add-teardrops         # Add teardrop settings to all pads in output file
 ```
 
 ### Differential Pair Routing (route_diff.py)
@@ -652,6 +653,7 @@ python route_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] --nets GND
 --dry-run               # Analyze without writing output
 --verbose, -v           # Print detailed debug messages
 --debug-lines           # Draw MST routes on User.1, User.2, etc. per net
+--add-teardrops         # Add teardrop settings to all pads in output file
 ```
 
 Features:
@@ -737,8 +739,8 @@ Features:
 
 - No push-and-shove (routes around obstacles, doesn't move them)
 - Layer swaps not supported for multi-point nets (3+ pads)
-- No blind or burried vias
-- No teardrops
+- No blind or buried vias
+- Teardrops are pad-level settings only (use `--add-teardrops` to enable on all pads)
 
 ## License
 
