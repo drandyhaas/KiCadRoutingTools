@@ -81,6 +81,7 @@ from routing_common import (
     build_obstacle_infrastructure, run_length_matching, sync_pcb_data_segments,
     get_common_config_kwargs
 )
+import routing_defaults as defaults
 import re
 from terminal_colors import RED, RESET
 from routing_constants import DEFAULT_4_LAYER_STACK, POWER_NET_EXCLUSION_PATTERNS
@@ -798,7 +799,7 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
-                        default="mps",
+                        default=defaults.DEFAULT_ORDERING_STRATEGY,
                         help="Net ordering strategy: mps (default, crossing conflicts), inside_out, or original")
     parser.add_argument("--direction", "-d", choices=["forward", "backward"],
                         default=None,
@@ -806,20 +807,20 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--no-bga-zones", nargs="*", default=None,
                         help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
     parser.add_argument("--layers", "-l", nargs="+",
-                        default=['F.Cu', 'B.Cu'],
+                        default=defaults.DEFAULT_LAYERS,
                         help="Routing layers to use (default: F.Cu B.Cu)")
 
     # Track and via geometry
-    parser.add_argument("--track-width", type=float, default=0.3,
-                        help="Track width in mm (default: 0.3). Ignored if --impedance is specified.")
+    parser.add_argument("--track-width", type=float, default=defaults.TRACK_WIDTH,
+                        help=f"Track width in mm (default: {defaults.TRACK_WIDTH}). Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target single-ended impedance in ohms (e.g., 50). Calculates track width per layer from board stackup.")
-    parser.add_argument("--clearance", type=float, default=0.25,
-                        help="Clearance between tracks in mm (default: 0.25)")
-    parser.add_argument("--via-size", type=float, default=0.5,
-                        help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=0.3,
-                        help="Via drill size in mm (default: 0.3)")
+    parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE,
+                        help=f"Clearance between tracks in mm (default: {defaults.CLEARANCE})")
+    parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE,
+                        help=f"Via outer diameter in mm (default: {defaults.VIA_SIZE})")
+    parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL,
+                        help=f"Via drill size in mm (default: {defaults.VIA_DRILL})")
 
     # Power net routing options
     parser.add_argument("--power-nets", nargs="*", default=[],
@@ -828,26 +829,26 @@ For differential pair routing, use route_diff.py:
                         help="Track widths in mm for each power-net pattern (must match --power-nets length)")
 
     # Router algorithm parameters
-    parser.add_argument("--grid-step", type=float, default=0.1,
-                        help="Grid resolution in mm (default: 0.1)")
-    parser.add_argument("--via-cost", type=int, default=50,
-                        help="Penalty for placing a via in grid steps (default: 50)")
-    parser.add_argument("--via-proximity-cost", type=int, default=10,
-                        help="Via cost multiplier in stub/BGA proximity zones (default: 10, 0=block vias)")
-    parser.add_argument("--max-iterations", type=int, default=200000,
-                        help="Max A* iterations before giving up (default: 200000)")
+    parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
+                        help=f"Grid resolution in mm (default: {defaults.GRID_STEP})")
+    parser.add_argument("--via-cost", type=int, default=defaults.VIA_COST,
+                        help=f"Penalty for placing a via in grid steps (default: {defaults.VIA_COST})")
+    parser.add_argument("--via-proximity-cost", type=int, default=defaults.VIA_PROXIMITY_COST,
+                        help=f"Via cost multiplier in stub/BGA proximity zones (default: {defaults.VIA_PROXIMITY_COST}, 0=block vias)")
+    parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,
+                        help=f"Max A* iterations before giving up (default: {defaults.MAX_ITERATIONS})")
     parser.add_argument("--max-probe-iterations", type=int, default=5000,
                         help="Max iterations for quick probe phase per direction (default: 5000)")
-    parser.add_argument("--heuristic-weight", type=float, default=1.9,
-                        help="A* heuristic weight, higher=faster but less optimal (default: 1.9)")
-    parser.add_argument("--turn-cost", type=int, default=1000,
-                        help="Penalty for direction changes, encourages straighter paths (default: 1000)")
+    parser.add_argument("--heuristic-weight", type=float, default=defaults.HEURISTIC_WEIGHT,
+                        help=f"A* heuristic weight, higher=faster but less optimal (default: {defaults.HEURISTIC_WEIGHT})")
+    parser.add_argument("--turn-cost", type=int, default=defaults.TURN_COST,
+                        help=f"Penalty for direction changes, encourages straighter paths (default: {defaults.TURN_COST})")
 
     # Stub proximity penalty
-    parser.add_argument("--stub-proximity-radius", type=float, default=2.0,
-                        help="Radius around stubs to penalize routing in mm (default: 2.0)")
-    parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
-                        help="Cost penalty near stubs in mm equivalent (default: 0.2)")
+    parser.add_argument("--stub-proximity-radius", type=float, default=defaults.STUB_PROXIMITY_RADIUS,
+                        help=f"Radius around stubs to penalize routing in mm (default: {defaults.STUB_PROXIMITY_RADIUS})")
+    parser.add_argument("--stub-proximity-cost", type=float, default=defaults.STUB_PROXIMITY_COST,
+                        help=f"Cost penalty near stubs in mm equivalent (default: {defaults.STUB_PROXIMITY_COST})")
 
     # BGA proximity penalty
     parser.add_argument("--bga-proximity-radius", type=float, default=7.0,
@@ -856,10 +857,10 @@ For differential pair routing, use route_diff.py:
                         help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 
     # Track proximity penalty (same layer only)
-    parser.add_argument("--track-proximity-distance", type=float, default=2.0,
-                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 2.0)")
-    parser.add_argument("--track-proximity-cost", type=float, default=0.2,
-                        help="Cost penalty near routed tracks in mm equivalent (default: 0.2)")
+    parser.add_argument("--track-proximity-distance", type=float, default=defaults.TRACK_PROXIMITY_DISTANCE,
+                        help=f"Distance around routed tracks to penalize routing on same layer in mm (default: {defaults.TRACK_PROXIMITY_DISTANCE})")
+    parser.add_argument("--track-proximity-cost", type=float, default=defaults.TRACK_PROXIMITY_COST,
+                        help=f"Cost penalty near routed tracks in mm equivalent (default: {defaults.TRACK_PROXIMITY_COST})")
 
     # Layer swap and target swap options
     parser.add_argument("--no-stub-layer-swap", action="store_true",
@@ -890,14 +891,14 @@ For differential pair routing, use route_diff.py:
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
 
     # Rip-up and retry options
-    parser.add_argument("--max-ripup", type=int, default=3,
-                        help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
-    parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
-                        help="Multiplier on track-via clearance (1.0 = minimum DRC)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2,
-                        help="Minimum clearance between drill holes in mm (default: 0.2)")
-    parser.add_argument("--board-edge-clearance", type=float, default=0.0,
-                        help="Clearance from board edge in mm (default: 0 = use track clearance)")
+    parser.add_argument("--max-ripup", type=int, default=defaults.MAX_RIPUP,
+                        help=f"Maximum blockers to rip up at once during rip-up and retry (default: {defaults.MAX_RIPUP})")
+    parser.add_argument("--routing-clearance-margin", type=float, default=defaults.ROUTING_CLEARANCE_MARGIN,
+                        help=f"Multiplier on track-via clearance ({defaults.ROUTING_CLEARANCE_MARGIN} = minimum DRC)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
+                        help=f"Minimum clearance between drill holes in mm (default: {defaults.HOLE_TO_HOLE_CLEARANCE})")
+    parser.add_argument("--board-edge-clearance", type=float, default=defaults.BOARD_EDGE_CLEARANCE,
+                        help=f"Clearance from board edge in mm (default: {defaults.BOARD_EDGE_CLEARANCE} = use track clearance)")
 
     # Vertical alignment attraction options
     parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,

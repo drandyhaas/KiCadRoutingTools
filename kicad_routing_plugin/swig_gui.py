@@ -6,6 +6,7 @@ Provides a wx-based dialog for routing configuration.
 
 import os
 import sys
+import time
 import wx
 import threading
 
@@ -14,6 +15,8 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+
+import routing_defaults as defaults
 
 
 class StdoutRedirector:
@@ -34,6 +37,23 @@ class StdoutRedirector:
     def flush(self):
         if self.original:
             self.original.flush()
+
+
+def _build_layer_mappings():
+    """Build layer name <-> ID mappings using pcbnew.
+
+    Returns:
+        tuple: (name_to_id dict, id_to_name dict)
+    """
+    import pcbnew
+    name_to_id = {'F.Cu': pcbnew.F_Cu, 'B.Cu': pcbnew.B_Cu}
+    id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
+    for i in range(1, 31):
+        layer_id = getattr(pcbnew, f'In{i}_Cu', None)
+        if layer_id is not None:
+            name_to_id[f'In{i}.Cu'] = layer_id
+            id_to_name[layer_id] = f'In{i}.Cu'
+    return name_to_id, id_to_name
 
 
 class RoutingDialog(wx.Dialog):
@@ -82,17 +102,11 @@ class RoutingDialog(wx.Dialog):
             return
 
         try:
-            # Layer ID to name mapping
-            layer_names = {}
-            layer_names[pcbnew.F_Cu] = 'F.Cu'
-            layer_names[pcbnew.B_Cu] = 'B.Cu'
-            for i in range(1, 31):
-                layer_id = getattr(pcbnew, f'In{i}_Cu', None)
-                if layer_id is not None:
-                    layer_names[layer_id] = f'In{i}.Cu'
+            # Get layer mappings
+            _, id_to_name = _build_layer_mappings()
 
             def get_layer_name(layer_id):
-                return layer_names.get(layer_id, 'F.Cu')
+                return id_to_name.get(layer_id, 'F.Cu')
 
             # Collect all segments from board
             new_segments = []
@@ -195,38 +209,44 @@ class RoutingDialog(wx.Dialog):
         param_grid.AddGrowableCol(1)
 
         # Track width
+        r = defaults.PARAM_RANGES['track_width']
         param_grid.Add(wx.StaticText(param_scroll, label="Track Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.track_width = wx.SpinCtrlDouble(param_scroll, min=0.05, max=5.0, initial=0.3, inc=0.05)
-        self.track_width.SetDigits(2)
+        self.track_width = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.TRACK_WIDTH, inc=r['inc'])
+        self.track_width.SetDigits(r['digits'])
         param_grid.Add(self.track_width, 0, wx.EXPAND)
 
         # Clearance
+        r = defaults.PARAM_RANGES['clearance']
         param_grid.Add(wx.StaticText(param_scroll, label="Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.clearance = wx.SpinCtrlDouble(param_scroll, min=0.05, max=5.0, initial=0.25, inc=0.05)
-        self.clearance.SetDigits(2)
+        self.clearance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
+        self.clearance.SetDigits(r['digits'])
         param_grid.Add(self.clearance, 0, wx.EXPAND)
 
         # Via size
+        r = defaults.PARAM_RANGES['via_size']
         param_grid.Add(wx.StaticText(param_scroll, label="Via Size (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_size = wx.SpinCtrlDouble(param_scroll, min=0.2, max=2.0, initial=0.5, inc=0.05)
-        self.via_size.SetDigits(2)
+        self.via_size = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_SIZE, inc=r['inc'])
+        self.via_size.SetDigits(r['digits'])
         param_grid.Add(self.via_size, 0, wx.EXPAND)
 
         # Via drill
+        r = defaults.PARAM_RANGES['via_drill']
         param_grid.Add(wx.StaticText(param_scroll, label="Via Drill (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_drill = wx.SpinCtrlDouble(param_scroll, min=0.1, max=1.5, initial=0.3, inc=0.05)
-        self.via_drill.SetDigits(2)
+        self.via_drill = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_DRILL, inc=r['inc'])
+        self.via_drill.SetDigits(r['digits'])
         param_grid.Add(self.via_drill, 0, wx.EXPAND)
 
         # Grid step
+        r = defaults.PARAM_RANGES['grid_step']
         param_grid.Add(wx.StaticText(param_scroll, label="Grid Step (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.grid_step = wx.SpinCtrlDouble(param_scroll, min=0.01, max=1.0, initial=0.05, inc=0.01)
-        self.grid_step.SetDigits(3)
+        self.grid_step = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.GRID_STEP, inc=r['inc'])
+        self.grid_step.SetDigits(r['digits'])
         param_grid.Add(self.grid_step, 0, wx.EXPAND)
 
         # Via cost
+        r = defaults.PARAM_RANGES['via_cost']
         param_grid.Add(wx.StaticText(param_scroll, label="Via Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_cost = wx.SpinCtrl(param_scroll, min=1, max=1000, initial=80)
+        self.via_cost = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_COST)
         param_grid.Add(self.via_cost, 0, wx.EXPAND)
 
         param_inner.Add(param_grid, 0, wx.EXPAND | wx.ALL, 5)
@@ -241,78 +261,90 @@ class RoutingDialog(wx.Dialog):
         adv_grid.AddGrowableCol(1)
 
         # Max iterations
+        r = defaults.PARAM_RANGES['max_iterations']
         adv_grid.Add(wx.StaticText(param_scroll, label="Max Iterations:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.max_iterations = wx.SpinCtrl(param_scroll, min=1000, max=1000000, initial=200000)
+        self.max_iterations = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.MAX_ITERATIONS)
         adv_grid.Add(self.max_iterations, 0, wx.EXPAND)
 
         # Heuristic weight
+        r = defaults.PARAM_RANGES['heuristic_weight']
         adv_grid.Add(wx.StaticText(param_scroll, label="Heuristic Weight:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.heuristic_weight = wx.SpinCtrlDouble(param_scroll, min=1.0, max=5.0, initial=1.9, inc=0.1)
-        self.heuristic_weight.SetDigits(1)
+        self.heuristic_weight = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.HEURISTIC_WEIGHT, inc=r['inc'])
+        self.heuristic_weight.SetDigits(r['digits'])
         adv_grid.Add(self.heuristic_weight, 0, wx.EXPAND)
 
         # Turn cost
+        r = defaults.PARAM_RANGES['turn_cost']
         adv_grid.Add(wx.StaticText(param_scroll, label="Turn Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.turn_cost = wx.SpinCtrl(param_scroll, min=0, max=10000, initial=1000)
+        self.turn_cost = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.TURN_COST)
         adv_grid.Add(self.turn_cost, 0, wx.EXPAND)
 
         # Max rip-up count
+        r = defaults.PARAM_RANGES['max_ripup']
         adv_grid.Add(wx.StaticText(param_scroll, label="Max Rip-up Count:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.max_ripup = wx.SpinCtrl(param_scroll, min=0, max=10, initial=3)
+        self.max_ripup = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.MAX_RIPUP)
         adv_grid.Add(self.max_ripup, 0, wx.EXPAND)
 
         # Ordering strategy
         adv_grid.Add(wx.StaticText(param_scroll, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.ordering_strategy = wx.Choice(param_scroll, choices=["mps", "inside_out", "original"])
-        self.ordering_strategy.SetSelection(0)
+        self.ordering_strategy.SetSelection(0)  # mps is default
         adv_grid.Add(self.ordering_strategy, 0, wx.EXPAND)
 
         # Stub proximity radius
+        r = defaults.PARAM_RANGES['stub_proximity_radius']
         adv_grid.Add(wx.StaticText(param_scroll, label="Stub Proximity (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.stub_proximity_radius = wx.SpinCtrlDouble(param_scroll, min=0.0, max=10.0, initial=2.0, inc=0.5)
-        self.stub_proximity_radius.SetDigits(1)
+        self.stub_proximity_radius = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.STUB_PROXIMITY_RADIUS, inc=r['inc'])
+        self.stub_proximity_radius.SetDigits(r['digits'])
         adv_grid.Add(self.stub_proximity_radius, 0, wx.EXPAND)
 
         # Stub proximity cost
+        r = defaults.PARAM_RANGES['stub_proximity_cost']
         adv_grid.Add(wx.StaticText(param_scroll, label="Stub Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.stub_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=0.0, max=5.0, initial=0.2, inc=0.1)
-        self.stub_proximity_cost.SetDigits(1)
+        self.stub_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.STUB_PROXIMITY_COST, inc=r['inc'])
+        self.stub_proximity_cost.SetDigits(r['digits'])
         adv_grid.Add(self.stub_proximity_cost, 0, wx.EXPAND)
 
         # Via proximity cost
+        r = defaults.PARAM_RANGES['via_proximity_cost']
         adv_grid.Add(wx.StaticText(param_scroll, label="Via Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=0.0, max=100.0, initial=10.0, inc=1.0)
-        self.via_proximity_cost.SetDigits(1)
+        self.via_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_PROXIMITY_COST, inc=r['inc'])
+        self.via_proximity_cost.SetDigits(r['digits'])
         adv_grid.Add(self.via_proximity_cost, 0, wx.EXPAND)
 
         # Track proximity distance
+        r = defaults.PARAM_RANGES['track_proximity_distance']
         adv_grid.Add(wx.StaticText(param_scroll, label="Track Prox. (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.track_proximity_distance = wx.SpinCtrlDouble(param_scroll, min=0.0, max=10.0, initial=2.0, inc=0.5)
-        self.track_proximity_distance.SetDigits(1)
+        self.track_proximity_distance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.TRACK_PROXIMITY_DISTANCE, inc=r['inc'])
+        self.track_proximity_distance.SetDigits(r['digits'])
         adv_grid.Add(self.track_proximity_distance, 0, wx.EXPAND)
 
         # Track proximity cost
+        r = defaults.PARAM_RANGES['track_proximity_cost']
         adv_grid.Add(wx.StaticText(param_scroll, label="Track Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.track_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=0.0, max=5.0, initial=0.2, inc=0.1)
-        self.track_proximity_cost.SetDigits(1)
+        self.track_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.TRACK_PROXIMITY_COST, inc=r['inc'])
+        self.track_proximity_cost.SetDigits(r['digits'])
         adv_grid.Add(self.track_proximity_cost, 0, wx.EXPAND)
 
         # Routing clearance margin
+        r = defaults.PARAM_RANGES['routing_clearance_margin']
         adv_grid.Add(wx.StaticText(param_scroll, label="Clearance Margin:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.routing_clearance_margin = wx.SpinCtrlDouble(param_scroll, min=0.5, max=2.0, initial=1.0, inc=0.1)
-        self.routing_clearance_margin.SetDigits(1)
+        self.routing_clearance_margin = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.ROUTING_CLEARANCE_MARGIN, inc=r['inc'])
+        self.routing_clearance_margin.SetDigits(r['digits'])
         adv_grid.Add(self.routing_clearance_margin, 0, wx.EXPAND)
 
         # Hole-to-hole clearance
+        r = defaults.PARAM_RANGES['hole_to_hole_clearance']
         adv_grid.Add(wx.StaticText(param_scroll, label="Hole Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.hole_to_hole_clearance = wx.SpinCtrlDouble(param_scroll, min=0.0, max=1.0, initial=0.2, inc=0.05)
-        self.hole_to_hole_clearance.SetDigits(2)
+        self.hole_to_hole_clearance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.HOLE_TO_HOLE_CLEARANCE, inc=r['inc'])
+        self.hole_to_hole_clearance.SetDigits(r['digits'])
         adv_grid.Add(self.hole_to_hole_clearance, 0, wx.EXPAND)
 
         # Board edge clearance
+        r = defaults.PARAM_RANGES['board_edge_clearance']
         adv_grid.Add(wx.StaticText(param_scroll, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.board_edge_clearance = wx.SpinCtrlDouble(param_scroll, min=0.0, max=5.0, initial=0.0, inc=0.1)
-        self.board_edge_clearance.SetDigits(1)
+        self.board_edge_clearance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.BOARD_EDGE_CLEARANCE, inc=r['inc'])
+        self.board_edge_clearance.SetDigits(r['digits'])
         adv_grid.Add(self.board_edge_clearance, 0, wx.EXPAND)
 
         # Enable layer switch checkbox
@@ -585,10 +617,6 @@ class RoutingDialog(wx.Dialog):
         """Actually append text to log (must be called on main thread)."""
         self.log_text.AppendText(text)
 
-    def _prepare_log_for_routing(self):
-        """Prepare log tab for routing output."""
-        pass  # Log is not cleared automatically; user can use Clear Log button
-
     def _get_selected_nets(self):
         """Get list of selected net names."""
         selected = []
@@ -624,6 +652,7 @@ class RoutingDialog(wx.Dialog):
         # Disable UI during routing
         self.route_btn.Disable()
         self._cancel_requested = False
+        self._routing_start_time = time.time()  # Track wall time from button press
 
         # Get parameters
         config = {
@@ -667,9 +696,6 @@ class RoutingDialog(wx.Dialog):
 
     def _run_routing(self, config):
         """Run the routing in a background thread."""
-        # Clear log and switch to log tab
-        wx.CallAfter(self._prepare_log_for_routing)
-
         # Set up stdout redirection to capture routing output
         original_stdout = sys.stdout
         sys.stdout = StdoutRedirector(self._append_log, original_stdout)
@@ -695,9 +721,8 @@ class RoutingDialog(wx.Dialog):
 
                 if missing:
                     msg = f"Missing Python dependencies: {', '.join(missing)}\n\n"
-                    msg += "Install them in KiCad's Python with:\n"
-                    msg += "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/pip3 install "
-                    msg += " ".join(missing)
+                    msg += "Install them using KiCad's Python interpreter:\n"
+                    msg += f"  {sys.executable} -m pip install " + " ".join(missing)
                     raise RuntimeError(msg)
                 else:
                     raise RuntimeError(f"Startup check failed: {e}")
@@ -744,8 +769,10 @@ class RoutingDialog(wx.Dialog):
             if self._cancel_requested:
                 wx.CallAfter(self._routing_cancelled)
             else:
+                # Calculate wall time from button press
+                wall_time = time.time() - self._routing_start_time
                 # Apply results to pcbnew on main thread
-                wx.CallAfter(self._apply_results_to_board, results_data, successful, failed, total_time, config)
+                wx.CallAfter(self._apply_results_to_board, results_data, successful, failed, wall_time, config)
 
         except Exception as e:
             wx.CallAfter(self._routing_error, str(e))
@@ -791,21 +818,12 @@ class RoutingDialog(wx.Dialog):
         vias_added = 0
         debug_lines_added = 0
 
+        # Get layer mappings
+        name_to_id, _ = _build_layer_mappings()
+
         def get_layer_id(layer_name):
             """Convert layer name to pcbnew layer ID."""
-            # Standard copper layer mapping (KiCad supports up to 32 copper layers)
-            layer_ids = {
-                'F.Cu': pcbnew.F_Cu,
-                'B.Cu': pcbnew.B_Cu,
-            }
-            # Add inner copper layers In1.Cu through In30.Cu
-            for i in range(1, 31):
-                layer_ids[f'In{i}.Cu'] = getattr(pcbnew, f'In{i}_Cu', None)
-
-            layer_id = layer_ids.get(layer_name)
-            if layer_id is not None:
-                return layer_id
-            return pcbnew.F_Cu
+            return name_to_id.get(layer_name, pcbnew.F_Cu)
 
         # Add segments from routing results
         for result in results_data.get('results', []):
@@ -827,37 +845,12 @@ class RoutingDialog(wx.Dialog):
                 tracks_added += 1
 
             for via in result.get('new_vias', []):
-                pcb_via = pcbnew.PCB_VIA(board)
-                pcb_via.SetPosition(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(via.x),
-                    pcbnew.FromMM(via.y)
-                ))
-                pcb_via.SetWidth(pcbnew.FromMM(via.size))
-                pcb_via.SetDrill(pcbnew.FromMM(via.drill))
-                pcb_via.SetNetCode(via.net_id)
-                # Set via layers
-                if hasattr(via, 'layers') and len(via.layers) >= 2:
-                    top_layer = get_layer_id(via.layers[0])
-                    bot_layer = get_layer_id(via.layers[1])
-                    pcb_via.SetLayerPair(top_layer, bot_layer)
-                board.Add(pcb_via)
+                self._add_via_to_board(board, via, get_layer_id)
                 vias_added += 1
 
         # Add vias from layer swapping
         for via in results_data.get('all_swap_vias', []):
-            pcb_via = pcbnew.PCB_VIA(board)
-            pcb_via.SetPosition(pcbnew.VECTOR2I(
-                pcbnew.FromMM(via.x),
-                pcbnew.FromMM(via.y)
-            ))
-            pcb_via.SetWidth(pcbnew.FromMM(via.size))
-            pcb_via.SetDrill(pcbnew.FromMM(via.drill))
-            pcb_via.SetNetCode(via.net_id)
-            if hasattr(via, 'layers') and len(via.layers) >= 2:
-                top_layer = get_layer_id(via.layers[0])
-                bot_layer = get_layer_id(via.layers[1])
-                pcb_via.SetLayerPair(top_layer, bot_layer)
-            board.Add(pcb_via)
+            self._add_via_to_board(board, via, get_layer_id)
             vias_added += 1
 
         # Add debug visualization lines if enabled
@@ -892,6 +885,23 @@ class RoutingDialog(wx.Dialog):
 
         # Refresh net list to hide newly connected nets
         self._update_net_list()
+
+    def _add_via_to_board(self, board, via, get_layer_id):
+        """Add a via to the pcbnew board."""
+        import pcbnew
+        pcb_via = pcbnew.PCB_VIA(board)
+        pcb_via.SetPosition(pcbnew.VECTOR2I(
+            pcbnew.FromMM(via.x),
+            pcbnew.FromMM(via.y)
+        ))
+        pcb_via.SetWidth(pcbnew.FromMM(via.size))
+        pcb_via.SetDrill(pcbnew.FromMM(via.drill))
+        pcb_via.SetNetCode(via.net_id)
+        if hasattr(via, 'layers') and len(via.layers) >= 2:
+            top_layer = get_layer_id(via.layers[0])
+            bot_layer = get_layer_id(via.layers[1])
+            pcb_via.SetLayerPair(top_layer, bot_layer)
+        board.Add(pcb_via)
 
     def _move_copper_text_to_silkscreen(self, board):
         """Move gr_text items from copper layers to silkscreen."""

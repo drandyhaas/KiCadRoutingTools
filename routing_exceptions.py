@@ -53,3 +53,19 @@ class LayerError(RoutingError):
 class GridResolutionError(RoutingError):
     """Raised when grid resolution causes issues."""
     pass
+
+
+class DependencyError(RoutingError):
+    """Raised when required Python dependencies are missing."""
+
+    def __init__(self, missing_packages: list, message: str = ""):
+        self.missing_packages = missing_packages
+        super().__init__(message or f"Missing dependencies: {', '.join(missing_packages)}")
+
+
+class NetNotFoundError(RoutingError):
+    """Raised when specified net patterns match no nets."""
+
+    def __init__(self, patterns: list, message: str = ""):
+        self.patterns = patterns
+        super().__init__(message or f"No nets match patterns: {', '.join(patterns)}")
