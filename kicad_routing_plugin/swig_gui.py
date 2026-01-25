@@ -126,6 +126,22 @@ class RoutingDialog(wx.Dialog):
 
         main_sizer.Add(layer_sizer, 0, wx.EXPAND | wx.ALL, 10)
 
+        # Options
+        options_box = wx.StaticBox(panel, label="Options")
+        options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
+
+        self.move_text_check = wx.CheckBox(panel, label="Move copper text to silkscreen")
+        self.move_text_check.SetValue(True)
+        self.move_text_check.SetToolTip("Move gr_text from copper layers to silkscreen to prevent routing interference")
+        options_sizer.Add(self.move_text_check, 0, wx.ALL, 5)
+
+        self.debug_lines_check = wx.CheckBox(panel, label="Add debug visualization lines")
+        self.debug_lines_check.SetValue(False)
+        self.debug_lines_check.SetToolTip("Add routing paths to User layers for debugging")
+        options_sizer.Add(self.debug_lines_check, 0, wx.ALL, 5)
+
+        main_sizer.Add(options_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+
         # Progress
         progress_box = wx.StaticBox(panel, label="Progress")
         progress_sizer = wx.StaticBoxSizer(progress_box, wx.VERTICAL)
@@ -243,6 +259,8 @@ class RoutingDialog(wx.Dialog):
             'via_drill': self.via_drill.GetValue(),
             'grid_step': self.grid_step.GetValue(),
             'via_cost': self.via_cost.GetValue(),
+            'move_copper_text': self.move_text_check.GetValue(),
+            'debug_lines': self.debug_lines_check.GetValue(),
         }
 
         # Run routing in a thread
@@ -286,20 +304,16 @@ class RoutingDialog(wx.Dialog):
                 else:
                     raise RuntimeError(f"Startup check failed: {e}")
 
-            # Generate output file path
-            base, ext = os.path.splitext(self.board_filename)
-            output_file = f"{base}_routed{ext}"
-
             def check_cancel():
                 return self._cancel_requested
 
             def on_progress(current, total, net_name=""):
                 wx.CallAfter(self._update_progress, current, total, net_name)
 
-            # Run the router
-            successful, failed, total_time = batch_route(
+            # Run the router with return_results=True to get track data
+            successful, failed, total_time, results_data = batch_route(
                 input_file=self.board_filename,
-                output_file=output_file,
+                output_file="",  # Not used when return_results=True
                 net_names=config['nets'],
                 layers=config['layers'],
                 track_width=config['track_width'],
@@ -310,14 +324,17 @@ class RoutingDialog(wx.Dialog):
                 via_cost=config['via_cost'],
                 max_iterations=200000,
                 heuristic_weight=1.9,
+                debug_lines=config['debug_lines'],
                 cancel_check=check_cancel,
                 progress_callback=on_progress,
+                return_results=True,
             )
 
             if self._cancel_requested:
                 wx.CallAfter(self._routing_cancelled)
             else:
-                wx.CallAfter(self._routing_complete, successful, failed, total_time, output_file)
+                # Apply results to pcbnew on main thread
+                wx.CallAfter(self._apply_results_to_board, results_data, successful, failed, total_time, config)
 
         except Exception as e:
             wx.CallAfter(self._routing_error, str(e))
@@ -336,19 +353,202 @@ class RoutingDialog(wx.Dialog):
             self.progress_bar.SetValue(percent)
         self.status_text.SetLabel(f"Routing: {net_name} ({current}/{total})")
 
-    def _routing_complete(self, successful, failed, total_time, output_file):
-        """Handle routing completion."""
+    def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
+        """Apply routing results directly to the open pcbnew board."""
+        import pcbnew
+
+        board = pcbnew.GetBoard()
+        if board is None:
+            wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
+            return
+
+        # Move copper text to silkscreen if enabled
+        text_moved = 0
+        if config.get('move_copper_text', True):
+            text_moved = self._move_copper_text_to_silkscreen(board)
+
+        # Track counts for reporting
+        tracks_added = 0
+        vias_added = 0
+        debug_lines_added = 0
+
+        def get_layer_id(layer_name):
+            """Convert layer name to pcbnew layer ID."""
+            # Standard copper layer mapping (KiCad supports up to 32 copper layers)
+            layer_ids = {
+                'F.Cu': pcbnew.F_Cu,
+                'B.Cu': pcbnew.B_Cu,
+            }
+            # Add inner copper layers In1.Cu through In30.Cu
+            for i in range(1, 31):
+                layer_ids[f'In{i}.Cu'] = getattr(pcbnew, f'In{i}_Cu', None)
+
+            layer_id = layer_ids.get(layer_name)
+            if layer_id is not None:
+                return layer_id
+            return pcbnew.F_Cu
+
+        # Add segments from routing results
+        for result in results_data.get('results', []):
+            for seg in result.get('new_segments', []):
+                track = pcbnew.PCB_TRACK(board)
+                # Convert mm to internal units (nanometers)
+                track.SetStart(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(seg.start_x),
+                    pcbnew.FromMM(seg.start_y)
+                ))
+                track.SetEnd(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(seg.end_x),
+                    pcbnew.FromMM(seg.end_y)
+                ))
+                track.SetWidth(pcbnew.FromMM(seg.width))
+                track.SetLayer(get_layer_id(seg.layer))
+                track.SetNetCode(seg.net_id)
+                board.Add(track)
+                tracks_added += 1
+
+            for via in result.get('new_vias', []):
+                pcb_via = pcbnew.PCB_VIA(board)
+                pcb_via.SetPosition(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(via.x),
+                    pcbnew.FromMM(via.y)
+                ))
+                pcb_via.SetWidth(pcbnew.FromMM(via.size))
+                pcb_via.SetDrill(pcbnew.FromMM(via.drill))
+                pcb_via.SetNetCode(via.net_id)
+                # Set via layers
+                if hasattr(via, 'layers') and len(via.layers) >= 2:
+                    top_layer = get_layer_id(via.layers[0])
+                    bot_layer = get_layer_id(via.layers[1])
+                    pcb_via.SetLayerPair(top_layer, bot_layer)
+                board.Add(pcb_via)
+                vias_added += 1
+
+        # Add vias from layer swapping
+        for via in results_data.get('all_swap_vias', []):
+            pcb_via = pcbnew.PCB_VIA(board)
+            pcb_via.SetPosition(pcbnew.VECTOR2I(
+                pcbnew.FromMM(via.x),
+                pcbnew.FromMM(via.y)
+            ))
+            pcb_via.SetWidth(pcbnew.FromMM(via.size))
+            pcb_via.SetDrill(pcbnew.FromMM(via.drill))
+            pcb_via.SetNetCode(via.net_id)
+            if hasattr(via, 'layers') and len(via.layers) >= 2:
+                top_layer = get_layer_id(via.layers[0])
+                bot_layer = get_layer_id(via.layers[1])
+                pcb_via.SetLayerPair(top_layer, bot_layer)
+            board.Add(pcb_via)
+            vias_added += 1
+
+        # Add debug visualization lines if enabled
+        if config.get('debug_lines', False):
+            debug_lines_added = self._add_debug_lines(board, results_data)
+
+        # Refresh the view
+        pcbnew.Refresh()
+
+        # Update UI and show completion message
         self.progress_bar.SetValue(100)
         self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed")
 
         msg = f"Routing complete!\n\n"
-        msg += f"Successfully routed: {successful}\n"
+        msg += f"Successfully routed: {successful} nets\n"
         msg += f"Failed: {failed}\n"
         msg += f"Time: {total_time:.1f}s\n\n"
-        msg += f"Output saved to:\n{output_file}\n\n"
-        msg += "Please reload the board to see the changes."
+        msg += f"Added to board:\n"
+        msg += f"  {tracks_added} tracks\n"
+        msg += f"  {vias_added} vias\n"
+        if text_moved > 0:
+            msg += f"  {text_moved} text items moved to silkscreen\n"
+        if debug_lines_added > 0:
+            msg += f"  {debug_lines_added} debug lines\n"
+        msg += "\nUse Edit -> Undo to revert changes."
 
         wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
+
+    def _move_copper_text_to_silkscreen(self, board):
+        """Move gr_text items from copper layers to silkscreen."""
+        import pcbnew
+
+        count = 0
+        for drawing in board.GetDrawings():
+            if drawing.GetClass() == "PCB_TEXT":
+                layer = drawing.GetLayer()
+                # Check if on F.Cu or B.Cu
+                if layer == pcbnew.F_Cu:
+                    drawing.SetLayer(pcbnew.F_SilkS)
+                    count += 1
+                elif layer == pcbnew.B_Cu:
+                    drawing.SetLayer(pcbnew.B_SilkS)
+                    count += 1
+        return count
+
+    def _add_debug_lines(self, board, results_data):
+        """Add debug visualization lines to User layers."""
+        import pcbnew
+
+        count = 0
+
+        # User layer mapping
+        user_layers = {
+            'User.3': pcbnew.User_3,   # Connector lines
+            'User.4': pcbnew.User_4,   # Stub direction arrows
+            'User.5': pcbnew.User_5,   # Exclusion zones
+            'User.8': pcbnew.User_8,   # Simplified path
+            'User.9': pcbnew.User_9,   # Raw A* path
+        }
+
+        def add_line(start, end, layer_name, width_mm=0.05):
+            nonlocal count
+            layer_id = user_layers.get(layer_name, pcbnew.User_9)
+            shape = pcbnew.PCB_SHAPE(board)
+            shape.SetShape(pcbnew.SHAPE_T_SEGMENT)
+            shape.SetStart(pcbnew.VECTOR2I(
+                pcbnew.FromMM(start[0]),
+                pcbnew.FromMM(start[1])
+            ))
+            shape.SetEnd(pcbnew.VECTOR2I(
+                pcbnew.FromMM(end[0]),
+                pcbnew.FromMM(end[1])
+            ))
+            shape.SetWidth(pcbnew.FromMM(width_mm))
+            shape.SetLayer(layer_id)
+            board.Add(shape)
+            count += 1
+
+        for result in results_data.get('results', []):
+            # Raw A* path on User.9
+            raw_path = result.get('raw_astar_path', [])
+            if len(raw_path) >= 2:
+                for i in range(len(raw_path) - 1):
+                    x1, y1 = raw_path[i][0], raw_path[i][1]
+                    x2, y2 = raw_path[i + 1][0], raw_path[i + 1][1]
+                    if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
+                        add_line((x1, y1), (x2, y2), 'User.9')
+
+            # Simplified path on User.8
+            simplified_path = result.get('simplified_path', [])
+            if len(simplified_path) >= 2:
+                for i in range(len(simplified_path) - 1):
+                    x1, y1 = simplified_path[i][0], simplified_path[i][1]
+                    x2, y2 = simplified_path[i + 1][0], simplified_path[i + 1][1]
+                    if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
+                        add_line((x1, y1), (x2, y2), 'User.8')
+
+            # Connector segments on User.3
+            for start, end in result.get('debug_connector_lines', []):
+                add_line(start, end, 'User.3')
+
+            # Stub direction arrows on User.4
+            for start, end in result.get('debug_stub_arrows', []):
+                add_line(start, end, 'User.4')
+
+        # Exclusion zone lines on User.5
+        for start, end in results_data.get('exclusion_zone_lines', []):
+            add_line(start, end, 'User.5')
+
+        return count
 
     def _routing_cancelled(self):
         """Handle routing cancellation."""

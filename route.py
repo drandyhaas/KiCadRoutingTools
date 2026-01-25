@@ -144,7 +144,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layer_costs: Optional[List[float]] = None,
                 add_teardrops: bool = False,
                 cancel_check=None,
-                progress_callback=None) -> Tuple[int, int, float]:
+                progress_callback=None,
+                return_results: bool = False) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -181,9 +182,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         vis_callback: Optional visualization callback (implements VisualizationCallback protocol)
         cancel_check: Optional callable returning True if routing should be cancelled
         progress_callback: Optional callable(current, total, net_name) for progress updates
+        return_results: If True, return results data instead of writing to file
 
     Returns:
-        (successful_count, failed_count, total_time)
+        If return_results=False: (successful_count, failed_count, total_time)
+        If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
     visualize = vis_callback is not None
 
@@ -672,23 +675,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     }
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
-    # Write output file using extracted output_writer module
-    write_routed_output(
-        input_file=input_file,
-        output_file=output_file,
-        results=results,
-        all_segment_modifications=all_segment_modifications,
-        all_swap_vias=all_swap_vias,
-        target_swap_info=[],
-        single_ended_target_swap_info=single_ended_target_swap_info,
-        pad_swaps=pad_swaps,
-        pcb_data=pcb_data,
-        debug_lines=debug_lines,
-        exclusion_zone_lines=exclusion_zone_lines,
-        boundary_debug_labels=boundary_debug_labels,
-        skip_routing=skip_routing,
-        add_teardrops=add_teardrops
-    )
+    # Write output file or return results for direct application
+    if return_results:
+        # Return results data for direct application (e.g., KiCad plugin)
+        results_data = {
+            'results': results,
+            'all_swap_vias': all_swap_vias,
+            'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
+            'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
+        }
+    else:
+        # Write output file using extracted output_writer module
+        write_routed_output(
+            input_file=input_file,
+            output_file=output_file,
+            results=results,
+            all_segment_modifications=all_segment_modifications,
+            all_swap_vias=all_swap_vias,
+            target_swap_info=[],
+            single_ended_target_swap_info=single_ended_target_swap_info,
+            pad_swaps=pad_swaps,
+            pcb_data=pcb_data,
+            debug_lines=debug_lines,
+            exclusion_zone_lines=exclusion_zone_lines,
+            boundary_debug_labels=boundary_debug_labels,
+            skip_routing=skip_routing,
+            add_teardrops=add_teardrops
+        )
 
     # Update schematics with swap info if directory specified
     if schematic_dir and single_ended_target_swap_info:
@@ -720,6 +733,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(format_obstacle_map_stats(state.working_obstacles))
         print("=" * 60)
 
+    if return_results:
+        return successful, failed, total_time, results_data
     return successful, failed, total_time
 
 if __name__ == "__main__":
