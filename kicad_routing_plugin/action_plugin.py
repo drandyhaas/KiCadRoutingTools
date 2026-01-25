@@ -21,9 +21,9 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
     """Action Plugin for KiCad Routing Tools."""
 
     def defaults(self):
-        self.name = "Route Nets"
+        self.name = "Auto-routing tools"
         self.category = "Routing"
-        self.description = "Advanced autorouting with differential pairs and length matching"
+        self.description = "Advanced auto-routing tools, by DrAndyHaas"
         self.show_toolbar_button = True
         icon_path = os.path.join(PLUGIN_DIR, "icon.png")
         if os.path.exists(icon_path):

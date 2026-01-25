@@ -23,7 +23,7 @@ class RoutingDialog(wx.Dialog):
         super().__init__(
             parent,
             title="KiCad Routing Tools",
-            size=(600, 700),
+            size=(800, 800),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
         )
 
@@ -37,11 +37,14 @@ class RoutingDialog(wx.Dialog):
         self.Centre()
 
     def _create_ui(self):
-        """Create the dialog UI."""
+        """Create the dialog UI with net list on left, scrollable options on right."""
         panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Net selection
+        # Horizontal split: nets on left, options on right
+        h_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        # === LEFT SIDE: Net Selection ===
         net_box = wx.StaticBox(panel, label="Net Selection")
         net_sizer = wx.StaticBoxSizer(net_box, wx.VERTICAL)
 
@@ -53,96 +56,207 @@ class RoutingDialog(wx.Dialog):
         filter_sizer.Add(self.filter_ctrl, 1, wx.EXPAND)
         net_sizer.Add(filter_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Net list
-        self.net_list = wx.CheckListBox(panel, size=(-1, 150))
+        # Net list (tall) with extended selection (Shift+click, Ctrl+click)
+        self.net_list = wx.CheckListBox(panel, size=(200, -1), style=wx.LB_EXTENDED)
+        self.net_list.Bind(wx.EVT_KEY_DOWN, self._on_net_list_key)
         net_sizer.Add(self.net_list, 1, wx.EXPAND | wx.ALL, 5)
 
-        # Select all/none buttons
+        # Select/Unselect buttons (operate on highlighted nets)
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.select_all_btn = wx.Button(panel, label="Select All")
-        self.select_all_btn.Bind(wx.EVT_BUTTON, self._on_select_all)
-        self.select_none_btn = wx.Button(panel, label="Select None")
-        self.select_none_btn.Bind(wx.EVT_BUTTON, self._on_select_none)
-        btn_sizer.Add(self.select_all_btn, 0, wx.RIGHT, 5)
-        btn_sizer.Add(self.select_none_btn, 0)
-        net_sizer.Add(btn_sizer, 0, wx.ALL, 5)
+        self.select_btn = wx.Button(panel, label="Select")
+        self.select_btn.Bind(wx.EVT_BUTTON, self._on_select)
+        self.unselect_btn = wx.Button(panel, label="Unselect")
+        self.unselect_btn.Bind(wx.EVT_BUTTON, self._on_unselect)
+        btn_sizer.Add(self.select_btn, 1, wx.RIGHT, 5)
+        btn_sizer.Add(self.unselect_btn, 1)
+        net_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        main_sizer.Add(net_sizer, 1, wx.EXPAND | wx.ALL, 10)
+        h_sizer.Add(net_sizer, 3, wx.EXPAND | wx.ALL, 5)
 
-        # Routing parameters
-        param_box = wx.StaticBox(panel, label="Routing Parameters")
-        param_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
+        # === RIGHT SIDE: Options with separate scroll areas ===
+        right_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # --- Routing Parameters (scrollable) ---
+        param_box = wx.StaticBox(panel, label="Parameters")
+        param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
+        param_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
+        param_scroll.SetScrollRate(0, 10)
+        param_inner = wx.BoxSizer(wx.VERTICAL)
         param_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         param_grid.AddGrowableCol(1)
 
         # Track width
-        param_grid.Add(wx.StaticText(panel, label="Track Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.track_width = wx.SpinCtrlDouble(panel, min=0.05, max=5.0, initial=0.3, inc=0.05)
+        param_grid.Add(wx.StaticText(param_scroll, label="Track Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.track_width = wx.SpinCtrlDouble(param_scroll, min=0.05, max=5.0, initial=0.3, inc=0.05)
         self.track_width.SetDigits(2)
         param_grid.Add(self.track_width, 0, wx.EXPAND)
 
         # Clearance
-        param_grid.Add(wx.StaticText(panel, label="Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.clearance = wx.SpinCtrlDouble(panel, min=0.05, max=5.0, initial=0.25, inc=0.05)
+        param_grid.Add(wx.StaticText(param_scroll, label="Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.clearance = wx.SpinCtrlDouble(param_scroll, min=0.05, max=5.0, initial=0.25, inc=0.05)
         self.clearance.SetDigits(2)
         param_grid.Add(self.clearance, 0, wx.EXPAND)
 
         # Via size
-        param_grid.Add(wx.StaticText(panel, label="Via Size (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_size = wx.SpinCtrlDouble(panel, min=0.2, max=2.0, initial=0.5, inc=0.05)
+        param_grid.Add(wx.StaticText(param_scroll, label="Via Size (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.via_size = wx.SpinCtrlDouble(param_scroll, min=0.2, max=2.0, initial=0.5, inc=0.05)
         self.via_size.SetDigits(2)
         param_grid.Add(self.via_size, 0, wx.EXPAND)
 
         # Via drill
-        param_grid.Add(wx.StaticText(panel, label="Via Drill (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_drill = wx.SpinCtrlDouble(panel, min=0.1, max=1.5, initial=0.3, inc=0.05)
+        param_grid.Add(wx.StaticText(param_scroll, label="Via Drill (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.via_drill = wx.SpinCtrlDouble(param_scroll, min=0.1, max=1.5, initial=0.3, inc=0.05)
         self.via_drill.SetDigits(2)
         param_grid.Add(self.via_drill, 0, wx.EXPAND)
 
         # Grid step
-        param_grid.Add(wx.StaticText(panel, label="Grid Step (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.grid_step = wx.SpinCtrlDouble(panel, min=0.01, max=1.0, initial=0.05, inc=0.01)
+        param_grid.Add(wx.StaticText(param_scroll, label="Grid Step (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.grid_step = wx.SpinCtrlDouble(param_scroll, min=0.01, max=1.0, initial=0.05, inc=0.01)
         self.grid_step.SetDigits(3)
         param_grid.Add(self.grid_step, 0, wx.EXPAND)
 
         # Via cost
-        param_grid.Add(wx.StaticText(panel, label="Via Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_cost = wx.SpinCtrl(panel, min=1, max=1000, initial=80)
+        param_grid.Add(wx.StaticText(param_scroll, label="Via Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.via_cost = wx.SpinCtrl(param_scroll, min=1, max=1000, initial=80)
         param_grid.Add(self.via_cost, 0, wx.EXPAND)
 
-        param_sizer.Add(param_grid, 0, wx.EXPAND | wx.ALL, 5)
-        main_sizer.Add(param_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        param_inner.Add(param_grid, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Layer selection
+        # --- Advanced section ---
+        adv_label = wx.StaticText(param_scroll, label="Advanced")
+        adv_label.SetFont(adv_label.GetFont().Bold())
+        param_inner.Add(adv_label, 0, wx.LEFT | wx.TOP, 5)
+        param_inner.Add(wx.StaticLine(param_scroll), 0, wx.EXPAND | wx.ALL, 5)
+
+        adv_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
+        adv_grid.AddGrowableCol(1)
+
+        # Max iterations
+        adv_grid.Add(wx.StaticText(param_scroll, label="Max Iterations:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.max_iterations = wx.SpinCtrl(param_scroll, min=1000, max=1000000, initial=200000)
+        adv_grid.Add(self.max_iterations, 0, wx.EXPAND)
+
+        # Heuristic weight
+        adv_grid.Add(wx.StaticText(param_scroll, label="Heuristic Weight:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.heuristic_weight = wx.SpinCtrlDouble(param_scroll, min=1.0, max=5.0, initial=1.9, inc=0.1)
+        self.heuristic_weight.SetDigits(1)
+        adv_grid.Add(self.heuristic_weight, 0, wx.EXPAND)
+
+        # Turn cost
+        adv_grid.Add(wx.StaticText(param_scroll, label="Turn Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.turn_cost = wx.SpinCtrl(param_scroll, min=0, max=10000, initial=1000)
+        adv_grid.Add(self.turn_cost, 0, wx.EXPAND)
+
+        # Max rip-up count
+        adv_grid.Add(wx.StaticText(param_scroll, label="Max Rip-up Count:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.max_ripup = wx.SpinCtrl(param_scroll, min=0, max=10, initial=3)
+        adv_grid.Add(self.max_ripup, 0, wx.EXPAND)
+
+        # Ordering strategy
+        adv_grid.Add(wx.StaticText(param_scroll, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.ordering_strategy = wx.Choice(param_scroll, choices=["mps", "inside_out", "original"])
+        self.ordering_strategy.SetSelection(0)
+        adv_grid.Add(self.ordering_strategy, 0, wx.EXPAND)
+
+        # Stub proximity radius
+        adv_grid.Add(wx.StaticText(param_scroll, label="Stub Proximity (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.stub_proximity_radius = wx.SpinCtrlDouble(param_scroll, min=0.0, max=10.0, initial=2.0, inc=0.5)
+        self.stub_proximity_radius.SetDigits(1)
+        adv_grid.Add(self.stub_proximity_radius, 0, wx.EXPAND)
+
+        # Stub proximity cost
+        adv_grid.Add(wx.StaticText(param_scroll, label="Stub Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.stub_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=0.0, max=5.0, initial=0.2, inc=0.1)
+        self.stub_proximity_cost.SetDigits(1)
+        adv_grid.Add(self.stub_proximity_cost, 0, wx.EXPAND)
+
+        # Via proximity cost
+        adv_grid.Add(wx.StaticText(param_scroll, label="Via Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.via_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=0.0, max=100.0, initial=10.0, inc=1.0)
+        self.via_proximity_cost.SetDigits(1)
+        adv_grid.Add(self.via_proximity_cost, 0, wx.EXPAND)
+
+        # Track proximity distance
+        adv_grid.Add(wx.StaticText(param_scroll, label="Track Prox. (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.track_proximity_distance = wx.SpinCtrlDouble(param_scroll, min=0.0, max=10.0, initial=2.0, inc=0.5)
+        self.track_proximity_distance.SetDigits(1)
+        adv_grid.Add(self.track_proximity_distance, 0, wx.EXPAND)
+
+        # Track proximity cost
+        adv_grid.Add(wx.StaticText(param_scroll, label="Track Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.track_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=0.0, max=5.0, initial=0.2, inc=0.1)
+        self.track_proximity_cost.SetDigits(1)
+        adv_grid.Add(self.track_proximity_cost, 0, wx.EXPAND)
+
+        # Routing clearance margin
+        adv_grid.Add(wx.StaticText(param_scroll, label="Clearance Margin:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.routing_clearance_margin = wx.SpinCtrlDouble(param_scroll, min=0.5, max=2.0, initial=1.0, inc=0.1)
+        self.routing_clearance_margin.SetDigits(1)
+        adv_grid.Add(self.routing_clearance_margin, 0, wx.EXPAND)
+
+        # Hole-to-hole clearance
+        adv_grid.Add(wx.StaticText(param_scroll, label="Hole Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.hole_to_hole_clearance = wx.SpinCtrlDouble(param_scroll, min=0.0, max=1.0, initial=0.2, inc=0.05)
+        self.hole_to_hole_clearance.SetDigits(2)
+        adv_grid.Add(self.hole_to_hole_clearance, 0, wx.EXPAND)
+
+        # Board edge clearance
+        adv_grid.Add(wx.StaticText(param_scroll, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.board_edge_clearance = wx.SpinCtrlDouble(param_scroll, min=0.0, max=5.0, initial=0.0, inc=0.1)
+        self.board_edge_clearance.SetDigits(1)
+        adv_grid.Add(self.board_edge_clearance, 0, wx.EXPAND)
+
+        # Enable layer switch checkbox
+        adv_grid.Add(wx.StaticText(param_scroll, label="Layer Switching:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.enable_layer_switch = wx.CheckBox(param_scroll)
+        self.enable_layer_switch.SetValue(True)
+        adv_grid.Add(self.enable_layer_switch, 0, wx.EXPAND)
+
+        param_inner.Add(adv_grid, 0, wx.EXPAND | wx.ALL, 5)
+        param_scroll.SetSizer(param_inner)
+        param_box_sizer.Add(param_scroll, 1, wx.EXPAND)
+        right_sizer.Add(param_box_sizer, 2, wx.EXPAND | wx.BOTTOM, 5)
+
+        # --- Layers (scrollable) ---
         layer_box = wx.StaticBox(panel, label="Layers")
-        layer_sizer = wx.StaticBoxSizer(layer_box, wx.HORIZONTAL)
+        layer_box_sizer = wx.StaticBoxSizer(layer_box, wx.VERTICAL)
+        layer_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
+        layer_scroll.SetScrollRate(0, 10)
+        layer_inner = wx.WrapSizer(wx.HORIZONTAL)
 
         self.layer_checks = {}
         for layer in self.pcb_data.board_info.copper_layers:
-            cb = wx.CheckBox(panel, label=layer)
+            cb = wx.CheckBox(layer_scroll, label=layer)
             cb.SetValue(True)
             self.layer_checks[layer] = cb
-            layer_sizer.Add(cb, 0, wx.ALL, 5)
+            layer_inner.Add(cb, 0, wx.ALL, 3)
 
-        main_sizer.Add(layer_sizer, 0, wx.EXPAND | wx.ALL, 10)
+        layer_scroll.SetSizer(layer_inner)
+        layer_box_sizer.Add(layer_scroll, 1, wx.EXPAND)
+        right_sizer.Add(layer_box_sizer, 1, wx.EXPAND | wx.BOTTOM, 5)
 
-        # Options
+        # --- Options (scrollable) ---
         options_box = wx.StaticBox(panel, label="Options")
-        options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
+        options_box_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
+        options_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
+        options_scroll.SetScrollRate(0, 10)
+        options_inner = wx.BoxSizer(wx.VERTICAL)
 
-        self.move_text_check = wx.CheckBox(panel, label="Move copper text to silkscreen")
+        self.move_text_check = wx.CheckBox(options_scroll, label="Move copper text to silkscreen")
         self.move_text_check.SetValue(True)
         self.move_text_check.SetToolTip("Move gr_text from copper layers to silkscreen to prevent routing interference")
-        options_sizer.Add(self.move_text_check, 0, wx.ALL, 5)
+        options_inner.Add(self.move_text_check, 0, wx.ALL, 3)
 
-        self.debug_lines_check = wx.CheckBox(panel, label="Add debug visualization lines")
+        self.debug_lines_check = wx.CheckBox(options_scroll, label="Add debug visualization lines")
         self.debug_lines_check.SetValue(False)
         self.debug_lines_check.SetToolTip("Add routing paths to User layers for debugging")
-        options_sizer.Add(self.debug_lines_check, 0, wx.ALL, 5)
+        options_inner.Add(self.debug_lines_check, 0, wx.ALL, 3)
 
-        main_sizer.Add(options_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        options_scroll.SetSizer(options_inner)
+        options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
+        right_sizer.Add(options_box_sizer, 1, wx.EXPAND | wx.BOTTOM, 5)
 
-        # Progress
+        # --- Progress (not scrollable) ---
         progress_box = wx.StaticBox(panel, label="Progress")
         progress_sizer = wx.StaticBoxSizer(progress_box, wx.VERTICAL)
 
@@ -150,21 +264,25 @@ class RoutingDialog(wx.Dialog):
         progress_sizer.Add(self.progress_bar, 0, wx.EXPAND | wx.ALL, 5)
 
         self.status_text = wx.StaticText(panel, label="Ready")
-        progress_sizer.Add(self.status_text, 0, wx.EXPAND | wx.ALL, 5)
+        progress_sizer.Add(self.status_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        main_sizer.Add(progress_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        right_sizer.Add(progress_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
-        # Buttons
+        # --- Buttons (not scrollable) ---
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
         self.route_btn = wx.Button(panel, label="Route")
         self.route_btn.Bind(wx.EVT_BUTTON, self._on_route)
-        button_sizer.Add(self.route_btn, 0, wx.RIGHT, 10)
+        button_sizer.Add(self.route_btn, 1, wx.RIGHT, 5)
 
         self.cancel_btn = wx.Button(panel, wx.ID_CANCEL, label="Close")
-        button_sizer.Add(self.cancel_btn, 0)
+        button_sizer.Add(self.cancel_btn, 1)
 
-        main_sizer.Add(button_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+        right_sizer.Add(button_sizer, 0, wx.EXPAND)
+
+        h_sizer.Add(right_sizer, 2, wx.EXPAND | wx.ALL, 5)
+
+        main_sizer.Add(h_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
         panel.SetSizer(main_sizer)
 
@@ -199,18 +317,35 @@ class RoutingDialog(wx.Dialog):
             if filter_text in name.lower():
                 self.net_list.Append(name)
 
+        # Highlight all items by default
+        for i in range(self.net_list.GetCount()):
+            self.net_list.SetSelection(i)
+
     def _on_filter_changed(self, event):
         """Handle filter text change."""
         self._update_net_list()
 
-    def _on_select_all(self, event):
-        """Select all visible nets."""
-        for i in range(self.net_list.GetCount()):
+    def _on_net_list_key(self, event):
+        """Handle keyboard events in net list."""
+        # Ctrl+A selects all items
+        if event.GetKeyCode() == ord('A') and event.ControlDown():
+            for i in range(self.net_list.GetCount()):
+                self.net_list.SetSelection(i)
+        else:
+            event.Skip()
+
+    def _get_selected_indices(self):
+        """Get indices of selected (highlighted) items in the list."""
+        return list(self.net_list.GetSelections())
+
+    def _on_select(self, event):
+        """Check the highlighted nets."""
+        for i in self._get_selected_indices():
             self.net_list.Check(i, True)
 
-    def _on_select_none(self, event):
-        """Deselect all nets."""
-        for i in range(self.net_list.GetCount()):
+    def _on_unselect(self, event):
+        """Uncheck the highlighted nets."""
+        for i in self._get_selected_indices():
             self.net_list.Check(i, False)
 
     def _get_selected_nets(self):
@@ -261,6 +396,21 @@ class RoutingDialog(wx.Dialog):
             'via_cost': self.via_cost.GetValue(),
             'move_copper_text': self.move_text_check.GetValue(),
             'debug_lines': self.debug_lines_check.GetValue(),
+            # Advanced parameters
+            'max_iterations': self.max_iterations.GetValue(),
+            'heuristic_weight': self.heuristic_weight.GetValue(),
+            'turn_cost': self.turn_cost.GetValue(),
+            'max_ripup': self.max_ripup.GetValue(),
+            'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
+            'stub_proximity_radius': self.stub_proximity_radius.GetValue(),
+            'stub_proximity_cost': self.stub_proximity_cost.GetValue(),
+            'via_proximity_cost': self.via_proximity_cost.GetValue(),
+            'track_proximity_distance': self.track_proximity_distance.GetValue(),
+            'track_proximity_cost': self.track_proximity_cost.GetValue(),
+            'routing_clearance_margin': self.routing_clearance_margin.GetValue(),
+            'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
+            'board_edge_clearance': self.board_edge_clearance.GetValue(),
+            'enable_layer_switch': self.enable_layer_switch.GetValue(),
         }
 
         # Run routing in a thread
@@ -322,8 +472,20 @@ class RoutingDialog(wx.Dialog):
                 via_drill=config['via_drill'],
                 grid_step=config['grid_step'],
                 via_cost=config['via_cost'],
-                max_iterations=200000,
-                heuristic_weight=1.9,
+                max_iterations=config['max_iterations'],
+                heuristic_weight=config['heuristic_weight'],
+                turn_cost=config['turn_cost'],
+                max_rip_up_count=config['max_ripup'],
+                ordering_strategy=config['ordering_strategy'],
+                stub_proximity_radius=config['stub_proximity_radius'],
+                stub_proximity_cost=config['stub_proximity_cost'],
+                via_proximity_cost=config['via_proximity_cost'],
+                track_proximity_distance=config['track_proximity_distance'],
+                track_proximity_cost=config['track_proximity_cost'],
+                routing_clearance_margin=config['routing_clearance_margin'],
+                hole_to_hole_clearance=config['hole_to_hole_clearance'],
+                board_edge_clearance=config['board_edge_clearance'],
+                enable_layer_switch=config['enable_layer_switch'],
                 debug_lines=config['debug_lines'],
                 cancel_check=check_cancel,
                 progress_callback=on_progress,
