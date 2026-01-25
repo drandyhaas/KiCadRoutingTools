@@ -145,7 +145,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 add_teardrops: bool = False,
                 cancel_check=None,
                 progress_callback=None,
-                return_results: bool = False) -> Tuple[int, int, float]:
+                return_results: bool = False,
+                pcb_data=None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -195,8 +196,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if debug_memory:
         print(format_memory_stats("Initial memory", mem_start))
 
-    print(f"Loading {input_file}...")
-    pcb_data = parse_kicad_pcb(input_file)
+    if pcb_data is None:
+        print(f"Loading {input_file}...")
+        pcb_data = parse_kicad_pcb(input_file)
+    else:
+        print("Using provided PCB data...")
 
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
@@ -291,11 +295,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     net_ids = resolve_net_ids(pcb_data, net_names)
     if not net_ids:
         print("No valid nets to route!")
+        if return_results:
+            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
     net_ids, _ = filter_already_routed(pcb_data, net_ids, config)
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
+        if return_results:
+            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output

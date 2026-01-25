@@ -31,10 +31,86 @@ class RoutingDialog(wx.Dialog):
         self.board_filename = board_filename
         self._cancel_requested = False
         self._routing_thread = None
+        self._connectivity_cache = {}  # Cache: net_id -> is_connected
 
         self._create_ui()
-        self._load_nets()
+        self._load_nets_immediate()  # Load net names only (fast)
         self.Centre()
+
+        # Defer sync and connectivity check until after dialog is shown
+        wx.CallAfter(self._deferred_init)
+
+    def _sync_pcb_data_from_board(self):
+        """Sync pcb_data.segments and pcb_data.vias from pcbnew's in-memory board.
+
+        This is necessary because pcb_data is parsed from the file on disk,
+        but tracks added during previous routing sessions only exist in pcbnew's
+        memory until the file is saved.
+        """
+        # Clear connectivity cache since board state is changing
+        self._connectivity_cache = {}
+
+        try:
+            import pcbnew
+            from kicad_parser import Segment, Via
+
+            board = pcbnew.GetBoard()
+            if board is None:
+                return
+        except Exception as e:
+            print(f"Warning: Could not sync from board: {e}")
+            return
+
+        try:
+            # Layer ID to name mapping
+            layer_names = {}
+            layer_names[pcbnew.F_Cu] = 'F.Cu'
+            layer_names[pcbnew.B_Cu] = 'B.Cu'
+            for i in range(1, 31):
+                layer_id = getattr(pcbnew, f'In{i}_Cu', None)
+                if layer_id is not None:
+                    layer_names[layer_id] = f'In{i}.Cu'
+
+            def get_layer_name(layer_id):
+                return layer_names.get(layer_id, 'F.Cu')
+
+            # Collect all segments from board
+            new_segments = []
+            for track in board.GetTracks():
+                if track.GetClass() == "PCB_TRACK":
+                    seg = Segment(
+                        start_x=pcbnew.ToMM(track.GetStart().x),
+                        start_y=pcbnew.ToMM(track.GetStart().y),
+                        end_x=pcbnew.ToMM(track.GetEnd().x),
+                        end_y=pcbnew.ToMM(track.GetEnd().y),
+                        width=pcbnew.ToMM(track.GetWidth()),
+                        layer=get_layer_name(track.GetLayer()),
+                        net_id=track.GetNetCode(),
+                    )
+                    new_segments.append(seg)
+
+            # Collect all vias from board
+            new_vias = []
+            for track in board.GetTracks():
+                if track.GetClass() == "PCB_VIA":
+                    via = track
+                    top_layer = via.TopLayer()
+                    bot_layer = via.BottomLayer()
+                    v = Via(
+                        x=pcbnew.ToMM(via.GetPosition().x),
+                        y=pcbnew.ToMM(via.GetPosition().y),
+                        size=pcbnew.ToMM(via.GetWidth()),
+                        drill=pcbnew.ToMM(via.GetDrill()),
+                        layers=[get_layer_name(top_layer), get_layer_name(bot_layer)],
+                        net_id=via.GetNetCode(),
+                    )
+                    new_vias.append(v)
+
+            # Replace pcb_data segments and vias with what's in pcbnew
+            self.pcb_data.segments = new_segments
+            self.pcb_data.vias = new_vias
+        except Exception as e:
+            print(f"Warning: Error syncing tracks from board: {e}")
 
     def _create_ui(self):
         """Create the dialog UI with net list on left, scrollable options on right."""
@@ -47,6 +123,13 @@ class RoutingDialog(wx.Dialog):
         # === LEFT SIDE: Net Selection ===
         net_box = wx.StaticBox(panel, label="Net Selection")
         net_sizer = wx.StaticBoxSizer(net_box, wx.VERTICAL)
+
+        # Hide connected checkbox
+        self.hide_connected_check = wx.CheckBox(panel, label="Hide connected")
+        self.hide_connected_check.SetValue(True)
+        self.hide_connected_check.SetToolTip("Hide nets that are already fully connected")
+        self.hide_connected_check.Bind(wx.EVT_CHECKBOX, self._on_filter_changed)
+        net_sizer.Add(self.hide_connected_check, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
         # Filter
         filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -286,8 +369,8 @@ class RoutingDialog(wx.Dialog):
 
         panel.SetSizer(main_sizer)
 
-    def _load_nets(self):
-        """Load nets from PCB data."""
+    def _load_nets_immediate(self):
+        """Load net names from PCB data (fast, no connectivity check)."""
         self.all_nets = []
 
         for net_id, net in self.pcb_data.nets.items():
@@ -305,17 +388,92 @@ class RoutingDialog(wx.Dialog):
         # Sort by name
         self.all_nets.sort(key=lambda x: x[0].lower())
 
-        # Populate list
-        self._update_net_list()
-
-    def _update_net_list(self):
-        """Update the net list based on filter."""
-        filter_text = self.filter_ctrl.GetValue().lower()
-
+        # Show all nets initially (before connectivity check)
         self.net_list.Clear()
         for name, net_id in self.all_nets:
-            if filter_text in name.lower():
-                self.net_list.Append(name)
+            self.net_list.Append(name)
+        self.status_text.SetLabel("Loading...")
+
+    def _deferred_init(self):
+        """Run after dialog is shown: sync board and check connectivity."""
+        # Sync pcb_data with pcbnew's in-memory board state
+        self.status_text.SetLabel("Syncing with board...")
+        wx.Yield()
+        self._sync_pcb_data_from_board()
+
+        # Now update net list with connectivity check
+        self._update_net_list()
+
+    def _is_net_connected(self, net_id):
+        """Check if a net is already fully connected using check_connected logic."""
+        try:
+            from check_connected import check_net_connectivity
+
+            net_segments = [s for s in self.pcb_data.segments if s.net_id == net_id]
+            net_vias = [v for v in self.pcb_data.vias if v.net_id == net_id]
+            net_pads = self.pcb_data.pads_by_net.get(net_id, [])
+            net_zones = [z for z in self.pcb_data.zones if z.net_id == net_id]
+
+            # Need at least 2 pads to be a routable net
+            if len(net_pads) < 2:
+                return True  # Nothing to route
+
+            # No segments means not connected (unless connected via zones)
+            if len(net_segments) == 0 and len(net_zones) == 0:
+                return False
+
+            result = check_net_connectivity(
+                net_id, net_segments, net_vias, net_pads, net_zones,
+                tolerance=0.02
+            )
+
+            return result['connected']
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _update_net_list(self):
+        """Update the net list based on filter and hide_connected setting."""
+        filter_text = self.filter_ctrl.GetValue().lower()
+        hide_connected = self.hide_connected_check.GetValue()
+
+        # Filter by text first (fast)
+        filtered_nets = [(name, net_id) for name, net_id in self.all_nets
+                         if filter_text in name.lower()]
+
+        # Check which nets need connectivity check (not in cache)
+        uncached_nets = [(name, net_id) for name, net_id in filtered_nets
+                         if net_id not in self._connectivity_cache]
+
+        # If we have uncached nets, run connectivity check with progress
+        if uncached_nets:
+            self.progress_bar.SetRange(len(uncached_nets))
+            self.progress_bar.SetValue(0)
+
+            for i, (name, net_id) in enumerate(uncached_nets):
+                self._connectivity_cache[net_id] = self._is_net_connected(net_id)
+                self.progress_bar.SetValue(i + 1)
+                self.status_text.SetLabel(f"Checking connectivity... {i + 1}/{len(uncached_nets)}")
+                wx.Yield()
+
+        # Now filter using cache (fast)
+        self.net_list.Clear()
+        connected_count = 0
+        for name, net_id in filtered_nets:
+            is_connected = self._connectivity_cache.get(net_id, False)
+            if is_connected:
+                connected_count += 1
+            if hide_connected and is_connected:
+                continue
+            self.net_list.Append(name)
+
+        remaining = self.net_list.GetCount()
+        if hide_connected:
+            self.status_text.SetLabel(f"Ready - {remaining} nets to route ({connected_count} connected)")
+        else:
+            self.status_text.SetLabel(f"Ready - {remaining} nets")
+        self.progress_bar.SetValue(0)
 
         # Highlight all items by default
         for i in range(self.net_list.GetCount()):
@@ -490,6 +648,7 @@ class RoutingDialog(wx.Dialog):
                 cancel_check=check_cancel,
                 progress_callback=on_progress,
                 return_results=True,
+                pcb_data=self.pcb_data,
             )
 
             if self._cancel_requested:
@@ -610,6 +769,10 @@ class RoutingDialog(wx.Dialog):
         # Refresh the view
         pcbnew.Refresh()
 
+        # Sync pcb_data from pcbnew board to ensure subsequent routing and
+        # connectivity checks see the new tracks
+        self._sync_pcb_data_from_board()
+
         # Update UI and show completion message
         self.progress_bar.SetValue(100)
         self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed")
@@ -619,7 +782,7 @@ class RoutingDialog(wx.Dialog):
         msg += f"Failed: {failed}\n"
         msg += f"Time: {total_time:.1f}s\n\n"
         msg += f"Added to board:\n"
-        msg += f"  {tracks_added} tracks\n"
+        msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
         if text_moved > 0:
             msg += f"  {text_moved} text items moved to silkscreen\n"
@@ -628,6 +791,9 @@ class RoutingDialog(wx.Dialog):
         msg += "\nUse Edit -> Undo to revert changes."
 
         wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
+
+        # Refresh net list to hide newly connected nets
+        self._update_net_list()
 
     def _move_copper_text_to_silkscreen(self, board):
         """Move gr_text items from copper layers to silkscreen."""
