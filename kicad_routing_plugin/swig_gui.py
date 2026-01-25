@@ -16,6 +16,26 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 
+class StdoutRedirector:
+    """Redirects stdout to a callback function while preserving original output."""
+
+    def __init__(self, callback, original_stdout):
+        self.callback = callback
+        self.original = original_stdout
+
+    def write(self, text):
+        if text:
+            # Write to original stdout
+            if self.original:
+                self.original.write(text)
+            # Also send to callback
+            self.callback(text)
+
+    def flush(self):
+        if self.original:
+            self.original.flush()
+
+
 class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
@@ -113,11 +133,17 @@ class RoutingDialog(wx.Dialog):
             print(f"Warning: Error syncing tracks from board: {e}")
 
     def _create_ui(self):
-        """Create the dialog UI with net list on left, scrollable options on right."""
-        panel = wx.Panel(self)
+        """Create the dialog UI with tabs for Configure and Log."""
+        main_panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Horizontal split: nets on left, options on right
+        # Create notebook for tabs
+        self.notebook = wx.Notebook(main_panel)
+
+        # === TAB 1: Configure ===
+        config_panel = wx.Panel(self.notebook)
+        config_sizer = wx.BoxSizer(wx.VERTICAL)
+        panel = config_panel  # 'panel' used by all config widgets below
         h_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
         # === LEFT SIDE: Net Selection ===
@@ -365,9 +391,35 @@ class RoutingDialog(wx.Dialog):
 
         h_sizer.Add(right_sizer, 2, wx.EXPAND | wx.ALL, 5)
 
-        main_sizer.Add(h_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        config_sizer.Add(h_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        config_panel.SetSizer(config_sizer)
+        self.notebook.AddPage(config_panel, "Configure")
 
-        panel.SetSizer(main_sizer)
+        # === TAB 2: Log ===
+        log_panel = wx.Panel(self.notebook)
+        log_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Log output text control (read-only, monospace font, always show scrollbars)
+        self.log_text = wx.TextCtrl(
+            log_panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2 | wx.HSCROLL | wx.VSCROLL | wx.ALWAYS_SHOW_SB
+        )
+        # Set monospace font for log
+        font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.log_text.SetFont(font)
+        log_sizer.Add(self.log_text, 1, wx.EXPAND | wx.ALL, 5)
+
+        # Clear log button
+        clear_log_btn = wx.Button(log_panel, label="Clear Log")
+        clear_log_btn.Bind(wx.EVT_BUTTON, self._on_clear_log)
+        log_sizer.Add(clear_log_btn, 0, wx.ALIGN_RIGHT | wx.RIGHT | wx.BOTTOM, 5)
+
+        log_panel.SetSizer(log_sizer)
+        self.notebook.AddPage(log_panel, "Log")
+
+        # Add notebook to main sizer
+        main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
+        main_panel.SetSizer(main_sizer)
 
     def _load_nets_immediate(self):
         """Load net names from PCB data (fast, no connectivity check)."""
@@ -521,6 +573,22 @@ class RoutingDialog(wx.Dialog):
         for i in self._get_selected_indices():
             self.net_list.Check(i, False)
 
+    def _on_clear_log(self, event):
+        """Clear the log text control."""
+        self.log_text.Clear()
+
+    def _append_log(self, text):
+        """Append text to the log (thread-safe via CallAfter)."""
+        wx.CallAfter(self._do_append_log, text)
+
+    def _do_append_log(self, text):
+        """Actually append text to log (must be called on main thread)."""
+        self.log_text.AppendText(text)
+
+    def _prepare_log_for_routing(self):
+        """Prepare log tab for routing output."""
+        pass  # Log is not cleared automatically; user can use Clear Log button
+
     def _get_selected_nets(self):
         """Get list of selected net names."""
         selected = []
@@ -599,6 +667,13 @@ class RoutingDialog(wx.Dialog):
 
     def _run_routing(self, config):
         """Run the routing in a background thread."""
+        # Clear log and switch to log tab
+        wx.CallAfter(self._prepare_log_for_routing)
+
+        # Set up stdout redirection to capture routing output
+        original_stdout = sys.stdout
+        sys.stdout = StdoutRedirector(self._append_log, original_stdout)
+
         try:
             try:
                 from route import batch_route
@@ -674,6 +749,9 @@ class RoutingDialog(wx.Dialog):
 
         except Exception as e:
             wx.CallAfter(self._routing_error, str(e))
+        finally:
+            # Restore original stdout
+            sys.stdout = original_stdout
 
     def _poll_routing(self):
         """Poll for routing thread completion."""
