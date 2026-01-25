@@ -154,13 +154,43 @@ class RoutingDialog(wx.Dialog):
         # Create notebook for tabs
         self.notebook = wx.Notebook(main_panel)
 
-        # === TAB 1: Configure ===
-        config_panel = wx.Panel(self.notebook)
+        # Tab 1: Configure
+        config_panel = self._create_config_tab()
+        self.notebook.AddPage(config_panel, "Configure")
+
+        # Tab 2: Log
+        log_panel = self._create_log_tab()
+        self.notebook.AddPage(log_panel, "Log")
+
+        # Add notebook to main sizer
+        main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
+        main_panel.SetSizer(main_sizer)
+
+    def _create_config_tab(self):
+        """Create the Configure tab with all routing options."""
+        panel = wx.Panel(self.notebook)
         config_sizer = wx.BoxSizer(wx.VERTICAL)
-        panel = config_panel  # 'panel' used by all config widgets below
         h_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        # === LEFT SIDE: Net Selection ===
+        # Left side: Net selection
+        net_sizer = self._create_net_selection_panel(panel)
+        h_sizer.Add(net_sizer, 3, wx.EXPAND | wx.ALL, 5)
+
+        # Right side: Parameters, layers, options, progress, buttons
+        right_sizer = wx.BoxSizer(wx.VERTICAL)
+        right_sizer.Add(self._create_parameters_panel(panel), 2, wx.EXPAND | wx.BOTTOM, 5)
+        right_sizer.Add(self._create_layers_panel(panel), 1, wx.EXPAND | wx.BOTTOM, 5)
+        right_sizer.Add(self._create_options_panel(panel), 1, wx.EXPAND | wx.BOTTOM, 5)
+        right_sizer.Add(self._create_progress_panel(panel), 0, wx.EXPAND | wx.BOTTOM, 5)
+        right_sizer.Add(self._create_buttons_panel(panel), 0, wx.EXPAND)
+        h_sizer.Add(right_sizer, 2, wx.EXPAND | wx.ALL, 5)
+
+        config_sizer.Add(h_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        panel.SetSizer(config_sizer)
+        return panel
+
+    def _create_net_selection_panel(self, panel):
+        """Create the net selection panel (left side)."""
         net_box = wx.StaticBox(panel, label="Net Selection")
         net_sizer = wx.StaticBoxSizer(net_box, wx.VERTICAL)
 
@@ -179,12 +209,12 @@ class RoutingDialog(wx.Dialog):
         filter_sizer.Add(self.filter_ctrl, 1, wx.EXPAND)
         net_sizer.Add(filter_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Net list (tall) with extended selection (Shift+click, Ctrl+click)
+        # Net list
         self.net_list = wx.CheckListBox(panel, size=(200, -1), style=wx.LB_EXTENDED)
         self.net_list.Bind(wx.EVT_KEY_DOWN, self._on_net_list_key)
         net_sizer.Add(self.net_list, 1, wx.EXPAND | wx.ALL, 5)
 
-        # Select/Unselect buttons (operate on highlighted nets)
+        # Select/Unselect buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.select_btn = wx.Button(panel, label="Select")
         self.select_btn.Bind(wx.EVT_BUTTON, self._on_select)
@@ -194,171 +224,116 @@ class RoutingDialog(wx.Dialog):
         btn_sizer.Add(self.unselect_btn, 1)
         net_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        h_sizer.Add(net_sizer, 3, wx.EXPAND | wx.ALL, 5)
+        return net_sizer
 
-        # === RIGHT SIDE: Options with separate scroll areas ===
-        right_sizer = wx.BoxSizer(wx.VERTICAL)
-
-        # --- Routing Parameters (scrollable) ---
+    def _create_parameters_panel(self, panel):
+        """Create the parameters panel with basic and advanced settings."""
         param_box = wx.StaticBox(panel, label="Parameters")
         param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
         param_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
         param_scroll.SetScrollRate(0, 10)
         param_inner = wx.BoxSizer(wx.VERTICAL)
+
+        # Basic parameters grid
         param_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         param_grid.AddGrowableCol(1)
-
-        # Track width
-        r = defaults.PARAM_RANGES['track_width']
-        param_grid.Add(wx.StaticText(param_scroll, label="Track Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.track_width = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.TRACK_WIDTH, inc=r['inc'])
-        self.track_width.SetDigits(r['digits'])
-        param_grid.Add(self.track_width, 0, wx.EXPAND)
-
-        # Clearance
-        r = defaults.PARAM_RANGES['clearance']
-        param_grid.Add(wx.StaticText(param_scroll, label="Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.clearance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
-        self.clearance.SetDigits(r['digits'])
-        param_grid.Add(self.clearance, 0, wx.EXPAND)
-
-        # Via size
-        r = defaults.PARAM_RANGES['via_size']
-        param_grid.Add(wx.StaticText(param_scroll, label="Via Size (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_size = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_SIZE, inc=r['inc'])
-        self.via_size.SetDigits(r['digits'])
-        param_grid.Add(self.via_size, 0, wx.EXPAND)
-
-        # Via drill
-        r = defaults.PARAM_RANGES['via_drill']
-        param_grid.Add(wx.StaticText(param_scroll, label="Via Drill (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_drill = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_DRILL, inc=r['inc'])
-        self.via_drill.SetDigits(r['digits'])
-        param_grid.Add(self.via_drill, 0, wx.EXPAND)
-
-        # Grid step
-        r = defaults.PARAM_RANGES['grid_step']
-        param_grid.Add(wx.StaticText(param_scroll, label="Grid Step (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.grid_step = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.GRID_STEP, inc=r['inc'])
-        self.grid_step.SetDigits(r['digits'])
-        param_grid.Add(self.grid_step, 0, wx.EXPAND)
-
-        # Via cost
-        r = defaults.PARAM_RANGES['via_cost']
-        param_grid.Add(wx.StaticText(param_scroll, label="Via Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_cost = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_COST)
-        param_grid.Add(self.via_cost, 0, wx.EXPAND)
-
+        self._add_basic_parameters(param_scroll, param_grid)
         param_inner.Add(param_grid, 0, wx.EXPAND | wx.ALL, 5)
 
-        # --- Advanced section ---
+        # Advanced section header
         adv_label = wx.StaticText(param_scroll, label="Advanced")
         adv_label.SetFont(adv_label.GetFont().Bold())
         param_inner.Add(adv_label, 0, wx.LEFT | wx.TOP, 5)
         param_inner.Add(wx.StaticLine(param_scroll), 0, wx.EXPAND | wx.ALL, 5)
 
+        # Advanced parameters grid
         adv_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         adv_grid.AddGrowableCol(1)
+        self._add_advanced_parameters(param_scroll, adv_grid)
+        param_inner.Add(adv_grid, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Max iterations
-        r = defaults.PARAM_RANGES['max_iterations']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Max Iterations:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.max_iterations = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.MAX_ITERATIONS)
-        adv_grid.Add(self.max_iterations, 0, wx.EXPAND)
+        param_scroll.SetSizer(param_inner)
+        param_box_sizer.Add(param_scroll, 1, wx.EXPAND)
+        return param_box_sizer
+
+    def _add_basic_parameters(self, parent, grid):
+        """Add basic parameter controls to grid."""
+        params = [
+            ('track_width', 'Track Width (mm):', defaults.TRACK_WIDTH),
+            ('clearance', 'Clearance (mm):', defaults.CLEARANCE),
+            ('via_size', 'Via Size (mm):', defaults.VIA_SIZE),
+            ('via_drill', 'Via Drill (mm):', defaults.VIA_DRILL),
+            ('grid_step', 'Grid Step (mm):', defaults.GRID_STEP),
+        ]
+        for name, label, default in params:
+            r = defaults.PARAM_RANGES[name]
+            grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            ctrl = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=default, inc=r['inc'])
+            ctrl.SetDigits(r['digits'])
+            setattr(self, name, ctrl)
+            grid.Add(ctrl, 0, wx.EXPAND)
+
+        # Via cost (integer)
+        r = defaults.PARAM_RANGES['via_cost']
+        grid.Add(wx.StaticText(parent, label="Via Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.via_cost = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=defaults.VIA_COST)
+        grid.Add(self.via_cost, 0, wx.EXPAND)
+
+    def _add_advanced_parameters(self, parent, grid):
+        """Add advanced parameter controls to grid."""
+        # Integer parameters
+        int_params = [
+            ('max_iterations', 'Max Iterations:', defaults.MAX_ITERATIONS),
+            ('turn_cost', 'Turn Cost:', defaults.TURN_COST),
+            ('max_ripup', 'Max Rip-up Count:', defaults.MAX_RIPUP),
+        ]
+        for name, label, default in int_params:
+            r = defaults.PARAM_RANGES[name]
+            grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            ctrl = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=default)
+            setattr(self, name, ctrl)
+            grid.Add(ctrl, 0, wx.EXPAND)
 
         # Heuristic weight
         r = defaults.PARAM_RANGES['heuristic_weight']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Heuristic Weight:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.heuristic_weight = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.HEURISTIC_WEIGHT, inc=r['inc'])
+        grid.Add(wx.StaticText(parent, label="Heuristic Weight:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.heuristic_weight = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.HEURISTIC_WEIGHT, inc=r['inc'])
         self.heuristic_weight.SetDigits(r['digits'])
-        adv_grid.Add(self.heuristic_weight, 0, wx.EXPAND)
-
-        # Turn cost
-        r = defaults.PARAM_RANGES['turn_cost']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Turn Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.turn_cost = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.TURN_COST)
-        adv_grid.Add(self.turn_cost, 0, wx.EXPAND)
-
-        # Max rip-up count
-        r = defaults.PARAM_RANGES['max_ripup']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Max Rip-up Count:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.max_ripup = wx.SpinCtrl(param_scroll, min=r['min'], max=r['max'], initial=defaults.MAX_RIPUP)
-        adv_grid.Add(self.max_ripup, 0, wx.EXPAND)
+        grid.Add(self.heuristic_weight, 0, wx.EXPAND)
 
         # Ordering strategy
-        adv_grid.Add(wx.StaticText(param_scroll, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.ordering_strategy = wx.Choice(param_scroll, choices=["mps", "inside_out", "original"])
-        self.ordering_strategy.SetSelection(0)  # mps is default
-        adv_grid.Add(self.ordering_strategy, 0, wx.EXPAND)
+        grid.Add(wx.StaticText(parent, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original"])
+        self.ordering_strategy.SetSelection(0)
+        grid.Add(self.ordering_strategy, 0, wx.EXPAND)
 
-        # Stub proximity radius
-        r = defaults.PARAM_RANGES['stub_proximity_radius']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Stub Proximity (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.stub_proximity_radius = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.STUB_PROXIMITY_RADIUS, inc=r['inc'])
-        self.stub_proximity_radius.SetDigits(r['digits'])
-        adv_grid.Add(self.stub_proximity_radius, 0, wx.EXPAND)
+        # Float parameters
+        float_params = [
+            ('stub_proximity_radius', 'Stub Proximity (mm):', defaults.STUB_PROXIMITY_RADIUS),
+            ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST),
+            ('via_proximity_cost', 'Via Prox. Cost:', defaults.VIA_PROXIMITY_COST),
+            ('track_proximity_distance', 'Track Prox. (mm):', defaults.TRACK_PROXIMITY_DISTANCE),
+            ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST),
+            ('routing_clearance_margin', 'Clearance Margin:', defaults.ROUTING_CLEARANCE_MARGIN),
+            ('hole_to_hole_clearance', 'Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE),
+            ('board_edge_clearance', 'Edge Clearance (mm):', defaults.BOARD_EDGE_CLEARANCE),
+        ]
+        for name, label, default in float_params:
+            r = defaults.PARAM_RANGES[name]
+            grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            ctrl = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=default, inc=r['inc'])
+            ctrl.SetDigits(r['digits'])
+            setattr(self, name, ctrl)
+            grid.Add(ctrl, 0, wx.EXPAND)
 
-        # Stub proximity cost
-        r = defaults.PARAM_RANGES['stub_proximity_cost']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Stub Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.stub_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.STUB_PROXIMITY_COST, inc=r['inc'])
-        self.stub_proximity_cost.SetDigits(r['digits'])
-        adv_grid.Add(self.stub_proximity_cost, 0, wx.EXPAND)
-
-        # Via proximity cost
-        r = defaults.PARAM_RANGES['via_proximity_cost']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Via Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.VIA_PROXIMITY_COST, inc=r['inc'])
-        self.via_proximity_cost.SetDigits(r['digits'])
-        adv_grid.Add(self.via_proximity_cost, 0, wx.EXPAND)
-
-        # Track proximity distance
-        r = defaults.PARAM_RANGES['track_proximity_distance']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Track Prox. (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.track_proximity_distance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.TRACK_PROXIMITY_DISTANCE, inc=r['inc'])
-        self.track_proximity_distance.SetDigits(r['digits'])
-        adv_grid.Add(self.track_proximity_distance, 0, wx.EXPAND)
-
-        # Track proximity cost
-        r = defaults.PARAM_RANGES['track_proximity_cost']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Track Prox. Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.track_proximity_cost = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.TRACK_PROXIMITY_COST, inc=r['inc'])
-        self.track_proximity_cost.SetDigits(r['digits'])
-        adv_grid.Add(self.track_proximity_cost, 0, wx.EXPAND)
-
-        # Routing clearance margin
-        r = defaults.PARAM_RANGES['routing_clearance_margin']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Clearance Margin:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.routing_clearance_margin = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.ROUTING_CLEARANCE_MARGIN, inc=r['inc'])
-        self.routing_clearance_margin.SetDigits(r['digits'])
-        adv_grid.Add(self.routing_clearance_margin, 0, wx.EXPAND)
-
-        # Hole-to-hole clearance
-        r = defaults.PARAM_RANGES['hole_to_hole_clearance']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Hole Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.hole_to_hole_clearance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.HOLE_TO_HOLE_CLEARANCE, inc=r['inc'])
-        self.hole_to_hole_clearance.SetDigits(r['digits'])
-        adv_grid.Add(self.hole_to_hole_clearance, 0, wx.EXPAND)
-
-        # Board edge clearance
-        r = defaults.PARAM_RANGES['board_edge_clearance']
-        adv_grid.Add(wx.StaticText(param_scroll, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.board_edge_clearance = wx.SpinCtrlDouble(param_scroll, min=r['min'], max=r['max'], initial=defaults.BOARD_EDGE_CLEARANCE, inc=r['inc'])
-        self.board_edge_clearance.SetDigits(r['digits'])
-        adv_grid.Add(self.board_edge_clearance, 0, wx.EXPAND)
-
-        # Enable layer switch checkbox
-        adv_grid.Add(wx.StaticText(param_scroll, label="Layer Switching:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.enable_layer_switch = wx.CheckBox(param_scroll)
+        # Layer switching checkbox
+        grid.Add(wx.StaticText(parent, label="Layer Switching:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.enable_layer_switch = wx.CheckBox(parent)
         self.enable_layer_switch.SetValue(True)
-        adv_grid.Add(self.enable_layer_switch, 0, wx.EXPAND)
+        grid.Add(self.enable_layer_switch, 0, wx.EXPAND)
 
-        param_inner.Add(adv_grid, 0, wx.EXPAND | wx.ALL, 5)
-        param_scroll.SetSizer(param_inner)
-        param_box_sizer.Add(param_scroll, 1, wx.EXPAND)
-        right_sizer.Add(param_box_sizer, 2, wx.EXPAND | wx.BOTTOM, 5)
-
-        # --- Layers (scrollable) ---
+    def _create_layers_panel(self, panel):
+        """Create the layers selection panel."""
         layer_box = wx.StaticBox(panel, label="Layers")
         layer_box_sizer = wx.StaticBoxSizer(layer_box, wx.VERTICAL)
         layer_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
@@ -374,9 +349,10 @@ class RoutingDialog(wx.Dialog):
 
         layer_scroll.SetSizer(layer_inner)
         layer_box_sizer.Add(layer_scroll, 1, wx.EXPAND)
-        right_sizer.Add(layer_box_sizer, 1, wx.EXPAND | wx.BOTTOM, 5)
+        return layer_box_sizer
 
-        # --- Options (scrollable) ---
+    def _create_options_panel(self, panel):
+        """Create the options panel."""
         options_box = wx.StaticBox(panel, label="Options")
         options_box_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
         options_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
@@ -395,9 +371,10 @@ class RoutingDialog(wx.Dialog):
 
         options_scroll.SetSizer(options_inner)
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
-        right_sizer.Add(options_box_sizer, 1, wx.EXPAND | wx.BOTTOM, 5)
+        return options_box_sizer
 
-        # --- Progress (not scrollable) ---
+    def _create_progress_panel(self, panel):
+        """Create the progress panel."""
         progress_box = wx.StaticBox(panel, label="Progress")
         progress_sizer = wx.StaticBoxSizer(progress_box, wx.VERTICAL)
 
@@ -407,9 +384,10 @@ class RoutingDialog(wx.Dialog):
         self.status_text = wx.StaticText(panel, label="Ready")
         progress_sizer.Add(self.status_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        right_sizer.Add(progress_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+        return progress_sizer
 
-        # --- Buttons (not scrollable) ---
+    def _create_buttons_panel(self, panel):
+        """Create the buttons panel."""
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
         self.route_btn = wx.Button(panel, label="Route")
@@ -419,24 +397,18 @@ class RoutingDialog(wx.Dialog):
         self.cancel_btn = wx.Button(panel, wx.ID_CANCEL, label="Close")
         button_sizer.Add(self.cancel_btn, 1)
 
-        right_sizer.Add(button_sizer, 0, wx.EXPAND)
+        return button_sizer
 
-        h_sizer.Add(right_sizer, 2, wx.EXPAND | wx.ALL, 5)
-
-        config_sizer.Add(h_sizer, 1, wx.EXPAND | wx.ALL, 5)
-        config_panel.SetSizer(config_sizer)
-        self.notebook.AddPage(config_panel, "Configure")
-
-        # === TAB 2: Log ===
+    def _create_log_tab(self):
+        """Create the Log tab."""
         log_panel = wx.Panel(self.notebook)
         log_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Log output text control (read-only, monospace font, always show scrollbars)
+        # Log output text control
         self.log_text = wx.TextCtrl(
             log_panel,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2 | wx.HSCROLL | wx.VSCROLL | wx.ALWAYS_SHOW_SB
         )
-        # Set monospace font for log
         font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.log_text.SetFont(font)
         log_sizer.Add(self.log_text, 1, wx.EXPAND | wx.ALL, 5)
@@ -447,11 +419,7 @@ class RoutingDialog(wx.Dialog):
         log_sizer.Add(clear_log_btn, 0, wx.ALIGN_RIGHT | wx.RIGHT | wx.BOTTOM, 5)
 
         log_panel.SetSizer(log_sizer)
-        self.notebook.AddPage(log_panel, "Log")
-
-        # Add notebook to main sizer
-        main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
-        main_panel.SetSizer(main_sizer)
+        return log_panel
 
     def _load_nets_immediate(self):
         """Load net names from PCB data (fast, no connectivity check)."""
