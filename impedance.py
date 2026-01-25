@@ -10,7 +10,7 @@ Based on IPC-2141 and industry-standard approximations.
 """
 
 import math
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
 
 from kicad_parser import PCBData, StackupLayer

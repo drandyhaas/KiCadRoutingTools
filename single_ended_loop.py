@@ -46,6 +46,8 @@ def route_single_ended_nets(
     vis_callback: Any = None,
     base_vis_data: Any = None,
     route_index_start: int = 0,
+    cancel_check: Any = None,
+    progress_callback: Any = None,
 ) -> Tuple[int, int, float, int, int, bool]:
     """
     Route all single-ended nets.
@@ -57,6 +59,8 @@ def route_single_ended_nets(
         vis_callback: Visualization callback (if visualize=True)
         base_vis_data: Base visualization data (if visualize=True)
         route_index_start: Starting route index (continues from diff pairs)
+        cancel_check: Optional callable that returns True if routing should be cancelled
+        progress_callback: Optional callable(current, total, net_name) for progress updates
 
     Returns:
         Tuple of (successful, failed, total_time, total_iterations, route_index, user_quit)
@@ -95,9 +99,19 @@ def route_single_ended_nets(
         if user_quit:
             break
 
+        # Check for cancellation request
+        if cancel_check is not None and cancel_check():
+            print("\nRouting cancelled by user")
+            user_quit = True
+            break
+
         route_index += 1
         failed_str = f" ({failed} failed)" if failed > 0 else ""
         print(f"\n[{route_index}/{total_routes}{failed_str}] Routing {net_name} (id={net_id})")
+
+        # Report progress
+        if progress_callback is not None:
+            progress_callback(route_index, total_routes, net_name)
         print("-" * 40)
 
         # Periodic memory reporting (every 10 nets)

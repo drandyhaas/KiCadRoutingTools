@@ -455,17 +455,17 @@ def print_blocking_analysis(
 
 
 def filter_rippable_blockers(
-    blockers: List[BlockerInfo],
+    blockers: List[BlockingInfo],
     routed_results: Dict,
     diff_pair_by_net_id: Dict,
     get_canonical_net_id_func
-) -> Tuple[List[BlockerInfo], Set[int]]:
+) -> Tuple[List[BlockingInfo], Set[int]]:
     """
     Filter blockers to only those that can be ripped (in routed_results),
     deduplicating by diff pair (P and N count as one).
 
     Args:
-        blockers: List of BlockerInfo from analyze_frontier_blocking
+        blockers: List of BlockingInfo from analyze_frontier_blocking
         routed_results: Dict of net_id -> result for routed nets
         diff_pair_by_net_id: Dict mapping net_id -> (pair_name, pair)
         get_canonical_net_id_func: Function to get canonical net ID

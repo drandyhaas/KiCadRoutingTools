@@ -142,7 +142,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 vis_callback=None,
                 schematic_dir: Optional[str] = None,
                 layer_costs: Optional[List[float]] = None,
-                add_teardrops: bool = False) -> Tuple[int, int, float]:
+                add_teardrops: bool = False,
+                cancel_check=None,
+                progress_callback=None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -177,6 +179,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         minimal_obstacle_cache: If True, only build obstacle cache for nets being routed
                                (faster when re-routing a small number of nets)
         vis_callback: Optional visualization callback (implements VisualizationCallback protocol)
+        cancel_check: Optional callable returning True if routing should be cancelled
+        progress_callback: Optional callable(current, total, net_name) for progress updates
 
     Returns:
         (successful_count, failed_count, total_time)
@@ -209,8 +213,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     for i, cost in enumerate(layer_costs):
         if cost < 1.0 or cost > 1000:
             layer_name = layers[i] if i < len(layers) else f"layer {i}"
-            print(f"ERROR: Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
-            sys.exit(1)
+            from routing_exceptions import ConfigurationError
+            raise ConfigurationError(f"Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
 
     costs_str = ', '.join(f"{layers[i]}={layer_costs[i]}x" for i in range(min(len(layers), len(layer_costs))))
     print(f"  Layer costs: {costs_str}")
@@ -510,7 +514,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
         state, single_ended_nets,
         visualize=visualize, vis_callback=vis_callback, base_vis_data=base_vis_data,
-        route_index_start=route_index
+        route_index_start=route_index,
+        cancel_check=cancel_check, progress_callback=progress_callback
     )
     successful += se_successful
     failed += se_failed
