@@ -147,18 +147,22 @@ class RoutingDialog(wx.Dialog):
             print(f"Warning: Error syncing tracks from board: {e}")
 
     def _create_ui(self):
-        """Create the dialog UI with tabs for Configure and Log."""
+        """Create the dialog UI with tabs for Configure, Advanced, and Log."""
         main_panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Create notebook for tabs
         self.notebook = wx.Notebook(main_panel)
 
-        # Tab 1: Configure
+        # Tab 1: Basic parameters
         config_panel = self._create_config_tab()
-        self.notebook.AddPage(config_panel, "Configure")
+        self.notebook.AddPage(config_panel, "Basic")
 
-        # Tab 2: Log
+        # Tab 2: Advanced (swappable nets + advanced parameters + options)
+        advanced_panel = self._create_advanced_tab()
+        self.notebook.AddPage(advanced_panel, "Advanced")
+
+        # Tab 3: Log
         log_panel = self._create_log_tab()
         self.notebook.AddPage(log_panel, "Log")
 
@@ -167,23 +171,23 @@ class RoutingDialog(wx.Dialog):
         main_panel.SetSizer(main_sizer)
 
     def _create_config_tab(self):
-        """Create the Configure tab with all routing options."""
+        """Create the Basic tab with basic routing parameters and options."""
         panel = wx.Panel(self.notebook)
         config_sizer = wx.BoxSizer(wx.VERTICAL)
         h_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        # Left side: Net selection
+        # Left side: Net selection (1:1 ratio with right side)
         net_sizer = self._create_net_selection_panel(panel)
-        h_sizer.Add(net_sizer, 3, wx.EXPAND | wx.ALL, 5)
+        h_sizer.Add(net_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
-        # Right side: Parameters, layers, options, progress, buttons
+        # Right side: Basic parameters, layers, options, progress, buttons (2:1:2 ratio)
         right_sizer = wx.BoxSizer(wx.VERTICAL)
         right_sizer.Add(self._create_parameters_panel(panel), 2, wx.EXPAND | wx.BOTTOM, 5)
         right_sizer.Add(self._create_layers_panel(panel), 1, wx.EXPAND | wx.BOTTOM, 5)
-        right_sizer.Add(self._create_options_panel(panel), 1, wx.EXPAND | wx.BOTTOM, 5)
+        right_sizer.Add(self._create_basic_options_panel(panel), 2, wx.EXPAND | wx.BOTTOM, 5)
         right_sizer.Add(self._create_progress_panel(panel), 0, wx.EXPAND | wx.BOTTOM, 5)
         right_sizer.Add(self._create_buttons_panel(panel), 0, wx.EXPAND)
-        h_sizer.Add(right_sizer, 2, wx.EXPAND | wx.ALL, 5)
+        h_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
         config_sizer.Add(h_sizer, 1, wx.EXPAND | wx.ALL, 5)
         panel.SetSizer(config_sizer)
@@ -201,13 +205,22 @@ class RoutingDialog(wx.Dialog):
         self.hide_connected_check.Bind(wx.EVT_CHECKBOX, self._on_filter_changed)
         net_sizer.Add(self.hide_connected_check, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
-        # Filter
+        # Filter by name
         filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         filter_sizer.Add(wx.StaticText(panel, label="Filter:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self.filter_ctrl = wx.TextCtrl(panel)
         self.filter_ctrl.Bind(wx.EVT_TEXT, self._on_filter_changed)
         filter_sizer.Add(self.filter_ctrl, 1, wx.EXPAND)
         net_sizer.Add(filter_sizer, 0, wx.EXPAND | wx.ALL, 5)
+
+        # Filter by component
+        comp_filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        comp_filter_sizer.Add(wx.StaticText(panel, label="Component:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.component_filter_ctrl = wx.TextCtrl(panel)
+        self.component_filter_ctrl.SetToolTip("Filter by component reference (e.g., U1)")
+        self.component_filter_ctrl.Bind(wx.EVT_TEXT, self._on_filter_changed)
+        comp_filter_sizer.Add(self.component_filter_ctrl, 1, wx.EXPAND)
+        net_sizer.Add(comp_filter_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
         # Net list
         self.net_list = wx.CheckListBox(panel, size=(200, -1), style=wx.LB_EXTENDED)
@@ -224,10 +237,13 @@ class RoutingDialog(wx.Dialog):
         btn_sizer.Add(self.unselect_btn, 1)
         net_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # Track checked nets persistently
+        self._checked_nets = set()
+
         return net_sizer
 
     def _create_parameters_panel(self, panel):
-        """Create the parameters panel with basic and advanced settings."""
+        """Create the parameters panel with basic settings only."""
         param_box = wx.StaticBox(panel, label="Parameters")
         param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
         param_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
@@ -239,18 +255,6 @@ class RoutingDialog(wx.Dialog):
         param_grid.AddGrowableCol(1)
         self._add_basic_parameters(param_scroll, param_grid)
         param_inner.Add(param_grid, 0, wx.EXPAND | wx.ALL, 5)
-
-        # Advanced section header
-        adv_label = wx.StaticText(param_scroll, label="Advanced")
-        adv_label.SetFont(adv_label.GetFont().Bold())
-        param_inner.Add(adv_label, 0, wx.LEFT | wx.TOP, 5)
-        param_inner.Add(wx.StaticLine(param_scroll), 0, wx.EXPAND | wx.ALL, 5)
-
-        # Advanced parameters grid
-        adv_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
-        adv_grid.AddGrowableCol(1)
-        self._add_advanced_parameters(param_scroll, adv_grid)
-        param_inner.Add(adv_grid, 0, wx.EXPAND | wx.ALL, 5)
 
         param_scroll.SetSizer(param_inner)
         param_box_sizer.Add(param_scroll, 1, wx.EXPAND)
@@ -279,13 +283,33 @@ class RoutingDialog(wx.Dialog):
         self.via_cost = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=defaults.VIA_COST)
         grid.Add(self.via_cost, 0, wx.EXPAND)
 
+        # Max rip-up count
+        r = defaults.PARAM_RANGES['max_ripup']
+        grid.Add(wx.StaticText(parent, label="Max Rip-up:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.max_ripup = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=defaults.MAX_RIPUP)
+        grid.Add(self.max_ripup, 0, wx.EXPAND)
+
     def _add_advanced_parameters(self, parent, grid):
         """Add advanced parameter controls to grid."""
+        # Impedance routing (checkbox + value)
+        grid.Add(wx.StaticText(parent, label="Impedance:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        impedance_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.impedance_check = wx.CheckBox(parent, label="")
+        self.impedance_check.SetValue(False)
+        self.impedance_check.SetToolTip("Use impedance-based track width (overrides Track Width)")
+        r = defaults.PARAM_RANGES['impedance']
+        self.impedance_value = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=defaults.IMPEDANCE_DEFAULT)
+        self.impedance_value.SetToolTip("Target impedance in ohms")
+        impedance_sizer.Add(self.impedance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        impedance_sizer.Add(self.impedance_value, 1, wx.EXPAND)
+        impedance_sizer.Add(wx.StaticText(parent, label="\u03A9"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 3)
+        grid.Add(impedance_sizer, 0, wx.EXPAND)
+
         # Integer parameters
         int_params = [
             ('max_iterations', 'Max Iterations:', defaults.MAX_ITERATIONS),
+            ('max_probe_iterations', 'Probe Iterations:', defaults.MAX_PROBE_ITERATIONS),
             ('turn_cost', 'Turn Cost:', defaults.TURN_COST),
-            ('max_ripup', 'Max Rip-up Count:', defaults.MAX_RIPUP),
         ]
         for name, label, default in int_params:
             r = defaults.PARAM_RANGES[name]
@@ -309,14 +333,17 @@ class RoutingDialog(wx.Dialog):
 
         # Float parameters
         float_params = [
+            ('bga_proximity_radius', 'BGA Proximity (mm):', defaults.BGA_PROXIMITY_RADIUS),
+            ('bga_proximity_cost', 'BGA Prox. Cost:', defaults.BGA_PROXIMITY_COST),
             ('stub_proximity_radius', 'Stub Proximity (mm):', defaults.STUB_PROXIMITY_RADIUS),
             ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST),
-            ('via_proximity_cost', 'Via Prox. Cost:', defaults.VIA_PROXIMITY_COST),
+            ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST),
             ('track_proximity_distance', 'Track Prox. (mm):', defaults.TRACK_PROXIMITY_DISTANCE),
             ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST),
+            ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS),
+            ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST),
             ('routing_clearance_margin', 'Clearance Margin:', defaults.ROUTING_CLEARANCE_MARGIN),
             ('hole_to_hole_clearance', 'Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE),
-            ('board_edge_clearance', 'Edge Clearance (mm):', defaults.BOARD_EDGE_CLEARANCE),
         ]
         for name, label, default in float_params:
             r = defaults.PARAM_RANGES[name]
@@ -326,11 +353,27 @@ class RoutingDialog(wx.Dialog):
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
 
-        # Layer switching checkbox
-        grid.Add(wx.StaticText(parent, label="Layer Switching:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.enable_layer_switch = wx.CheckBox(parent)
-        self.enable_layer_switch.SetValue(True)
-        grid.Add(self.enable_layer_switch, 0, wx.EXPAND)
+        # Board edge clearance with checkbox
+        grid.Add(wx.StaticText(parent, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.edge_clearance_check = wx.CheckBox(parent, label="")
+        self.edge_clearance_check.SetValue(False)
+        self.edge_clearance_check.SetToolTip("Enable custom edge clearance (unchecked = use track clearance)")
+        self.edge_clearance_check.Bind(wx.EVT_CHECKBOX, self._on_edge_clearance_check)
+        r = defaults.PARAM_RANGES['board_edge_clearance']
+        self.board_edge_clearance = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
+        self.board_edge_clearance.SetDigits(r['digits'])
+        self.board_edge_clearance.Enable(False)
+        edge_sizer.Add(self.edge_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        edge_sizer.Add(self.board_edge_clearance, 1, wx.EXPAND)
+        grid.Add(edge_sizer, 0, wx.EXPAND)
+
+        # Direction dropdown
+        grid.Add(wx.StaticText(parent, label="Routing Direction:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.direction_choice = wx.Choice(parent, choices=["Auto", "Forward", "Backward"])
+        self.direction_choice.SetSelection(0)
+        self.direction_choice.SetToolTip("Direction search order for each net route")
+        grid.Add(self.direction_choice, 0, wx.EXPAND)
 
     def _create_layers_panel(self, panel):
         """Create the layers selection panel."""
@@ -351,23 +394,166 @@ class RoutingDialog(wx.Dialog):
         layer_box_sizer.Add(layer_scroll, 1, wx.EXPAND)
         return layer_box_sizer
 
-    def _create_options_panel(self, panel):
-        """Create the options panel."""
+    def _create_basic_options_panel(self, panel):
+        """Create the basic options panel for the Basic tab."""
         options_box = wx.StaticBox(panel, label="Options")
         options_box_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
         options_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
         options_scroll.SetScrollRate(0, 10)
         options_inner = wx.BoxSizer(wx.VERTICAL)
 
+        # Stub layer swaps
+        self.enable_layer_switch = wx.CheckBox(options_scroll, label="Stub layer swaps")
+        self.enable_layer_switch.SetValue(True)
+        self.enable_layer_switch.SetToolTip("Enable stub layer switching optimization")
+        options_inner.Add(self.enable_layer_switch, 0, wx.ALL, 3)
+
+        # Move copper text
         self.move_text_check = wx.CheckBox(options_scroll, label="Move copper text to silkscreen")
         self.move_text_check.SetValue(True)
         self.move_text_check.SetToolTip("Move gr_text from copper layers to silkscreen to prevent routing interference")
         options_inner.Add(self.move_text_check, 0, wx.ALL, 3)
 
+        # Add teardrops
+        self.add_teardrops_check = wx.CheckBox(options_scroll, label="Add teardrops")
+        self.add_teardrops_check.SetValue(False)
+        self.add_teardrops_check.SetToolTip("Add teardrop settings to all pads in output file")
+        options_inner.Add(self.add_teardrops_check, 0, wx.ALL, 3)
+
+        # Power nets
+        power_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        power_sizer.Add(wx.StaticText(options_scroll, label="Power Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.power_nets_ctrl = wx.TextCtrl(options_scroll)
+        self.power_nets_ctrl.SetToolTip("Glob patterns for power nets (e.g., *GND* *VCC*)")
+        power_sizer.Add(self.power_nets_ctrl, 1, wx.EXPAND)
+        options_inner.Add(power_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Power net widths
+        widths_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        widths_sizer.Add(wx.StaticText(options_scroll, label="Power Widths:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.power_widths_ctrl = wx.TextCtrl(options_scroll)
+        self.power_widths_ctrl.SetToolTip("Track widths in mm for each power-net pattern (space-separated)")
+        widths_sizer.Add(self.power_widths_ctrl, 1, wx.EXPAND)
+        options_inner.Add(widths_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # No BGA zones
+        bga_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        bga_sizer.Add(wx.StaticText(options_scroll, label="No BGA Zones:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.no_bga_zones_ctrl = wx.TextCtrl(options_scroll)
+        self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty")
+        bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
+        options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Layer costs
+        layer_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        layer_sizer.Add(wx.StaticText(options_scroll, label="Layer Costs:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.layer_costs_ctrl = wx.TextCtrl(options_scroll)
+        # Generate default layer costs: 1.0 for F.Cu, 3.0 for others
+        default_costs = []
+        for layer in self.pcb_data.board_info.copper_layers:
+            default_costs.append("1.0" if layer == "F.Cu" else "3.0")
+        self.layer_costs_ctrl.SetValue(" ".join(default_costs))
+        self.layer_costs_ctrl.SetToolTip("Per-layer cost multipliers (order: " + " ".join(self.pcb_data.board_info.copper_layers) + ")")
+        layer_sizer.Add(self.layer_costs_ctrl, 1, wx.EXPAND)
+        options_inner.Add(layer_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        options_scroll.SetSizer(options_inner)
+        options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
+        return options_box_sizer
+
+    def _create_options_panel(self, panel):
+        """Create the advanced options panel (MPS, crossing, length matching, debug)."""
+        options_box = wx.StaticBox(panel, label="Options")
+        options_box_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
+        options_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
+        options_scroll.SetScrollRate(0, 10)
+        options_inner = wx.BoxSizer(wx.VERTICAL)
+
+        # MPS options
+        mps_label = wx.StaticText(options_scroll, label="MPS Options:")
+        mps_label.SetFont(mps_label.GetFont().Bold())
+        options_inner.Add(mps_label, 0, wx.LEFT | wx.TOP, 3)
+
+        self.mps_reverse_rounds = wx.CheckBox(options_scroll, label="Reverse MPS rounds")
+        self.mps_reverse_rounds.SetToolTip("Route most-conflicting groups first instead of least-conflicting")
+        options_inner.Add(self.mps_reverse_rounds, 0, wx.ALL, 3)
+
+        self.mps_layer_swap = wx.CheckBox(options_scroll, label="MPS layer swap")
+        self.mps_layer_swap.SetToolTip("Enable MPS-aware layer swaps to reduce crossing conflicts")
+        options_inner.Add(self.mps_layer_swap, 0, wx.ALL, 3)
+
+        self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
+        self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
+        options_inner.Add(self.mps_segment_intersection, 0, wx.ALL, 3)
+
+        # Crossing/swap options
+        self.no_crossing_layer_check = wx.CheckBox(options_scroll, label="Ignore crossing layers")
+        self.no_crossing_layer_check.SetToolTip("Count crossings regardless of layer overlap")
+        options_inner.Add(self.no_crossing_layer_check, 0, wx.ALL, 3)
+
+        self.can_swap_to_top = wx.CheckBox(options_scroll, label="Allow swap to top layer")
+        self.can_swap_to_top.SetToolTip("Allow swapping stubs to F.Cu (top layer)")
+        options_inner.Add(self.can_swap_to_top, 0, wx.ALL, 3)
+
+        # Crossing penalty
+        crossing_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        crossing_sizer.Add(wx.StaticText(options_scroll, label="Crossing Penalty:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['crossing_penalty']
+        self.crossing_penalty = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                   initial=defaults.CROSSING_PENALTY, inc=r['inc'])
+        self.crossing_penalty.SetDigits(r['digits'])
+        self.crossing_penalty.SetToolTip("Penalty for crossing assignments in target swap optimization")
+        crossing_sizer.Add(self.crossing_penalty, 1, wx.EXPAND)
+        options_inner.Add(crossing_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Length matching
+        length_label = wx.StaticText(options_scroll, label="Length Matching:")
+        length_label.SetFont(length_label.GetFont().Bold())
+        options_inner.Add(length_label, 0, wx.LEFT | wx.TOP, 3)
+
+        group_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        group_sizer.Add(wx.StaticText(options_scroll, label="Groups:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.length_match_groups_ctrl = wx.TextCtrl(options_scroll)
+        self.length_match_groups_ctrl.SetToolTip("Net patterns to length-match (comma-separated groups, e.g., 'DATA*,ADDR*')")
+        group_sizer.Add(self.length_match_groups_ctrl, 1, wx.EXPAND)
+        options_inner.Add(group_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        length_params_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        length_params_sizer.Add(wx.StaticText(options_scroll, label="Tolerance:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['length_match_tolerance']
+        self.length_match_tolerance = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                        initial=defaults.LENGTH_MATCH_TOLERANCE, inc=r['inc'])
+        self.length_match_tolerance.SetDigits(r['digits'])
+        length_params_sizer.Add(self.length_match_tolerance, 0, wx.RIGHT, 10)
+        length_params_sizer.Add(wx.StaticText(options_scroll, label="Amplitude:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['meander_amplitude']
+        self.meander_amplitude = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                   initial=defaults.MEANDER_AMPLITUDE, inc=r['inc'])
+        self.meander_amplitude.SetDigits(r['digits'])
+        length_params_sizer.Add(self.meander_amplitude, 0)
+        options_inner.Add(length_params_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Debug options
+        debug_label = wx.StaticText(options_scroll, label="Debug:")
+        debug_label.SetFont(debug_label.GetFont().Bold())
+        options_inner.Add(debug_label, 0, wx.LEFT | wx.TOP, 3)
+
         self.debug_lines_check = wx.CheckBox(options_scroll, label="Add debug visualization lines")
         self.debug_lines_check.SetValue(False)
         self.debug_lines_check.SetToolTip("Add routing paths to User layers for debugging")
         options_inner.Add(self.debug_lines_check, 0, wx.ALL, 3)
+
+        self.verbose_check = wx.CheckBox(options_scroll, label="Verbose output")
+        self.verbose_check.SetToolTip("Print detailed diagnostic output")
+        options_inner.Add(self.verbose_check, 0, wx.ALL, 3)
+
+        self.skip_routing_check = wx.CheckBox(options_scroll, label="Skip routing (swaps only)")
+        self.skip_routing_check.SetToolTip("Skip actual routing, only do swaps and write debug info")
+        options_inner.Add(self.skip_routing_check, 0, wx.ALL, 3)
+
+        self.debug_memory_check = wx.CheckBox(options_scroll, label="Debug memory")
+        self.debug_memory_check.SetToolTip("Print memory usage statistics at key points")
+        options_inner.Add(self.debug_memory_check, 0, wx.ALL, 3)
 
         options_scroll.SetSizer(options_inner)
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
@@ -420,6 +606,199 @@ class RoutingDialog(wx.Dialog):
 
         log_panel.SetSizer(log_sizer)
         return log_panel
+
+    def _create_advanced_tab(self):
+        """Create the Advanced tab with swappable nets on left, parameters+options on right."""
+        panel = wx.Panel(self.notebook)
+        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        # Left side: Swappable nets selection (1:1 ratio with right side)
+        left_sizer = self._create_swappable_nets_panel(panel)
+        main_sizer.Add(left_sizer, 1, wx.EXPAND | wx.ALL, 5)
+
+        # Right side: Advanced parameters and options
+        right_sizer = wx.BoxSizer(wx.VERTICAL)
+        right_sizer.Add(self._create_advanced_parameters_panel(panel), 1, wx.EXPAND | wx.BOTTOM, 5)
+        right_sizer.Add(self._create_options_panel(panel), 1, wx.EXPAND)
+        main_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
+
+        panel.SetSizer(main_sizer)
+
+        # Populate swappable nets list after creation
+        wx.CallAfter(self._populate_swappable_nets)
+
+        return panel
+
+    def _create_swappable_nets_panel(self, panel):
+        """Create the swappable nets selection panel (left side of Advanced tab)."""
+        swap_box = wx.StaticBox(panel, label="Swappable Nets")
+        swap_sizer = wx.StaticBoxSizer(swap_box, wx.VERTICAL)
+
+        # Instructions
+        instructions = wx.StaticText(panel, label=(
+            "Select nets that can have targets swapped to reduce crossings."
+        ))
+        instructions.Wrap(250)
+        swap_sizer.Add(instructions, 0, wx.ALL, 5)
+
+        # Swappable nets pattern input
+        pattern_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        pattern_sizer.Add(wx.StaticText(panel, label="Filter:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.swappable_pattern_ctrl = wx.TextCtrl(panel)
+        self.swappable_pattern_ctrl.SetToolTip("Glob patterns for swappable nets (e.g., *DATA_*)")
+        self.swappable_pattern_ctrl.Bind(wx.EVT_TEXT, self._on_swappable_filter_changed)
+        pattern_sizer.Add(self.swappable_pattern_ctrl, 1, wx.EXPAND)
+        swap_sizer.Add(pattern_sizer, 0, wx.EXPAND | wx.ALL, 5)
+
+        # Net list for swappable nets
+        self.swappable_net_list = wx.CheckListBox(panel, size=(-1, -1), style=wx.LB_EXTENDED)
+        self.swappable_net_list.Bind(wx.EVT_KEY_DOWN, self._on_swappable_list_key)
+        swap_sizer.Add(self.swappable_net_list, 1, wx.EXPAND | wx.ALL, 5)
+
+        # Select/Unselect buttons
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        select_btn = wx.Button(panel, label="Select")
+        select_btn.Bind(wx.EVT_BUTTON, self._on_swappable_select)
+        unselect_btn = wx.Button(panel, label="Unselect")
+        unselect_btn.Bind(wx.EVT_BUTTON, self._on_swappable_unselect)
+        btn_sizer.Add(select_btn, 1, wx.RIGHT, 5)
+        btn_sizer.Add(unselect_btn, 1)
+        swap_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        # Track checked swappable nets persistently
+        self._checked_swappable_nets = set()
+
+        # Schematic update options
+        self.update_schematic_check = wx.CheckBox(panel, label="Update schematic with swaps")
+        self.update_schematic_check.SetToolTip("Update .kicad_sch files with pin swap changes")
+        self.update_schematic_check.Bind(wx.EVT_CHECKBOX, self._on_update_schematic_changed)
+        swap_sizer.Add(self.update_schematic_check, 0, wx.ALL, 5)
+
+        dir_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        dir_sizer.Add(wx.StaticText(panel, label="Schematic dir.:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.schematic_dir_ctrl = wx.TextCtrl(panel)
+        self.schematic_dir_ctrl.SetValue(os.path.dirname(self.board_filename))
+        self.schematic_dir_ctrl.SetToolTip("Directory containing .kicad_sch files")
+        self.schematic_dir_ctrl.Enable(False)
+        dir_sizer.Add(self.schematic_dir_ctrl, 1, wx.EXPAND | wx.RIGHT, 5)
+        self.browse_schematic_btn = wx.Button(panel, label="...")
+        self.browse_schematic_btn.Bind(wx.EVT_BUTTON, self._on_browse_schematic_dir)
+        self.browse_schematic_btn.Enable(False)
+        dir_sizer.Add(self.browse_schematic_btn, 0)
+        swap_sizer.Add(dir_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        return swap_sizer
+
+    def _create_advanced_parameters_panel(self, panel):
+        """Create the advanced parameters panel (right side of Advanced tab)."""
+        param_box = wx.StaticBox(panel, label="Parameters")
+        param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
+        param_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
+        param_scroll.SetScrollRate(0, 10)
+        param_inner = wx.BoxSizer(wx.VERTICAL)
+
+        # Advanced parameters grid
+        param_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
+        param_grid.AddGrowableCol(1)
+        self._add_advanced_parameters(param_scroll, param_grid)
+        param_inner.Add(param_grid, 0, wx.EXPAND | wx.ALL, 5)
+
+        param_scroll.SetSizer(param_inner)
+        param_box_sizer.Add(param_scroll, 1, wx.EXPAND)
+        return param_box_sizer
+
+    def _populate_swappable_nets(self):
+        """Populate the swappable nets list."""
+        self.swappable_net_list.Clear()
+        for name, net_id in self.all_nets:
+            self.swappable_net_list.Append(name)
+
+    def _on_swappable_filter_changed(self, event):
+        """Handle swappable net filter change."""
+        import fnmatch
+        pattern = self.swappable_pattern_ctrl.GetValue()
+
+        # Save checked state before filtering
+        for i in range(self.swappable_net_list.GetCount()):
+            name = self.swappable_net_list.GetString(i)
+            if self.swappable_net_list.IsChecked(i):
+                self._checked_swappable_nets.add(name)
+            else:
+                self._checked_swappable_nets.discard(name)
+
+        # Filter nets
+        self.swappable_net_list.Clear()
+        for name, net_id in self.all_nets:
+            if not pattern or fnmatch.fnmatch(name, f"*{pattern}*"):
+                idx = self.swappable_net_list.Append(name)
+                # Restore checked state
+                if name in self._checked_swappable_nets:
+                    self.swappable_net_list.Check(idx, True)
+
+    def _on_swappable_list_key(self, event):
+        """Handle keyboard events in swappable net list."""
+        if event.GetKeyCode() == ord('A') and event.ControlDown():
+            for i in range(self.swappable_net_list.GetCount()):
+                self.swappable_net_list.SetSelection(i)
+        else:
+            event.Skip()
+
+    def _on_swappable_select(self, event):
+        """Check the highlighted swappable nets."""
+        for i in self.swappable_net_list.GetSelections():
+            self.swappable_net_list.Check(i, True)
+            self._checked_swappable_nets.add(self.swappable_net_list.GetString(i))
+
+    def _on_swappable_unselect(self, event):
+        """Uncheck the highlighted swappable nets."""
+        for i in self.swappable_net_list.GetSelections():
+            self.swappable_net_list.Check(i, False)
+            self._checked_swappable_nets.discard(self.swappable_net_list.GetString(i))
+
+    def _on_edge_clearance_check(self, event):
+        """Handle edge clearance checkbox change."""
+        self.board_edge_clearance.Enable(self.edge_clearance_check.GetValue())
+
+    def _on_update_schematic_changed(self, event):
+        """Handle update schematic checkbox change."""
+        enabled = self.update_schematic_check.GetValue()
+        self.schematic_dir_ctrl.Enable(enabled)
+        self.browse_schematic_btn.Enable(enabled)
+
+    def _on_browse_schematic_dir(self, event):
+        """Browse for schematic directory."""
+        default_path = self.schematic_dir_ctrl.GetValue() or os.path.dirname(self.board_filename)
+        dlg = wx.DirDialog(self, "Select Schematic Directory",
+                           defaultPath=default_path,
+                           style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.schematic_dir_ctrl.SetValue(dlg.GetPath())
+        dlg.Destroy()
+
+    def _get_swappable_nets(self):
+        """Get list of selected swappable net names."""
+        selected = []
+        for i in range(self.swappable_net_list.GetCount()):
+            if self.swappable_net_list.IsChecked(i):
+                selected.append(self.swappable_net_list.GetString(i))
+        # Also include any nets checked but currently filtered out
+        for name in self._checked_swappable_nets:
+            if name not in selected:
+                selected.append(name)
+        return selected
+
+    def _parse_length_match_groups(self):
+        """Parse length match groups from the text control."""
+        text = self.length_match_groups_ctrl.GetValue().strip()
+        if not text:
+            return None
+        # Split by comma to get separate groups, each group has space-separated patterns
+        groups = []
+        for group_text in text.split(','):
+            patterns = group_text.strip().split()
+            if patterns:
+                groups.append(patterns)
+        return groups if groups else None
 
     def _load_nets_immediate(self):
         """Load net names from PCB data (fast, no connectivity check)."""
@@ -486,18 +865,46 @@ class RoutingDialog(wx.Dialog):
             return False
 
     def _update_net_list(self):
-        """Update the net list based on filter and hide_connected setting."""
+        """Update the net list based on filter, component filter, and hide_connected setting."""
         filter_text = self.filter_ctrl.GetValue().lower()
+        component_filter = self.component_filter_ctrl.GetValue().strip()
         hide_connected = self.hide_connected_check.GetValue()
 
-        # Filter by text first (fast)
-        filtered_nets = [(name, net_id) for name, net_id in self.all_nets
-                         if filter_text in name.lower()]
+        # Save checked state before filtering
+        for i in range(self.net_list.GetCount()):
+            name = self.net_list.GetString(i)
+            if self.net_list.IsChecked(i):
+                self._checked_nets.add(name)
+            else:
+                self._checked_nets.discard(name)
+
+        # Build set of nets connected to the filtered component
+        component_nets = set()
+        if component_filter:
+            for net_id, pads in self.pcb_data.pads_by_net.items():
+                for pad in pads:
+                    if pad.component_ref and component_filter.lower() in pad.component_ref.lower():
+                        net_info = self.pcb_data.nets.get(net_id)
+                        if net_info and net_info.name:
+                            component_nets.add(net_info.name)
+                        break
+
+        # Filter by text and component
+        filtered_nets = []
+        for name, net_id in self.all_nets:
+            if filter_text and filter_text not in name.lower():
+                continue
+            if component_filter and name not in component_nets:
+                continue
+            filtered_nets.append((name, net_id))
 
         # Start with all filtered nets in the list
         self.net_list.Clear()
         for name, net_id in filtered_nets:
-            self.net_list.Append(name)
+            idx = self.net_list.Append(name)
+            # Restore checked state
+            if name in self._checked_nets:
+                self.net_list.Check(idx, True)
 
         # Check which nets need connectivity check (not in cache)
         uncached_nets = [(name, net_id) for name, net_id in filtered_nets
@@ -586,12 +993,17 @@ class RoutingDialog(wx.Dialog):
         self.log_text.AppendText(text)
 
     def _get_selected_nets(self):
-        """Get list of selected net names."""
-        selected = []
+        """Get list of selected net names, including those checked but currently filtered out."""
+        # First, update _checked_nets with current visible state
         for i in range(self.net_list.GetCount()):
+            name = self.net_list.GetString(i)
             if self.net_list.IsChecked(i):
-                selected.append(self.net_list.GetString(i))
-        return selected
+                self._checked_nets.add(name)
+            else:
+                self._checked_nets.discard(name)
+
+        # Return all checked nets (including filtered out ones)
+        return list(self._checked_nets)
 
     def _get_selected_layers(self):
         """Get list of selected layers."""
@@ -634,8 +1046,11 @@ class RoutingDialog(wx.Dialog):
             'via_cost': self.via_cost.GetValue(),
             'move_copper_text': self.move_text_check.GetValue(),
             'debug_lines': self.debug_lines_check.GetValue(),
+            # Impedance routing
+            'impedance': self.impedance_value.GetValue() if self.impedance_check.GetValue() else None,
             # Advanced parameters
             'max_iterations': self.max_iterations.GetValue(),
+            'max_probe_iterations': self.max_probe_iterations.GetValue(),
             'heuristic_weight': self.heuristic_weight.GetValue(),
             'turn_cost': self.turn_cost.GetValue(),
             'max_ripup': self.max_ripup.GetValue(),
@@ -645,11 +1060,72 @@ class RoutingDialog(wx.Dialog):
             'via_proximity_cost': self.via_proximity_cost.GetValue(),
             'track_proximity_distance': self.track_proximity_distance.GetValue(),
             'track_proximity_cost': self.track_proximity_cost.GetValue(),
+            'bga_proximity_radius': self.bga_proximity_radius.GetValue(),
+            'bga_proximity_cost': self.bga_proximity_cost.GetValue(),
+            'vertical_attraction_radius': self.vertical_attraction_radius.GetValue(),
+            'vertical_attraction_cost': self.vertical_attraction_cost.GetValue(),
+            'crossing_penalty': self.crossing_penalty.GetValue(),
             'routing_clearance_margin': self.routing_clearance_margin.GetValue(),
             'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
-            'board_edge_clearance': self.board_edge_clearance.GetValue(),
+            'board_edge_clearance': self.board_edge_clearance.GetValue() if self.edge_clearance_check.GetValue() else 0.0,
             'enable_layer_switch': self.enable_layer_switch.GetValue(),
+            # Direction
+            'direction': ['forward', 'backward'][self.direction_choice.GetSelection() - 1] if self.direction_choice.GetSelection() > 0 else None,
+            # Options
+            'add_teardrops': self.add_teardrops_check.GetValue(),
+            'verbose': self.verbose_check.GetValue(),
+            'skip_routing': self.skip_routing_check.GetValue(),
+            'debug_memory': self.debug_memory_check.GetValue(),
+            # MPS options
+            'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
+            'mps_layer_swap': self.mps_layer_swap.GetValue(),
+            'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
+            # Crossing/swap options
+            'no_crossing_layer_check': self.no_crossing_layer_check.GetValue(),
+            'can_swap_to_top_layer': self.can_swap_to_top.GetValue(),
+            # Swappable nets
+            'swappable_nets': self._get_swappable_nets() or None,
+            'schematic_dir': self.schematic_dir_ctrl.GetValue() if self.update_schematic_check.GetValue() else None,
+            # Length matching
+            'length_match_groups': self._parse_length_match_groups(),
+            'length_match_tolerance': self.length_match_tolerance.GetValue(),
+            'meander_amplitude': self.meander_amplitude.GetValue(),
         }
+
+        # Parse power nets and widths
+        power_nets_text = self.power_nets_ctrl.GetValue().strip()
+        power_widths_text = self.power_widths_ctrl.GetValue().strip()
+        if power_nets_text:
+            config['power_nets'] = power_nets_text.split()
+            if power_widths_text:
+                try:
+                    config['power_nets_widths'] = [float(w) for w in power_widths_text.split()]
+                except ValueError:
+                    config['power_nets_widths'] = []
+            else:
+                config['power_nets_widths'] = []
+        else:
+            config['power_nets'] = []
+            config['power_nets_widths'] = []
+
+        # Parse no BGA zones
+        no_bga_text = self.no_bga_zones_ctrl.GetValue().strip()
+        if no_bga_text.upper() == 'ALL':
+            config['no_bga_zones'] = []  # Empty list means disable all
+        elif no_bga_text:
+            config['no_bga_zones'] = no_bga_text.split()
+        else:
+            config['no_bga_zones'] = None  # None means use BGA zones
+
+        # Parse layer costs
+        layer_costs_text = self.layer_costs_ctrl.GetValue().strip()
+        if layer_costs_text:
+            try:
+                config['layer_costs'] = [float(c) for c in layer_costs_text.split()]
+            except ValueError:
+                config['layer_costs'] = []
+        else:
+            config['layer_costs'] = []
 
         # Run routing in a thread
         self._routing_thread = threading.Thread(
@@ -713,20 +1189,46 @@ class RoutingDialog(wx.Dialog):
                 via_drill=config['via_drill'],
                 grid_step=config['grid_step'],
                 via_cost=config['via_cost'],
+                impedance=config.get('impedance'),
                 max_iterations=config['max_iterations'],
+                max_probe_iterations=config.get('max_probe_iterations', 5000),
                 heuristic_weight=config['heuristic_weight'],
                 turn_cost=config['turn_cost'],
                 max_rip_up_count=config['max_ripup'],
                 ordering_strategy=config['ordering_strategy'],
+                direction_order=config.get('direction'),
                 stub_proximity_radius=config['stub_proximity_radius'],
                 stub_proximity_cost=config['stub_proximity_cost'],
                 via_proximity_cost=config['via_proximity_cost'],
                 track_proximity_distance=config['track_proximity_distance'],
                 track_proximity_cost=config['track_proximity_cost'],
+                bga_proximity_radius=config.get('bga_proximity_radius', 7.0),
+                bga_proximity_cost=config.get('bga_proximity_cost', 0.2),
+                vertical_attraction_radius=config.get('vertical_attraction_radius', 1.0),
+                vertical_attraction_cost=config.get('vertical_attraction_cost', 0.1),
+                crossing_penalty=config.get('crossing_penalty', 1000.0),
                 routing_clearance_margin=config['routing_clearance_margin'],
                 hole_to_hole_clearance=config['hole_to_hole_clearance'],
                 board_edge_clearance=config['board_edge_clearance'],
                 enable_layer_switch=config['enable_layer_switch'],
+                crossing_layer_check=not config.get('no_crossing_layer_check', False),
+                can_swap_to_top_layer=config.get('can_swap_to_top_layer', False),
+                swappable_net_patterns=config.get('swappable_nets'),
+                schematic_dir=config.get('schematic_dir'),
+                mps_reverse_rounds=config.get('mps_reverse_rounds', False),
+                mps_layer_swap=config.get('mps_layer_swap', False),
+                mps_segment_intersection=config.get('mps_segment_intersection', False),
+                power_nets=config.get('power_nets', []),
+                power_nets_widths=config.get('power_nets_widths', []),
+                disable_bga_zones=config.get('no_bga_zones'),
+                layer_costs=config.get('layer_costs', []),
+                length_match_groups=config.get('length_match_groups'),
+                length_match_tolerance=config.get('length_match_tolerance', 0.1),
+                meander_amplitude=config.get('meander_amplitude', 1.0),
+                add_teardrops=config.get('add_teardrops', False),
+                verbose=config.get('verbose', False),
+                skip_routing=config.get('skip_routing', False),
+                debug_memory=config.get('debug_memory', False),
                 debug_lines=config['debug_lines'],
                 cancel_check=check_cancel,
                 progress_callback=on_progress,

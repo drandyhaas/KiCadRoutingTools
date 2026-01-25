@@ -24,6 +24,25 @@ TRACK_PROXIMITY_COST = 0.2
 # Distance parameters
 STUB_PROXIMITY_RADIUS = 2.0  # mm
 TRACK_PROXIMITY_DISTANCE = 2.0  # mm
+BGA_PROXIMITY_RADIUS = 7.0  # mm
+BGA_PROXIMITY_COST = 0.2
+
+# Vertical alignment attraction
+VERTICAL_ATTRACTION_RADIUS = 1.0  # mm
+VERTICAL_ATTRACTION_COST = 0.1
+
+# Impedance routing
+IMPEDANCE_DEFAULT = 50  # ohms
+
+# Crossing penalty
+CROSSING_PENALTY = 1000.0
+
+# Probe iterations
+MAX_PROBE_ITERATIONS = 5000
+
+# Length matching
+LENGTH_MATCH_TOLERANCE = 0.1  # mm
+MEANDER_AMPLITUDE = 1.0  # mm
 
 # Algorithm parameters
 MAX_ITERATIONS = 200000
@@ -49,7 +68,7 @@ PARAM_RANGES = {
     'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
     'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 2},
     'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 2},
-    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 3},
+    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 2},
     'via_cost': {'min': 1, 'max': 1000},
     'max_iterations': {'min': 1000, 'max': 1000000},
     'heuristic_weight': {'min': 1.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
@@ -63,4 +82,13 @@ PARAM_RANGES = {
     'routing_clearance_margin': {'min': 0.5, 'max': 2.0, 'inc': 0.1, 'digits': 1},
     'hole_to_hole_clearance': {'min': 0.0, 'max': 1.0, 'inc': 0.05, 'digits': 2},
     'board_edge_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'bga_proximity_radius': {'min': 0.0, 'max': 20.0, 'inc': 0.5, 'digits': 1},
+    'bga_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'vertical_attraction_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
+    'vertical_attraction_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'impedance': {'min': 10, 'max': 200, 'inc': 1, 'digits': 0},
+    'crossing_penalty': {'min': 0.0, 'max': 10000.0, 'inc': 100.0, 'digits': 0},
+    'max_probe_iterations': {'min': 100, 'max': 100000},
+    'length_match_tolerance': {'min': 0.01, 'max': 5.0, 'inc': 0.01, 'digits': 2},
+    'meander_amplitude': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
 }

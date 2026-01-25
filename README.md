@@ -278,6 +278,55 @@ This script demonstrates:
 3. Connecting disconnected plane regions using `route_disconnected_planes.py`
 4. DRC and connectivity verification
 
+## KiCad Plugin
+
+The router can be used directly within KiCad 9+ via an ActionPlugin, providing a graphical interface for all routing features.
+
+### Installation
+
+```bash
+# Install the plugin (copies to KiCad plugins directory)
+python install_plugin.py
+
+# For development: create symlink instead of copying
+python install_plugin.py --symlink
+
+# Remove the plugin
+python install_plugin.py --uninstall
+```
+
+The installer automatically detects your KiCad installation directory:
+- **macOS**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
+- **Linux**: `~/.local/share/kicad/9.0/3rdparty/plugins/`
+- **Windows**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
+
+### Usage
+
+1. Open KiCad 9.0 or later
+2. Open a PCB in Pcbnew
+3. Go to **Tools → External Plugins → Auto-routing tools**
+4. Configure routing parameters and select nets to route
+5. Click **Route** to run the router
+
+### Plugin Features
+
+The plugin GUI provides access to all routing features:
+
+**Basic Tab:**
+- Net selection with filtering and component filtering
+- Track width, clearance, via size/drill configuration
+- Layer selection with per-layer cost multipliers
+- Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
+
+**Advanced Tab:**
+- Swappable nets configuration for target swap optimization
+- Routing parameters: iterations, heuristic weight, rip-up, probe iterations
+- MPS ordering options, direction control, length matching
+- Proximity settings: BGA, stub, track, via proximity costs
+- Debug options
+
+The plugin applies routed results directly to the open PCB in KiCad.
+
 ## Documentation
 
 | Document | Description |
@@ -309,6 +358,8 @@ KiCadRoutingTools/
 ├── plane_resistance.py       # Plane resistance and current capacity calculations
 ├── plane_region_connector.py # Detect and route between disconnected plane regions
 ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
+├── routing_defaults.py       # Default routing parameter values
+├── routing_exceptions.py     # Routing exception classes
 ├── routing_state.py          # RoutingState class - tracks routing progress
 ├── routing_context.py        # Helper functions for obstacle building
 ├── routing_common.py         # Shared utilities for route.py and route_diff.py
@@ -383,6 +434,10 @@ KiCadRoutingTools/
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
+├── kicad_routing_plugin/     # KiCad ActionPlugin
+│   ├── action_plugin.py      # ActionPlugin entry point
+│   └── swig_gui.py           # wxPython GUI for KiCad integration
+├── install_plugin.py         # Plugin installer script
 ├── docs/                     # Documentation
 └── .claude/skills/           # Claude Code skills
     └── analyze-power-nets/   # AI-powered power net analysis skill
@@ -747,7 +802,6 @@ Features:
 - No GND via auto return path placements for single-ended routing
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost learning/tuning
-- No KiCad plugin integration
 - No design rule import from KiCad
 - No design rules by region/area support
 
