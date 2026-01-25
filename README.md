@@ -740,7 +740,16 @@ Features:
 - No push-and-shove (routes around obstacles, doesn't move them)
 - Layer swaps not supported for multi-point nets (3+ pads)
 - No blind or buried vias
-- Teardrops are pad-level settings only (use `--add-teardrops` to enable on all pads)
+- No net class support (KiCad native)
+- No User-Defined Keepout Zones
+- No Bus/Parallel Routing 
+- Propagation Delay Matching
+- No GND via auto return path placements for single-ended routing
+- No coarse grid assignment before detailed routing to plan overall topology
+- No via cost learning/tuning
+- No KiCad plugin integration
+- No design rule import from KiCad
+- No design rules by region/area support
 
 ## License
 
