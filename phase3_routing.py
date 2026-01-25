@@ -56,6 +56,7 @@ def run_phase3_tap_routing(
     results: List[Dict],
     track_proximity_cache: Dict[int, Dict],
     layer_map: Dict[str, int],
+    progress_callback: Any = None,
 ) -> Phase3Stats:
     """
     Route tap connections for all pending multi-point nets.
@@ -107,10 +108,17 @@ def run_phase3_tap_routing(
     # Cache for obstacle cells - persists across retry iterations for performance
     obstacle_cache = {}
 
+    total_multipoint_nets = len(state.pending_multipoint_nets)
+    net_index = 0
     for net_id, main_result in list(state.pending_multipoint_nets.items()):
         # Skip if already processed (removed during a Phase 3 rip-up reroute of another net)
         if net_id not in state.pending_multipoint_nets:
             continue
+
+        net_index += 1
+        net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+        if progress_callback:
+            progress_callback(net_index, total_multipoint_nets, net_name)
 
         net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
         print(f"\n{net_name} (net {net_id}):")

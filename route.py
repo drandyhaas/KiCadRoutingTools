@@ -413,6 +413,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
+    if progress_callback:
+        progress_callback(0, 0, "Building base obstacle map...")
     print("Building base obstacle map...")
     base_start = time.time()
 
@@ -460,6 +462,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_proximity_points)} stub/pad proximity circles on User.5")
 
     # Pre-compute net obstacles for caching (speeds up per-route setup)
+    if progress_callback:
+        progress_callback(0, 0, "Pre-computing net obstacle cache...")
     print("Pre-computing net obstacle cache...")
     cache_start = time.time()
     net_obstacles_cache = precompute_all_net_obstacles(
@@ -476,6 +480,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Build working obstacle map (base + all nets) for incremental updates
     # Uses reference counting in Rust to correctly handle cells blocked by multiple nets
+    if progress_callback:
+        progress_callback(0, 0, "Building working obstacle map...")
     working_obstacles = build_working_obstacle_map(base_obstacles, net_obstacles_cache)
     # Shrink internal allocations to reduce memory footprint
     working_obstacles.shrink_to_fit()
@@ -521,12 +527,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Counters (kept as locals, not aliased from state)
     route_index = 0
 
+    # Wrap progress callback to show "net_name (X/N)"
+    def routing_progress_callback(current, total, net_name):
+        if progress_callback:
+            progress_callback(current, total_routes, net_name)
+
     # Route single-ended nets
     se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
         state, single_ended_nets,
         visualize=visualize, vis_callback=vis_callback, base_vis_data=base_vis_data,
         route_index_start=route_index,
-        cancel_check=cancel_check, progress_callback=progress_callback
+        cancel_check=cancel_check, progress_callback=routing_progress_callback
     )
     successful += se_successful
     failed += se_failed
@@ -548,10 +559,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Sync pcb_data with length-matched segments before Phase 3
     # This ensures tap routes see meanders from other nets as obstacles
+    if progress_callback:
+        progress_callback(0, 0, "Syncing pcb_data...")
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
 
     # Phase 3: Complete multi-point routing (tap connections)
     # This happens AFTER length matching so tap routes connect to meandered main routes
+    num_multipoint_nets = len(state.pending_multipoint_nets) if state.pending_multipoint_nets else 0
+
+    # Create phase 3 progress callback
+    def phase3_progress_callback(current, total, net_name):
+        if progress_callback:
+            progress_callback(current, num_multipoint_nets, f"Multi-point: {net_name}")
+
     run_phase3_tap_routing(
         state=state,
         pcb_data=pcb_data,
@@ -566,8 +586,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         diff_pair_by_net_id=state.diff_pair_by_net_id,  # Empty for single-ended
         results=results,
         track_proximity_cache=track_proximity_cache,
-        layer_map=layer_map
+        layer_map=layer_map,
+        progress_callback=phase3_progress_callback,
     )
+
+    # Final progress update
+    if progress_callback:
+        progress_callback(total_routes, total_routes, "Routing complete")
 
     # Notify visualization callback that all routing is complete
     if visualize:

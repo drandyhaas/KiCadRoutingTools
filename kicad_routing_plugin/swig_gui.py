@@ -442,6 +442,11 @@ class RoutingDialog(wx.Dialog):
         filtered_nets = [(name, net_id) for name, net_id in self.all_nets
                          if filter_text in name.lower()]
 
+        # Start with all filtered nets in the list
+        self.net_list.Clear()
+        for name, net_id in filtered_nets:
+            self.net_list.Append(name)
+
         # Check which nets need connectivity check (not in cache)
         uncached_nets = [(name, net_id) for name, net_id in filtered_nets
                          if net_id not in self._connectivity_cache]
@@ -452,22 +457,32 @@ class RoutingDialog(wx.Dialog):
             self.progress_bar.SetValue(0)
 
             for i, (name, net_id) in enumerate(uncached_nets):
-                self._connectivity_cache[net_id] = self._is_net_connected(net_id)
+                is_connected = self._is_net_connected(net_id)
+                self._connectivity_cache[net_id] = is_connected
+
+                # If hiding connected and this net is connected, remove it from list
+                if hide_connected and is_connected:
+                    idx = self.net_list.FindString(name)
+                    if idx != wx.NOT_FOUND:
+                        self.net_list.Delete(idx)
+
                 self.progress_bar.SetValue(i + 1)
-                self.status_text.SetLabel(f"Checking connectivity... {i + 1}/{len(uncached_nets)}")
+                remaining = self.net_list.GetCount()
+                self.status_text.SetLabel(f"Checking connectivity... {i + 1}/{len(uncached_nets)} ({remaining} to route)")
                 wx.Yield()
 
-        # Now filter using cache (fast)
-        self.net_list.Clear()
-        connected_count = 0
-        for name, net_id in filtered_nets:
-            is_connected = self._connectivity_cache.get(net_id, False)
-            if is_connected:
-                connected_count += 1
-            if hide_connected and is_connected:
-                continue
-            self.net_list.Append(name)
+        # If all nets were cached, still need to filter if hide_connected
+        if not uncached_nets and hide_connected:
+            # Remove connected nets using cache (fast, no progress needed)
+            for name, net_id in filtered_nets:
+                if self._connectivity_cache.get(net_id, False):
+                    idx = self.net_list.FindString(name)
+                    if idx != wx.NOT_FOUND:
+                        self.net_list.Delete(idx)
 
+        # Count connected for status
+        connected_count = sum(1 for name, net_id in filtered_nets
+                              if self._connectivity_cache.get(net_id, False))
         remaining = self.net_list.GetCount()
         if hide_connected:
             self.status_text.SetLabel(f"Ready - {remaining} nets to route ({connected_count} connected)")
@@ -667,12 +682,17 @@ class RoutingDialog(wx.Dialog):
         else:
             self.route_btn.Enable()
 
-    def _update_progress(self, current, total, net_name):
+    def _update_progress(self, current, total, step_name):
         """Update progress bar and status."""
         if total > 0:
             percent = int(100 * current / total)
             self.progress_bar.SetValue(percent)
-        self.status_text.SetLabel(f"Routing: {net_name} ({current}/{total})")
+            self.progress_bar.SetRange(100)
+            self.status_text.SetLabel(f"{step_name} ({current}/{total})")
+        else:
+            # Setup phase - no count, just show the step name
+            self.progress_bar.Pulse()  # Indeterminate progress
+            self.status_text.SetLabel(step_name)
 
     def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
         """Apply routing results directly to the open pcbnew board."""
