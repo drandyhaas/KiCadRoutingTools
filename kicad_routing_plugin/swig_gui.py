@@ -168,8 +168,8 @@ class RoutingDialog(wx.Dialog):
         self.notebook.AddPage(differential_panel, "Differential")
 
         # Tab 4: Fanout
-        fanout_panel = self._create_fanout_tab()
-        self.notebook.AddPage(fanout_panel, "Fanout")
+        self.fanout_tab = self._create_fanout_tab()
+        self.notebook.AddPage(self.fanout_tab, "Fanout")
 
         # Tab 5: Log
         log_panel = self._create_log_tab()
@@ -837,11 +837,6 @@ class RoutingDialog(wx.Dialog):
 
     def _deferred_init(self):
         """Run after dialog is shown: sync board and check connectivity."""
-        # Sync pcb_data with pcbnew's in-memory board state
-        self.status_text.SetLabel("Syncing with board...")
-        wx.Yield()
-        self._sync_pcb_data_from_board()
-
         # Set up connectivity check function on the net panel
         # This function returns True if a net should be hidden (i.e., is connected)
         def is_connected(net_id):
@@ -859,12 +854,46 @@ class RoutingDialog(wx.Dialog):
         if self.net_panel.hide_check:
             self.net_panel.hide_check.SetValue(True)
 
+        # Do initial refresh
+        self.refresh_from_board()
+
+    def refresh_from_board(self):
+        """Refresh pcb_data from the current board state.
+
+        Call this when re-showing the dialog after the user has made
+        changes in KiCad.
+        """
+        # Save current selections from all net panels BEFORE any refresh
+        # This ensures we preserve selections even if refresh() is called during sync
+        saved_selections = {
+            'net_panel': set(self.net_panel.get_selected_nets()),
+            'swappable_net_panel': set(self.swappable_net_panel.get_selected_nets()),
+            'fanout_tab': set(self.fanout_tab.net_panel.get_selected_nets()),
+        }
+        # DiffPairSelectionPanel uses _checked_pairs, not _checked_nets
+        saved_diff_pairs = set(self.differential_tab.pair_panel._checked_pairs)
+
+        # Sync pcb_data with pcbnew's in-memory board state
+        self.status_text.SetLabel("Syncing with board...")
+        wx.Yield()
+        self._sync_pcb_data_from_board()
+
         # Run connectivity check with progress
         self._check_connectivity_with_progress()
 
-        # Refresh swappable net panel and differential tab after connectivity check
+        # Restore selections to each panel before refreshing
+        self.net_panel._checked_nets = saved_selections['net_panel']
+        self.swappable_net_panel._checked_nets = saved_selections['swappable_net_panel']
+        self.fanout_tab.net_panel._checked_nets = saved_selections['fanout_tab']
+        self.differential_tab.pair_panel._checked_pairs = saved_diff_pairs
+
+        # Refresh all net panels (will restore checks from saved state)
+        self.net_panel.refresh()
         self.swappable_net_panel.refresh()
         self.differential_tab.pair_panel.refresh()
+        self.fanout_tab.net_panel.refresh()
+
+        self.status_text.SetLabel("Ready")
 
     def _is_net_connected(self, net_id):
         """Check if a net is already fully connected using check_connected logic."""

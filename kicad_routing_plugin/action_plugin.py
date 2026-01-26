@@ -20,6 +20,10 @@ if ROOT_DIR not in sys.path:
 class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
     """Action Plugin for KiCad Routing Tools."""
 
+    # Class-level dialog reference (persists across Run calls)
+    _dialog = None
+    _dialog_board_filename = None
+
     def defaults(self):
         self.name = "KiCadRoutingTools"
         self.category = "Routing"
@@ -61,6 +65,26 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
             )
             return
 
+        # Check if we have an existing dialog for this board
+        cls = KiCadRoutingToolsPlugin
+        if cls._dialog is not None:
+            # Check if dialog is still valid and for the same board
+            try:
+                if cls._dialog_board_filename == board_filename:
+                    # Re-show the existing dialog (preserves all settings)
+                    cls._dialog.Show()
+                    cls._dialog.Raise()
+                    # Refresh board state in case user made changes in KiCad
+                    cls._dialog.refresh_from_board()
+                    return
+                else:
+                    # Different board - destroy old dialog
+                    cls._dialog.Destroy()
+                    cls._dialog = None
+            except RuntimeError:
+                # Dialog was destroyed externally
+                cls._dialog = None
+
         # Import our modules
         from kicad_parser import parse_kicad_pcb
         from .swig_gui import RoutingDialog
@@ -76,13 +100,19 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
             )
             return
 
-        # Show the configuration dialog
+        # Create and show the dialog (non-modal so user can interact with KiCad)
         parent = wx.GetTopLevelWindows()[0] if wx.GetTopLevelWindows() else None
-        dlg = RoutingDialog(parent, pcb_data, board_filename)
+        cls._dialog = RoutingDialog(parent, pcb_data, board_filename)
+        cls._dialog_board_filename = board_filename
 
-        result = dlg.ShowModal()
-        dlg.Destroy()
+        # Bind close event to hide instead of destroy
+        cls._dialog.Bind(wx.EVT_CLOSE, self._on_dialog_close)
 
-        if result == wx.ID_OK:
-            # Refresh the board view
-            pcbnew.Refresh()
+        cls._dialog.Show()
+
+    def _on_dialog_close(self, event):
+        """Hide the dialog instead of destroying it."""
+        cls = KiCadRoutingToolsPlugin
+        if cls._dialog:
+            cls._dialog.Hide()
+        # Don't call event.Skip() - we don't want the default close behavior
