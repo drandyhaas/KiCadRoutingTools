@@ -156,18 +156,24 @@ class DiffPairSelectionPanel(wx.Panel):
         """Handle filter change."""
         self._update_pair_list()
 
-    def _update_pair_list(self):
-        """Update the pair list based on filters."""
+    def _update_pair_list(self, sync_from_visible=True):
+        """Update the pair list based on filters.
+
+        Args:
+            sync_from_visible: If True, sync _checked_pairs from visible items first.
+                              Set to False when restoring settings to avoid clearing them.
+        """
         filter_text = self.filter_ctrl.GetValue().lower()
         hide_connected = self.hide_check and self.hide_check.GetValue()
 
-        # Save checked state
-        for i in range(self.pair_list.GetCount()):
-            name = self.pair_list.GetString(i)
-            if self.pair_list.IsChecked(i):
-                self._checked_pairs.add(name)
-            else:
-                self._checked_pairs.discard(name)
+        # Save checked state (only if syncing from visible)
+        if sync_from_visible:
+            for i in range(self.pair_list.GetCount()):
+                name = self.pair_list.GetString(i)
+                if self.pair_list.IsChecked(i):
+                    self._checked_pairs.add(name)
+                else:
+                    self._checked_pairs.discard(name)
 
         # Build set of pairs connected to filtered component
         component_pairs = set()
@@ -228,9 +234,14 @@ class DiffPairSelectionPanel(wx.Panel):
         """Set connectivity check function."""
         self._check_fn = fn
 
-    def refresh(self):
-        """Refresh the pair list."""
-        self._update_pair_list()
+    def refresh(self, sync_from_visible=True):
+        """Refresh the pair list.
+
+        Args:
+            sync_from_visible: If True, sync _checked_pairs from visible items first.
+                              Set to False when restoring settings to avoid clearing them.
+        """
+        self._update_pair_list(sync_from_visible=sync_from_visible)
 
     def get_selected_pairs(self):
         """Get list of selected differential pair base names."""
@@ -440,8 +451,8 @@ class DifferentialTab(wx.Panel):
             # Routing is running - cancel it
             self.request_cancel()
         else:
-            # Not routing - close/hide the parent dialog
-            self.GetTopLevelParent().Close()
+            # Not routing - close the parent modal dialog
+            self.GetTopLevelParent().EndModal(wx.ID_CANCEL)
 
     def request_cancel(self):
         """Request cancellation of the current routing operation."""
@@ -696,6 +707,9 @@ class DifferentialTab(wx.Panel):
         for via in results_data.get('all_swap_vias', []):
             self._add_via_to_board(board, via, get_layer_id)
             vias_added += 1
+
+        # Build connectivity to register new items properly
+        board.BuildConnectivity()
 
         # Refresh the view
         pcbnew.Refresh()

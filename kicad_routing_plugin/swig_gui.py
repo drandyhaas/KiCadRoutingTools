@@ -18,6 +18,7 @@ if ROOT_DIR not in sys.path:
 
 import routing_defaults as defaults
 from .fanout_gui import NetSelectionPanel
+from .settings_persistence import get_dialog_settings, restore_dialog_settings
 
 
 class StdoutRedirector:
@@ -60,7 +61,7 @@ def _build_layer_mappings():
 class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
-    def __init__(self, parent, pcb_data, board_filename):
+    def __init__(self, parent, pcb_data, board_filename, saved_settings=None):
         super().__init__(
             parent,
             title="KiCad Routing Tools",
@@ -73,6 +74,7 @@ class RoutingDialog(wx.Dialog):
         self._cancel_requested = False
         self._routing_thread = None
         self._connectivity_cache = {}  # Cache: net_id -> is_connected
+        self._saved_settings = saved_settings  # Settings to restore after init
 
         self._create_ui()
         self._load_nets_immediate()  # Load net names only (fast)
@@ -582,8 +584,8 @@ class RoutingDialog(wx.Dialog):
             if hasattr(self, 'differential_tab'):
                 self.differential_tab.request_cancel()
         else:
-            # Not routing - close/hide the dialog
-            self.Close()
+            # Not routing - close the modal dialog
+            self.EndModal(wx.ID_CANCEL)
 
     def _create_log_tab(self):
         """Create the Log tab."""
@@ -864,9 +866,13 @@ class RoutingDialog(wx.Dialog):
         self.swappable_net_panel.set_check_function(is_connected)
         self.differential_tab.pair_panel.set_check_function(is_connected)
 
-        # Enable hide checkbox by default on Basic tab only
-        if self.net_panel.hide_check:
-            self.net_panel.hide_check.SetValue(True)
+        # Restore saved settings if available, otherwise use defaults
+        if self._saved_settings:
+            restore_dialog_settings(self, self._saved_settings)
+        else:
+            # Enable hide checkbox by default on Basic tab only
+            if self.net_panel.hide_check:
+                self.net_panel.hide_check.SetValue(True)
 
         # Do initial refresh
         self.refresh_from_board()
@@ -878,11 +884,11 @@ class RoutingDialog(wx.Dialog):
         changes in KiCad.
         """
         # Save current selections from all net panels BEFORE any refresh
-        # This ensures we preserve selections even if refresh() is called during sync
+        # Use _checked_nets directly to preserve restored settings (don't sync from visible items)
         saved_selections = {
-            'net_panel': set(self.net_panel.get_selected_nets()),
-            'swappable_net_panel': set(self.swappable_net_panel.get_selected_nets()),
-            'fanout_tab': set(self.fanout_tab.net_panel.get_selected_nets()),
+            'net_panel': set(self.net_panel._checked_nets),
+            'swappable_net_panel': set(self.swappable_net_panel._checked_nets),
+            'fanout_tab': set(self.fanout_tab.net_panel._checked_nets),
         }
         # DiffPairSelectionPanel uses _checked_pairs, not _checked_nets
         saved_diff_pairs = set(self.differential_tab.pair_panel._checked_pairs)
@@ -901,13 +907,20 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab.net_panel._checked_nets = saved_selections['fanout_tab']
         self.differential_tab.pair_panel._checked_pairs = saved_diff_pairs
 
-        # Refresh all net panels (will restore checks from saved state)
-        self.net_panel.refresh()
-        self.swappable_net_panel.refresh()
-        self.differential_tab.pair_panel.refresh()
-        self.fanout_tab.net_panel.refresh()
+        # Refresh all net panels (skip syncing from visible to preserve restored selections)
+        self.net_panel.refresh(sync_from_visible=False)
+        self.swappable_net_panel.refresh(sync_from_visible=False)
+        self.differential_tab.pair_panel.refresh(sync_from_visible=False)
+        self.fanout_tab.net_panel.refresh(sync_from_visible=False)
 
-        self.status_text.SetLabel("Ready")
+        # Update status with connectivity info
+        connected_count = sum(1 for v in self._connectivity_cache.values() if v)
+        remaining = self.net_panel.net_list.GetCount()
+        hide_connected = self.net_panel.hide_check and self.net_panel.hide_check.GetValue()
+        if hide_connected:
+            self.status_text.SetLabel(f"Ready - {remaining} nets to route ({connected_count} connected)")
+        else:
+            self.status_text.SetLabel(f"Ready - {remaining} nets")
 
     def _is_net_connected(self, net_id):
         """Check if a net is already fully connected using check_connected logic."""
@@ -956,17 +969,8 @@ class RoutingDialog(wx.Dialog):
                 self.status_text.SetLabel(f"Checking connectivity... {i + 1}/{len(uncached_nets)}")
                 wx.Yield()
 
-        # Refresh the net panel with connectivity info
-        self.net_panel.refresh()
-
-        # Update status
-        connected_count = sum(1 for net_id in self._connectivity_cache.values() if net_id)
-        remaining = self.net_panel.net_list.GetCount()
-        hide_connected = self.net_panel.hide_check and self.net_panel.hide_check.GetValue()
-        if hide_connected:
-            self.status_text.SetLabel(f"Ready - {remaining} nets to route ({connected_count} connected)")
-        else:
-            self.status_text.SetLabel(f"Ready - {remaining} nets")
+        # Note: Don't refresh here - caller (refresh_from_board) will do it
+        # after restoring selections
         self.progress_bar.SetValue(0)
 
     def _update_net_list(self):
@@ -1324,6 +1328,9 @@ class RoutingDialog(wx.Dialog):
         if config.get('debug_lines', False):
             debug_lines_added = self._add_debug_lines(board, results_data)
 
+        # Build connectivity to register new items properly
+        board.BuildConnectivity()
+
         # Refresh the view
         pcbnew.Refresh()
 
@@ -1471,3 +1478,7 @@ class RoutingDialog(wx.Dialog):
             "Routing Error",
             wx.OK | wx.ICON_ERROR
         )
+
+    def get_settings(self):
+        """Get all current dialog settings for persistence."""
+        return get_dialog_settings(self)

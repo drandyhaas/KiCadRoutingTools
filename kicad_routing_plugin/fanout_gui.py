@@ -226,8 +226,13 @@ class NetSelectionPanel(wx.Panel):
             self.component_filter_ctrl.SetValue(component_ref)
         self._update_net_list()
 
-    def _update_net_list(self):
-        """Update the net list based on filters."""
+    def _update_net_list(self, sync_from_visible=True):
+        """Update the net list based on filters.
+
+        Args:
+            sync_from_visible: If True, sync _checked_nets from visible items first.
+                              Set to False when restoring settings to avoid clearing them.
+        """
         filter_text = self.filter_ctrl.GetValue().lower()
 
         # Component filter - combine text control and dropdown/programmatic value
@@ -241,13 +246,14 @@ class NetSelectionPanel(wx.Panel):
         if self.hide_check:
             hide_checked = self.hide_check.GetValue()
 
-        # Save checked state before filtering
-        for i in range(self.net_list.GetCount()):
-            name = self.net_list.GetString(i)
-            if self.net_list.IsChecked(i):
-                self._checked_nets.add(name)
-            else:
-                self._checked_nets.discard(name)
+        # Save checked state before filtering (only if syncing from visible)
+        if sync_from_visible:
+            for i in range(self.net_list.GetCount()):
+                name = self.net_list.GetString(i)
+                if self.net_list.IsChecked(i):
+                    self._checked_nets.add(name)
+                else:
+                    self._checked_nets.discard(name)
 
         # Build set of nets connected to the filtered component
         component_nets = set()
@@ -344,9 +350,14 @@ class NetSelectionPanel(wx.Panel):
         # Return all checked nets
         return list(self._checked_nets)
 
-    def refresh(self):
-        """Refresh the net list."""
-        self._update_net_list()
+    def refresh(self, sync_from_visible=True):
+        """Refresh the net list.
+
+        Args:
+            sync_from_visible: If True, sync _checked_nets from visible items first.
+                              Set to False when restoring settings to avoid clearing them.
+        """
+        self._update_net_list(sync_from_visible=sync_from_visible)
 
     def _is_differential_net(self, name):
         """Check if a net name looks like a differential pair net."""
@@ -928,6 +939,9 @@ class FanoutTab(wx.Panel):
                 )
             board.Add(via)
             vias_added += 1
+
+        # Build connectivity to register new items properly
+        board.BuildConnectivity()
 
         # Refresh the view
         pcbnew.Refresh()
