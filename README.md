@@ -335,6 +335,16 @@ The plugin GUI provides access to all routing features:
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 
+**Planes Tab:**
+- Net-to-layer assignment for power/ground planes
+- Create planes with via connections to SMD pads
+- Repair disconnected plane regions
+- Via size/drill, track width, clearance configuration
+
+**Log Tab:**
+- Real-time routing output display
+- Color-coded messages (errors, warnings, success)
+
 **About Tab:**
 - Version information and credits
 
@@ -456,7 +466,9 @@ KiCadRoutingTools/
 │   ├── swig_gui.py           # Main routing dialog (Basic/Advanced tabs)
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
+│   ├── planes_gui.py         # Power/ground planes tab
 │   ├── about_tab.py          # About tab with version info
+│   ├── gui_utils.py          # Shared GUI utilities
 │   └── settings_persistence.py  # Save/restore dialog settings between sessions
 ├── install_plugin.py         # Plugin installer script
 ├── docs/                     # Documentation
