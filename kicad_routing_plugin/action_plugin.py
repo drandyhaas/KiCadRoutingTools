@@ -21,11 +21,11 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
     """Action Plugin for KiCad Routing Tools."""
 
     def defaults(self):
-        self.name = "Auto-routing tools"
+        self.name = "KiCadRoutingTools"
         self.category = "Routing"
-        self.description = "Advanced auto-routing tools, by DrAndyHaas"
+        self.description = "KiCadRoutingTools, by DrAndyHaas"
         self.show_toolbar_button = True
-        icon_path = os.path.join(PLUGIN_DIR, "icon.png")
+        icon_path = os.path.join(PLUGIN_DIR, "icon_512.png")
         if os.path.exists(icon_path):
             self.icon_file_name = icon_path
 

@@ -162,13 +162,26 @@ class RoutingDialog(wx.Dialog):
         advanced_panel = self._create_advanced_tab()
         self.notebook.AddPage(advanced_panel, "Advanced")
 
-        # Tab 3: Log
+        # Tab 3: Fanout
+        fanout_panel = self._create_fanout_tab()
+        self.notebook.AddPage(fanout_panel, "Fanout")
+
+        # Tab 4: Log
         log_panel = self._create_log_tab()
         self.notebook.AddPage(log_panel, "Log")
+
+        # Tab 5: About
+        about_panel = self._create_about_tab()
+        self.notebook.AddPage(about_panel, "About")
 
         # Add notebook to main sizer
         main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
         main_panel.SetSizer(main_sizer)
+
+    def _create_about_tab(self):
+        """Create the About tab."""
+        from .about_tab import AboutTab
+        return AboutTab(self.notebook)
 
     def _create_config_tab(self):
         """Create the Basic tab with basic routing parameters and options."""
@@ -606,6 +619,33 @@ class RoutingDialog(wx.Dialog):
 
         log_panel.SetSizer(log_sizer)
         return log_panel
+
+    def _create_fanout_tab(self):
+        """Create the Fanout tab for BGA/QFN fanout operations."""
+        from .fanout_gui import FanoutTab
+
+        def get_shared_params():
+            """Get shared parameters from the Basic tab."""
+            return {
+                'track_width': self.track_width.GetValue(),
+                'clearance': self.clearance.GetValue(),
+                'via_size': self.via_size.GetValue(),
+                'via_drill': self.via_drill.GetValue(),
+            }
+
+        def on_fanout_complete():
+            # Sync pcb_data from board after fanout adds tracks
+            self._sync_pcb_data_from_board()
+            # Clear connectivity cache since board changed
+            self._connectivity_cache = {}
+
+        return FanoutTab(
+            self.notebook,
+            self.pcb_data,
+            self.board_filename,
+            get_shared_params=get_shared_params,
+            on_fanout_complete=on_fanout_complete
+        )
 
     def _create_advanced_tab(self):
         """Create the Advanced tab with swappable nets on left, parameters+options on right."""

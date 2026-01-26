@@ -60,6 +60,18 @@ DEFAULT_LAYERS = ['F.Cu', 'B.Cu']
 # Ordering strategy
 DEFAULT_ORDERING_STRATEGY = "mps"
 
+# BGA Fanout defaults
+BGA_TRACK_WIDTH = 0.3  # mm
+BGA_CLEARANCE = 0.25  # mm
+BGA_VIA_SIZE = 0.5  # mm
+BGA_VIA_DRILL = 0.3  # mm
+BGA_EXIT_MARGIN = 0.5  # mm
+BGA_DIFF_PAIR_GAP = 0.1  # mm
+
+# QFN Fanout defaults
+QFN_TRACK_WIDTH = 0.1  # mm
+QFN_CLEARANCE = 0.1  # mm
+
 
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI
@@ -91,4 +103,7 @@ PARAM_RANGES = {
     'max_probe_iterations': {'min': 100, 'max': 100000},
     'length_match_tolerance': {'min': 0.01, 'max': 5.0, 'inc': 0.01, 'digits': 2},
     'meander_amplitude': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
+    # Fanout parameters
+    'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'diff_pair_gap': {'min': 0.05, 'max': 1.0, 'inc': 0.01, 'digits': 2},
 }

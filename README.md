@@ -304,7 +304,7 @@ The installer automatically detects your KiCad installation directory:
 
 1. Open KiCad 9.0 or later
 2. Open a PCB in Pcbnew
-3. Go to **Tools → External Plugins → Auto-routing tools**
+3. Go to **Tools → External Plugins → KiCadRoutingTools**
 4. Configure routing parameters and select nets to route
 5. Click **Route** to run the router
 
