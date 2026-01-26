@@ -150,7 +150,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 mps_layer_swap: bool = False,
                 mps_segment_intersection: bool = False,
                 schematic_dir: Optional[str] = None,
-                add_teardrops: bool = False) -> Tuple[int, int, float]:
+                add_teardrops: bool = False,
+                return_results: bool = False,
+                pcb_data=None) -> Tuple[int, int, float]:
     """
     Route differential pairs using the Rust router.
 
@@ -169,17 +171,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         gnd_via_enabled: Add GND vias near diff pair signal vias (default: True)
         diff_chamfer_extra: Chamfer multiplier for diff pair meanders (default: 1.5)
         diff_pair_intra_match: Enable intra-pair P/N length matching (default: False)
+        return_results: If True, return results data instead of writing to file
+        pcb_data: Optional pre-parsed PCBData (if None, loads from input_file)
 
     Returns:
-        (successful_count, failed_count, total_time)
+        If return_results=False: (successful_count, failed_count, total_time)
+        If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:
         print(format_memory_stats("Initial memory", mem_start))
 
-    print(f"Loading {input_file}...")
-    pcb_data = parse_kicad_pcb(input_file)
+    # Load or use provided pcb_data
+    if pcb_data is None:
+        print(f"Loading {input_file}...")
+        pcb_data = parse_kicad_pcb(input_file)
+    else:
+        print("Using provided PCB data...")
 
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
@@ -254,6 +263,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"Error: No differential pairs found matching the patterns!")
         print("  Differential pairs must have _P/_N, P/N, or +/- suffixes.")
         print(f"  Patterns provided: {net_names}")
+        if return_results:
+            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
     # Track which net IDs are part of pairs
@@ -267,11 +278,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     net_ids = resolve_net_ids(pcb_data, net_names)
     if not net_ids:
         print("No valid nets to route!")
+        if return_results:
+            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
     net_ids, _ = filter_already_routed(pcb_data, net_ids, config)
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
+        if return_results:
+            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output
@@ -297,6 +312,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if not diff_pair_ids_to_route_set:
         print("Error: No differential pairs to route!")
         print("  Ensure your net patterns match nets with _P/_N, P/N, or +/- suffixes.")
+        if return_results:
+            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
     # Apply target swaps for swappable-nets feature
@@ -646,23 +663,32 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     }
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
-    # Write output file
-    write_routed_output(
-        input_file=input_file,
-        output_file=output_file,
-        results=results,
-        all_segment_modifications=all_segment_modifications,
-        all_swap_vias=all_swap_vias,
-        target_swap_info=target_swap_info,
-        single_ended_target_swap_info=[],
-        pad_swaps=pad_swaps,
-        pcb_data=pcb_data,
-        debug_lines=debug_lines,
-        exclusion_zone_lines=exclusion_zone_lines,
-        boundary_debug_labels=boundary_debug_labels,
-        skip_routing=skip_routing,
-        add_teardrops=add_teardrops
-    )
+    # Write output file or return results for direct application
+    if return_results:
+        # Return results data for direct application (e.g., KiCad plugin)
+        results_data = {
+            'results': results,
+            'all_swap_vias': all_swap_vias,
+            'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
+            'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
+        }
+    else:
+        write_routed_output(
+            input_file=input_file,
+            output_file=output_file,
+            results=results,
+            all_segment_modifications=all_segment_modifications,
+            all_swap_vias=all_swap_vias,
+            target_swap_info=target_swap_info,
+            single_ended_target_swap_info=[],
+            pad_swaps=pad_swaps,
+            pcb_data=pcb_data,
+            debug_lines=debug_lines,
+            exclusion_zone_lines=exclusion_zone_lines,
+            boundary_debug_labels=boundary_debug_labels,
+            skip_routing=skip_routing,
+            add_teardrops=add_teardrops
+        )
 
     # Update schematics with swap info if directory specified
     if schematic_dir and (target_swap_info or pad_swaps):
@@ -719,6 +745,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(format_obstacle_map_stats(state.working_obstacles))
         print("=" * 60)
 
+    if return_results:
+        return successful, failed, total_time, results_data
     return successful, failed, total_time
 
 if __name__ == "__main__":

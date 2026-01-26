@@ -71,6 +71,14 @@ BGA_DIFF_PAIR_GAP = 0.1  # mm
 # QFN Fanout defaults
 QFN_TRACK_WIDTH = 0.1  # mm
 QFN_CLEARANCE = 0.1  # mm
+QFN_EXTENSION = 0.1  # mm - extension past pad edge before bend
+
+# Differential Pair defaults
+DIFF_PAIR_GAP = 0.101  # mm gap between P and N traces
+DIFF_PAIR_MIN_TURNING_RADIUS = 0.2  # mm
+DIFF_PAIR_MAX_SETBACK_ANGLE = 45.0  # degrees
+DIFF_PAIR_MAX_TURN_ANGLE = 180.0  # degrees
+DIFF_PAIR_CHAMFER_EXTRA = 1.5  # multiplier for meander chamfers
 
 
 # GUI-specific ranges (min, max, increment, digits)
@@ -106,4 +114,10 @@ PARAM_RANGES = {
     # Fanout parameters
     'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'diff_pair_gap': {'min': 0.05, 'max': 1.0, 'inc': 0.01, 'digits': 2},
+    'qfn_extension': {'min': 0.05, 'max': 2.0, 'inc': 0.05, 'digits': 2},
+    # Differential pair routing parameters
+    'diff_pair_min_turning_radius': {'min': 0.05, 'max': 2.0, 'inc': 0.05, 'digits': 2},
+    'diff_pair_max_setback_angle': {'min': 10.0, 'max': 90.0, 'inc': 5.0, 'digits': 0},
+    'diff_pair_max_turn_angle': {'min': 45.0, 'max': 360.0, 'inc': 15.0, 'digits': 0},
+    'diff_pair_chamfer_extra': {'min': 1.0, 'max': 3.0, 'inc': 0.1, 'digits': 1},
 }

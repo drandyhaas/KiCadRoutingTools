@@ -57,7 +57,7 @@ def generate_qfn_fanout(footprint: Footprint,
                         net_filter: Optional[List[str]] = None,
                         layer: str = "F.Cu",
                         track_width: float = 0.1,
-                        clearance: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
+                        extension: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -74,7 +74,7 @@ def generate_qfn_fanout(footprint: Footprint,
         net_filter: Optional list of net patterns to include
         layer: Routing layer (default F.Cu)
         track_width: Width of fanout tracks
-        clearance: Minimum clearance (used for track spacing and pad escape margin)
+        extension: Extension past pad edge before bend (mm)
 
     Returns:
         (tracks, vias) - tracks are the segments, vias is empty
@@ -90,7 +90,7 @@ def generate_qfn_fanout(footprint: Footprint,
     print(f"  Size: {layout.width:.2f} x {layout.height:.2f} mm")
     print(f"  Detected pad pitch: {layout.pad_pitch:.2f} mm")
     print(f"  Edge tolerance: {layout.edge_tolerance:.2f} mm")
-    print(f"  Stub length: pad_width / 2 + clearance (clears pad before bend)")
+    print(f"  Stub length: pad_width / 2 + extension (clears pad before bend)")
     print(f"  Layer: {layer}")
 
     # Analyze all pads
@@ -132,9 +132,9 @@ def generate_qfn_fanout(footprint: Footprint,
     max_diagonal_length = max(layout.width, layout.height) / 3
 
     for pad_info in pad_infos:
-        # Straight stub length = pad_width / 2 + clearance (to clear the pad before bending)
+        # Straight stub length = pad_width / 2 + extension (to clear the pad before bending)
         # pad_width is the dimension perpendicular to the chip edge (escape direction)
-        straight_length = pad_info.pad_width / 2 + clearance
+        straight_length = pad_info.pad_width / 2 + extension
         corner_pos, stub_end = calculate_fanout_stub(
             pad_info, layout, straight_length, max_diagonal_length
         )
@@ -179,14 +179,14 @@ def generate_qfn_fanout(footprint: Footprint,
     print(f"  Generated {len(tracks)} track segments ({len(stubs)} stubs x 2 segments)")
 
     # Validate endpoint spacing
-    min_spacing = track_width + clearance
+    min_spacing = track_width + extension
     collisions = check_endpoint_spacing(stubs, min_spacing)
 
     if collisions:
         print(f"  WARNING: {len(collisions)} endpoint pairs too close!")
         for i, j, dist in collisions[:5]:
             print(f"    {stubs[i].pad.net_name} <-> {stubs[j].pad.net_name}: {dist:.3f}mm")
-        print(f"  Consider increasing clearance")
+        print(f"  Consider increasing extension")
     else:
         print(f"  Validated: No endpoint collisions")
 
@@ -207,8 +207,8 @@ def main():
                         help='Routing layer')
     parser.add_argument('--width', '-w', type=float, default=0.1,
                         help='Track width in mm')
-    parser.add_argument('--clearance', type=float, default=0.1,
-                        help='Clearance in mm (track spacing and margin past pad before bend)')
+    parser.add_argument('--extension', type=float, default=0.1,
+                        help='Extension past pad edge before bend (mm)')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
 
@@ -249,7 +249,7 @@ def main():
         net_filter=args.nets,
         layer=args.layer,
         track_width=args.width,
-        clearance=args.clearance
+        extension=args.extension
     )
 
     if tracks:

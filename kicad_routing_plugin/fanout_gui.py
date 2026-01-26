@@ -21,20 +21,32 @@ class NetSelectionPanel(wx.Panel):
     """Reusable net selection panel with filtering."""
 
     def __init__(self, parent, pcb_data,
+                 instructions=None,
                  hide_label="Hide connected",
                  hide_tooltip="Hide nets that are already processed",
                  show_hide_checkbox=True,
-                 show_component_filter=True):
+                 show_component_filter=True,
+                 show_component_dropdown=False,
+                 min_pads_for_dropdown=3,
+                 show_hide_differential=False,
+                 hide_differential_default=True,
+                 auto_hide_differential=False):
         """
         Create a net selection panel.
 
         Args:
             parent: Parent window
             pcb_data: PCBData object with nets and pads
+            instructions: Optional instruction text to show at the top
             hide_label: Label for the hide checkbox
             hide_tooltip: Tooltip for the hide checkbox
             show_hide_checkbox: Whether to show the hide checkbox
-            show_component_filter: Whether to show the component filter
+            show_component_filter: Whether to show the component filter text box
+            show_component_dropdown: Whether to show the component dropdown
+            min_pads_for_dropdown: Minimum pads for a component to appear in dropdown
+            show_hide_differential: Whether to show the hide differential checkbox
+            hide_differential_default: Default value for hide differential checkbox
+            auto_hide_differential: Auto-hide differential nets when not in differential mode
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
@@ -42,14 +54,28 @@ class NetSelectionPanel(wx.Panel):
         self._checked_nets = set()
         self._check_fn = None  # Optional connectivity check function
         self._show_hide_checkbox = show_hide_checkbox
+        self._show_hide_differential = show_hide_differential
+        self._hide_differential_default = hide_differential_default
+        self._auto_hide_differential = auto_hide_differential
         self._component_filter_value = ""  # For programmatic component filtering
+        self._min_pads_for_dropdown = min_pads_for_dropdown
+        self._differential_mode = False  # When True, show diff pairs as "name_P/N"
+        self._diff_pairs = {}  # base_name -> (p_net_id, n_net_id) when in diff mode
 
-        self._create_ui(hide_label, hide_tooltip, show_hide_checkbox, show_component_filter)
+        self._create_ui(instructions, hide_label, hide_tooltip, show_hide_checkbox,
+                       show_component_filter, show_component_dropdown)
         self._load_nets()
 
-    def _create_ui(self, hide_label, hide_tooltip, show_hide_checkbox, show_component_filter):
+    def _create_ui(self, instructions, hide_label, hide_tooltip, show_hide_checkbox,
+                   show_component_filter, show_component_dropdown):
         """Create the panel UI."""
         sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Instructions (optional)
+        if instructions:
+            instr_text = wx.StaticText(self, label=instructions)
+            instr_text.Wrap(350)
+            sizer.Add(instr_text, 0, wx.ALL, 5)
 
         # Hide checkbox (optional)
         if show_hide_checkbox:
@@ -61,6 +87,29 @@ class NetSelectionPanel(wx.Panel):
         else:
             self.hide_check = None
 
+        # Hide differential checkbox (optional)
+        if self._show_hide_differential:
+            self.hide_diff_check = wx.CheckBox(self, label="Hide differential")
+            self.hide_diff_check.SetValue(self._hide_differential_default)
+            self.hide_diff_check.SetToolTip("Hide differential pair nets (_P/_N, +/-)")
+            self.hide_diff_check.Bind(wx.EVT_CHECKBOX, self._on_filter_changed)
+            sizer.Add(self.hide_diff_check, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
+        else:
+            self.hide_diff_check = None
+
+        # Component dropdown (optional) - shows components with many pads
+        if show_component_dropdown:
+            comp_dropdown_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            comp_dropdown_sizer.Add(wx.StaticText(self, label="Component:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+            self.component_dropdown = wx.Choice(self)
+            self.component_dropdown.SetToolTip("Select component to highlight its nets")
+            self.component_dropdown.Bind(wx.EVT_CHOICE, self._on_component_dropdown_changed)
+            comp_dropdown_sizer.Add(self.component_dropdown, 1, wx.EXPAND)
+            sizer.Add(comp_dropdown_sizer, 0, wx.EXPAND | wx.ALL, 5)
+            self._populate_component_dropdown()
+        else:
+            self.component_dropdown = None
+
         # Filter by name
         filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         filter_sizer.Add(wx.StaticText(self, label="Filter:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -69,10 +118,10 @@ class NetSelectionPanel(wx.Panel):
         filter_sizer.Add(self.filter_ctrl, 1, wx.EXPAND)
         sizer.Add(filter_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Filter by component (optional)
+        # Filter by component text box (optional)
         if show_component_filter:
             comp_filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
-            comp_filter_sizer.Add(wx.StaticText(self, label="Component:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+            comp_filter_sizer.Add(wx.StaticText(self, label="Comp Filter:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
             self.component_filter_ctrl = wx.TextCtrl(self)
             self.component_filter_ctrl.SetToolTip("Filter by component reference (e.g., U1)")
             self.component_filter_ctrl.Bind(wx.EVT_TEXT, self._on_filter_changed)
@@ -98,12 +147,63 @@ class NetSelectionPanel(wx.Panel):
 
         self.SetSizer(sizer)
 
+    def _populate_component_dropdown(self):
+        """Populate component dropdown with components having enough pads."""
+        if not self.component_dropdown:
+            return
+
+        # Count pads per component
+        component_pad_counts = {}
+        for footprint in self.pcb_data.footprints.values():
+            ref = footprint.reference
+            pad_count = len(footprint.pads)
+            if pad_count >= self._min_pads_for_dropdown:
+                component_pad_counts[ref] = pad_count
+
+        # Sort by reference
+        sorted_components = sorted(component_pad_counts.keys())
+
+        # Add to dropdown with pad count
+        self.component_dropdown.Clear()
+        self.component_dropdown.Append("(none)")  # First option to clear filter
+        for ref in sorted_components:
+            count = component_pad_counts[ref]
+            self.component_dropdown.Append(f"{ref} ({count} pads)")
+
+        self.component_dropdown.SetSelection(0)
+
+    def _on_component_dropdown_changed(self, event):
+        """Handle component dropdown selection change."""
+        if not self.component_dropdown:
+            return
+
+        selection = self.component_dropdown.GetSelection()
+        if selection <= 0:  # "(none)" selected
+            self._component_filter_value = ""
+        else:
+            # Extract component reference (remove pad count)
+            text = self.component_dropdown.GetString(selection)
+            ref = text.split(' (')[0]
+            self._component_filter_value = ref
+
+        self._update_net_list()
+
     def _load_nets(self):
         """Load net names from pcb_data."""
+        if self._differential_mode:
+            self._load_diff_pairs()
+            self._update_net_list()
+            return
+
         self.all_nets = []
+        self._diff_pairs = {}
         for net_id, net in self.pcb_data.nets.items():
-            if net.name and net_id > 0:  # Skip unconnected (net 0)
-                self.all_nets.append((net.name, net_id))
+            if not net.name or net_id <= 0:
+                continue
+            # Skip unconnected nets
+            if net.name.lower().startswith('unconnected-'):
+                continue
+            self.all_nets.append((net.name, net_id))
         self.all_nets.sort(key=lambda x: x[0].lower())
         self._update_net_list()
 
@@ -130,11 +230,12 @@ class NetSelectionPanel(wx.Panel):
         """Update the net list based on filters."""
         filter_text = self.filter_ctrl.GetValue().lower()
 
-        # Component filter - use text control if shown, otherwise use programmatic value
+        # Component filter - combine text control and dropdown/programmatic value
+        component_filter = self._component_filter_value
         if self.component_filter_ctrl:
-            component_filter = self.component_filter_ctrl.GetValue().strip()
-        else:
-            component_filter = self._component_filter_value
+            text_filter = self.component_filter_ctrl.GetValue().strip()
+            if text_filter:
+                component_filter = text_filter
 
         hide_checked = False
         if self.hide_check:
@@ -150,6 +251,7 @@ class NetSelectionPanel(wx.Panel):
 
         # Build set of nets connected to the filtered component
         component_nets = set()
+        component_net_ids = set()
         if component_filter:
             for net_id, pads in self.pcb_data.pads_by_net.items():
                 for pad in pads:
@@ -157,6 +259,7 @@ class NetSelectionPanel(wx.Panel):
                         net_info = self.pcb_data.nets.get(net_id)
                         if net_info and net_info.name:
                             component_nets.add(net_info.name)
+                            component_net_ids.add(net_id)
                         break
 
         # Filter by text and component
@@ -164,17 +267,34 @@ class NetSelectionPanel(wx.Panel):
         for name, net_id in self.all_nets:
             if filter_text and filter_text not in name.lower():
                 continue
-            if component_filter and name not in component_nets:
-                continue
+            if component_filter:
+                # In differential mode, check if either P or N net belongs to the component
+                if self._differential_mode and name in self._diff_pairs:
+                    p_net_id, n_net_id = self._diff_pairs[name]
+                    if p_net_id not in component_net_ids and n_net_id not in component_net_ids:
+                        continue
+                elif name not in component_nets:
+                    continue
             filtered_nets.append((name, net_id))
+
+        # Check if hiding differential nets
+        hide_diff = False
+        if self.hide_diff_check:
+            hide_diff = self.hide_diff_check.GetValue()
+        # Auto-hide differential nets when not in differential mode (for fanout tab)
+        if self._auto_hide_differential and not self._differential_mode:
+            hide_diff = True
 
         # Populate list
         self.net_list.Clear()
         for name, net_id in filtered_nets:
-            # Check if should be hidden
+            # Check if should be hidden (connected)
             if hide_checked and self._check_fn:
                 if self._check_fn(net_id):
                     continue
+            # Check if should be hidden (differential)
+            if hide_diff and self._is_differential_net(name):
+                continue
             idx = self.net_list.Append(name)
             # Restore checked state
             if name in self._checked_nets:
@@ -228,20 +348,83 @@ class NetSelectionPanel(wx.Panel):
         """Refresh the net list."""
         self._update_net_list()
 
+    def _is_differential_net(self, name):
+        """Check if a net name looks like a differential pair net."""
+        from net_queries import extract_diff_pair_base
+        return extract_diff_pair_base(name) is not None
+
+    def set_differential_mode(self, enabled):
+        """Switch between single-ended and differential pair display mode."""
+        if self._differential_mode == enabled:
+            return
+        self._differential_mode = enabled
+        self._checked_nets.clear()
+        self._load_nets()
+        self._update_net_list()
+
+    def _load_diff_pairs(self):
+        """Load nets as differential pairs."""
+        from net_queries import find_differential_pairs
+
+        # Find all differential pairs
+        diff_pairs = find_differential_pairs(self.pcb_data, ['*'])
+
+        self.all_nets = []
+        self._diff_pairs = {}
+        for base_name, pair in diff_pairs.items():
+            display_name = f"{base_name}_P/N"
+            # Use p_net_id as the "net_id" for filtering purposes
+            self.all_nets.append((display_name, pair.p_net_id))
+            self._diff_pairs[display_name] = (pair.p_net_id, pair.n_net_id)
+
+        # Sort by name
+        self.all_nets.sort(key=lambda x: x[0].lower())
+
+    def get_selected_diff_pairs(self):
+        """Get list of (p_net_id, n_net_id) for selected differential pairs."""
+        if not self._differential_mode:
+            return []
+
+        # Update _checked_nets with current visible state
+        for i in range(self.net_list.GetCount()):
+            name = self.net_list.GetString(i)
+            if self.net_list.IsChecked(i):
+                self._checked_nets.add(name)
+            else:
+                self._checked_nets.discard(name)
+
+        # Return pair info for checked pairs
+        result = []
+        for name in self._checked_nets:
+            if name in self._diff_pairs:
+                result.append(self._diff_pairs[name])
+        return result
+
+    def get_selected_component(self):
+        """Get the selected component reference from the dropdown, or None if none selected."""
+        if not self.component_dropdown:
+            return None
+        selection = self.component_dropdown.GetSelection()
+        if selection <= 0:  # "(none)" or nothing selected
+            return None
+        # Extract component reference (remove pad count)
+        text = self.component_dropdown.GetString(selection)
+        return text.split(' (')[0]
+
 
 class BGAOptionsPanel(wx.Panel):
     """BGA fanout options panel (parameters not in Basic tab)."""
 
-    def __init__(self, parent, copper_layers):
+    def __init__(self, parent, on_differential_changed=None):
         """
         Create BGA options panel.
 
         Args:
             parent: Parent window
-            copper_layers: List of copper layer names available
+            on_differential_changed: Callback(bool) when differential checkbox changes
         """
         super().__init__(parent)
-        self.copper_layers = copper_layers
+        self._on_differential_changed_callback = on_differential_changed
         self._create_ui()
 
     def _create_ui(self):
@@ -263,22 +446,35 @@ class BGAOptionsPanel(wx.Panel):
         self.exit_margin.SetDigits(r['digits'])
         grid.Add(self.exit_margin, 0, wx.EXPAND)
 
-        # Diff pair gap
+        param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(param_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+
+        # Routing mode section
+        mode_box = wx.StaticBox(self, label="Routing Mode")
+        mode_sizer = wx.StaticBoxSizer(mode_box, wx.VERTICAL)
+
+        self.differential_check = wx.CheckBox(self, label="Differential pairs")
+        self.differential_check.SetValue(False)
+        self.differential_check.SetToolTip("Route as differential pairs (auto-detects _P/_N nets)")
+        self.differential_check.Bind(wx.EVT_CHECKBOX, self._on_differential_changed)
+        mode_sizer.Add(self.differential_check, 0, wx.ALL, 5)
+
+        # Diff pair gap (only shown when differential is checked)
+        self.diff_gap_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.diff_gap_label = wx.StaticText(self, label="Diff Pair Gap (mm):")
+        self.diff_gap_sizer.Add(self.diff_gap_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         r = defaults.PARAM_RANGES['diff_pair_gap']
-        grid.Add(wx.StaticText(self, label="Diff Pair Gap (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.diff_pair_gap = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                 initial=defaults.BGA_DIFF_PAIR_GAP, inc=r['inc'])
         self.diff_pair_gap.SetDigits(r['digits'])
-        grid.Add(self.diff_pair_gap, 0, wx.EXPAND)
+        self.diff_gap_sizer.Add(self.diff_pair_gap, 1, wx.EXPAND)
+        mode_sizer.Add(self.diff_gap_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Diff pair patterns
-        grid.Add(wx.StaticText(self, label="Diff Pair Patterns:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.diff_pair_patterns = wx.TextCtrl(self)
-        self.diff_pair_patterns.SetToolTip("Glob patterns for diff pairs (e.g., *lvds*), space-separated")
-        grid.Add(self.diff_pair_patterns, 0, wx.EXPAND)
+        # Initially hide diff pair gap
+        self.diff_gap_label.Hide()
+        self.diff_pair_gap.Hide()
 
-        param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
-        main_sizer.Add(param_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+        main_sizer.Add(mode_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Escape direction section
         escape_box = wx.StaticBox(self, label="Escape Direction")
@@ -300,22 +496,6 @@ class BGAOptionsPanel(wx.Panel):
 
         main_sizer.Add(escape_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
-        # Layers section
-        layers_box = wx.StaticBox(self, label="Layers")
-        layers_sizer = wx.StaticBoxSizer(layers_box, wx.VERTICAL)
-
-        self.layer_checks = {}
-        layers_grid = wx.GridSizer(cols=2, hgap=5, vgap=2)
-        for layer in self.copper_layers:
-            cb = wx.CheckBox(self, label=layer)
-            # Default: F.Cu and B.Cu checked
-            cb.SetValue(layer in ['F.Cu', 'B.Cu'])
-            self.layer_checks[layer] = cb
-            layers_grid.Add(cb, 0)
-        layers_sizer.Add(layers_grid, 0, wx.EXPAND | wx.ALL, 5)
-
-        main_sizer.Add(layers_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
-
         # Options section
         options_box = wx.StaticBox(self, label="Options")
         options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
@@ -332,16 +512,28 @@ class BGAOptionsPanel(wx.Panel):
 
         self.SetSizer(main_sizer)
 
+    def _on_differential_changed(self, event):
+        """Handle differential checkbox change."""
+        is_diff = self.differential_check.GetValue()
+        self.diff_gap_label.Show(is_diff)
+        self.diff_pair_gap.Show(is_diff)
+        self.Layout()
+        self.GetParent().Layout()
+        # Notify callback
+        if self._on_differential_changed_callback:
+            self._on_differential_changed_callback(is_diff)
+
     def get_config(self):
         """Get the configuration values (BGA-specific only, shared params come from Basic tab)."""
+        is_differential = self.differential_check.GetValue()
         return {
             'exit_margin': self.exit_margin.GetValue(),
-            'diff_pair_gap': self.diff_pair_gap.GetValue(),
-            'diff_pair_patterns': self.diff_pair_patterns.GetValue().split(),
+            'differential': is_differential,
+            'diff_pair_gap': self.diff_pair_gap.GetValue() if is_differential else 0,
+            'diff_pair_patterns': ['*'] if is_differential else [],  # Auto-detect all diff pairs when enabled
             'primary_escape': 'horizontal' if self.escape_direction.GetSelection() == 0 else 'vertical',
             'force_escape_direction': self.force_escape.GetValue(),
             'rebalance_escape': self.rebalance_escape.GetValue(),
-            'layers': [layer for layer, cb in self.layer_checks.items() if cb.GetValue()],
             'check_for_previous': self.check_previous.GetValue(),
             'no_inner_top_layer': self.no_inner_top.GetValue(),
         }
@@ -350,37 +542,40 @@ class BGAOptionsPanel(wx.Panel):
 class QFNOptionsPanel(wx.Panel):
     """QFN fanout options panel (parameters not in Basic tab)."""
 
-    def __init__(self, parent, copper_layers):
+    def __init__(self, parent):
         """
         Create QFN options panel.
 
         Args:
             parent: Parent window
-            copper_layers: List of copper layer names available
         """
         super().__init__(parent)
-        self.copper_layers = copper_layers
         self._create_ui()
 
     def _create_ui(self):
         """Create the panel UI."""
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Parameters section (QFN-specific only, shared params come from Basic tab)
+        # Info text - QFN uses component's layer automatically
+        info_text = wx.StaticText(self, label="QFN fanout routes on the component's layer.\nTrack width comes from Basic tab.")
+        info_text.Wrap(250)
+        main_sizer.Add(info_text, 0, wx.ALL, 10)
+
+        # Parameters section
         param_box = wx.StaticBox(self, label="QFN Parameters")
         param_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
 
         grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         grid.AddGrowableCol(1)
 
-        # Layer selection (single choice - QFN uses single layer unlike BGA multi-layer)
-        grid.Add(wx.StaticText(self, label="Layer:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.layer_choice = wx.Choice(self, choices=self.copper_layers)
-        if 'F.Cu' in self.copper_layers:
-            self.layer_choice.SetSelection(self.copper_layers.index('F.Cu'))
-        elif self.copper_layers:
-            self.layer_choice.SetSelection(0)
-        grid.Add(self.layer_choice, 0, wx.EXPAND)
+        # Extension parameter
+        r = defaults.PARAM_RANGES['qfn_extension']
+        grid.Add(wx.StaticText(self, label="Extension (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.extension = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                            initial=defaults.QFN_EXTENSION, inc=r['inc'])
+        self.extension.SetDigits(r['digits'])
+        self.extension.SetToolTip("Extension past pad edge before bend")
+        grid.Add(self.extension, 0, wx.EXPAND)
 
         param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(param_sizer, 0, wx.EXPAND)
@@ -389,10 +584,8 @@ class QFNOptionsPanel(wx.Panel):
 
     def get_config(self):
         """Get the configuration values (QFN-specific only, shared params come from Basic tab)."""
-        layer_idx = self.layer_choice.GetSelection()
-        layer = self.copper_layers[layer_idx] if layer_idx >= 0 else 'F.Cu'
         return {
-            'layer': layer,
+            'extension': self.extension.GetValue(),
         }
 
 
@@ -400,7 +593,8 @@ class FanoutTab(wx.Panel):
     """Complete fanout tab combining component/net selection with options."""
 
     def __init__(self, parent, pcb_data, board_filename,
-                 get_shared_params=None, on_fanout_complete=None):
+                 get_shared_params=None, on_fanout_complete=None,
+                 get_connectivity_check=None):
         """
         Create the fanout tab.
 
@@ -411,82 +605,43 @@ class FanoutTab(wx.Panel):
             get_shared_params: Callback to get shared parameters from Basic tab
                                Returns dict with track_width, clearance, via_size, via_drill
             on_fanout_complete: Callback after fanout completes
+            get_connectivity_check: Callback that returns a connectivity check function
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
         self.board_filename = board_filename
         self.get_shared_params = get_shared_params
         self.on_fanout_complete = on_fanout_complete
-
-        # Get copper layers from board
-        self.copper_layers = pcb_data.board_info.copper_layers if pcb_data.board_info else ['F.Cu', 'B.Cu']
-
-        # Find components that could be fanned out
-        self._find_fanout_components()
+        self.get_connectivity_check = get_connectivity_check
 
         self._create_ui()
 
-    def _find_fanout_components(self):
-        """Find BGA and QFN/QFP components in the board."""
-        from kicad_parser import find_components_by_type
-
-        self.bga_components = []
-        self.qfn_components = []
-
-        # Find BGA components (grid-like pad patterns)
-        bga_refs = find_components_by_type(self.pcb_data, 'BGA')
-        for ref in bga_refs:
-            if ref in self.pcb_data.footprints:
-                self.bga_components.append(ref)
-
-        # Find QFN/QFP components (peripheral pad patterns)
-        for pattern in ['QFN', 'QFP', 'LQFP', 'TQFP', 'SOIC', 'SSOP', 'TSSOP']:
-            refs = find_components_by_type(self.pcb_data, pattern)
-            for ref in refs:
-                if ref in self.pcb_data.footprints and ref not in self.qfn_components:
-                    self.qfn_components.append(ref)
-
-        # Sort for consistent display
-        self.bga_components.sort()
-        self.qfn_components.sort()
+        # Set up connectivity check after UI creation
+        if self.get_connectivity_check:
+            self.net_panel.set_check_function(self.get_connectivity_check())
 
     def _create_ui(self):
         """Create the tab UI."""
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        # Left side: Component and Net selection
-        left_sizer = wx.BoxSizer(wx.VERTICAL)
-
-        # Component selection
-        comp_box = wx.StaticBox(self, label="Component")
-        comp_sizer = wx.StaticBoxSizer(comp_box, wx.VERTICAL)
-
-        # Component dropdown
-        comp_h_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        comp_h_sizer.Add(wx.StaticText(self, label="Reference:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.component_choice = wx.Choice(self, choices=[])
-        self.component_choice.Bind(wx.EVT_CHOICE, self._on_component_changed)
-        comp_h_sizer.Add(self.component_choice, 1, wx.EXPAND)
-        comp_sizer.Add(comp_h_sizer, 0, wx.EXPAND | wx.ALL, 5)
-
-        left_sizer.Add(comp_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
-
-        # Net selection panel
+        # Left side: Net selection (same as other tabs)
         net_box = wx.StaticBox(self, label="Net Selection")
         net_box_sizer = wx.StaticBoxSizer(net_box, wx.VERTICAL)
 
         self.net_panel = NetSelectionPanel(
             self, self.pcb_data,
-            hide_label="Hide fanned out",
-            hide_tooltip="Hide nets that already have fanout tracks",
-            show_hide_checkbox=False,  # Fanout doesn't need connectivity check
-            show_component_filter=False  # Component is selected above
+            instructions="Select nets to fanout...",
+            hide_label="Hide connected",
+            hide_tooltip="Hide nets that are already fully connected",
+            show_hide_checkbox=True,
+            show_component_filter=True,
+            show_component_dropdown=True,
+            min_pads_for_dropdown=3,
+            auto_hide_differential=True
         )
         net_box_sizer.Add(self.net_panel, 1, wx.EXPAND)
 
-        left_sizer.Add(net_box_sizer, 1, wx.EXPAND)
-
-        main_sizer.Add(left_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(net_box_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
         # Right side: Fanout type and options
         right_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -505,8 +660,8 @@ class FanoutTab(wx.Panel):
         right_sizer.Add(type_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Options panels (stacked, show/hide based on type)
-        self.bga_options = BGAOptionsPanel(self, self.copper_layers)
-        self.qfn_options = QFNOptionsPanel(self, self.copper_layers)
+        self.bga_options = BGAOptionsPanel(self, on_differential_changed=self._on_bga_differential_changed)
+        self.qfn_options = QFNOptionsPanel(self)
 
         right_sizer.Add(self.bga_options, 1, wx.EXPAND | wx.BOTTOM, 5)
         right_sizer.Add(self.qfn_options, 1, wx.EXPAND | wx.BOTTOM, 5)
@@ -536,21 +691,7 @@ class FanoutTab(wx.Panel):
         self.SetSizer(main_sizer)
 
         # Initial state
-        self._update_component_list()
         self._on_type_changed(None)
-
-    def _update_component_list(self):
-        """Update component dropdown based on selected fanout type."""
-        is_bga = self.fanout_type.GetSelection() == 0
-        components = self.bga_components if is_bga else self.qfn_components
-
-        self.component_choice.Clear()
-        for ref in components:
-            self.component_choice.Append(ref)
-
-        if components:
-            self.component_choice.SetSelection(0)
-            self._on_component_changed(None)
 
     def _on_type_changed(self, event):
         """Handle fanout type change."""
@@ -560,24 +701,20 @@ class FanoutTab(wx.Panel):
         self.bga_options.Show(is_bga)
         self.qfn_options.Show(not is_bga)
 
-        # Update component list
-        self._update_component_list()
+        # When switching to QFN, ensure we're in single-ended mode
+        if not is_bga:
+            self.net_panel.set_differential_mode(False)
 
         # Refresh layout
         self.Layout()
 
-    def _on_component_changed(self, event):
-        """Handle component selection change."""
-        component_ref = self.component_choice.GetStringSelection()
-        if not component_ref:
-            return
-
-        # Filter net list to only show nets connected to this component
-        self.net_panel.set_component_filter(component_ref)
+    def _on_bga_differential_changed(self, is_differential):
+        """Handle BGA differential checkbox change - switch net panel mode."""
+        self.net_panel.set_differential_mode(is_differential)
 
     def _on_fanout(self, event):
         """Handle fanout button click."""
-        component_ref = self.component_choice.GetStringSelection()
+        component_ref = self.net_panel.get_selected_component()
         if not component_ref:
             wx.MessageBox(
                 "Please select a component.",
@@ -586,14 +723,36 @@ class FanoutTab(wx.Panel):
             )
             return
 
-        selected_nets = self.net_panel.get_selected_nets()
-        if not selected_nets:
-            wx.MessageBox(
-                "Please select at least one net to fanout.",
-                "No Nets Selected",
-                wx.OK | wx.ICON_WARNING
-            )
-            return
+        is_bga = self.fanout_type.GetSelection() == 0
+
+        # In differential mode, get the actual net names for selected pairs
+        if is_bga and self.net_panel._differential_mode:
+            selected_pairs = self.net_panel.get_selected_diff_pairs()
+            if not selected_pairs:
+                wx.MessageBox(
+                    "Please select at least one differential pair to fanout.",
+                    "No Pairs Selected",
+                    wx.OK | wx.ICON_WARNING
+                )
+                return
+            # Convert net IDs to net names for the filter
+            selected_nets = []
+            for p_net_id, n_net_id in selected_pairs:
+                p_net = self.pcb_data.nets.get(p_net_id)
+                n_net = self.pcb_data.nets.get(n_net_id)
+                if p_net and p_net.name:
+                    selected_nets.append(p_net.name)
+                if n_net and n_net.name:
+                    selected_nets.append(n_net.name)
+        else:
+            selected_nets = self.net_panel.get_selected_nets()
+            if not selected_nets:
+                wx.MessageBox(
+                    "Please select at least one net to fanout.",
+                    "No Nets Selected",
+                    wx.OK | wx.ICON_WARNING
+                )
+                return
 
         # Get component footprint
         footprint = self.pcb_data.footprints.get(component_ref)
@@ -605,17 +764,8 @@ class FanoutTab(wx.Panel):
             )
             return
 
-        is_bga = self.fanout_type.GetSelection() == 0
-
         if is_bga:
             config = self.bga_options.get_config()
-            if not config['layers']:
-                wx.MessageBox(
-                    "Please select at least one layer for BGA fanout.",
-                    "No Layers Selected",
-                    wx.OK | wx.ICON_WARNING
-                )
-                return
             self._run_bga_fanout(footprint, selected_nets, config)
         else:
             config = self.qfn_options.get_config()
@@ -628,12 +778,23 @@ class FanoutTab(wx.Panel):
         self.progress_bar.Pulse()
         wx.Yield()
 
-        # Get shared parameters from Basic tab
+        # Get shared parameters from Basic tab (includes layers)
         shared = self.get_shared_params() if self.get_shared_params else {}
         track_width = shared.get('track_width', defaults.BGA_TRACK_WIDTH)
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
+        layers = shared.get('layers', defaults.DEFAULT_LAYERS)
+
+        if not layers:
+            wx.MessageBox(
+                "Please select at least one layer on the Basic tab.",
+                "No Layers Selected",
+                wx.OK | wx.ICON_WARNING
+            )
+            self.fanout_btn.Enable()
+            self.progress_bar.SetValue(0)
+            return
 
         try:
             from bga_fanout import generate_bga_fanout
@@ -643,7 +804,7 @@ class FanoutTab(wx.Panel):
                 self.pcb_data,
                 net_filter=net_patterns,
                 diff_pair_patterns=config['diff_pair_patterns'] or None,
-                layers=config['layers'],
+                layers=layers,
                 track_width=track_width,
                 clearance=clearance,
                 diff_pair_gap=config['diff_pair_gap'],
@@ -681,18 +842,23 @@ class FanoutTab(wx.Panel):
         # Get shared parameters from Basic tab
         shared = self.get_shared_params() if self.get_shared_params else {}
         track_width = shared.get('track_width', defaults.QFN_TRACK_WIDTH)
-        clearance = shared.get('clearance', defaults.QFN_CLEARANCE)
+
+        # Get extension from config (QFN-specific parameter)
+        extension = config.get('extension', defaults.QFN_EXTENSION)
 
         try:
             from qfn_fanout import generate_qfn_fanout
+
+            # Use the component's layer (F.Cu for top, B.Cu for bottom)
+            component_layer = footprint.layer if hasattr(footprint, 'layer') else 'F.Cu'
 
             tracks, vias = generate_qfn_fanout(
                 footprint,
                 self.pcb_data,
                 net_filter=net_patterns,
-                layer=config['layer'],
+                layer=component_layer,
                 track_width=track_width,
-                clearance=clearance,
+                extension=extension,
             )
 
             self._apply_fanout_results(tracks, vias)
@@ -741,7 +907,7 @@ class FanoutTab(wx.Panel):
             ))
             track.SetWidth(pcbnew.FromMM(track_dict['width']))
             track.SetLayer(get_layer_id(track_dict['layer']))
-            track.SetNetCode(track_dict['net'])
+            track.SetNetCode(track_dict['net_id'])
             board.Add(track)
             tracks_added += 1
 
@@ -754,7 +920,7 @@ class FanoutTab(wx.Panel):
             ))
             via.SetWidth(pcbnew.FromMM(via_dict['size']))
             via.SetDrill(pcbnew.FromMM(via_dict['drill']))
-            via.SetNetCode(via_dict['net'])
+            via.SetNetCode(via_dict['net_id'])
             if 'layers' in via_dict and len(via_dict['layers']) >= 2:
                 via.SetLayerPair(
                     get_layer_id(via_dict['layers'][0]),
