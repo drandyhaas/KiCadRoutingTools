@@ -37,6 +37,7 @@ class DiffPairSelectionPanel(wx.Panel):
         self.all_pairs = []  # List of (display_name, base_name, p_net_id, n_net_id)
         self._checked_pairs = set()
         self._check_fn = None
+        self._suspend_check = False  # Temporarily disable check_fn during restore
         self._component_filter_value = ""
 
         self._create_ui(instructions, show_hide_checkbox, show_component_dropdown)
@@ -199,7 +200,7 @@ class DiffPairSelectionPanel(wx.Panel):
         self.pair_list.Clear()
         for display_name, base_name, p_net_id, n_net_id in filtered_pairs:
             # Check if should be hidden (both P and N connected)
-            if hide_connected and self._check_fn:
+            if hide_connected and self._check_fn and not self._suspend_check:
                 if self._check_fn(p_net_id) and self._check_fn(n_net_id):
                     continue
             idx = self.pair_list.Append(display_name)
@@ -233,6 +234,14 @@ class DiffPairSelectionPanel(wx.Panel):
     def set_check_function(self, fn):
         """Set connectivity check function."""
         self._check_fn = fn
+
+    def suspend_check(self):
+        """Temporarily disable connectivity checking during settings restore."""
+        self._suspend_check = True
+
+    def resume_check(self):
+        """Re-enable connectivity checking after settings restore."""
+        self._suspend_check = False
 
     def refresh(self, sync_from_visible=True):
         """Refresh the pair list.

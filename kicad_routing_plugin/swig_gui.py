@@ -631,8 +631,8 @@ class RoutingDialog(wx.Dialog):
         def on_fanout_complete():
             # Sync pcb_data from board after fanout adds tracks
             self._sync_pcb_data_from_board()
-            # Clear connectivity cache since board changed
-            self._connectivity_cache = {}
+            # Repopulate connectivity cache (sync already cleared it)
+            self._check_connectivity_with_progress()
             # Refresh all net panels to show updated connectivity
             self._update_net_list()
 
@@ -675,8 +675,8 @@ class RoutingDialog(wx.Dialog):
         def on_planes_complete():
             # Sync pcb_data from board after planes operation
             self._sync_pcb_data_from_board()
-            # Clear connectivity cache since board changed
-            self._connectivity_cache = {}
+            # Repopulate connectivity cache (sync already cleared it)
+            self._check_connectivity_with_progress()
             # Refresh all net panels to show updated connectivity
             self._update_net_list()
 
@@ -904,6 +904,8 @@ class RoutingDialog(wx.Dialog):
 
     def _deferred_init(self):
         """Run after dialog is shown: sync board and check connectivity."""
+        t0 = time.time()
+
         # Set up connectivity check function on the net panel
         # This function returns True if a net should be hidden (i.e., is connected)
         def is_connected(net_id):
@@ -918,15 +920,21 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.pair_panel.set_check_function(is_connected)
 
         # Restore saved settings if available, otherwise use defaults
+        t1 = time.time()
         if self._saved_settings:
             restore_dialog_settings(self, self._saved_settings)
         else:
             # Enable hide checkbox by default on Basic tab only
             if self.net_panel.hide_check:
                 self.net_panel.hide_check.SetValue(True)
+        t2 = time.time()
+        print(f"[TIMING] restore_dialog_settings: {t2 - t1:.2f}s")
 
         # Do initial refresh
         self.refresh_from_board()
+        t3 = time.time()
+        print(f"[TIMING] refresh_from_board: {t3 - t2:.2f}s")
+        print(f"[TIMING] _deferred_init total: {t3 - t0:.2f}s")
 
     def refresh_from_board(self):
         """Refresh pcb_data from the current board state.
@@ -934,6 +942,8 @@ class RoutingDialog(wx.Dialog):
         Call this when re-showing the dialog after the user has made
         changes in KiCad.
         """
+        t0 = time.time()
+
         # Save current selections from all net panels BEFORE any refresh
         # Use _checked_nets directly to preserve restored settings (don't sync from visible items)
         saved_selections = {
@@ -948,10 +958,15 @@ class RoutingDialog(wx.Dialog):
         # Sync pcb_data with pcbnew's in-memory board state
         self.status_text.SetLabel("Syncing with board...")
         wx.Yield()
+        t1 = time.time()
         self._sync_pcb_data_from_board()
+        t2 = time.time()
+        print(f"[TIMING] _sync_pcb_data_from_board: {t2 - t1:.2f}s")
 
         # Run connectivity check with progress
         self._check_connectivity_with_progress()
+        t3 = time.time()
+        print(f"[TIMING] _check_connectivity_with_progress: {t3 - t2:.2f}s")
 
         # Restore selections to each panel before refreshing
         self.net_panel._checked_nets = saved_selections['net_panel']
@@ -1422,6 +1437,10 @@ class RoutingDialog(wx.Dialog):
         # Sync pcb_data from pcbnew board to ensure subsequent routing and
         # connectivity checks see the new tracks
         self._sync_pcb_data_from_board()
+
+        # Repopulate connectivity cache before showing message box
+        # so the net list refresh after OK is fast
+        self._check_connectivity_with_progress()
 
         # Update UI and show completion message
         self.progress_bar.SetValue(100)

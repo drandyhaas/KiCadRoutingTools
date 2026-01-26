@@ -53,6 +53,7 @@ class NetSelectionPanel(wx.Panel):
         self.all_nets = []  # List of (name, net_id) tuples
         self._checked_nets = set()
         self._check_fn = None  # Optional connectivity check function
+        self._suspend_check = False  # Temporarily disable check_fn during restore
         self._show_hide_checkbox = show_hide_checkbox
         self._show_hide_differential = show_hide_differential
         self._hide_differential_default = hide_differential_default
@@ -215,6 +216,14 @@ class NetSelectionPanel(wx.Panel):
         """
         self._check_fn = fn
 
+    def suspend_check(self):
+        """Temporarily disable connectivity checking during settings restore."""
+        self._suspend_check = True
+
+    def resume_check(self):
+        """Re-enable connectivity checking after settings restore."""
+        self._suspend_check = False
+
     def set_component_filter(self, component_ref):
         """Set the component filter value.
 
@@ -295,7 +304,7 @@ class NetSelectionPanel(wx.Panel):
         self.net_list.Clear()
         for name, net_id in filtered_nets:
             # Check if should be hidden (connected)
-            if hide_checked and self._check_fn:
+            if hide_checked and self._check_fn and not self._suspend_check:
                 if self._check_fn(net_id):
                     continue
             # Check if should be hidden (differential)

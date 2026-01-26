@@ -4,6 +4,8 @@ KiCad Routing Tools - Dialog Settings Persistence
 Handles saving and restoring dialog settings between invocations.
 """
 
+import time
+
 
 def get_dialog_settings(dialog):
     """Get all current dialog settings for persistence.
@@ -162,6 +164,15 @@ def restore_dialog_settings(dialog, settings):
     if not settings:
         return
 
+    t_start = time.time()
+
+    # Suspend connectivity checks during restore to avoid expensive recalculations
+    dialog.net_panel.suspend_check()
+    dialog.swappable_net_panel.suspend_check()
+    dialog.differential_tab.pair_panel.suspend_check()
+    dialog.fanout_tab.net_panel.suspend_check()
+    dialog.planes_tab.net_panel.suspend_check()
+
     # Restore tab selection
     if 'active_tab' in settings:
         dialog.notebook.SetSelection(settings['active_tab'])
@@ -289,6 +300,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.schematic_dir_ctrl.SetValue(settings['schematic_dir'])
 
     # Restore hide checkboxes
+    t1 = time.time()
+    print(f"[TIMING] restore basic/advanced settings: {t1 - t_start:.2f}s")
     if 'net_panel_hide' in settings and dialog.net_panel.hide_check:
         dialog.net_panel.hide_check.SetValue(settings['net_panel_hide'])
     if 'net_panel_hide_diff' in settings and dialog.net_panel.hide_diff_check:
@@ -301,6 +314,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.net_panel.hide_check.SetValue(settings['fanout_hide'])
 
     # Restore filters
+    t2 = time.time()
+    print(f"[TIMING] restore hide checkboxes: {t2 - t1:.2f}s")
     if 'net_panel_filter' in settings:
         dialog.net_panel.filter_ctrl.SetValue(settings['net_panel_filter'])
     if 'swappable_filter' in settings:
@@ -341,6 +356,8 @@ def restore_dialog_settings(dialog, settings):
                 dialog.fanout_tab.net_panel._component_filter_value = text.split(' (')[0]
 
     # Restore differential tab parameters
+    t3 = time.time()
+    print(f"[TIMING] restore filters/components: {t3 - t2:.2f}s")
     if 'diff_pair_gap' in settings:
         dialog.differential_tab.diff_pair_gap.SetValue(settings['diff_pair_gap'])
     if 'min_turning_radius' in settings:
@@ -359,6 +376,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.intra_match_check.SetValue(settings['intra_match_check'])
 
     # Restore fanout tab settings
+    t4 = time.time()
+    print(f"[TIMING] restore differential tab: {t4 - t3:.2f}s")
     if 'fanout_type' in settings:
         dialog.fanout_tab.fanout_type.SetSelection(settings['fanout_type'])
         # Trigger type change to show/hide appropriate options
@@ -385,6 +404,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
 
     # Restore planes tab settings
+    t5 = time.time()
+    print(f"[TIMING] restore fanout tab: {t5 - t4:.2f}s")
     if 'planes_mode' in settings:
         dialog.planes_tab.mode_selector.SetSelection(settings['planes_mode'])
         # Trigger mode change to show/hide appropriate options
@@ -423,6 +444,8 @@ def restore_dialog_settings(dialog, settings):
 
     # Restore net selections LAST - after all filters/checkboxes are set
     # This prevents the selections from being cleared by filter change events
+    t6 = time.time()
+    print(f"[TIMING] restore planes tab: {t6 - t5:.2f}s")
     if 'net_panel_checked' in settings:
         dialog.net_panel._checked_nets = set(settings['net_panel_checked'])
     if 'swappable_net_panel_checked' in settings:
@@ -435,5 +458,18 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.pair_panel._checked_pairs = set(settings['diff_pairs_checked'])
 
     # Restore log content
+    t7 = time.time()
+    print(f"[TIMING] restore net selections: {t7 - t6:.2f}s")
     if 'log_content' in settings and settings['log_content']:
+        t0 = time.time()
         dialog.log_text.SetValue(settings['log_content'])
+        print(f"[TIMING] log_text.SetValue ({len(settings['log_content'])} chars): {time.time() - t0:.2f}s")
+
+    # Resume connectivity checks (actual check happens in refresh_from_board)
+    dialog.net_panel.resume_check()
+    dialog.swappable_net_panel.resume_check()
+    dialog.differential_tab.pair_panel.resume_check()
+    dialog.fanout_tab.net_panel.resume_check()
+    dialog.planes_tab.net_panel.resume_check()
+
+    print(f"[TIMING] restore_dialog_settings total: {time.time() - t_start:.2f}s")
