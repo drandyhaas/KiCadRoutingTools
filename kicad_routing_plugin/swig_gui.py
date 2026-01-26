@@ -566,10 +566,24 @@ class RoutingDialog(wx.Dialog):
         self.route_btn.Bind(wx.EVT_BUTTON, self._on_route)
         button_sizer.Add(self.route_btn, 1, wx.RIGHT, 5)
 
-        self.cancel_btn = wx.Button(panel, wx.ID_CANCEL, label="Close")
+        self.cancel_btn = wx.Button(panel, label="Close")
+        self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel_or_close)
         button_sizer.Add(self.cancel_btn, 1)
 
         return button_sizer
+
+    def _on_cancel_or_close(self, event):
+        """Handle cancel/close button - cancel if routing, otherwise close dialog."""
+        if self._routing_thread and self._routing_thread.is_alive():
+            # Routing is running - cancel it
+            self._cancel_requested = True
+            self.status_text.SetLabel("Cancelling...")
+            # Also notify the differential tab if it has a routing operation running
+            if hasattr(self, 'differential_tab'):
+                self.differential_tab.request_cancel()
+        else:
+            # Not routing - close/hide the dialog
+            self.Close()
 
     def _create_log_tab(self):
         """Create the Log tab."""
@@ -1012,6 +1026,7 @@ class RoutingDialog(wx.Dialog):
 
         # Disable UI during routing
         self.route_btn.Disable()
+        self.cancel_btn.SetLabel("Cancel")
         self._cancel_requested = False
         self._routing_start_time = time.time()  # Track wall time from button press
 
@@ -1237,6 +1252,7 @@ class RoutingDialog(wx.Dialog):
             wx.CallLater(100, self._poll_routing)
         else:
             self.route_btn.Enable()
+            self.cancel_btn.SetLabel("Close")
 
     def _update_progress(self, current, total, step_name):
         """Update progress bar and status."""
@@ -1439,10 +1455,16 @@ class RoutingDialog(wx.Dialog):
 
     def _routing_cancelled(self):
         """Handle routing cancellation."""
+        self.route_btn.Enable()
+        self.cancel_btn.SetLabel("Close")
+        self.progress_bar.SetValue(0)
         self.status_text.SetLabel("Cancelled")
 
     def _routing_error(self, error_msg):
         """Handle routing error."""
+        self.route_btn.Enable()
+        self.cancel_btn.SetLabel("Close")
+        self.progress_bar.SetValue(0)
         self.status_text.SetLabel("Error")
         wx.MessageBox(
             f"Routing error:\n\n{error_msg}",

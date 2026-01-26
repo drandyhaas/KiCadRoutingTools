@@ -152,7 +152,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 schematic_dir: Optional[str] = None,
                 add_teardrops: bool = False,
                 return_results: bool = False,
-                pcb_data=None) -> Tuple[int, int, float]:
+                pcb_data=None,
+                cancel_check=None) -> Tuple[int, int, float]:
     """
     Route differential pairs using the Rust router.
 
@@ -544,6 +545,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         total_layer_swaps=total_layer_swaps,
         net_obstacles_cache=net_obstacles_cache,
         working_obstacles=working_obstacles,
+        cancel_check=cancel_check,
     )
 
     # Create local aliases for frequently-used state fields

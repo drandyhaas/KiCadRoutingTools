@@ -86,6 +86,9 @@ class RoutingState:
     enable_layer_switch: bool = False
     debug_lines: bool = False
 
+    # Cancellation callback
+    cancel_check: Any = None  # Optional callable returning True if routing should be cancelled
+
     # Target swap info (for output writing)
     target_swaps: Dict[str, str] = field(default_factory=dict)
     target_swap_info: List[Dict] = field(default_factory=list)
@@ -127,6 +130,7 @@ def create_routing_state(
     total_layer_swaps: int = 0,
     net_obstacles_cache: Optional[Dict] = None,
     working_obstacles: Any = None,
+    cancel_check: Any = None,
 ) -> RoutingState:
     """
     Create and initialize a RoutingState object.
@@ -155,6 +159,7 @@ def create_routing_state(
         total_layer_swaps=total_layer_swaps,
         net_obstacles_cache=net_obstacles_cache or {},
         working_obstacles=working_obstacles,
+        cancel_check=cancel_check,
     )
 
 

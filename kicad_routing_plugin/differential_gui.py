@@ -415,10 +415,17 @@ class DifferentialTab(wx.Panel):
 
         right_sizer.Add(status_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
-        # Route button
-        self.route_btn = wx.Button(self, label="Route Differential Pairs")
+        # Route and Cancel buttons
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.route_btn = wx.Button(self, label="Route")
         self.route_btn.Bind(wx.EVT_BUTTON, self._on_route)
-        right_sizer.Add(self.route_btn, 0, wx.EXPAND)
+        btn_sizer.Add(self.route_btn, 1, wx.RIGHT, 5)
+
+        self.cancel_btn = wx.Button(self, label="Close")
+        self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel_or_close)
+        btn_sizer.Add(self.cancel_btn, 1)
+
+        right_sizer.Add(btn_sizer, 0, wx.EXPAND)
 
         # Add spacer to push content up
         right_sizer.AddStretchSpacer(1)
@@ -426,6 +433,20 @@ class DifferentialTab(wx.Panel):
         main_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(main_sizer)
+
+    def _on_cancel_or_close(self, event):
+        """Handle cancel/close button - cancel if routing, otherwise close dialog."""
+        if self._routing_thread and self._routing_thread.is_alive():
+            # Routing is running - cancel it
+            self.request_cancel()
+        else:
+            # Not routing - close/hide the parent dialog
+            self.GetTopLevelParent().Close()
+
+    def request_cancel(self):
+        """Request cancellation of the current routing operation."""
+        self._cancel_requested = True
+        self.status_text.SetLabel("Cancelling...")
 
     def _on_route(self, event):
         """Handle route button click."""
@@ -473,6 +494,7 @@ class DifferentialTab(wx.Panel):
 
         # Disable UI during routing
         self.route_btn.Disable()
+        self.cancel_btn.SetLabel("Cancel")
         self._cancel_requested = False
 
         self.status_text.SetLabel(f"Routing {len(selected_pair_info)} differential pair(s)...")
@@ -519,6 +541,9 @@ class DifferentialTab(wx.Panel):
             from route_diff import batch_route_diff_pairs
 
             # Run differential pair routing with return_results=True
+            def check_cancel():
+                return self._cancel_requested
+
             successful, failed, total_time, results_data = batch_route_diff_pairs(
                 input_file=self.board_filename,
                 output_file="",  # Not used when return_results=True
@@ -544,6 +569,7 @@ class DifferentialTab(wx.Panel):
                 verbose=config.get('verbose', False),
                 return_results=True,
                 pcb_data=self.pcb_data,
+                cancel_check=check_cancel,
             )
 
             self._routing_result = {
@@ -566,6 +592,9 @@ class DifferentialTab(wx.Panel):
     def _poll_routing(self):
         """Poll for routing completion."""
         if self._routing_thread and self._routing_thread.is_alive():
+            # Check if cancel was requested
+            if self._cancel_requested:
+                self.status_text.SetLabel("Cancelling... (waiting for current operation)")
             # Still running, poll again
             wx.CallLater(100, self._poll_routing)
         else:
@@ -575,7 +604,14 @@ class DifferentialTab(wx.Panel):
     def _on_routing_complete(self):
         """Handle routing completion."""
         self.route_btn.Enable()
+        self.cancel_btn.SetLabel("Close")
         self.progress_bar.SetValue(0)
+
+        # Check if cancelled
+        if self._cancel_requested:
+            self._cancel_requested = False
+            self.status_text.SetLabel("Cancelled")
+            return
 
         result = getattr(self, '_routing_result', None)
         if not result:
