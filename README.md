@@ -1,10 +1,15 @@
-# KiCad PCB Grid Router
+<p align="center">
+  <img src="kicad_routing_plugin/icon_512_text.png" alt="KiCadRoutingTools" width="256">
+</p>
 
-A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coordinates. Routes nets between existing stub endpoints with multi-layer support and automatic via placement.
+# KiCad Routing Tools
 
-<img src="docs/routed_all.png" alt="Routed PCB example" style="max-width: 800px; height: auto;">
+A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a **KiCad Plugin** with full GUI and a **Command-Line Interface** for scripting and automation.
 
-<img src="docs/routed_kit.png" alt="Routed PCB example 2" style="max-width: 800px; height: auto;">
+<p align="center">
+  <img src="docs/routed_all.png" alt="Routed PCB example" width="600">
+  <img src="docs/routed_kit.png" alt="Routed PCB example 2" width="600">
+</p>
 
 ## Features
 
@@ -47,14 +52,114 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files using integer grid coo
 python build_router.py
 ```
 
-To clean all build artifacts and compiled libraries:
+### 2. Choose Your Interface
+
+**Option A: KiCad Plugin (Recommended for interactive use)**
+
 ```bash
-python build_router.py --clean
+# Install the plugin
+python install_plugin.py
+
+# Then in KiCad: Tools → External Plugins → KiCadRoutingTools
 ```
 
-**Note:** The router automatically checks that the Rust library version matches `Cargo.toml` on startup. If there's a version mismatch, it rebuilds automatically.
+**Option B: Command Line (For scripting and automation)**
 
-### 2. Route Nets
+```bash
+# Route all nets
+python route.py my_board.kicad_pcb
+
+# Route differential pairs
+python route_diff.py my_board.kicad_pcb --nets "*lvds*"
+
+# Create power planes
+python route_planes.py my_board.kicad_pcb --nets GND --plane-layers B.Cu
+```
+
+---
+
+## KiCad Plugin
+
+The plugin provides a full graphical interface for all routing features, running directly within KiCad 9+.
+
+<p align="center">
+  <img src="kicad_routing_plugin/gui.png" alt="KiCad Plugin GUI" width="600">
+</p>
+
+### Installation
+
+```bash
+# Install the plugin (copies to KiCad plugins directory)
+python install_plugin.py
+
+# For development: create symlink instead of copying
+python install_plugin.py --symlink
+
+# Remove the plugin
+python install_plugin.py --uninstall
+```
+
+The installer automatically detects your KiCad installation directory:
+- **macOS**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
+- **Linux**: `~/.local/share/kicad/9.0/3rdparty/plugins/`
+- **Windows**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
+
+### Usage
+
+1. Open KiCad 9.0 or later
+2. Open a PCB in Pcbnew
+3. Go to **Tools → External Plugins → KiCadRoutingTools**
+4. Configure routing parameters and select nets to route
+5. Click **Route** to run the router
+
+### Plugin Tabs
+
+**Basic Tab:**
+- Net selection with filtering and component filtering
+- Track width, clearance, via size/drill configuration
+- Layer selection with per-layer cost multipliers
+- Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
+
+**Advanced Tab:**
+- Swappable nets configuration for target swap optimization
+- Routing parameters: iterations, heuristic weight, rip-up, probe iterations
+- MPS ordering options, direction control, length matching
+- Proximity settings: BGA, stub, track, via proximity costs
+- Debug options
+
+**Differential Tab:**
+- Differential pair selection with filtering
+- Pair gap, turning radius, setback angle configuration
+- Options: polarity fix, GND vias, intra-pair length matching
+
+**Fanout Tab:**
+- BGA fanout with exit margin, escape direction, differential pair support
+- QFN fanout with extension length configuration
+- Net selection for fanout operations
+
+**Planes Tab:**
+- Net-to-layer assignment for power/ground planes
+- Create planes with via connections to SMD pads
+- Repair disconnected plane regions
+- Via size/drill, track width, clearance configuration
+
+**Log Tab:**
+- Real-time routing output display
+- Color-coded messages (errors, warnings, success)
+
+**About Tab:**
+- Version information and credits
+
+**General Features:**
+- Settings persistence (parameters and selections preserved between sessions)
+- Cancel button to stop routing operations mid-progress
+- Results applied directly to the open PCB in KiCad
+
+---
+
+## Command-Line Interface
+
+### Route Nets
 
 ```bash
 # Route all nets (default) - outputs to input_routed.kicad_pcb
@@ -183,176 +288,17 @@ The skill:
 
 See [Power Net Analysis](docs/power-nets.md) for detailed documentation.
 
-### 6. Full Integration Test
-
-Run the complete pipeline (QFN/BGA fanout → routing → DRC → connectivity) on the test board:
+### 6. Integration Tests
 
 ```bash
-# Run all stages (fanout, routing, checks)
-python test_fanout_and_route.py --all
+# Run full integration test (fanout + routing + checks)
+python tests/test_fanout_and_route.py --all
 
-# Quick mode (reduced scope for faster testing)
-python test_fanout_and_route.py --all --quick
-
-# Unbuffered output (useful for real-time logging)
-python test_fanout_and_route.py --all -u
-
-# Run only specific stages
-python test_fanout_and_route.py --ftdi --lvds    # Only FTDI and LVDS routing
-python test_fanout_and_route.py --ram --planes   # Only RAM routing and planes
-
-# Run only DRC/connectivity checks (no routing)
-python test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
+# Quick mode for faster testing
+python tests/test_fanout_and_route.py --all --quick
 ```
 
-Options:
-- `--all` - Run all stages: fanout, ftdi, lvds, ram, planes, and checks
-- `--quick` - Run quick test with reduced routing (fewer nets per stage)
-- `--fanout` - Run fanout tests (QFN and BGA fanout)
-- `--ftdi` - Run FTDI single-ended routing tests
-- `--lvds` - Run LVDS differential pair routing tests
-- `--ram` - Run DDR RAM routing tests
-- `--planes` - Run power/ground plane routing tests
-- `--checks` - Run DRC and connectivity checks after routing (skipped in --quick mode)
-- `--onlychecks` - Run only checks, skip all routing stages (requires stage flags like --ftdi to specify which checks)
-- `-u, --unbuffered` - Run python commands with unbuffered output
-
-Note: By default, no stages run. Use `--all` to run everything, or specify individual stages.
-
-This script demonstrates a real-world workflow:
-1. QFN fanout for U2 (ADC interface)
-2. BGA fanout for FTDI (U3), ADC (IC1), FPGA (U3), and DDR (U1)
-3. Single-ended routing (FTDI data lanes with swappable targets)
-4. Differential pair routing (LVDS with length matching)
-5. DDR routing (DQS/CK diff pairs + DQ data lanes with auto byte-lane grouping)
-6. DRC and connectivity verification after each stage
-
-### 7. 4-Layer Board with Pad-to-Pad Routing Test
-
-Route directly between pads without fanout (for boards with standard through-hole or SMD pads):
-
-```bash
-python test_kit_route.py
-
-# Quick mode (only /IRQ* and /AN* nets)
-python test_kit_route.py --quick
-
-# Unbuffered output (useful for real-time logging)
-python test_kit_route.py -u
-```
-
-This script routes nets on the kit-dev-coldfire-xilinx board directly from pads, demonstrating routing without BGA fanout.
-
-### 8. 2-Layer Board with GND Plane Test
-
-Test routing on a simple 2-layer board with a GND plane and power net width assignments:
-
-```bash
-python test_flat_hierarchy.py
-
-# With unbuffered output
-python test_flat_hierarchy.py -u
-```
-
-This script demonstrates:
-1. Creating a GND plane on B.Cu using `route_planes.py`
-2. Routing all signals with power net width overrides (GND/VCC at 0.5mm, VPP at 0.35mm)
-3. DRC and connectivity verification
-
-The test uses power net configurations generated by `/analyze-power-nets`.
-
-### 9. 2-Layer Board with Non-Rectangular Outline Test
-
-Test routing on a 2-layer board with a non-rectangular board outline (has a bottom protrusion):
-
-```bash
-python test_interf_u.py
-
-# With unbuffered output
-python test_interf_u.py -u
-```
-
-This script demonstrates:
-1. Creating VCC and GND planes on both F.Cu and B.Cu using `route_planes.py`
-2. Routing all signals with polygon-based board edge blocking (non-rectangular board support)
-3. Connecting disconnected plane regions using `route_disconnected_planes.py`
-4. DRC and connectivity verification
-
-## KiCad Plugin
-
-The router can be used directly within KiCad 9+ via an ActionPlugin, providing a graphical interface for all routing features.
-
-### Installation
-
-```bash
-# Install the plugin (copies to KiCad plugins directory)
-python install_plugin.py
-
-# For development: create symlink instead of copying
-python install_plugin.py --symlink
-
-# Remove the plugin
-python install_plugin.py --uninstall
-```
-
-The installer automatically detects your KiCad installation directory:
-- **macOS**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
-- **Linux**: `~/.local/share/kicad/9.0/3rdparty/plugins/`
-- **Windows**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
-
-### Usage
-
-1. Open KiCad 9.0 or later
-2. Open a PCB in Pcbnew
-3. Go to **Tools → External Plugins → KiCadRoutingTools**
-4. Configure routing parameters and select nets to route
-5. Click **Route** to run the router
-
-### Plugin Features
-
-The plugin GUI provides access to all routing features:
-
-**Basic Tab:**
-- Net selection with filtering and component filtering
-- Track width, clearance, via size/drill configuration
-- Layer selection with per-layer cost multipliers
-- Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
-
-**Advanced Tab:**
-- Swappable nets configuration for target swap optimization
-- Routing parameters: iterations, heuristic weight, rip-up, probe iterations
-- MPS ordering options, direction control, length matching
-- Proximity settings: BGA, stub, track, via proximity costs
-- Debug options
-
-**Differential Tab:**
-- Differential pair selection with filtering
-- Pair gap, turning radius, setback angle configuration
-- Options: polarity fix, GND vias, intra-pair length matching
-
-**Fanout Tab:**
-- BGA fanout with exit margin, escape direction, differential pair support
-- QFN fanout with extension length configuration
-- Net selection for fanout operations
-
-**Planes Tab:**
-- Net-to-layer assignment for power/ground planes
-- Create planes with via connections to SMD pads
-- Repair disconnected plane regions
-- Via size/drill, track width, clearance configuration
-
-**Log Tab:**
-- Real-time routing output display
-- Color-coded messages (errors, warnings, success)
-
-**About Tab:**
-- Version information and credits
-
-**General Features:**
-- Settings persistence (parameters and selections preserved between sessions)
-- Cancel button to stop routing operations mid-progress
-- Real-time routing log output
-- Results applied directly to the open PCB in KiCad
+See [tests/README.md](tests/README.md) for detailed documentation of all test scripts.
 
 ## Documentation
 
@@ -369,6 +315,7 @@ The plugin GUI provides access to all routing features:
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
+| [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 
 ## Project Structure
 
@@ -453,11 +400,14 @@ KiCadRoutingTools/
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script (--clean to remove artifacts)
 ├── startup_checks.py         # Startup checks (Python deps, Rust library version)
-├── test_fanout_and_route.py  # Full integration test (fanout + route)
-├── test_kit_route.py         # Pad-to-pad routing test (no fanout)
-├── test_flat_hierarchy.py    # 2-layer board with GND plane test
-├── test_interf_u.py          # 2-layer board with non-rectangular outline test
-├── run_utils.py             # Shared test utilities (run command helper)
+│
+├── tests/                    # Integration tests
+│   ├── test_fanout_and_route.py  # Full integration test (fanout + route)
+│   ├── test_kit_route.py         # Pad-to-pad routing test (no fanout)
+│   ├── test_flat_hierarchy.py    # 2-layer board with GND plane test
+│   ├── test_interf_u.py          # 2-layer board with non-rectangular outline test
+│   ├── test_sonde_u.py           # Wide track routing test
+│   └── run_utils.py              # Shared test utilities
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
@@ -558,7 +508,7 @@ Key functions in `analyze_power_paths.py` (used by `/analyze-power-nets` skill):
 
 ## Performance
 
-Integration test results (`test_fanout_and_route.py`):
+Integration test results (`tests/test_fanout_and_route.py`):
 
 | Stage | Nets | Time | Iterations |
 |-------|------|------|------------|
@@ -831,7 +781,7 @@ Features:
 - No net class support (KiCad native)
 - No User-Defined Keepout Zones
 - No Bus/Parallel Routing 
-- Propagation Delay Matching
+- No Propagation Delay Matching
 - No GND via auto return path placements for single-ended routing
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost learning/tuning
