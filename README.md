@@ -325,7 +325,24 @@ The plugin GUI provides access to all routing features:
 - Proximity settings: BGA, stub, track, via proximity costs
 - Debug options
 
-The plugin applies routed results directly to the open PCB in KiCad.
+**Differential Tab:**
+- Differential pair selection with filtering
+- Pair gap, turning radius, setback angle configuration
+- Options: polarity fix, GND vias, intra-pair length matching
+
+**Fanout Tab:**
+- BGA fanout with exit margin, escape direction, differential pair support
+- QFN fanout with extension length configuration
+- Net selection for fanout operations
+
+**About Tab:**
+- Version information and credits
+
+**General Features:**
+- Settings persistence (parameters and selections preserved between sessions)
+- Cancel button to stop routing operations mid-progress
+- Real-time routing log output
+- Results applied directly to the open PCB in KiCad
 
 ## Documentation
 
@@ -436,7 +453,11 @@ KiCadRoutingTools/
 ├── pygame_visualizer/        # Real-time visualization
 ├── kicad_routing_plugin/     # KiCad ActionPlugin
 │   ├── action_plugin.py      # ActionPlugin entry point
-│   └── swig_gui.py           # wxPython GUI for KiCad integration
+│   ├── swig_gui.py           # Main routing dialog (Basic/Advanced tabs)
+│   ├── differential_gui.py   # Differential pair routing tab
+│   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
+│   ├── about_tab.py          # About tab with version info
+│   └── settings_persistence.py  # Save/restore dialog settings between sessions
 ├── install_plugin.py         # Plugin installer script
 ├── docs/                     # Documentation
 └── .claude/skills/           # Claude Code skills
