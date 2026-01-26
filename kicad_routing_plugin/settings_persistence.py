@@ -127,6 +127,24 @@ def get_dialog_settings(dialog):
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
+
+        # Planes tab settings
+        'planes_net_panel_checked': list(dialog.planes_tab.net_panel.get_selected_nets()),
+        'planes_mode': dialog.planes_tab.mode_selector.GetSelection(),
+        'planes_assignments': dialog.planes_tab.assignment_panel.get_assignments(),
+        'planes_hide': dialog.planes_tab.net_panel.hide_check.GetValue() if dialog.planes_tab.net_panel.hide_check else False,
+        'planes_filter': dialog.planes_tab.net_panel.filter_ctrl.GetValue(),
+        'planes_component': dialog.planes_tab.net_panel.component_dropdown.GetSelection() if dialog.planes_tab.net_panel.component_dropdown else 0,
+        # Create mode options
+        'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
+        'planes_edge_clearance': dialog.planes_tab.create_options.edge_clearance.GetValue(),
+        'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
+        'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
+        'planes_reroute_ripped_check': dialog.planes_tab.create_options.reroute_ripped_check.GetValue(),
+        # Repair mode options
+        'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
+        'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
+        'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
     }
     return settings
 
@@ -363,6 +381,43 @@ def restore_dialog_settings(dialog, settings):
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
 
+    # Restore planes tab settings
+    if 'planes_mode' in settings:
+        dialog.planes_tab.mode_selector.SetSelection(settings['planes_mode'])
+        # Trigger mode change to show/hide appropriate options
+        dialog.planes_tab._on_mode_changed(None)
+    if 'planes_assignments' in settings:
+        dialog.planes_tab.assignment_panel.set_assignments(settings['planes_assignments'])
+    if 'planes_hide' in settings and dialog.planes_tab.net_panel.hide_check:
+        dialog.planes_tab.net_panel.hide_check.SetValue(settings['planes_hide'])
+    if 'planes_filter' in settings:
+        dialog.planes_tab.net_panel.filter_ctrl.SetValue(settings['planes_filter'])
+    if 'planes_component' in settings and dialog.planes_tab.net_panel.component_dropdown:
+        idx = settings['planes_component']
+        if idx < dialog.planes_tab.net_panel.component_dropdown.GetCount():
+            dialog.planes_tab.net_panel.component_dropdown.SetSelection(idx)
+            if idx > 0:
+                text = dialog.planes_tab.net_panel.component_dropdown.GetString(idx)
+                dialog.planes_tab.net_panel._component_filter_value = text.split(' (')[0]
+    # Create mode options
+    if 'planes_zone_clearance' in settings:
+        dialog.planes_tab.create_options.zone_clearance.SetValue(settings['planes_zone_clearance'])
+    if 'planes_edge_clearance' in settings:
+        dialog.planes_tab.create_options.edge_clearance.SetValue(settings['planes_edge_clearance'])
+    if 'planes_max_search_radius' in settings:
+        dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
+    if 'planes_rip_blocker_check' in settings:
+        dialog.planes_tab.create_options.rip_blocker_check.SetValue(settings['planes_rip_blocker_check'])
+    if 'planes_reroute_ripped_check' in settings:
+        dialog.planes_tab.create_options.reroute_ripped_check.SetValue(settings['planes_reroute_ripped_check'])
+    # Repair mode options
+    if 'planes_repair_max_track_width' in settings:
+        dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
+    if 'planes_repair_min_track_width' in settings:
+        dialog.planes_tab.repair_options.min_track_width.SetValue(settings['planes_repair_min_track_width'])
+    if 'planes_repair_analysis_grid' in settings:
+        dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
+
     # Restore net selections LAST - after all filters/checkboxes are set
     # This prevents the selections from being cleared by filter change events
     if 'net_panel_checked' in settings:
@@ -371,5 +426,7 @@ def restore_dialog_settings(dialog, settings):
         dialog.swappable_net_panel._checked_nets = set(settings['swappable_net_panel_checked'])
     if 'fanout_net_panel_checked' in settings:
         dialog.fanout_tab.net_panel._checked_nets = set(settings['fanout_net_panel_checked'])
+    if 'planes_net_panel_checked' in settings:
+        dialog.planes_tab.net_panel._checked_nets = set(settings['planes_net_panel_checked'])
     if 'diff_pairs_checked' in settings:
         dialog.differential_tab.pair_panel._checked_pairs = set(settings['diff_pairs_checked'])

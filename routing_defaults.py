@@ -80,6 +80,19 @@ DIFF_PAIR_MAX_SETBACK_ANGLE = 45.0  # degrees
 DIFF_PAIR_MAX_TURN_ANGLE = 180.0  # degrees
 DIFF_PAIR_CHAMFER_EXTRA = 1.5  # multiplier for meander chamfers
 
+# Plane routing defaults (route_planes.py)
+PLANE_ZONE_CLEARANCE = 0.2  # mm - zone fill clearance from other copper
+PLANE_MIN_THICKNESS = 0.1  # mm - minimum zone copper thickness
+PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
+PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
+PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
+PLANE_MAX_RIP_NETS = 3  # max blocker nets to rip up
+
+# Repair disconnected planes defaults (route_disconnected_planes.py)
+REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
+REPAIR_MIN_TRACK_WIDTH = 0.2  # mm - minimum track width for connections
+REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
+
 
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI
@@ -120,4 +133,15 @@ PARAM_RANGES = {
     'diff_pair_max_setback_angle': {'min': 10.0, 'max': 90.0, 'inc': 5.0, 'digits': 0},
     'diff_pair_max_turn_angle': {'min': 45.0, 'max': 360.0, 'inc': 15.0, 'digits': 0},
     'diff_pair_chamfer_extra': {'min': 1.0, 'max': 3.0, 'inc': 0.1, 'digits': 1},
+    # Plane routing parameters
+    'plane_zone_clearance': {'min': 0.05, 'max': 2.0, 'inc': 0.05, 'digits': 2},
+    'plane_min_thickness': {'min': 0.05, 'max': 1.0, 'inc': 0.05, 'digits': 2},
+    'plane_edge_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'plane_max_search_radius': {'min': 1.0, 'max': 50.0, 'inc': 1.0, 'digits': 1},
+    'plane_max_via_reuse_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
+    'plane_max_rip_nets': {'min': 1, 'max': 10},
+    # Repair planes parameters
+    'repair_max_track_width': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
+    'repair_min_track_width': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
+    'repair_analysis_grid_step': {'min': 0.1, 'max': 2.0, 'inc': 0.1, 'digits': 1},
 }

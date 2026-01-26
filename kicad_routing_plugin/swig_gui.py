@@ -173,11 +173,15 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab = self._create_fanout_tab()
         self.notebook.AddPage(self.fanout_tab, "Fanout")
 
-        # Tab 5: Log
+        # Tab 5: Planes
+        self.planes_tab = self._create_planes_tab()
+        self.notebook.AddPage(self.planes_tab, "Planes")
+
+        # Tab 6: Log
         log_panel = self._create_log_tab()
         self.notebook.AddPage(log_panel, "Log")
 
-        # Tab 6: About
+        # Tab 7: About
         about_panel = self._create_about_tab()
         self.notebook.AddPage(about_panel, "About")
 
@@ -650,6 +654,52 @@ class RoutingDialog(wx.Dialog):
             get_connectivity_check=get_connectivity_check
         )
 
+    def _create_planes_tab(self):
+        """Create the Planes tab for copper plane creation and repair."""
+        from .planes_gui import PlanesTab
+
+        def get_shared_params():
+            """Get shared parameters from the Basic tab."""
+            return {
+                'track_width': self.track_width.GetValue(),
+                'clearance': self.clearance.GetValue(),
+                'via_size': self.via_size.GetValue(),
+                'via_drill': self.via_drill.GetValue(),
+                'grid_step': self.grid_step.GetValue(),
+                'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
+                'max_iterations': int(self.max_iterations.GetValue()),
+                'max_ripup': int(self.max_ripup.GetValue()),
+            }
+
+        def on_planes_complete():
+            # Sync pcb_data from board after planes operation
+            self._sync_pcb_data_from_board()
+            # Clear connectivity cache since board changed
+            self._connectivity_cache = {}
+            # Refresh all net panels to show updated connectivity
+            self._update_net_list()
+
+        def get_connectivity_check():
+            """Return a function to check if a net is connected."""
+            def is_connected(net_id):
+                if net_id in self._connectivity_cache:
+                    return self._connectivity_cache[net_id]
+                is_conn = self._is_net_connected(net_id)
+                self._connectivity_cache[net_id] = is_conn
+                return is_conn
+            return is_connected
+
+        return PlanesTab(
+            self.notebook,
+            self.pcb_data,
+            self.board_filename,
+            get_shared_params=get_shared_params,
+            on_planes_complete=on_planes_complete,
+            get_connectivity_check=get_connectivity_check,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board
+        )
+
     def _create_differential_tab(self):
         """Create the Differential tab for differential pair routing."""
         from .differential_gui import DifferentialTab
@@ -889,6 +939,7 @@ class RoutingDialog(wx.Dialog):
             'net_panel': set(self.net_panel._checked_nets),
             'swappable_net_panel': set(self.swappable_net_panel._checked_nets),
             'fanout_tab': set(self.fanout_tab.net_panel._checked_nets),
+            'planes_tab': set(self.planes_tab.net_panel._checked_nets),
         }
         # DiffPairSelectionPanel uses _checked_pairs, not _checked_nets
         saved_diff_pairs = set(self.differential_tab.pair_panel._checked_pairs)
@@ -905,6 +956,7 @@ class RoutingDialog(wx.Dialog):
         self.net_panel._checked_nets = saved_selections['net_panel']
         self.swappable_net_panel._checked_nets = saved_selections['swappable_net_panel']
         self.fanout_tab.net_panel._checked_nets = saved_selections['fanout_tab']
+        self.planes_tab.net_panel._checked_nets = saved_selections['planes_tab']
         self.differential_tab.pair_panel._checked_pairs = saved_diff_pairs
 
         # Refresh all net panels (skip syncing from visible to preserve restored selections)
@@ -912,6 +964,7 @@ class RoutingDialog(wx.Dialog):
         self.swappable_net_panel.refresh(sync_from_visible=False)
         self.differential_tab.pair_panel.refresh(sync_from_visible=False)
         self.fanout_tab.net_panel.refresh(sync_from_visible=False)
+        self.planes_tab.net_panel.refresh(sync_from_visible=False)
 
         # Update status with connectivity info
         connected_count = sum(1 for v in self._connectivity_cache.values() if v)
@@ -978,6 +1031,8 @@ class RoutingDialog(wx.Dialog):
         self.net_panel.refresh()
         self.swappable_net_panel.refresh()
         self.differential_tab.pair_panel.refresh()
+        self.fanout_tab.net_panel.refresh()
+        self.planes_tab.net_panel.refresh()
 
         # Update status
         connected_count = sum(1 for v in self._connectivity_cache.values() if v)
