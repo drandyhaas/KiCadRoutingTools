@@ -5,6 +5,7 @@ Provides a wx-based dialog for routing configuration.
 """
 
 import os
+import re
 import sys
 import time
 import wx
@@ -1052,8 +1053,37 @@ class RoutingDialog(wx.Dialog):
         wx.CallAfter(self._do_append_log, text)
 
     def _do_append_log(self, text):
-        """Actually append text to log (must be called on main thread)."""
-        self.log_text.AppendText(text)
+        """Actually append text to log (must be called on main thread).
+
+        Parses ANSI escape codes and applies corresponding colors.
+        """
+        # ANSI color code mapping
+        ansi_colors = {
+            '\033[91m': wx.Colour(220, 50, 50),    # RED
+            '\033[92m': wx.Colour(50, 180, 50),    # GREEN
+            '\033[93m': wx.Colour(200, 180, 50),   # YELLOW
+            '\033[0m': None,                        # RESET
+        }
+
+        # Pattern to match ANSI escape codes
+        ansi_pattern = re.compile(r'\033\[\d+m')
+
+        # Split text by ANSI codes while keeping track of positions
+        parts = ansi_pattern.split(text)
+        codes = ansi_pattern.findall(text)
+
+        current_color = None
+        for i, part in enumerate(parts):
+            if part:
+                start_pos = self.log_text.GetLastPosition()
+                self.log_text.AppendText(part)
+                if current_color:
+                    end_pos = self.log_text.GetLastPosition()
+                    attr = wx.TextAttr(current_color)
+                    self.log_text.SetStyle(start_pos, end_pos, attr)
+            # Update color for next part
+            if i < len(codes):
+                current_color = ansi_colors.get(codes[i])
 
     def _get_selected_nets(self):
         """Get list of selected net names, including those checked but currently filtered out."""

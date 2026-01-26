@@ -562,24 +562,34 @@ class PlanesTab(wx.Panel):
         # Expand assignments: each net goes on each layer in the assignment
         # e.g., nets=['+3.3V'] layers=['F.Cu', 'In2.Cu'] becomes:
         #   expanded_nets=['+3.3V', '+3.3V'], expanded_layers=['F.Cu', 'In2.Cu']
+        # Also build layer_nets dict for multi-net layer handling (Voronoi boundaries)
         expanded_nets = []
         expanded_layers = []
+        layer_nets = {}  # layer -> list of nets on that layer
         for nets_list, layers_list in assignments:
             for layer in layers_list:
+                if layer not in layer_nets:
+                    layer_nets[layer] = []
                 for net in nets_list:
                     expanded_nets.append(net)
                     expanded_layers.append(layer)
+                    if net not in layer_nets[layer]:
+                        layer_nets[layer].append(net)
 
         print(f"\nCreating planes for {len(expanded_nets)} net/layer pairs:")
         for net, layer in zip(expanded_nets, expanded_layers):
             print(f"  {net} -> {layer}")
+        # Show multi-net layers
+        for layer, nets in layer_nets.items():
+            if len(nets) > 1:
+                print(f"  Multi-net layer {layer}: {', '.join(nets)}")
 
         if not expanded_nets:
             print("No net/layer assignments to process")
             return
 
         try:
-            vias, traces, pads_needing, new_vias, new_segments = create_plane(
+            vias, traces, pads_needing, new_vias, new_segments, new_zones = create_plane(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=expanded_nets,
@@ -602,6 +612,7 @@ class PlanesTab(wx.Panel):
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),
                 pcb_data=self.pcb_data,
                 return_results=True,
+                layer_nets=layer_nets,
             )
 
             total_vias = vias
@@ -609,6 +620,7 @@ class PlanesTab(wx.Panel):
             total_pads = pads_needing
             self._new_vias = new_vias
             self._new_segments = new_segments
+            self._new_zones = new_zones
 
         except Exception as e:
             import traceback
@@ -805,8 +817,32 @@ class PlanesTab(wx.Panel):
                 tracks_added += 1
             self._new_segments = []
 
-        if vias_added > 0 or tracks_added > 0:
-            print(f"Added to board: {vias_added} vias, {tracks_added} tracks")
+        # Add zones from create_plane results
+        zones_added = 0
+        if hasattr(self, '_new_zones') and self._new_zones:
+            for zone_data in self._new_zones:
+                zone = pcbnew.ZONE(board)
+                zone.SetNetCode(zone_data['net_id'])
+                zone.SetLayer(get_layer_id(zone_data['layer']))
+
+                # Set zone outline from polygon points
+                outline = zone.Outline()
+                outline.NewOutline()
+                for x, y in zone_data['polygon_points']:
+                    outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+
+                # Set zone properties
+                zone.SetLocalClearance(pcbnew.FromMM(zone_data.get('clearance', 0.2)))
+                zone.SetMinThickness(pcbnew.FromMM(zone_data.get('min_thickness', 0.1)))
+                zone.SetIsFilled(False)  # Will be filled by DRC/zone fill
+                zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)  # Direct connect
+
+                board.Add(zone)
+                zones_added += 1
+            self._new_zones = []
+
+        if vias_added > 0 or tracks_added > 0 or zones_added > 0:
+            print(f"Added to board: {zones_added} zones, {vias_added} vias, {tracks_added} tracks")
 
         # Build connectivity and refresh
         board.BuildConnectivity()

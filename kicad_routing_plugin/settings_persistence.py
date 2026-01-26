@@ -145,6 +145,9 @@ def get_dialog_settings(dialog):
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
         'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
+
+        # Log content
+        'log_content': dialog.log_text.GetValue(),
     }
     return settings
 
@@ -430,3 +433,7 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.net_panel._checked_nets = set(settings['planes_net_panel_checked'])
     if 'diff_pairs_checked' in settings:
         dialog.differential_tab.pair_panel._checked_pairs = set(settings['diff_pairs_checked'])
+
+    # Restore log content
+    if 'log_content' in settings and settings['log_content']:
+        dialog.log_text.SetValue(settings['log_content'])

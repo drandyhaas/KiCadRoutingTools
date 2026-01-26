@@ -650,7 +650,7 @@ def _generate_multinet_layer_zones(
     board_edge_clearance: float,
     debug_lines: bool,
     verbose: bool
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], List[str], List[Dict]]:
     """
     Generate Voronoi-based zone boundaries for a multi-net layer.
 
@@ -674,10 +674,11 @@ def _generate_multinet_layer_zones(
         verbose: Verbose output
 
     Returns:
-        Tuple of (zone_sexprs, debug_line_sexprs)
+        Tuple of (zone_sexprs, debug_line_sexprs, zone_data_list)
     """
     zone_sexprs = []
     debug_line_sexprs = []
+    zone_data_list = []
 
     # Build vias_by_net for this layer
     vias_by_net: Dict[int, List[Tuple[float, float]]] = {}
@@ -728,7 +729,15 @@ def _generate_multinet_layer_zones(
                 direct_connect=True
             )
             zone_sexprs.append(zone_sexpr)
-        return zone_sexprs, debug_line_sexprs
+            zone_data_list.append({
+                'net_id': net_id,
+                'net_name': net_name,
+                'layer': layer,
+                'polygon_points': zone_polygon,
+                'clearance': zone_clearance,
+                'min_thickness': min_thickness,
+            })
+        return zone_sexprs, debug_line_sexprs, zone_data_list
 
     # Compute MST edges for each net
     net_mst_edges: Dict[int, List[Tuple[Tuple[float, float], Tuple[float, float]]]] = {}
@@ -866,7 +875,15 @@ def _generate_multinet_layer_zones(
             direct_connect=True
         )
         zone_sexprs.append(zone_sexpr)
-        return zone_sexprs, debug_line_sexprs
+        zone_data_list.append({
+            'net_id': net_id,
+            'net_name': net_name,
+            'layer': layer,
+            'polygon_points': zone_polygon,
+            'clearance': zone_clearance,
+            'min_thickness': min_thickness,
+        })
+        return zone_sexprs, debug_line_sexprs, zone_data_list
 
     # Generate zones for each net
     for net_id, polygons in zone_polygons.items():
@@ -887,6 +904,14 @@ def _generate_multinet_layer_zones(
                 direct_connect=True
             )
             zone_sexprs.append(zone_sexpr)
+            zone_data_list.append({
+                'net_id': net_id,
+                'net_name': net_name,
+                'layer': layer,
+                'polygon_points': polygon,
+                'clearance': zone_clearance,
+                'min_thickness': min_thickness,
+            })
 
     # Calculate and print resistance
     resistance_results = {}
@@ -901,7 +926,7 @@ def _generate_multinet_layer_zones(
 
     print_multi_net_resistance(resistance_results)
 
-    return zone_sexprs, debug_line_sexprs
+    return zone_sexprs, debug_line_sexprs, zone_data_list
 
 
 def _write_output_and_reroute(
@@ -1147,6 +1172,7 @@ def create_plane(
     all_new_vias = []
     all_new_segments = []
     all_zone_sexprs = []
+    all_zone_data = []  # Zone data dicts for pcbnew (when return_results=True)
     all_debug_lines = []  # Debug lines for inter-region routes (User.4)
     total_vias_placed = 0
     total_vias_reused = 0
@@ -1589,6 +1615,14 @@ def create_plane(
                 direct_connect=True
             )
             all_zone_sexprs.append(zone_sexpr)
+            all_zone_data.append({
+                'net_id': net_id,
+                'net_name': net_name,
+                'layer': plane_layer,
+                'polygon_points': zone_polygon,
+                'clearance': zone_clearance,
+                'min_thickness': min_thickness,
+            })
 
             # Calculate and print resistance for single-net layer
             result = analyze_single_net_plane(zone_polygon, plane_layer)
@@ -1646,7 +1680,7 @@ def create_plane(
                 print(f"Nets: {', '.join(nets_on_layer)}")
                 print(f"{'='*60}")
 
-                zone_sexprs, debug_line_sexprs = _generate_multinet_layer_zones(
+                zone_sexprs, debug_line_sexprs, zone_data = _generate_multinet_layer_zones(
                     layer=layer,
                     nets_on_layer=nets_on_layer,
                     pcb_data=pcb_data,
@@ -1667,6 +1701,7 @@ def create_plane(
                 )
                 all_zone_sexprs.extend(zone_sexprs)
                 all_debug_lines.extend(debug_line_sexprs)
+                all_zone_data.extend(zone_data)
 
     # Print overall totals only if multiple nets were processed
     if len(net_names) > 1:
@@ -1716,7 +1751,7 @@ def create_plane(
         )
 
     if return_results:
-        return (total_vias_placed, total_traces_added, total_pads_needing_vias, all_new_vias, all_new_segments)
+        return (total_vias_placed, total_traces_added, total_pads_needing_vias, all_new_vias, all_new_segments, all_zone_data)
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 
