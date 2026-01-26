@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import routing_defaults as defaults
+from .gui_utils import StdoutRedirector
 
 
 class DiffPairSelectionPanel(wx.Panel):
@@ -537,25 +538,9 @@ class DifferentialTab(wx.Panel):
         """Run differential pair routing in a background thread."""
         import sys
 
-        # Redirect stdout to log if available
-        class LogRedirector:
-            def __init__(self, callback, original):
-                self.callback = callback
-                self.original = original
-
-            def write(self, text):
-                if text and self.original:
-                    self.original.write(text)
-                if text and self.callback:
-                    self.callback(text)
-
-            def flush(self):
-                if self.original:
-                    self.original.flush()
-
         original_stdout = sys.stdout
         if self.append_log:
-            sys.stdout = LogRedirector(self.append_log, original_stdout)
+            sys.stdout = StdoutRedirector(self.append_log, original_stdout)
 
         try:
             from route_diff import batch_route_diff_pairs

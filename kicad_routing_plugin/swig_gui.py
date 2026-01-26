@@ -19,27 +19,8 @@ if ROOT_DIR not in sys.path:
 
 import routing_defaults as defaults
 from .fanout_gui import NetSelectionPanel
+from .gui_utils import StdoutRedirector
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
-
-
-class StdoutRedirector:
-    """Redirects stdout to a callback function while preserving original output."""
-
-    def __init__(self, callback, original_stdout):
-        self.callback = callback
-        self.original = original_stdout
-
-    def write(self, text):
-        if text:
-            # Write to original stdout
-            if self.original:
-                self.original.write(text)
-            # Also send to callback
-            self.callback(text)
-
-    def flush(self):
-        if self.original:
-            self.original.flush()
 
 
 def _build_layer_mappings():
@@ -619,7 +600,6 @@ class RoutingDialog(wx.Dialog):
         from .fanout_gui import FanoutTab
 
         def get_shared_params():
-            """Get shared parameters from the Basic tab."""
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -628,31 +608,13 @@ class RoutingDialog(wx.Dialog):
                 'layers': self._get_selected_layers(),
             }
 
-        def on_fanout_complete():
-            # Sync pcb_data from board after fanout adds tracks
-            self._sync_pcb_data_from_board()
-            # Repopulate connectivity cache (sync already cleared it)
-            self._check_connectivity_with_progress()
-            # Refresh all net panels to show updated connectivity
-            self._update_net_list()
-
-        def get_connectivity_check():
-            """Return a function to check if a net is connected."""
-            def is_connected(net_id):
-                if net_id in self._connectivity_cache:
-                    return self._connectivity_cache[net_id]
-                is_conn = self._is_net_connected(net_id)
-                self._connectivity_cache[net_id] = is_conn
-                return is_conn
-            return is_connected
-
         return FanoutTab(
             self.notebook,
             self.pcb_data,
             self.board_filename,
             get_shared_params=get_shared_params,
-            on_fanout_complete=on_fanout_complete,
-            get_connectivity_check=get_connectivity_check
+            on_fanout_complete=self._on_tab_operation_complete,
+            get_connectivity_check=self._get_connectivity_check_fn
         )
 
     def _create_planes_tab(self):
@@ -660,7 +622,6 @@ class RoutingDialog(wx.Dialog):
         from .planes_gui import PlanesTab
 
         def get_shared_params():
-            """Get shared parameters from the Basic tab."""
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -672,31 +633,13 @@ class RoutingDialog(wx.Dialog):
                 'max_ripup': int(self.max_ripup.GetValue()),
             }
 
-        def on_planes_complete():
-            # Sync pcb_data from board after planes operation
-            self._sync_pcb_data_from_board()
-            # Repopulate connectivity cache (sync already cleared it)
-            self._check_connectivity_with_progress()
-            # Refresh all net panels to show updated connectivity
-            self._update_net_list()
-
-        def get_connectivity_check():
-            """Return a function to check if a net is connected."""
-            def is_connected(net_id):
-                if net_id in self._connectivity_cache:
-                    return self._connectivity_cache[net_id]
-                is_conn = self._is_net_connected(net_id)
-                self._connectivity_cache[net_id] = is_conn
-                return is_conn
-            return is_connected
-
         return PlanesTab(
             self.notebook,
             self.pcb_data,
             self.board_filename,
             get_shared_params=get_shared_params,
-            on_planes_complete=on_planes_complete,
-            get_connectivity_check=get_connectivity_check,
+            on_planes_complete=self._on_tab_operation_complete,
+            get_connectivity_check=self._get_connectivity_check_fn,
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board
         )
@@ -706,23 +649,12 @@ class RoutingDialog(wx.Dialog):
         from .differential_gui import DifferentialTab
 
         def get_shared_params():
-            """Get shared parameters from the Basic tab."""
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
             }
-
-        def get_connectivity_check():
-            """Return a function to check if a net is connected."""
-            def is_connected(net_id):
-                if net_id in self._connectivity_cache:
-                    return self._connectivity_cache[net_id]
-                is_conn = self._is_net_connected(net_id)
-                self._connectivity_cache[net_id] = is_conn
-                return is_conn
-            return is_connected
 
         def get_routing_config():
             """Get full routing configuration from the main dialog."""
@@ -755,7 +687,7 @@ class RoutingDialog(wx.Dialog):
             self.pcb_data,
             self.board_filename,
             get_shared_params=get_shared_params,
-            get_connectivity_check=get_connectivity_check,
+            get_connectivity_check=self._get_connectivity_check_fn,
             get_routing_config=get_routing_config,
             append_log=self._append_log,
             sync_pcb_data_callback=sync_pcb_data
@@ -1048,6 +980,28 @@ class RoutingDialog(wx.Dialog):
         """Clear the log text control."""
         self.log_text.Clear()
 
+    def _get_connectivity_check_fn(self):
+        """Return a function to check if a net is connected.
+
+        Used as callback by Fanout, Planes, and Differential tabs.
+        """
+        def is_connected(net_id):
+            if net_id in self._connectivity_cache:
+                return self._connectivity_cache[net_id]
+            is_conn = self._is_net_connected(net_id)
+            self._connectivity_cache[net_id] = is_conn
+            return is_conn
+        return is_connected
+
+    def _on_tab_operation_complete(self):
+        """Handle completion of tab operations (fanout, planes, etc.).
+
+        Syncs board data, refreshes connectivity cache, and updates net lists.
+        """
+        self._sync_pcb_data_from_board()
+        self._check_connectivity_with_progress()
+        self._update_net_list()
+
     def _reset_all_settings(self):
         """Reset all settings to defaults, clear log, and uncheck all selections."""
         # Clear log
@@ -1229,8 +1183,12 @@ class RoutingDialog(wx.Dialog):
         """Get list of selected layers."""
         return [layer for layer, cb in self.layer_checks.items() if cb.GetValue()]
 
-    def _on_route(self, event):
-        """Handle route button click."""
+    def _validate_routing_inputs(self):
+        """Validate routing inputs before starting.
+
+        Returns:
+            tuple: (selected_nets, selected_layers) if valid, (None, None) if invalid
+        """
         selected_nets = self._get_selected_nets()
         if not selected_nets:
             wx.MessageBox(
@@ -1238,7 +1196,7 @@ class RoutingDialog(wx.Dialog):
                 "No Nets Selected",
                 wx.OK | wx.ICON_WARNING
             )
-            return
+            return None, None
 
         selected_layers = self._get_selected_layers()
         if not selected_layers:
@@ -1247,18 +1205,24 @@ class RoutingDialog(wx.Dialog):
                 "No Layers Selected",
                 wx.OK | wx.ICON_WARNING
             )
-            return
+            return None, None
 
-        # Disable UI during routing
-        self.route_btn.Disable()
-        self.cancel_btn.SetLabel("Cancel")
-        self._cancel_requested = False
-        self._routing_start_time = time.time()  # Track wall time from button press
+        return selected_nets, selected_layers
 
-        # Get parameters
+    def _build_routing_config(self, selected_nets, selected_layers):
+        """Build the routing configuration dictionary from UI controls.
+
+        Args:
+            selected_nets: List of selected net names
+            selected_layers: List of selected layer names
+
+        Returns:
+            dict: Configuration for the router
+        """
         config = {
             'nets': selected_nets,
             'layers': selected_layers,
+            # Basic parameters
             'track_width': self.track_width.GetValue(),
             'clearance': self.clearance.GetValue(),
             'via_size': self.via_size.GetValue(),
@@ -1347,6 +1311,23 @@ class RoutingDialog(wx.Dialog):
                 config['layer_costs'] = []
         else:
             config['layer_costs'] = []
+
+        return config
+
+    def _on_route(self, event):
+        """Handle route button click."""
+        selected_nets, selected_layers = self._validate_routing_inputs()
+        if selected_nets is None:
+            return
+
+        # Disable UI during routing
+        self.route_btn.Disable()
+        self.cancel_btn.SetLabel("Cancel")
+        self._cancel_requested = False
+        self._routing_start_time = time.time()
+
+        # Build configuration
+        config = self._build_routing_config(selected_nets, selected_layers)
 
         # Run routing in a thread
         self._routing_thread = threading.Thread(
