@@ -19,8 +19,9 @@ ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 class AboutTab(wx.Panel):
     """About tab panel with version info, author, and links."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, on_reset_settings=None):
         super().__init__(parent)
+        self.on_reset_settings = on_reset_settings
         self._create_ui()
 
     def _create_ui(self):
@@ -93,7 +94,25 @@ class AboutTab(wx.Panel):
         copyright_text.SetForegroundColour(wx.Colour(128, 128, 128))
         about_sizer.Add(copyright_text, 0, wx.ALIGN_CENTER | wx.TOP, 20)
 
+        # Reset settings button
+        about_sizer.AddStretchSpacer()
+        reset_btn = wx.Button(self, label="Reset All Settings to Defaults")
+        reset_btn.SetToolTip("Clear log, selections, and reset all parameters to defaults")
+        reset_btn.Bind(wx.EVT_BUTTON, self._on_reset_settings)
+        about_sizer.Add(reset_btn, 0, wx.ALIGN_CENTER | wx.ALL, 20)
+
         self.SetSizer(about_sizer)
+
+    def _on_reset_settings(self, event):
+        """Handle reset settings button click."""
+        result = wx.MessageBox(
+            "This will reset all settings to defaults, clear the log, "
+            "and uncheck all net selections.\n\nContinue?",
+            "Reset Settings",
+            wx.YES_NO | wx.ICON_WARNING
+        )
+        if result == wx.YES and self.on_reset_settings:
+            self.on_reset_settings()
 
     def _get_git_info(self):
         """Get version and date from git."""

@@ -193,7 +193,7 @@ class RoutingDialog(wx.Dialog):
     def _create_about_tab(self):
         """Create the About tab."""
         from .about_tab import AboutTab
-        return AboutTab(self.notebook)
+        return AboutTab(self.notebook, on_reset_settings=self._reset_all_settings)
 
     def _create_config_tab(self):
         """Create the Basic tab with basic routing parameters and options."""
@@ -904,8 +904,6 @@ class RoutingDialog(wx.Dialog):
 
     def _deferred_init(self):
         """Run after dialog is shown: sync board and check connectivity."""
-        t0 = time.time()
-
         # Set up connectivity check function on the net panel
         # This function returns True if a net should be hidden (i.e., is connected)
         def is_connected(net_id):
@@ -920,21 +918,15 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.pair_panel.set_check_function(is_connected)
 
         # Restore saved settings if available, otherwise use defaults
-        t1 = time.time()
         if self._saved_settings:
             restore_dialog_settings(self, self._saved_settings)
         else:
             # Enable hide checkbox by default on Basic tab only
             if self.net_panel.hide_check:
                 self.net_panel.hide_check.SetValue(True)
-        t2 = time.time()
-        print(f"[TIMING] restore_dialog_settings: {t2 - t1:.2f}s")
 
         # Do initial refresh
         self.refresh_from_board()
-        t3 = time.time()
-        print(f"[TIMING] refresh_from_board: {t3 - t2:.2f}s")
-        print(f"[TIMING] _deferred_init total: {t3 - t0:.2f}s")
 
     def refresh_from_board(self):
         """Refresh pcb_data from the current board state.
@@ -942,8 +934,6 @@ class RoutingDialog(wx.Dialog):
         Call this when re-showing the dialog after the user has made
         changes in KiCad.
         """
-        t0 = time.time()
-
         # Save current selections from all net panels BEFORE any refresh
         # Use _checked_nets directly to preserve restored settings (don't sync from visible items)
         saved_selections = {
@@ -958,15 +948,10 @@ class RoutingDialog(wx.Dialog):
         # Sync pcb_data with pcbnew's in-memory board state
         self.status_text.SetLabel("Syncing with board...")
         wx.Yield()
-        t1 = time.time()
         self._sync_pcb_data_from_board()
-        t2 = time.time()
-        print(f"[TIMING] _sync_pcb_data_from_board: {t2 - t1:.2f}s")
 
         # Run connectivity check with progress
         self._check_connectivity_with_progress()
-        t3 = time.time()
-        print(f"[TIMING] _check_connectivity_with_progress: {t3 - t2:.2f}s")
 
         # Restore selections to each panel before refreshing
         self.net_panel._checked_nets = saved_selections['net_panel']
@@ -1062,6 +1047,142 @@ class RoutingDialog(wx.Dialog):
     def _on_clear_log(self, event):
         """Clear the log text control."""
         self.log_text.Clear()
+
+    def _reset_all_settings(self):
+        """Reset all settings to defaults, clear log, and uncheck all selections."""
+        # Clear log
+        self.log_text.Clear()
+
+        # Clear all net selections
+        self.net_panel._checked_nets = set()
+        self.swappable_net_panel._checked_nets = set()
+        self.fanout_tab.net_panel._checked_nets = set()
+        self.planes_tab.net_panel._checked_nets = set()
+        self.differential_tab.pair_panel._checked_pairs = set()
+
+        # Reset basic parameters to defaults
+        self.track_width.SetValue(defaults.TRACK_WIDTH)
+        self.clearance.SetValue(defaults.CLEARANCE)
+        self.via_size.SetValue(defaults.VIA_SIZE)
+        self.via_drill.SetValue(defaults.VIA_DRILL)
+        self.grid_step.SetValue(defaults.GRID_STEP)
+        self.via_cost.SetValue(defaults.VIA_COST)
+        self.max_ripup.SetValue(defaults.MAX_RIPUP)
+
+        # Reset layer selections (select F.Cu and B.Cu by default)
+        for layer, cb in self.layer_checks.items():
+            cb.SetValue(layer in ['F.Cu', 'B.Cu'])
+
+        # Reset basic options
+        self.enable_layer_switch.SetValue(True)
+        self.move_text_check.SetValue(True)
+        self.add_teardrops_check.SetValue(True)
+        self.power_nets_ctrl.SetValue("")
+        self.power_widths_ctrl.SetValue("")
+        self.no_bga_zones_ctrl.SetValue("")
+        self.layer_costs_ctrl.SetValue("")
+
+        # Reset advanced parameters
+        self.impedance_check.SetValue(False)
+        self.impedance_value.SetValue(50.0)
+        self.max_iterations.SetValue(defaults.MAX_ITERATIONS)
+        self.max_probe_iterations.SetValue(defaults.MAX_PROBE_ITERATIONS)
+        self.heuristic_weight.SetValue(defaults.HEURISTIC_WEIGHT)
+        self.turn_cost.SetValue(defaults.TURN_COST)
+        self.ordering_strategy.SetSelection(0)
+        self.bga_proximity_radius.SetValue(defaults.BGA_PROXIMITY_RADIUS)
+        self.bga_proximity_cost.SetValue(defaults.BGA_PROXIMITY_COST)
+        self.stub_proximity_radius.SetValue(defaults.STUB_PROXIMITY_RADIUS)
+        self.stub_proximity_cost.SetValue(defaults.STUB_PROXIMITY_COST)
+        self.via_proximity_cost.SetValue(defaults.VIA_PROXIMITY_COST)
+        self.track_proximity_distance.SetValue(defaults.TRACK_PROXIMITY_DISTANCE)
+        self.track_proximity_cost.SetValue(defaults.TRACK_PROXIMITY_COST)
+        self.vertical_attraction_radius.SetValue(defaults.VERTICAL_ATTRACTION_RADIUS)
+        self.vertical_attraction_cost.SetValue(defaults.VERTICAL_ATTRACTION_COST)
+        self.routing_clearance_margin.SetValue(defaults.ROUTING_CLEARANCE_MARGIN)
+        self.hole_to_hole_clearance.SetValue(defaults.HOLE_TO_HOLE_CLEARANCE)
+        self.edge_clearance_check.SetValue(False)
+        self.board_edge_clearance.SetValue(defaults.BOARD_EDGE_CLEARANCE)
+        self.board_edge_clearance.Enable(False)
+        self.direction_choice.SetSelection(0)
+
+        # Reset advanced options
+        self.mps_reverse_rounds.SetValue(True)
+        self.mps_layer_swap.SetValue(True)
+        self.mps_segment_intersection.SetValue(True)
+        self.no_crossing_layer_check.SetValue(False)
+        self.can_swap_to_top.SetValue(True)
+        self.crossing_penalty.SetValue(defaults.CROSSING_PENALTY)
+        self.length_match_groups_ctrl.SetValue("")
+        self.length_match_tolerance.SetValue(defaults.LENGTH_MATCH_TOLERANCE)
+        self.meander_amplitude.SetValue(defaults.MEANDER_AMPLITUDE)
+        self.debug_lines_check.SetValue(False)
+        self.verbose_check.SetValue(False)
+        self.skip_routing_check.SetValue(False)
+        self.debug_memory_check.SetValue(False)
+
+        # Reset hide checkboxes
+        if self.net_panel.hide_check:
+            self.net_panel.hide_check.SetValue(True)
+        if self.net_panel.hide_diff_check:
+            self.net_panel.hide_diff_check.SetValue(False)
+        if self.swappable_net_panel.hide_check:
+            self.swappable_net_panel.hide_check.SetValue(False)
+        if self.differential_tab.pair_panel.hide_check:
+            self.differential_tab.pair_panel.hide_check.SetValue(False)
+        if self.fanout_tab.net_panel.hide_check:
+            self.fanout_tab.net_panel.hide_check.SetValue(False)
+        if self.planes_tab.net_panel.hide_check:
+            self.planes_tab.net_panel.hide_check.SetValue(False)
+
+        # Reset filters
+        self.net_panel.filter_ctrl.SetValue("")
+        self.swappable_net_panel.filter_ctrl.SetValue("")
+        self.differential_tab.pair_panel.filter_ctrl.SetValue("")
+        self.fanout_tab.net_panel.filter_ctrl.SetValue("")
+        self.planes_tab.net_panel.filter_ctrl.SetValue("")
+
+        # Reset component dropdowns to "All"
+        if self.net_panel.component_dropdown:
+            self.net_panel.component_dropdown.SetSelection(0)
+            self.net_panel._component_filter_value = ""
+        if self.swappable_net_panel.component_dropdown:
+            self.swappable_net_panel.component_dropdown.SetSelection(0)
+            self.swappable_net_panel._component_filter_value = ""
+        if self.differential_tab.pair_panel.component_dropdown:
+            self.differential_tab.pair_panel.component_dropdown.SetSelection(0)
+            self.differential_tab.pair_panel._component_filter_value = ""
+        if self.fanout_tab.net_panel.component_dropdown:
+            self.fanout_tab.net_panel.component_dropdown.SetSelection(0)
+            self.fanout_tab.net_panel._component_filter_value = ""
+        if self.planes_tab.net_panel.component_dropdown:
+            self.planes_tab.net_panel.component_dropdown.SetSelection(0)
+            self.planes_tab.net_panel._component_filter_value = ""
+
+        # Reset differential tab
+        self.differential_tab.diff_pair_gap.SetValue(defaults.DIFF_PAIR_GAP)
+        self.differential_tab.min_turning_radius.SetValue(defaults.DIFF_PAIR_MIN_TURNING_RADIUS)
+        self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
+        self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
+        self.differential_tab.chamfer_extra.SetValue(defaults.DIFF_PAIR_CHAMFER_EXTRA)
+        self.differential_tab.fix_polarity_check.SetValue(False)
+        self.differential_tab.gnd_via_check.SetValue(False)
+        self.differential_tab.intra_match_check.SetValue(False)
+
+        # Reset fanout tab
+        self.fanout_tab.fanout_type.SetSelection(0)
+        self.fanout_tab._on_type_changed(None)
+
+        # Reset planes tab
+        self.planes_tab.mode_selector.SetSelection(0)
+        self.planes_tab._on_mode_changed(None)
+        self.planes_tab.assignment_panel.clear_assignments()
+
+        # Refresh all net panels
+        self._update_net_list()
+
+        # Update status
+        self.status_text.SetLabel("Settings reset to defaults")
 
     def _append_log(self, text):
         """Append text to the log (thread-safe via CallAfter)."""
