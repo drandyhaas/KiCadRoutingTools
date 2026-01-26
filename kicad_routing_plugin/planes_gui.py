@@ -53,17 +53,17 @@ class PlaneAssignmentPanel(wx.Panel):
         layer_label = wx.StaticText(self, label="Target Layers:")
         sizer.Add(layer_label, 0, wx.BOTTOM, 2)
 
-        # Create checkbox grid for layers
+        # Create checkbox wrap sizer for layers (wraps to next line if needed)
         copper_layers = self._get_copper_layers()
-        layer_grid = wx.FlexGridSizer(cols=3, hgap=10, vgap=2)
+        layer_sizer = wx.WrapSizer(wx.HORIZONTAL)
         self.layer_checks = {}
         for layer in copper_layers:
             cb = wx.CheckBox(self, label=layer)
             cb.SetToolTip(f"Include {layer} in this assignment")
             self.layer_checks[layer] = cb
-            layer_grid.Add(cb, 0, wx.EXPAND)
+            layer_sizer.Add(cb, 0, wx.RIGHT | wx.BOTTOM, 10)
 
-        sizer.Add(layer_grid, 0, wx.EXPAND | wx.BOTTOM, 5)
+        sizer.Add(layer_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Buttons row
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -559,68 +559,61 @@ class PlanesTab(wx.Panel):
         total_traces = 0
         total_pads = 0
 
-        # Debug: print all assignments
-        print(f"\n{'='*60}")
-        print(f"DEBUG: Total assignments: {len(assignments)}")
-        for i, (nets_list, plane_layers_list) in enumerate(assignments):
-            print(f"  Assignment {i+1}: nets={nets_list} -> layers={plane_layers_list}")
-        print(f"{'='*60}\n")
+        # Expand assignments: each net goes on each layer in the assignment
+        # e.g., nets=['+3.3V'] layers=['F.Cu', 'In2.Cu'] becomes:
+        #   expanded_nets=['+3.3V', '+3.3V'], expanded_layers=['F.Cu', 'In2.Cu']
+        expanded_nets = []
+        expanded_layers = []
+        for nets_list, layers_list in assignments:
+            for layer in layers_list:
+                for net in nets_list:
+                    expanded_nets.append(net)
+                    expanded_layers.append(layer)
 
-        for idx, (nets_list, plane_layers) in enumerate(assignments):
-            if self._cancel_requested:
-                break
+        print(f"\nCreating planes for {len(expanded_nets)} net/layer pairs:")
+        for net, layer in zip(expanded_nets, expanded_layers):
+            print(f"  {net} -> {layer}")
 
-            # Debug: print arguments for this call
-            print(f"\n{'='*60}")
-            print(f"Assignment {idx+1}/{len(assignments)}:")
-            print(f"  --net_names: {nets_list}")
-            print(f"  --plane_layers: {plane_layers}")
-            print(f"  --via_size: {config.get('via_size', defaults.VIA_SIZE)}")
-            print(f"  --via_drill: {config.get('via_drill', defaults.VIA_DRILL)}")
-            print(f"  --track_width: {config.get('track_width', defaults.TRACK_WIDTH)}")
-            print(f"  --clearance: {config.get('clearance', defaults.CLEARANCE)}")
-            print(f"  --zone_clearance: {config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE)}")
-            print(f"  --grid_step: {config.get('grid_step', defaults.GRID_STEP)}")
-            print(f"  --max_search_radius: {config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS)}")
-            print(f"  --all_layers: {all_layers}")
-            print(f"  --dry_run: True")
-            print(f"  --rip_blocker_nets: {config.get('rip_blocker_nets', False)}")
-            print(f"  --max_rip_nets: {config.get('max_ripup', defaults.MAX_RIPUP)}")
-            print(f"{'='*60}")
+        if not expanded_nets:
+            print("No net/layer assignments to process")
+            return
 
-            try:
-                vias, traces, pads_needing = create_plane(
-                    input_file=self.board_filename,
-                    output_file="",
-                    net_names=nets_list,
-                    plane_layers=plane_layers,
-                    via_size=config.get('via_size', defaults.VIA_SIZE),
-                    via_drill=config.get('via_drill', defaults.VIA_DRILL),
-                    track_width=config.get('track_width', defaults.TRACK_WIDTH),
-                    clearance=config.get('clearance', defaults.CLEARANCE),
-                    zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
-                    min_thickness=defaults.PLANE_MIN_THICKNESS,
-                    grid_step=config.get('grid_step', defaults.GRID_STEP),
-                    max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
-                    max_via_reuse_radius=defaults.PLANE_MAX_VIA_REUSE_RADIUS,
-                    hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
-                    board_edge_clearance=config.get('edge_clearance', defaults.PLANE_EDGE_CLEARANCE),
-                    all_layers=all_layers,
-                    dry_run=True,  # Don't write to file, apply via pcbnew
-                    rip_blocker_nets=config.get('rip_blocker_nets', False),
-                    max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
-                    reroute_ripped_nets=config.get('reroute_ripped_nets', False),
-                )
+        try:
+            vias, traces, pads_needing, new_vias, new_segments = create_plane(
+                input_file=self.board_filename,
+                output_file="",
+                net_names=expanded_nets,
+                plane_layers=expanded_layers,
+                via_size=config.get('via_size', defaults.VIA_SIZE),
+                via_drill=config.get('via_drill', defaults.VIA_DRILL),
+                track_width=config.get('track_width', defaults.TRACK_WIDTH),
+                clearance=config.get('clearance', defaults.CLEARANCE),
+                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                min_thickness=defaults.PLANE_MIN_THICKNESS,
+                grid_step=config.get('grid_step', defaults.GRID_STEP),
+                max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
+                max_via_reuse_radius=defaults.PLANE_MAX_VIA_REUSE_RADIUS,
+                hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
+                board_edge_clearance=config.get('edge_clearance', defaults.PLANE_EDGE_CLEARANCE),
+                all_layers=all_layers,
+                dry_run=True,  # Don't write to file, apply via pcbnew
+                rip_blocker_nets=config.get('rip_blocker_nets', False),
+                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
+                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
+                pcb_data=self.pcb_data,
+                return_results=True,
+            )
 
-                print(f"  Result: vias={vias}, traces={traces}, pads_needing={pads_needing}")
-                total_vias += vias
-                total_traces += traces
-                total_pads += pads_needing
+            total_vias = vias
+            total_traces = traces
+            total_pads = pads_needing
+            self._new_vias = new_vias
+            self._new_segments = new_segments
 
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                print(f"Error creating plane for {nets_str}: {e}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"Error creating planes: {e}")
 
         self._operation_result = {
             'mode': 'create',
@@ -651,7 +644,7 @@ class PlanesTab(wx.Panel):
         print(f"Repairing zones: {list(zip(net_names, plane_layers))}")
 
         try:
-            routes_added, regions_connected = repair_planes(
+            routes_added, regions_connected, new_vias, new_segments = repair_planes(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=net_names,
@@ -668,8 +661,12 @@ class PlanesTab(wx.Panel):
                 max_iterations=config.get('max_iterations', defaults.MAX_ITERATIONS),
                 routing_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
+                pcb_data=self.pcb_data,
+                return_results=True,
             )
 
+            self._new_vias = new_vias
+            self._new_segments = new_segments
             self._operation_result = {
                 'mode': 'repair',
                 'routes_added': routes_added,
@@ -755,6 +752,61 @@ class PlanesTab(wx.Panel):
         board = pcbnew.GetBoard()
         if board is None:
             return
+
+        # Get layer name to ID mapping
+        name_to_id = {}
+        for i in range(pcbnew.PCB_LAYER_ID_COUNT):
+            name = board.GetLayerName(i)
+            if name:
+                name_to_id[name] = i
+
+        def get_layer_id(layer_name):
+            return name_to_id.get(layer_name, pcbnew.F_Cu)
+
+        # Add vias from create_plane results
+        vias_added = 0
+        if hasattr(self, '_new_vias') and self._new_vias:
+            for via_data in self._new_vias:
+                via = pcbnew.PCB_VIA(board)
+                via.SetPosition(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(via_data['x']),
+                    pcbnew.FromMM(via_data['y'])
+                ))
+                via.SetDrill(pcbnew.FromMM(via_data['drill']))
+                via.SetWidth(pcbnew.FromMM(via_data['size']))
+                via.SetNetCode(via_data['net_id'])
+                # Set via layers
+                layers = via_data.get('layers', ['F.Cu', 'B.Cu'])
+                if len(layers) >= 2:
+                    via.SetLayerPair(get_layer_id(layers[0]), get_layer_id(layers[-1]))
+                board.Add(via)
+                vias_added += 1
+            self._new_vias = []
+
+        # Add segments from create_plane results
+        tracks_added = 0
+        if hasattr(self, '_new_segments') and self._new_segments:
+            for seg_data in self._new_segments:
+                track = pcbnew.PCB_TRACK(board)
+                start = seg_data['start']
+                end = seg_data['end']
+                track.SetStart(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(start[0]),
+                    pcbnew.FromMM(start[1])
+                ))
+                track.SetEnd(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(end[0]),
+                    pcbnew.FromMM(end[1])
+                ))
+                track.SetWidth(pcbnew.FromMM(seg_data['width']))
+                track.SetLayer(get_layer_id(seg_data['layer']))
+                track.SetNetCode(seg_data['net_id'])
+                board.Add(track)
+                tracks_added += 1
+            self._new_segments = []
+
+        if vias_added > 0 or tracks_added > 0:
+            print(f"Added to board: {vias_added} vias, {tracks_added} tracks")
 
         # Build connectivity and refresh
         board.BuildConnectivity()

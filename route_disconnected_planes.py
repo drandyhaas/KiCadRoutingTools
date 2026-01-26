@@ -137,7 +137,9 @@ def route_planes(
     verbose: bool = False,
     dry_run: bool = False,
     debug_lines: bool = False,
-    routing_layers: Optional[List[str]] = None
+    routing_layers: Optional[List[str]] = None,
+    pcb_data: Optional[PCBData] = None,
+    return_results: bool = False
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -166,8 +168,9 @@ def route_planes(
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
     """
-    print(f"Loading PCB from {input_file}...")
-    pcb_data = parse_kicad_pcb(input_file)
+    if pcb_data is None:
+        print(f"Loading PCB from {input_file}...")
+        pcb_data = parse_kicad_pcb(input_file)
 
     # Resolve net IDs
     net_ids = []
@@ -352,6 +355,8 @@ def route_planes(
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(content)
 
+    if return_results:
+        return (total_routes, total_regions, all_new_vias, all_new_segments)
     return (total_routes, total_regions)
 
 

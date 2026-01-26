@@ -1027,7 +1027,9 @@ def create_plane(
     layer_costs: Optional[List[float]] = None,
     power_nets: Optional[List[str]] = None,
     power_nets_widths: Optional[List[float]] = None,
-    add_teardrops: bool = False
+    add_teardrops: bool = False,
+    pcb_data: Optional[PCBData] = None,
+    return_results: bool = False
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1058,9 +1060,10 @@ def create_plane(
         print(f"Error: Number of nets ({len(net_names)}) must match number of layers ({len(plane_layers)})")
         return (0, 0, 0)
 
-    # Step 1: Load PCB
-    print(f"Loading PCB from {input_file}...")
-    pcb_data = parse_kicad_pcb(input_file)
+    # Step 1: Load PCB (or use provided pcb_data)
+    if pcb_data is None:
+        print(f"Loading PCB from {input_file}...")
+        pcb_data = parse_kicad_pcb(input_file)
 
     # Resolve all net IDs upfront
     net_ids = []
@@ -1215,9 +1218,9 @@ def create_plane(
             """Get or create routing obstacle map for a layer."""
             if layer not in routing_obstacles_cache:
                 if verbose:
-                    print(f"  Building routing obstacle map for {layer}...")
+                    print(f"\n  Building routing obstacle map for {layer}...")
                 routing_obstacles_cache[layer] = build_routing_obstacle_map(
-                    pcb_data, config, net_id, layer, skip_pad_blocking=False
+                    pcb_data, config, net_id, layer, skip_pad_blocking=False, verbose=False
                 )
             return routing_obstacles_cache[layer]
 
@@ -1665,23 +1668,24 @@ def create_plane(
                 all_zone_sexprs.extend(zone_sexprs)
                 all_debug_lines.extend(debug_line_sexprs)
 
-    # Print overall totals
-    print(f"\n{'='*60}")
-    print(f"OVERALL TOTALS")
-    print(f"{'='*60}")
-    print(f"  Nets processed: {len(net_names)}")
-    print(f"  Total new vias placed: {total_vias_placed}")
-    print(f"  Total existing vias reused: {total_vias_reused}")
-    print(f"  Total traces added: {total_traces_added}")
-    if total_failed_pads > 0:
-        print(f"  Total failed pads: {total_failed_pads}")
+    # Print overall totals only if multiple nets were processed
+    if len(net_names) > 1:
+        print(f"\n{'='*60}")
+        print(f"OVERALL TOTALS")
+        print(f"{'='*60}")
+        print(f"  Nets processed: {len(net_names)}")
+        print(f"  Total new vias placed: {total_vias_placed}")
+        print(f"  Total existing vias reused: {total_vias_reused}")
+        print(f"  Total traces added: {total_traces_added}")
+        if total_failed_pads > 0:
+            print(f"  Total failed pads: {total_failed_pads}")
 
-    if all_ripped_net_ids:
-        ripped_names = []
-        for rid in all_ripped_net_ids:
-            net = pcb_data.nets.get(rid)
-            ripped_names.append(net.name if net else f"net_{rid}")
-        print(f"  Nets excluded from output: {', '.join(ripped_names)}")
+        if all_ripped_net_ids:
+            ripped_names = []
+            for rid in all_ripped_net_ids:
+                net = pcb_data.nets.get(rid)
+                ripped_names.append(net.name if net else f"net_{rid}")
+            print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
     if dry_run:
         print("\nDry run - no output file written")
@@ -1711,6 +1715,8 @@ def create_plane(
             add_teardrops=add_teardrops
         )
 
+    if return_results:
+        return (total_vias_placed, total_traces_added, total_pads_needing_vias, all_new_vias, all_new_segments)
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 

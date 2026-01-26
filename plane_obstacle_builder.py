@@ -98,7 +98,8 @@ def identify_target_pads(
 def build_via_obstacle_map(
     pcb_data: PCBData,
     config: GridRouteConfig,
-    exclude_net_id: int
+    exclude_net_id: int,
+    verbose: bool = True
 ) -> GridObstacleMap:
     """
     Build obstacle map for via placement.
@@ -110,8 +111,20 @@ def build_via_obstacle_map(
     - Board edge clearance
     - Through-hole pad drills (hole-to-hole clearance)
     """
+    import time
+    t_start = time.time()
+
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
+
+    # Calculate grid dimensions for info
+    board_bounds = pcb_data.board_info.board_bounds
+    if board_bounds:
+        min_x, min_y, max_x, max_y = board_bounds
+        grid_w = int((max_x - min_x) / config.grid_step)
+        grid_h = int((max_y - min_y) / config.grid_step)
+        if verbose:
+            print(f"  Grid: {grid_w} x {grid_h} = {grid_w * grid_h:,} cells (grid_step={config.grid_step}mm)")
 
     obstacles = GridObstacleMap(num_layers)
 
@@ -123,6 +136,7 @@ def build_via_obstacle_map(
     via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
 
     # Add existing vias as obstacles (including same net - can't place via too close to another)
+    t0 = time.time()
     for via in pcb_data.vias:
         gx, gy = coord.to_grid(via.x, via.y)
         # Block via placement within via-via clearance
@@ -130,9 +144,13 @@ def build_via_obstacle_map(
             for ey in range(-via_via_radius_int, via_via_radius_int + 1):
                 if ex*ex + ey*ey <= via_via_radius_sq:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
+    if verbose:
+        print(f"  Vias: {len(pcb_data.vias)} vias in {time.time() - t0:.2f}s")
 
     # Add existing segments as obstacles (via can't overlap with tracks on ANY layer)
     # Since vias span all layers, we must check segments on all copper layers, not just config.layers
+    t0 = time.time()
+    seg_count = 0
     for seg in pcb_data.segments:
         if seg.net_id == exclude_net_id:
             continue
@@ -143,19 +161,36 @@ def build_via_obstacle_map(
         # Include grid cushion for discretization
         seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance + grid_cushion
         _add_segment_via_obstacle(obstacles, seg, coord, seg_expansion_mm)
+        seg_count += 1
+    if verbose:
+        print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
 
     # Add pads as obstacles (excluding target net pads)
+    t0 = time.time()
+    pad_count = 0
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id == exclude_net_id:
             continue
         for pad in pads:
             _add_pad_via_obstacle(obstacles, pad, coord, config)
+            pad_count += 1
+    if verbose:
+        print(f"  Pads: {pad_count} pads in {time.time() - t0:.2f}s")
 
     # Add board edge via blocking
+    t0 = time.time()
     _add_board_edge_via_obstacles(obstacles, pcb_data, config)
+    if verbose:
+        print(f"  Board edge: {time.time() - t0:.2f}s")
 
     # Add hole-to-hole clearance blocking for existing drills
+    t0 = time.time()
     _add_drill_hole_via_obstacles(obstacles, pcb_data, config, exclude_net_id)
+    if verbose:
+        print(f"  Drill holes: {time.time() - t0:.2f}s")
+
+    if verbose:
+        print(f"  Total obstacle build: {time.time() - t_start:.2f}s")
 
     return obstacles
 
@@ -217,11 +252,34 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
         obstacles.add_blocked_via(cell_gx, cell_gy)
 
 
+def _is_rectangular_outline(board_outline: List[Tuple[float, float]],
+                            board_bounds: Tuple[float, float, float, float],
+                            tolerance: float = 0.1) -> bool:
+    """Check if board outline is approximately rectangular.
+
+    Returns True if all vertices are within tolerance of the bounding box corners.
+    """
+    if not board_outline or len(board_outline) < 4:
+        return False
+
+    min_x, min_y, max_x, max_y = board_bounds
+    corners = [(min_x, min_y), (min_x, max_y), (max_x, min_y), (max_x, max_y)]
+
+    # Check each vertex - must be on an edge of the bounding box
+    for vx, vy in board_outline:
+        on_edge = (abs(vx - min_x) < tolerance or abs(vx - max_x) < tolerance or
+                   abs(vy - min_y) < tolerance or abs(vy - max_y) < tolerance)
+        if not on_edge:
+            return False
+    return True
+
+
 def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig):
     """Block via placement near board edges.
 
     Supports both rectangular and non-rectangular board outlines.
+    Optimized to only check cells near the boundary, not the entire grid.
     """
     board_bounds = pcb_data.board_info.board_bounds
     if not board_bounds:
@@ -240,17 +298,32 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     # Check for non-rectangular board outline
     board_outline = pcb_data.board_info.board_outline
-    if board_outline and len(board_outline) >= 3:
+    use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
+
+    if use_polygon:
         # Polygon-based via blocking for non-rectangular boards
+        # Optimization: only check cells in a band near the boundary, not the entire grid
+        band_width = via_expand + 10  # Check cells within this distance of bounding box edges
+
+        # Block all cells outside bounding box (fast)
         for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
             for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+                if gx < gmin_x or gx > gmax_x or gy < gmin_y or gy > gmax_y:
+                    obstacles.add_blocked_via(gx, gy)
+
+        # For cells near the boundary, do detailed polygon check
+        for gx in range(gmin_x, gmax_x + 1):
+            for gy in range(gmin_y, gmax_y + 1):
+                # Skip cells far from any edge (in interior)
+                dist_to_edge = min(gx - gmin_x, gmax_x - gx, gy - gmin_y, gmax_y - gy)
+                if dist_to_edge > band_width:
+                    continue
+
                 x, y = coord.to_float(gx, gy)
                 inside = point_in_polygon(x, y, board_outline)
                 if not inside:
-                    # Outside board
                     obstacles.add_blocked_via(gx, gy)
                 else:
-                    # Inside but check distance to edge
                     edge_dist = point_to_polygon_edge_distance(x, y, board_outline)
                     if edge_dist < via_edge_clearance:
                         obstacles.add_blocked_via(gx, gy)
@@ -269,6 +342,7 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     """Block track routing near board edges on a single layer.
 
     Supports both rectangular and non-rectangular board outlines.
+    Optimized to only check cells near the boundary, not the entire grid.
     """
     board_bounds = pcb_data.board_info.board_bounds
     if not board_bounds:
@@ -287,17 +361,32 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
     # Check for non-rectangular board outline
     board_outline = pcb_data.board_info.board_outline
-    if board_outline and len(board_outline) >= 3:
+    use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
+
+    if use_polygon:
         # Polygon-based track blocking for non-rectangular boards
+        # Optimization: only check cells in a band near the boundary, not the entire grid
+        band_width = track_expand + 10
+
+        # Block all cells outside bounding box (fast)
         for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
             for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
+                if gx < gmin_x or gx > gmax_x or gy < gmin_y or gy > gmax_y:
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+
+        # For cells near the boundary, do detailed polygon check
+        for gx in range(gmin_x, gmax_x + 1):
+            for gy in range(gmin_y, gmax_y + 1):
+                # Skip cells far from any edge (in interior)
+                dist_to_edge = min(gx - gmin_x, gmax_x - gx, gy - gmin_y, gmax_y - gy)
+                if dist_to_edge > band_width:
+                    continue
+
                 x, y = coord.to_float(gx, gy)
                 inside = point_in_polygon(x, y, board_outline)
                 if not inside:
-                    # Outside board
                     obstacles.add_blocked_cell(gx, gy, layer_idx)
                 else:
-                    # Inside but check distance to edge
                     edge_dist = point_to_polygon_edge_distance(x, y, board_outline)
                     if edge_dist < track_edge_clearance:
                         obstacles.add_blocked_cell(gx, gy, layer_idx)
@@ -363,7 +452,8 @@ def build_routing_obstacle_map(
     config: GridRouteConfig,
     exclude_net_id: int,
     route_layer: str,
-    skip_pad_blocking: bool = False
+    skip_pad_blocking: bool = False,
+    verbose: bool = True
 ) -> GridObstacleMap:
     """
     Build obstacle map for A* routing on a specific layer.
@@ -376,16 +466,30 @@ def build_routing_obstacle_map(
     Args:
         skip_pad_blocking: If True, don't block based on pad clearances.
                           Use this for plane via connections where DRC is lenient.
+        verbose: If True, print timing information for each step.
     """
+    import time
+    t_start = time.time()
+
     coord = GridCoord(config.grid_step)
     # Single layer routing
     num_layers = 1
     layer_idx = 0
 
+    # Calculate grid dimensions for info
+    board_bounds = pcb_data.board_info.board_bounds
+    if board_bounds and verbose:
+        min_x, min_y, max_x, max_y = board_bounds
+        grid_w = int((max_x - min_x) / config.grid_step)
+        grid_h = int((max_y - min_y) / config.grid_step)
+        print(f"  Routing grid ({route_layer}): {grid_w} x {grid_h} = {grid_w * grid_h:,} cells")
+
     obstacles = GridObstacleMap(num_layers)
 
     # Add pads on this layer as obstacles (excluding target net)
     # Skip this entirely for plane connections where we're more lenient
+    t0 = time.time()
+    pad_count = 0
     if not skip_pad_blocking:
         for net_id, pads in pcb_data.pads_by_net.items():
             if net_id == exclude_net_id:
@@ -406,9 +510,14 @@ def build_routing_obstacle_map(
                         corner_radius = 0
                     for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
                         obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
+                    pad_count += 1
+    if verbose:
+        print(f"  Pads: {pad_count} pads in {time.time() - t0:.2f}s")
 
     # Add segments on this layer as obstacles (excluding target net)
     # Use actual segment width for proper clearance calculation
+    t0 = time.time()
+    seg_count = 0
     for seg in pcb_data.segments:
         if seg.net_id == exclude_net_id:
             continue
@@ -418,8 +527,13 @@ def build_routing_obstacle_map(
         seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
         seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+        seg_count += 1
+    if verbose:
+        print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
 
     # Add vias as obstacles (they block all layers)
+    t0 = time.time()
+    via_count = 0
     for via in pcb_data.vias:
         if via.net_id == exclude_net_id:
             continue
@@ -429,9 +543,18 @@ def build_routing_obstacle_map(
             for ey in range(-via_expansion, via_expansion + 1):
                 if ex*ex + ey*ey <= via_expansion * via_expansion:
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+        via_count += 1
+    if verbose:
+        print(f"  Vias: {via_count} vias in {time.time() - t0:.2f}s")
 
     # Add board edge track blocking (supports non-rectangular boards)
+    t0 = time.time()
     _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
+    if verbose:
+        print(f"  Board edge: {time.time() - t0:.2f}s")
+
+    if verbose:
+        print(f"  Total routing obstacle build: {time.time() - t_start:.2f}s")
 
     return obstacles
 
