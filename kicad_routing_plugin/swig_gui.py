@@ -1402,6 +1402,8 @@ class RoutingDialog(wx.Dialog):
 
             def on_progress(current, total, net_name=""):
                 wx.CallAfter(self._update_progress, current, total, net_name)
+                # Brief sleep releases GIL, allowing main thread to process CallAfter events
+                time.sleep(0.001)
 
             # Run the router with return_results=True to get track data
             successful, failed, total_time, results_data = batch_route(
