@@ -46,13 +46,36 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 
 ## Quick Start
 
-### 1. Build the Rust Router
+### 1. Get the Code
+
+```bash
+# Clone with git
+git clone https://github.com/drandyhaas/KiCadRoutingTools.git
+cd KiCadRoutingTools
+```
+
+Or [download the ZIP](https://github.com/drandyhaas/KiCadRoutingTools/archive/refs/heads/main.zip) and extract it.
+
+### 2. Install Rust
+
+If you don't have Rust installed, install it from [rustup.rs](https://rustup.rs/):
+
+```bash
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Windows: Download and run rustup-init.exe from https://rustup.rs/
+```
+
+After installation, restart your terminal or run `source ~/.cargo/env`.
+
+### 3. Build the Rust Router
 
 ```bash
 python build_router.py
 ```
 
-### 2. Choose Your Interface
+### 4. Choose Your Interface
 
 **Option A: KiCad Plugin (Recommended for interactive use)**
 
