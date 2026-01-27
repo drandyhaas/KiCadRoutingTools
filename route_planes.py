@@ -1294,6 +1294,9 @@ def create_plane(
                 all_debug_lines.append(generate_gr_line_sexpr((x2, y2), (x1, y2), 0.05, "User.9"))
                 all_debug_lines.append(generate_gr_line_sexpr((x1, y2), (x1, y1), 0.05, "User.9"))
 
+        if pads_needing_vias:
+            print(f"\nConnecting {len(pads_needing_vias)} pads to {plane_layer} plane:")
+
         for pad_idx, pad_info in enumerate(pads_needing_vias):
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
@@ -1349,13 +1352,13 @@ def create_plane(
                             new_segments.extend(trace_segments)
                             traces_added += len(trace_segments)
                         vias_reused += 1
-                        print(f"reusing nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments) if trace_segments else 0} segs, {dist:.2f}mm")
+                        print(f"reused nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away, routed {len(trace_segments) if trace_segments else 0} segments to pad")
                         processed_pad_ids.add(current_pad_key)
                         continue  # Move to next pad
                 else:
                     # No pad layer (through-hole) - just count as reused
                     vias_reused += 1
-                    print(f"reusing nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm")
+                    print(f"reused nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away")
                     processed_pad_ids.add(current_pad_key)
                     continue
 
@@ -1405,9 +1408,9 @@ def create_plane(
                 block_via_position(obstacles, via_in_pad[0], via_in_pad[1], coord,
                                    hole_to_hole_clearance, via_drill)
                 if via_in_pad == (pad.global_x, pad.global_y):
-                    print(f"via at pad center")
+                    print(f"placed via at pad center (no trace needed)")
                 else:
-                    print(f"via at ({via_in_pad[0]:.2f}, {via_in_pad[1]:.2f}) within pad")
+                    print(f"placed via at ({via_in_pad[0]:.2f}, {via_in_pad[1]:.2f}) within pad (no trace needed)")
                 processed_pad_ids.add(current_pad_key)
                 continue  # Move to next pad
 
@@ -1435,15 +1438,15 @@ def create_plane(
                         vias_reused += 1
                         reuse_success = True
                         dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-                        print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments)} segs, {dist:.2f}mm")
+                        print(f"reused existing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away, routed {len(trace_segments)} segments to pad")
                     else:
                         vias_reused += 1
                         reuse_success = True
-                        print(f"reusing via at pad center")
+                        print(f"reused via at pad center")
                 else:
                     vias_reused += 1
                     reuse_success = True
-                    print(f"reusing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                    print(f"reused existing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
 
                 if reuse_success:
                     processed_pad_ids.add(current_pad_key)
@@ -1530,7 +1533,7 @@ def create_plane(
                     traces_added += len(result.segments)
                     block_via_position(obstacles, result.via_pos[0], result.via_pos[1], coord,
                                        hole_to_hole_clearance, via_drill)
-                    print(f"{GREEN}via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}), ripped {len(result.ripped_net_ids)} nets{RESET}")
+                    print(f"{GREEN}placed via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}) after ripping {len(result.ripped_net_ids)} nets{RESET}")
                 else:
                     failed_pads += 1
                     failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
@@ -1559,9 +1562,9 @@ def create_plane(
                                    hole_to_hole_clearance, via_drill)
 
                 if via_at_pad_center:
-                    print(f"via at pad center")
+                    print(f"placed via at pad center (no trace needed)")
                 else:
-                    print(f"via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments) if trace_segments else 0} segs")
+                    print(f"placed via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments) if trace_segments else 0} segments to pad")
 
             elif not rip_blocker_nets:
                 # Fast path failed, no rip-up enabled - try fallback via reuse
@@ -1581,15 +1584,15 @@ def create_plane(
                             traces_added += len(trace_segments)
                             vias_reused += 1
                             processed_pad_ids.add(current_pad_key)
-                            print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {len(trace_segments)} segs")
+                            print(f"reused fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segments to pad")
                         else:
                             vias_reused += 1
                             processed_pad_ids.add(current_pad_key)
-                            print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                            print(f"reused fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                     else:
                         vias_reused += 1
                         processed_pad_ids.add(current_pad_key)
-                        print(f"fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
+                        print(f"reused fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
                 else:
                     print(f"{RED}FAILED - no valid position{RESET}")
                     failed_pads += 1

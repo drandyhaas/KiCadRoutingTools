@@ -328,13 +328,8 @@ def add_gnd_vias_to_existing_board(
     skipped_no_space = 0
     placement_distances = []  # Track distances where GND vias were placed
 
-    # Debug: sample a few signal vias to show detailed info
-    debug_count = 0
-    max_debug = 5
-
     for sig_via in signal_vias:
         sx, sy = sig_via.x, sig_via.y
-        do_debug = debug_count < max_debug
 
         # Check if there's already a GND via/pad within gnd_via_distance
         has_nearby_gnd = False
@@ -350,12 +345,6 @@ def add_gnd_vias_to_existing_board(
             skipped_has_gnd += 1
             continue
 
-        if do_debug:
-            net_name = pcb_data.nets.get(sig_via.net_id, None)
-            net_name = net_name.name if net_name else f"net{sig_via.net_id}"
-            print(f"\nDebug signal via at ({sx:.3f}, {sy:.3f}) net={net_name}:")
-            print(f"  Nearest existing GND: {nearest_gnd_dist:.2f}mm")
-
         # Try to place a GND via as close as possible to signal via
         best_pos = None
         distance_step = config.grid_step / 2  # Finer step for better placement
@@ -363,7 +352,6 @@ def add_gnd_vias_to_existing_board(
         distance = min_distance
         while distance <= gnd_via_distance:
             # Try all angles at this distance
-            blocked_at_this_dist = []
             for angle_deg in angles_deg:
                 angle_rad = math.radians(angle_deg)
                 gnd_x = sx + distance * math.cos(angle_rad)
@@ -374,37 +362,17 @@ def add_gnd_vias_to_existing_board(
                     # Found a valid position at closest possible distance
                     best_pos = (gnd_x, gnd_y)
                     break
-                else:
-                    blocked_at_this_dist.append((angle_deg, reason))
-
-            if do_debug and distance <= min_distance + config.grid_step * 2:
-                # Show why early distances were blocked
-                if blocked_at_this_dist:
-                    reason_counts = {}
-                    for angle, reason in blocked_at_this_dist:
-                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                    print(f"  dist={distance:.3f}mm: blocked - {reason_counts}")
 
             if best_pos is not None:
-                if do_debug:
-                    print(f"  PLACED at dist={distance:.3f}mm, pos=({best_pos[0]:.3f}, {best_pos[1]:.3f})")
                 break  # Found a position, stop searching
 
             distance += distance_step
 
         if best_pos is None:
             skipped_no_space += 1
-            if do_debug:
-                print(f"  NO SPACE within {gnd_via_distance}mm")
-                debug_count += 1
         else:
             actual_dist = math.sqrt((best_pos[0] - sx)**2 + (best_pos[1] - sy)**2)
             placement_distances.append(actual_dist)
-
-            # Always print placement distance for each GND via
-            net_name = pcb_data.nets.get(sig_via.net_id, None)
-            net_name = net_name.name if net_name else f"net{sig_via.net_id}"
-            print(f"  Placed GND via dist={actual_dist:.3f}mm from signal via ({sx:.2f},{sy:.2f}) {net_name}")
 
             gnd_via = Via(
                 x=best_pos[0],
@@ -418,9 +386,6 @@ def add_gnd_vias_to_existing_board(
             new_gnd_vias.append(gnd_via)
             placed_gnd_positions.append(best_pos)
             existing_gnd_positions.append(best_pos)
-
-        if do_debug:
-            debug_count += 1
 
     # Summary
     if new_gnd_vias:
