@@ -143,6 +143,9 @@ def get_dialog_settings(dialog):
         'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
         'planes_reroute_ripped_check': dialog.planes_tab.create_options.reroute_ripped_check.GetValue(),
+        'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
+        'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
+        'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
         'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
@@ -426,6 +429,12 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.rip_blocker_check.SetValue(settings['planes_rip_blocker_check'])
     if 'planes_reroute_ripped_check' in settings:
         dialog.planes_tab.create_options.reroute_ripped_check.SetValue(settings['planes_reroute_ripped_check'])
+    if 'planes_add_gnd_vias' in settings:
+        dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
+    if 'planes_gnd_via_distance' in settings:
+        dialog.planes_tab.create_options.gnd_via_distance.SetValue(settings['planes_gnd_via_distance'])
+    if 'planes_gnd_via_net' in settings:
+        dialog.planes_tab.create_options.gnd_via_net.SetValue(settings['planes_gnd_via_net'])
     # Repair mode options
     if 'planes_repair_max_track_width' in settings:
         dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])

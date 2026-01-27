@@ -48,6 +48,11 @@ MEANDER_AMPLITUDE = 1.0  # mm
 TIME_MATCHING = False  # If True, match propagation time instead of length
 TIME_MATCH_TOLERANCE = 1.0  # ps
 
+# GND via placement for single-ended routing
+ADD_GND_VIAS = False  # If True, add GND vias near signal vias
+GND_VIA_NET = "GND"  # Net name for GND vias
+GND_VIA_DISTANCE = 2.0  # mm - max distance from signal via to GND via
+
 # Algorithm parameters
 MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 1.9
@@ -129,6 +134,7 @@ PARAM_RANGES = {
     'length_match_tolerance': {'min': 0.01, 'max': 5.0, 'inc': 0.01, 'digits': 2},
     'meander_amplitude': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
     'time_match_tolerance': {'min': 0.1, 'max': 50.0, 'inc': 0.1, 'digits': 1},
+    'gnd_via_distance': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     # Fanout parameters
     'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'diff_pair_gap': {'min': 0.05, 'max': 1.0, 'inc': 0.01, 'digits': 2},

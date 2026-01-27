@@ -227,7 +227,35 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.reroute_ripped_check.SetToolTip("Automatically re-route ripped nets after plane creation")
         ripup_sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        sizer.Add(ripup_sizer, 0, wx.EXPAND)
+        sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+
+        # GND Return Vias section
+        gnd_box = wx.StaticBox(self, label="GND Return Vias")
+        gnd_sizer = wx.StaticBoxSizer(gnd_box, wx.VERTICAL)
+
+        self.add_gnd_vias_check = wx.CheckBox(self, label="Add GND vias near signal vias")
+        self.add_gnd_vias_check.SetToolTip("Add GND vias near signal vias for return current path")
+        gnd_sizer.Add(self.add_gnd_vias_check, 0, wx.ALL, 5)
+
+        # GND via parameters
+        gnd_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
+        gnd_grid.AddGrowableCol(1)
+
+        gnd_grid.Add(wx.StaticText(self, label="Max Distance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['gnd_via_distance']
+        self.gnd_via_distance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                   initial=defaults.GND_VIA_DISTANCE, inc=r['inc'])
+        self.gnd_via_distance.SetDigits(r['digits'])
+        self.gnd_via_distance.SetToolTip("Maximum distance from signal via to place GND via")
+        gnd_grid.Add(self.gnd_via_distance, 0, wx.EXPAND)
+
+        gnd_grid.Add(wx.StaticText(self, label="GND Net Name:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.gnd_via_net = wx.TextCtrl(self, value=defaults.GND_VIA_NET)
+        self.gnd_via_net.SetToolTip("Net name for GND vias (e.g., GND)")
+        gnd_grid.Add(self.gnd_via_net, 0, wx.EXPAND)
+
+        gnd_sizer.Add(gnd_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        sizer.Add(gnd_sizer, 0, wx.EXPAND)
 
         self.SetSizer(sizer)
 
@@ -239,6 +267,9 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'max_search_radius': self.max_search_radius.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),
             'reroute_ripped_nets': self.reroute_ripped_check.GetValue(),
+            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
+            'gnd_via_distance': self.gnd_via_distance.GetValue(),
+            'gnd_via_net': self.gnd_via_net.GetValue(),
         }
 
 
@@ -533,6 +564,9 @@ class PlanesTab(wx.Panel):
     def _run_create_planes(self, config):
         """Run plane creation."""
         from route_planes import create_plane
+        from add_gnd_vias import add_gnd_vias_to_existing_board
+        from routing_config import GridRouteConfig, GridCoord
+        from obstacle_map import build_base_obstacle_map
 
         # Get assignments: each is (nets_list, layers_list)
         assignments = config['assignments']
@@ -606,6 +640,53 @@ class PlanesTab(wx.Panel):
             self._new_vias = new_vias
             self._new_segments = new_segments
             self._new_zones = new_zones
+
+            # Add GND return vias if enabled
+            if config.get('add_gnd_vias', False):
+                try:
+                    gnd_via_distance = config.get('gnd_via_distance', defaults.GND_VIA_DISTANCE)
+                    gnd_via_net = config.get('gnd_via_net', defaults.GND_VIA_NET)
+
+                    # Create config for GND via placement
+                    gnd_config = GridRouteConfig(
+                        via_size=config.get('via_size', defaults.VIA_SIZE),
+                        via_drill=config.get('via_drill', defaults.VIA_DRILL),
+                        track_width=config.get('track_width', defaults.TRACK_WIDTH),
+                        clearance=config.get('clearance', defaults.CLEARANCE),
+                        grid_step=config.get('grid_step', defaults.GRID_STEP),
+                        layers=all_layers
+                    )
+                    coord = GridCoord(gnd_config.grid_step)
+
+                    # Build obstacle map from PCB data (excluding no nets since we want all obstacles)
+                    obstacles = build_base_obstacle_map(self.pcb_data, gnd_config, [])
+
+                    # Add GND vias near existing signal vias
+                    gnd_vias = add_gnd_vias_to_existing_board(
+                        self.pcb_data,
+                        gnd_via_net,
+                        gnd_via_distance,
+                        gnd_config,
+                        obstacles,
+                        coord
+                    )
+
+                    # Add to new vias list
+                    for gv in gnd_vias:
+                        self._new_vias.append({
+                            'x': gv.x,
+                            'y': gv.y,
+                            'size': gv.size,
+                            'drill': gv.drill,
+                            'net_id': gv.net_id,
+                            'layers': gv.layers if hasattr(gv, 'layers') else ['F.Cu', 'B.Cu']
+                        })
+                    total_vias += len(gnd_vias)
+
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"Error adding GND vias: {e}")
 
         except Exception as e:
             import traceback

@@ -115,6 +115,33 @@ When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, t
 | `--verbose`, `-v` | Print detailed debug messages |
 | `--debug-lines` | Draw MST routes on User.1, User.2, etc. per net |
 
+### GND Return Via Placement
+
+For signal integrity on high-speed designs, signal vias should have nearby GND return vias. This feature automatically places GND vias near existing signal vias.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--add-gnd-vias` | off | Enable GND return via placement near signal vias |
+| `--gnd-via-net` | GND | Net name for the GND vias |
+| `--gnd-via-distance` | 2.0 | Maximum distance from signal via to place GND via (mm) |
+
+The algorithm:
+1. Finds all signal vias (non-GND nets)
+2. Skips signal vias that already have a GND via or through-hole GND pad within the distance threshold
+3. For each remaining signal via, searches outward from the minimum viable distance (via-to-via clearance) in 24 angles (every 15°)
+4. Places the GND via at the closest valid position that respects track clearances
+
+Example:
+```bash
+python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --add-gnd-vias --gnd-via-distance 2.0
+```
+
+Output:
+```
+Added 8 GND vias near signal vias
+Placement distances: min=0.800mm, avg=1.131mm, max=1.450mm (min_distance theoretical=0.750mm)
+```
+
 ## How It Works
 
 ### Pad Classification

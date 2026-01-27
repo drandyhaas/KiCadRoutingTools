@@ -45,6 +45,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
 - **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
 - **Disconnected plane region repair** - After power planes are created, regions may be effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects disconnected regions and routes wide, short tracks between them to ensure electrical continuity
+- **GND return via placement** - Automatically places GND vias near signal vias for return current paths. Searches from minimum viable distance outward (24 angles, fine step), placing GND vias as close as possible while respecting track clearances. Through-hole GND pads count as existing return paths. Use `--add-gnd-vias` with route_planes.py
 
 ## Quick Start
 
@@ -166,6 +167,7 @@ The installer automatically detects your KiCad installation directory:
 - Net-to-layer assignment for power/ground planes
 - Create planes with via connections to SMD pads
 - Repair disconnected plane regions
+- GND return via placement near signal vias
 - Via size/drill, track width, clearance configuration
 
 **Log Tab:**
@@ -721,6 +723,11 @@ python route_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] --nets GND
 --verbose, -v           # Print detailed debug messages
 --debug-lines           # Draw MST routes on User.1, User.2, etc. per net
 --add-teardrops         # Add teardrop settings to all pads in output file
+
+# GND return via placement (for signal integrity)
+--add-gnd-vias          # Add GND vias near signal vias for return current paths
+--gnd-via-net GND       # Net name for GND vias (default: GND)
+--gnd-via-distance 2.0  # Max distance from signal via to place GND via (mm, default: 2.0)
 ```
 
 Features:
@@ -810,7 +817,6 @@ Features:
 - No net class support (KiCad native)
 - No User-Defined Keepout Zones
 - No Bus/Parallel Routing
-- No GND via auto return path placements for single-ended routing
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost learning/tuning
 - No design rule import from KiCad

@@ -1838,6 +1838,14 @@ Examples:
     parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
     parser.add_argument("--add-teardrops", action="store_true", help="Add teardrop settings to all pads in output file")
 
+    # GND return vias
+    parser.add_argument("--add-gnd-vias", action="store_true",
+        help="Add GND vias near signal vias for return current path")
+    parser.add_argument("--gnd-via-net", type=str, default="GND",
+        help="Net name for GND vias (default: GND)")
+    parser.add_argument("--gnd-via-distance", type=float, default=2.0,
+        help="Maximum distance from signal via to place GND via in mm (default: 2.0)")
+
     args = parser.parse_args()
 
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
@@ -1924,6 +1932,64 @@ Examples:
         power_nets_widths=args.power_nets_widths,
         add_teardrops=args.add_teardrops
     )
+
+    # Add GND return vias if requested
+    if args.add_gnd_vias and not args.dry_run:
+        from kicad_parser import parse_kicad_pcb
+        from routing_config import GridRouteConfig, GridCoord
+        from obstacle_map import build_base_obstacle_map
+        from add_gnd_vias import add_gnd_vias_to_existing_board
+        from kicad_writer import add_tracks_and_vias_to_pcb
+
+        print(f"\nAdding GND return vias near signal vias...")
+
+        # Parse the output file (which now has planes)
+        pcb_data = parse_kicad_pcb(args.output_file)
+
+        # Create config for GND via placement
+        gnd_config = GridRouteConfig(
+            via_size=args.via_size,
+            via_drill=args.via_drill,
+            track_width=args.track_width,
+            clearance=args.clearance,
+            grid_step=args.grid_step,
+            layers=args.layers
+        )
+        coord = GridCoord(gnd_config.grid_step)
+
+        # Build obstacle map
+        obstacles = build_base_obstacle_map(pcb_data, gnd_config, [])
+
+        # Add GND vias
+        gnd_vias = add_gnd_vias_to_existing_board(
+            pcb_data,
+            args.gnd_via_net,
+            args.gnd_via_distance,
+            gnd_config,
+            obstacles,
+            coord
+        )
+
+        if gnd_vias:
+            # Convert Via objects to dict format for writer
+            via_dicts = [{
+                'x': v.x,
+                'y': v.y,
+                'size': v.size,
+                'drill': v.drill,
+                'net_id': v.net_id,
+                'layers': v.layers,
+                'free': getattr(v, 'free', False)
+            } for v in gnd_vias]
+
+            # Write vias to output file
+            add_tracks_and_vias_to_pcb(
+                args.output_file,
+                args.output_file,
+                tracks=[],
+                vias=via_dicts
+            )
+            print(f"Wrote {len(gnd_vias)} GND vias to {args.output_file}")
 
 
 if __name__ == "__main__":

@@ -18,8 +18,10 @@ def main():
 
     unbuffered = args.unbuffered
 
+    OPTIONS='' #--track-width 1.2 --clearance 0.3 --board-edge-clearance 0.6'
+
     # Route with wide tracks
-    run("python3 route.py kicad_files/sonde_u.kicad_pcb --track-width 1.2 --clearance 0.3 --board-edge-clearance 0.6", unbuffered)
+    run(f"python3 route.py kicad_files/sonde_u.kicad_pcb {OPTIONS}", unbuffered)
 
     if not args.no_checks:
         # Check for DRC errors
