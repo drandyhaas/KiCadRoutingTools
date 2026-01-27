@@ -143,6 +143,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 length_match_groups: Optional[List[List[str]]] = None,
                 length_match_tolerance: float = 0.1,
                 meander_amplitude: float = 1.0,
+                time_matching: bool = False,
+                time_match_tolerance: float = 1.0,
                 diff_chamfer_extra: float = 1.5,
                 diff_pair_intra_match: bool = False,
                 debug_memory: bool = False,
@@ -235,6 +237,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         vertical_attraction_radius=vertical_attraction_radius,
         vertical_attraction_cost=vertical_attraction_cost, length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
+        time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory
     )
     # Add diff-pair specific config options
@@ -873,6 +876,13 @@ Examples:
                         help="Acceptable length variance within group in mm (default: 0.1)")
     parser.add_argument("--meander-amplitude", type=float, default=1.0,
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
+
+    # Time matching options (alternative to length matching)
+    parser.add_argument("--time-matching", action="store_true",
+                        help="Match by propagation time instead of length (accounts for layer dielectric)")
+    parser.add_argument("--time-match-tolerance", type=float, default=1.0,
+                        help="Acceptable time variance in picoseconds (default: 1.0)")
+
     parser.add_argument("--diff-chamfer-extra", type=float, default=1.5,
                         help="Chamfer multiplier for diff pair meanders (default: 1.5, >1 avoids P/N crossings)")
     parser.add_argument("--diff-pair-intra-match", action="store_true",
@@ -991,6 +1001,8 @@ Examples:
                 length_match_groups=args.length_match_groups,
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,
+                time_matching=args.time_matching,
+                time_match_tolerance=args.time_match_tolerance,
                 diff_chamfer_extra=args.diff_chamfer_extra,
                 diff_pair_intra_match=args.diff_pair_intra_match,
                 debug_memory=args.debug_memory,

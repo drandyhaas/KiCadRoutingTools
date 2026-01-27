@@ -24,7 +24,8 @@ from memory_debug import (
     estimate_net_obstacles_cache_mb
 )
 from length_matching import (
-    apply_length_matching_to_group, find_nets_matching_patterns, auto_group_ddr4_nets
+    apply_length_matching_to_group, apply_time_matching_to_group,
+    find_nets_matching_patterns, auto_group_ddr4_nets
 )
 
 
@@ -271,7 +272,10 @@ def run_length_matching(
     pcb_data: PCBData
 ) -> Dict[str, Dict]:
     """
-    Apply length matching to all configured groups.
+    Apply length or time matching to all configured groups.
+
+    If config.time_matching is True, matches propagation time instead of length,
+    accounting for different signal speeds on different layers.
 
     Args:
         routed_results: Dict of net_id -> routing result
@@ -282,9 +286,17 @@ def run_length_matching(
     Returns:
         Updated net_name_to_result mapping
     """
-    print("\n" + "=" * 60)
-    print("Length matching")
-    print("=" * 60)
+    # Select matching function based on config
+    if config.time_matching:
+        matching_func = apply_time_matching_to_group
+        print("\n" + "=" * 60)
+        print("Time matching (propagation delay)")
+        print("=" * 60)
+    else:
+        matching_func = apply_length_matching_to_group
+        print("\n" + "=" * 60)
+        print("Length matching")
+        print("=" * 60)
 
     # Build net_name -> result mapping
     net_name_to_result = {}
@@ -305,7 +317,7 @@ def run_length_matching(
             auto_groups = auto_group_ddr4_nets(all_routed_names)
             for auto_group in auto_groups:
                 if len(auto_group) >= 2:
-                    net_name_to_result = apply_length_matching_to_group(
+                    net_name_to_result = matching_func(
                         net_name_to_result, auto_group, config, pcb_data,
                         all_processed_segments, all_processed_vias
                     )
@@ -321,9 +333,10 @@ def run_length_matching(
             # Find nets matching the patterns in this group
             matching_nets = find_nets_matching_patterns(all_routed_names, group)
             if len(matching_nets) >= 2:
-                print(f"\nLength match group: {group}")
+                match_type = "Time match" if config.time_matching else "Length match"
+                print(f"\n{match_type} group: {group}")
                 print(f"  Matched nets: {matching_nets}")
-                net_name_to_result = apply_length_matching_to_group(
+                net_name_to_result = matching_func(
                     net_name_to_result, matching_nets, config, pcb_data,
                     all_processed_segments, all_processed_vias
                 )
@@ -424,6 +437,8 @@ def get_common_config_kwargs(
     length_match_groups: Optional[List[List[str]]],
     length_match_tolerance: float,
     meander_amplitude: float,
+    time_matching: bool,
+    time_match_tolerance: float,
     debug_memory: bool,
     layer_costs: Optional[List[float]] = None
 ) -> Dict:
@@ -466,6 +481,8 @@ def get_common_config_kwargs(
         length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance,
         meander_amplitude=meander_amplitude,
+        time_matching=time_matching,
+        time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory,
         layer_costs=layer_costs,
     )

@@ -794,3 +794,159 @@ def print_impedance_routing_plan(pcb: PCBData, layers: List[str], target_z0: flo
                 print(f"{layer_name:<12} {layer_type:<12} {'N/A':<12} {'N/A':<12} {'Not achievable'}")
 
     print("=" * 80)
+
+
+# =============================================================================
+# Propagation Time Calculations (for time-matching)
+# =============================================================================
+
+SPEED_OF_LIGHT_MM_PER_NS = 299.792458  # mm/ns (speed of light in vacuum)
+
+
+def get_layer_epsilon_eff(pcb: PCBData, layer_name: str) -> float:
+    """
+    Get effective dielectric constant for propagation delay calculation.
+
+    For microstrip (outer layers): epsilon_eff = (Er + 1) / 2
+    For stripline (inner layers): epsilon_eff = Er
+
+    Args:
+        pcb: Parsed PCB data with stackup
+        layer_name: Copper layer name (e.g., "F.Cu", "In1.Cu")
+
+    Returns:
+        Effective dielectric constant (defaults to 4.0 for FR4 if layer not found)
+    """
+    params = get_layer_impedance_params(pcb, layer_name)
+    if params is None:
+        return 4.0  # Default FR4
+
+    er = params.dielectric_constant
+    if params.is_outer_layer:
+        # Microstrip: field partially in air, partially in dielectric
+        return (er + 1) / 2
+    else:
+        # Stripline: field entirely in dielectric
+        return er
+
+
+def get_layer_ps_per_mm(pcb: PCBData, layer_name: str) -> float:
+    """
+    Get propagation delay in picoseconds per millimeter for a layer.
+
+    Uses the layer's effective dielectric constant to calculate signal velocity:
+    v = c / sqrt(epsilon_eff)
+    delay = 1/v = sqrt(epsilon_eff) / c
+
+    Args:
+        pcb: Parsed PCB data with stackup
+        layer_name: Copper layer name
+
+    Returns:
+        Propagation delay in ps/mm
+    """
+    eps_eff = get_layer_epsilon_eff(pcb, layer_name)
+    speed_mm_per_ns = SPEED_OF_LIGHT_MM_PER_NS / math.sqrt(eps_eff)
+    # Convert ns/mm to ps/mm (1 ns = 1000 ps)
+    return 1000.0 / speed_mm_per_ns
+
+
+def get_via_barrel_epsilon_eff(pcb: PCBData, layer1: str, layer2: str) -> float:
+    """
+    Get effective dielectric constant for a via barrel between two layers.
+
+    Calculates a thickness-weighted average of dielectric constants through
+    the via span.
+
+    Args:
+        pcb: Parsed PCB data with stackup
+        layer1: First copper layer
+        layer2: Second copper layer
+
+    Returns:
+        Weighted average epsilon_eff for the via barrel
+    """
+    stackup = pcb.board_info.stackup
+    if not stackup:
+        return 4.0  # Default FR4
+
+    # Find layer indices
+    idx1 = idx2 = -1
+    for i, layer in enumerate(stackup):
+        if layer.name == layer1:
+            idx1 = i
+        elif layer.name == layer2:
+            idx2 = i
+
+    if idx1 < 0 or idx2 < 0:
+        return 4.0
+
+    start_idx = min(idx1, idx2)
+    end_idx = max(idx1, idx2)
+
+    # Calculate thickness-weighted average epsilon
+    total_thickness = 0.0
+    weighted_epsilon = 0.0
+
+    for i in range(start_idx, end_idx + 1):
+        layer = stackup[i]
+        if layer.layer_type in ('core', 'prepreg'):
+            er = layer.epsilon_r if layer.epsilon_r > 0 else 4.0
+            weighted_epsilon += er * layer.thickness
+            total_thickness += layer.thickness
+
+    if total_thickness <= 0:
+        return 4.0
+
+    return weighted_epsilon / total_thickness
+
+
+def calculate_route_propagation_time_ps(
+    segments: List,
+    vias: List = None,
+    pcb_data: PCBData = None
+) -> float:
+    """
+    Calculate total propagation time for a route in picoseconds.
+
+    Sums the propagation time for each segment based on its layer's
+    effective dielectric constant, plus via barrel delays.
+
+    Args:
+        segments: List of Segment objects
+        vias: Optional list of Via objects
+        pcb_data: PCB data with stackup (required for layer-specific delays)
+
+    Returns:
+        Total propagation time in picoseconds
+    """
+    if pcb_data is None:
+        # Fallback: assume FR4 microstrip everywhere
+        from net_queries import calculate_route_length
+        length = calculate_route_length(segments, vias, None)
+        # Default FR4 microstrip: eps_eff = (4.3 + 1) / 2 = 2.65
+        default_ps_per_mm = 1000.0 / (SPEED_OF_LIGHT_MM_PER_NS / math.sqrt(2.65))
+        return length * default_ps_per_mm
+
+    total_time_ps = 0.0
+
+    # Time for each segment
+    for seg in segments:
+        dx = seg.end_x - seg.start_x
+        dy = seg.end_y - seg.start_y
+        length_mm = math.sqrt(dx * dx + dy * dy)
+        ps_per_mm = get_layer_ps_per_mm(pcb_data, seg.layer)
+        total_time_ps += length_mm * ps_per_mm
+
+    # Time for via barrels
+    if vias:
+        for via in vias:
+            if via.layers and len(via.layers) >= 2:
+                barrel_length = pcb_data.get_via_barrel_length(via.layers[0], via.layers[1])
+                if barrel_length > 0:
+                    eps_eff = get_via_barrel_epsilon_eff(pcb_data, via.layers[0], via.layers[1])
+                    speed = SPEED_OF_LIGHT_MM_PER_NS / math.sqrt(eps_eff)
+                    via_time_ps = (barrel_length / speed) * 1000.0
+                    total_time_ps += via_time_ps
+
+    return total_time_ps

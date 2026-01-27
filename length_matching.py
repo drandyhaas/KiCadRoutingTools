@@ -1260,6 +1260,209 @@ def apply_meanders_to_route(
     return segments, 0
 
 
+def _apply_meanders_to_net_with_iteration(
+    result: dict,
+    target_metric: float,
+    current_metric: float,
+    tolerance: float,
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+    already_processed_segments: List[Segment],
+    already_processed_vias: List,
+    group_clearance_index,
+    metric_func,
+    extra_length_func,
+    metric_unit: str = "mm"
+) -> Tuple[dict, List[Segment], int]:
+    """
+    Apply meanders to a single net with bump iteration and amplitude scaling.
+
+    This is a shared helper for both length and time matching. The difference
+    is controlled by the metric_func (calculates current value) and
+    extra_length_func (converts metric deficit to physical length to add).
+
+    Args:
+        result: The routing result for this net
+        target_metric: Target value to match (length in mm or time in ps)
+        current_metric: Current value before meanders
+        tolerance: Acceptable variance in metric units
+        config: Routing configuration
+        pcb_data: PCB data for clearance checking
+        already_processed_segments: Segments from other nets for clearance
+        already_processed_vias: Vias from other nets for clearance
+        group_clearance_index: Spatial index for clearance checking
+        metric_func: Function(segments, vias) -> current metric value
+        extra_length_func: Function(metric_deficit) -> extra_length in mm
+        metric_unit: Unit string for printing ("mm" or "ps")
+
+    Returns:
+        Tuple of (modified_result_or_segments, final_segments, bump_count)
+    """
+    from net_queries import calculate_route_length
+
+    delta_metric = target_metric - current_metric
+    extra_length = extra_length_func(delta_metric)
+
+    is_diff_pair = result.get('is_diff_pair', False)
+
+    if is_diff_pair:
+        # Differential pair: apply meanders to centerline
+        modified_result, bump_count = apply_meanders_to_diff_pair(
+            result, extra_length, config, pcb_data,
+            extra_segments=already_processed_segments,
+            extra_vias=already_processed_vias
+        )
+        new_segments = modified_result.get('new_segments', [])
+        new_vias = modified_result.get('new_vias', [])
+        new_metric = metric_func(new_segments, new_vias)
+
+        # Step 2: If we undershot, add more bumps
+        max_bump_iterations = 20
+        iteration = 0
+        while new_metric < target_metric - tolerance and iteration < max_bump_iterations:
+            iteration += 1
+            bump_count += 1
+            metric_deficit = target_metric - new_metric
+            extra_length = extra_length_func(metric_deficit)
+
+            modified_result, actual_bumps = apply_meanders_to_diff_pair(
+                result, extra_length, config, pcb_data,
+                extra_segments=already_processed_segments,
+                extra_vias=already_processed_vias,
+                min_bumps=bump_count
+            )
+            prev_metric = new_metric
+            new_segments = modified_result.get('new_segments', [])
+            new_vias = modified_result.get('new_vias', [])
+            new_metric = metric_func(new_segments, new_vias)
+
+            if actual_bumps < bump_count or new_metric <= prev_metric:
+                print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
+                bump_count = actual_bumps
+                break
+
+        # Step 3: Scale amplitude to hit target
+        best_result = modified_result.copy()
+        best_metric = new_metric
+        scaled_amplitude = config.meander_amplitude
+        for scale_iter in range(5):
+            if abs(new_metric - target_metric) <= tolerance:
+                break
+            actual_added = new_metric - current_metric
+            if actual_added <= 0 or bump_count == 0:
+                break
+
+            scale = delta_metric / actual_added
+            scaled_amplitude = scaled_amplitude * scale
+            if scaled_amplitude < 0.2:
+                scaled_amplitude = 0.2
+
+            trial_result, trial_bumps = apply_meanders_to_diff_pair(
+                result, extra_length, config, pcb_data,
+                extra_segments=already_processed_segments,
+                extra_vias=already_processed_vias,
+                min_bumps=bump_count,
+                amplitude_override=scaled_amplitude
+            )
+            trial_segments = trial_result.get('new_segments', [])
+            trial_vias = trial_result.get('new_vias', [])
+            trial_metric = metric_func(trial_segments, trial_vias)
+
+            if trial_bumps > 0 and trial_metric >= best_metric:
+                modified_result = trial_result
+                new_metric = trial_metric
+                best_result = trial_result.copy()
+                best_metric = trial_metric
+            else:
+                modified_result = best_result
+                new_metric = best_metric
+                break
+
+        return modified_result, modified_result.get('new_segments', []), bump_count, new_metric
+
+    else:
+        # Single-ended net
+        net_id = None
+        original_segments = result['new_segments']
+        stub_length = result.get('stub_length', 0.0)
+        if original_segments:
+            net_id = original_segments[0].net_id
+
+        new_segments, bump_count = apply_meanders_to_route(
+            original_segments, extra_length, config,
+            pcb_data=pcb_data, net_id=net_id,
+            extra_segments=already_processed_segments,
+            extra_vias=already_processed_vias,
+            clearance_index=group_clearance_index
+        )
+        new_vias = result.get('new_vias', [])
+        new_metric = metric_func(new_segments, new_vias)
+
+        # Step 2: Add more bumps if undershoot
+        max_bump_iterations = 20
+        iteration = 0
+        while new_metric < target_metric - tolerance and iteration < max_bump_iterations:
+            iteration += 1
+            bump_count += 1
+            metric_deficit = target_metric - new_metric
+            extra_length = extra_length_func(metric_deficit)
+
+            new_segments, actual_bumps = apply_meanders_to_route(
+                original_segments, extra_length, config,
+                pcb_data=pcb_data, net_id=net_id,
+                extra_segments=already_processed_segments,
+                extra_vias=already_processed_vias,
+                min_bumps=bump_count,
+                clearance_index=group_clearance_index
+            )
+            prev_metric = new_metric
+            new_metric = metric_func(new_segments, new_vias)
+
+            if actual_bumps < bump_count or new_metric <= prev_metric:
+                print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
+                bump_count = actual_bumps
+                break
+
+        # Step 3: Scale amplitude
+        best_segments = new_segments
+        best_metric = new_metric
+        scaled_amplitude = config.meander_amplitude
+        for scale_iter in range(5):
+            if abs(new_metric - target_metric) <= tolerance:
+                break
+            actual_added = new_metric - current_metric
+            if actual_added <= 0 or bump_count == 0:
+                break
+
+            scale = delta_metric / actual_added
+            scaled_amplitude = scaled_amplitude * scale
+            if scaled_amplitude < 0.2:
+                scaled_amplitude = 0.2
+
+            trial_segments, trial_bumps = apply_meanders_to_route(
+                original_segments, extra_length, config,
+                pcb_data=pcb_data, net_id=net_id,
+                extra_segments=already_processed_segments,
+                extra_vias=already_processed_vias,
+                min_bumps=bump_count,
+                amplitude_override=scaled_amplitude,
+                clearance_index=group_clearance_index
+            )
+            trial_metric = metric_func(trial_segments, new_vias)
+
+            if trial_bumps > 0 and trial_metric >= best_metric:
+                new_segments = trial_segments
+                new_metric = trial_metric
+                best_segments = trial_segments
+                best_metric = trial_metric
+            else:
+                new_segments = best_segments
+                new_metric = best_metric
+                break
+
+        return new_segments, new_segments, bump_count, new_metric
+
+
 def apply_length_matching_to_group(
     net_results: Dict[str, dict],
     net_names: List[str],
@@ -1285,9 +1488,11 @@ def apply_length_matching_to_group(
     Returns:
         Modified net_results with meanders added
     """
+    from net_queries import calculate_route_length
+
     # Find nets in this group that were successfully routed
     group_results = {}
-    processed_result_ids = set()  # Track by id() to avoid processing same diff pair twice
+    processed_result_ids = set()
 
     for name in net_names:
         if name in net_results:
@@ -1302,266 +1507,226 @@ def apply_length_matching_to_group(
         print(f"  Length matching group: fewer than 2 routed nets, skipping")
         return net_results
 
-    # Identify diff pairs vs single-ended nets
-    diff_pair_results = {}  # net_name -> result for diff pairs
-    single_ended_results = {}  # net_name -> result for single-ended
+    # Identify diff pairs vs single-ended
+    diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))
+    single_count = len(group_results) - diff_pair_count
 
-    for net_name, result in group_results.items():
-        if result.get('is_diff_pair'):
-            diff_pair_results[net_name] = result
-        else:
-            single_ended_results[net_name] = result
-
-    # Find target length (longest route in group - use centerline_length for diff pairs)
-    all_lengths = []
-    for result in group_results.values():
-        all_lengths.append(result['route_length'])
-    target_length = max(all_lengths)
-
-    diff_pair_count = len(diff_pair_results)
-    single_count = len(single_ended_results)
+    # Find target length
+    target_length = max(r['route_length'] for r in group_results.values())
     print(f"  Length matching group: {len(group_results)} nets ({diff_pair_count} diff pairs, {single_count} single-ended), target={target_length:.2f}mm")
 
-    # Pre-collect ALL original segments and vias from ALL nets in the group
-    # Start with segments/vias from previously processed groups (cross-group clearance)
+    # Pre-collect segments/vias for clearance checking
     already_processed_segments: List[Segment] = list(prev_group_segments) if prev_group_segments else []
     already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
 
-    # Add all original segments/vias from ALL nets in this group BEFORE any meander processing
-    for net_name, result in group_results.items():
+    for result in group_results.values():
         if result.get('new_segments'):
             already_processed_segments.extend(result['new_segments'])
         if result.get('new_vias'):
             already_processed_vias.extend(result['new_vias'])
 
-    # Build spatial index ONCE for the entire group (major performance optimization)
-    # Index is updated incrementally after each net's meanders are generated
+    # Build spatial index
     group_clearance_index = None
-    index_margin = 0  # Will be set when index is built
+    index_margin = 0
     if pcb_data is not None and config is not None:
         group_clearance_index = ClearanceIndex()
         group_clearance_index.build(pcb_data, config, already_processed_segments, already_processed_vias)
         index_margin = config.track_width + config.clearance + config.meander_amplitude
 
-    # Apply meanders to shorter routes
-    from net_queries import calculate_route_length
+    # Define metric functions for length matching
+    def length_metric(segments, vias):
+        return calculate_route_length(segments, vias, pcb_data)
 
+    def length_to_length(delta):
+        return delta  # Identity for length matching
+
+    # Apply meanders to shorter routes
     for net_name, result in group_results.items():
         current_length = result['route_length']
         delta = target_length - current_length
 
         if delta <= config.length_match_tolerance:
-            if result.get('is_diff_pair'):
-                print(f"    {net_name} (diff pair): {current_length:.2f}mm (OK, within tolerance)")
-            else:
-                print(f"    {net_name}: {current_length:.2f}mm (OK, within tolerance)")
+            suffix = " (diff pair)" if result.get('is_diff_pair') else ""
+            print(f"    {net_name}{suffix}: {current_length:.2f}mm (OK, within tolerance)")
             continue
 
-        is_diff_pair = result.get('is_diff_pair', False)
+        suffix = " (diff pair)" if result.get('is_diff_pair') else ""
+        print(f"    {net_name}{suffix}: {current_length:.2f}mm -> adding {delta:.2f}mm")
 
-        if is_diff_pair:
-            # Differential pair: apply meanders to centerline and regenerate P/N
-            print(f"    {net_name} (diff pair): {current_length:.2f}mm -> adding {delta:.2f}mm")
+        modified, new_segments, bump_count, new_length = _apply_meanders_to_net_with_iteration(
+            result, target_length, current_length, config.length_match_tolerance,
+            config, pcb_data, already_processed_segments, already_processed_vias,
+            group_clearance_index, length_metric, length_to_length, "mm"
+        )
 
-            stub_length = result.get('stub_length', 0.0)
+        print(f"      {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps)")
 
-            # Step 1: Generate initial meanders on centerline
-            modified_result, bump_count = apply_meanders_to_diff_pair(
-                result, delta, config, pcb_data,
-                extra_segments=already_processed_segments,
-                extra_vias=already_processed_vias
-            )
-            new_length = modified_result['route_length']
-
-            # Step 2: If we undershot, add more bumps
-            max_bump_iterations = 20
-            iteration = 0
-            while new_length < target_length - config.length_match_tolerance and iteration < max_bump_iterations:
-                iteration += 1
-                bump_count += 1
-                modified_result, actual_bumps = apply_meanders_to_diff_pair(
-                    result, delta, config, pcb_data,
-                    extra_segments=already_processed_segments,
-                    extra_vias=already_processed_vias,
-                    min_bumps=bump_count
-                )
-                prev_length = new_length
-                new_length = modified_result['route_length']
-
-                if actual_bumps < bump_count or new_length <= prev_length:
-                    print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
-                    bump_count = actual_bumps
-                    break
-
-            # Step 3: If we overshot, scale down amplitude
-            # Save best result from Step 2 in case Step 3 makes things worse
-            best_result = modified_result.copy()
-            best_length = new_length
-            best_amplitude = config.meander_amplitude
-            scaled_amplitude = config.meander_amplitude
-            for scale_iter in range(5):
-                actual_extra = new_length - current_length
-                if abs(new_length - target_length) <= config.length_match_tolerance:
-                    break
-                if actual_extra <= 0 or bump_count == 0:
-                    break
-
-                scale = delta / actual_extra
-                scaled_amplitude = scaled_amplitude * scale
-                if scaled_amplitude < 0.2:
-                    scaled_amplitude = 0.2
-
-                trial_result, trial_bumps = apply_meanders_to_diff_pair(
-                    result, delta, config, pcb_data,
-                    extra_segments=already_processed_segments,
-                    extra_vias=already_processed_vias,
-                    min_bumps=bump_count,
-                    amplitude_override=scaled_amplitude
-                )
-                trial_length = trial_result['route_length']
-
-                # Only accept if we got bumps and the result is better (closer to target or longer)
-                if trial_bumps > 0 and trial_length >= best_length:
-                    modified_result = trial_result
-                    new_length = trial_length
-                    best_result = trial_result.copy()
-                    best_length = trial_length
-                    best_amplitude = scaled_amplitude
-                else:
-                    # Scaling made things worse, restore best and stop
-                    modified_result = best_result
-                    new_length = best_length
-                    scaled_amplitude = best_amplitude
-                    break
-
-            if scaled_amplitude < config.meander_amplitude:
-                print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps, amplitude={scaled_amplitude:.3f})")
-            else:
-                print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps)")
-
-            # Update the original result in-place (affects all references to it)
-            result.update(modified_result)
-
-            # Add this diff pair's segments and vias to already-processed lists
-            already_processed_segments.extend(result['new_segments'])
-            if result.get('new_vias'):
-                already_processed_vias.extend(result['new_vias'])
-
-            # Update spatial index with new meandered segments for subsequent nets
-            if group_clearance_index is not None:
-                group_clearance_index.add_segments(result['new_segments'], index_margin)
-
+        if result.get('is_diff_pair'):
+            result.update(modified)
         else:
-            # Single-ended net: use existing meander logic
-            print(f"    {net_name}: {current_length:.2f}mm -> adding {delta:.2f}mm")
-
-            net_id = None
-            original_segments = result['new_segments']
-            stub_length = result.get('stub_length', 0.0)
-            if original_segments:
-                net_id = original_segments[0].net_id
-
-            # Step 1: Generate initial meanders
-            new_segments, bump_count = apply_meanders_to_route(
-                original_segments,
-                delta,
-                config,
-                pcb_data=pcb_data,
-                net_id=net_id,
-                extra_segments=already_processed_segments,
-                extra_vias=already_processed_vias,
-                clearance_index=group_clearance_index
-            )
-            new_length = calculate_route_length(new_segments) + stub_length
-
-            # Step 2: If we undershot, add more bumps until we overshoot
-            max_bump_iterations = 20
-            iteration = 0
-            while new_length < target_length - config.length_match_tolerance and iteration < max_bump_iterations:
-                iteration += 1
-                bump_count += 1
-                new_segments, actual_bumps = apply_meanders_to_route(
-                    original_segments,
-                    delta,
-                    config,
-                    pcb_data=pcb_data,
-                    net_id=net_id,
-                    extra_segments=already_processed_segments,
-                    extra_vias=already_processed_vias,
-                    min_bumps=bump_count,
-                    clearance_index=group_clearance_index
-                )
-                prev_length = new_length
-                new_length = calculate_route_length(new_segments) + stub_length
-
-                if actual_bumps < bump_count or new_length <= prev_length:
-                    print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
-                    bump_count = actual_bumps
-                    break
-
-            # Step 3: If we overshot, iteratively scale down amplitude to hit target
-            # Save best result from Step 2 in case Step 3 makes things worse
-            best_segments = new_segments
-            best_length = new_length
-            best_amplitude = config.meander_amplitude
-            scaled_amplitude = config.meander_amplitude
-            for scale_iter in range(5):
-                actual_extra = new_length - current_length
-                if abs(new_length - target_length) <= config.length_match_tolerance:
-                    break
-                if actual_extra <= 0 or bump_count == 0:
-                    break
-
-                scale = delta / actual_extra
-                scaled_amplitude = scaled_amplitude * scale
-                if scaled_amplitude < 0.2:
-                    scaled_amplitude = 0.2
-
-                trial_segments, trial_bumps = apply_meanders_to_route(
-                    original_segments,
-                    delta,
-                    config,
-                    pcb_data=pcb_data,
-                    net_id=net_id,
-                    extra_segments=already_processed_segments,
-                    extra_vias=already_processed_vias,
-                    min_bumps=bump_count,
-                    amplitude_override=scaled_amplitude,
-                    clearance_index=group_clearance_index
-                )
-                trial_length = calculate_route_length(trial_segments) + stub_length
-
-                # Only accept if we got bumps and the result is better (closer to target or longer)
-                if trial_bumps > 0 and trial_length >= best_length:
-                    new_segments = trial_segments
-                    new_length = trial_length
-                    best_segments = trial_segments
-                    best_length = trial_length
-                    best_amplitude = scaled_amplitude
-                else:
-                    # Scaling made things worse, restore best and stop
-                    new_segments = best_segments
-                    new_length = best_length
-                    scaled_amplitude = best_amplitude
-                    break
-
-            if scaled_amplitude < config.meander_amplitude:
-                print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps, amplitude={scaled_amplitude:.3f})")
-            else:
-                print(f"    {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps)")
-
-            # Update result
             result['new_segments'] = new_segments
             result['route_length'] = new_length
 
-            # Add this net's segments and vias to the already-processed lists
-            already_processed_segments.extend(new_segments)
-            if result.get('new_vias'):
-                already_processed_vias.extend(result['new_vias'])
+        already_processed_segments.extend(new_segments)
+        if result.get('new_vias'):
+            already_processed_vias.extend(result['new_vias'])
 
-            # Update spatial index with new meandered segments for subsequent nets
-            if group_clearance_index is not None:
-                group_clearance_index.add_segments(new_segments, index_margin)
+        if group_clearance_index is not None:
+            group_clearance_index.add_segments(new_segments, index_margin)
+
+    return net_results
+
+
+def get_route_primary_layer(segments: List[Segment]) -> str:
+    """
+    Determine the primary layer for a route (where most length is).
+
+    Used by time matching to determine which layer's ps/mm to use
+    when calculating extra length needed to add a target amount of time.
+
+    Args:
+        segments: List of Segment objects
+
+    Returns:
+        Layer name where most of the route length is (defaults to 'F.Cu')
+    """
+    layer_lengths: Dict[str, float] = {}
+    for seg in segments:
+        length = segment_length(seg)
+        layer_lengths[seg.layer] = layer_lengths.get(seg.layer, 0.0) + length
+
+    if not layer_lengths:
+        return 'F.Cu'
+
+    return max(layer_lengths, key=layer_lengths.get)
+
+
+def apply_time_matching_to_group(
+    net_results: Dict[str, dict],
+    net_names: List[str],
+    config: GridRouteConfig,
+    pcb_data: PCBData = None,
+    prev_group_segments: List[Segment] = None,
+    prev_group_vias: List = None
+) -> Dict[str, dict]:
+    """
+    Apply time matching to a group of nets.
+
+    Similar to apply_length_matching_to_group but matches propagation time
+    instead of physical length. This accounts for different signal speeds
+    on different layers due to varying effective dielectric constants.
+
+    Args:
+        net_results: Dict mapping net name to routing result
+        net_names: Net names in this matching group
+        config: Routing configuration
+        pcb_data: PCB data for time calculations and clearance checking
+        prev_group_segments: Segments from previously processed groups
+        prev_group_vias: Vias from previously processed groups
+
+    Returns:
+        Modified net_results with meanders added
+    """
+    from impedance import calculate_route_propagation_time_ps, get_layer_ps_per_mm
+    from net_queries import calculate_route_length
+
+    # Find nets in this group that were successfully routed
+    group_results = {}
+    processed_result_ids = set()
+
+    for name in net_names:
+        if name in net_results:
+            result = net_results[name]
+            if result and not result.get('failed') and 'route_length' in result:
+                result_id = id(result)
+                if result_id not in processed_result_ids:
+                    group_results[name] = result
+                    processed_result_ids.add(result_id)
+
+    if len(group_results) < 2:
+        print(f"  Time matching group: fewer than 2 routed nets, skipping")
+        return net_results
+
+    # Identify diff pairs vs single-ended
+    diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))
+    single_count = len(group_results) - diff_pair_count
+
+    # Calculate propagation time for each net and find primary layers
+    net_times: Dict[str, float] = {}
+    net_primary_layers: Dict[str, str] = {}
+
+    for net_name, result in group_results.items():
+        segments = result.get('new_segments', [])
+        vias = result.get('new_vias', [])
+        net_times[net_name] = calculate_route_propagation_time_ps(segments, vias, pcb_data)
+        net_primary_layers[net_name] = get_route_primary_layer(segments)
+
+    target_time = max(net_times.values())
+    print(f"  Time matching group: {len(group_results)} nets ({diff_pair_count} diff pairs, {single_count} single-ended), target={target_time:.2f}ps")
+
+    # Pre-collect segments/vias for clearance checking
+    already_processed_segments: List[Segment] = list(prev_group_segments) if prev_group_segments else []
+    already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
+
+    for result in group_results.values():
+        if result.get('new_segments'):
+            already_processed_segments.extend(result['new_segments'])
+        if result.get('new_vias'):
+            already_processed_vias.extend(result['new_vias'])
+
+    # Build spatial index
+    group_clearance_index = None
+    index_margin = 0
+    if pcb_data is not None and config is not None:
+        group_clearance_index = ClearanceIndex()
+        group_clearance_index.build(pcb_data, config, already_processed_segments, already_processed_vias)
+        index_margin = config.track_width + config.clearance + config.meander_amplitude
+
+    # Apply meanders to shorter-time routes
+    for net_name, result in group_results.items():
+        current_time = net_times[net_name]
+        delta_time = target_time - current_time
+
+        if delta_time <= config.time_match_tolerance:
+            suffix = " (diff pair)" if result.get('is_diff_pair') else ""
+            print(f"    {net_name}{suffix}: {current_time:.2f}ps (OK, within tolerance)")
+            continue
+
+        primary_layer = net_primary_layers[net_name]
+        ps_per_mm = get_layer_ps_per_mm(pcb_data, primary_layer)
+        extra_length = delta_time / ps_per_mm
+
+        suffix = " (diff pair)" if result.get('is_diff_pair') else ""
+        print(f"    {net_name}{suffix}: {current_time:.2f}ps -> adding {delta_time:.2f}ps ({extra_length:.3f}mm on {primary_layer})")
+
+        # Create metric functions that capture pcb_data
+        def time_metric(segments, vias):
+            return calculate_route_propagation_time_ps(segments, vias, pcb_data)
+
+        def time_to_length(delta_ps):
+            return delta_ps / ps_per_mm
+
+        modified, new_segments, bump_count, new_time = _apply_meanders_to_net_with_iteration(
+            result, target_time, current_time, config.time_match_tolerance,
+            config, pcb_data, already_processed_segments, already_processed_vias,
+            group_clearance_index, time_metric, time_to_length, "ps"
+        )
+
+        print(f"      {net_name}: new time = {new_time:.2f}ps ({bump_count} bumps)")
+
+        if result.get('is_diff_pair'):
+            result.update(modified)
+        else:
+            result['new_segments'] = new_segments
+            stub_length = result.get('stub_length', 0.0)
+            result['route_length'] = calculate_route_length(new_segments) + stub_length
+
+        already_processed_segments.extend(new_segments)
+        if result.get('new_vias'):
+            already_processed_vias.extend(result['new_vias'])
+
+        if group_clearance_index is not None:
+            group_clearance_index.add_segments(new_segments, index_margin)
 
     return net_results
 

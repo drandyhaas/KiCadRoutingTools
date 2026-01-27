@@ -100,9 +100,9 @@ def main():
         # Route RAM
         ram_opts = f"--bga-proximity-radius 1 --stub-proximity-radius 1 {GEOMETRY} {LAYERS_5}"
         # DDR diff pairs (DQS, CK)
-        run(f"python3 route_diff.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ramdiff.kicad_pcb --nets 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --length-match-group 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5 {ram_opts}", unbuffered)
+        run(f"python3 route_diff.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ramdiff.kicad_pcb --nets 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --length-match-group 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --time-matching --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5 {ram_opts}", unbuffered)
         # DDR single-ended (DQ, CA, etc.)
-        ram_se_opts = f"--swappable-nets 'Net-(U1*DQ*)' --length-match-group auto --max-iterations 1000000 --no-bga-zones U1 {ram_opts}"
+        ram_se_opts = f"--swappable-nets 'Net-(U1*DQ*)' --length-match-group auto --time-matching --max-iterations 1000000 --no-bga-zones U1 {ram_opts}"
         if quick:
             run(f"python3 route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets 'Net-(U1B-CA*)' {ram_se_opts}", unbuffered)
         else:

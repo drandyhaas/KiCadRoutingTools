@@ -135,6 +135,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 length_match_groups: Optional[List[List[str]]] = None,
                 length_match_tolerance: float = 0.1,
                 meander_amplitude: float = 1.0,
+                time_matching: bool = False,
+                time_match_tolerance: float = 1.0,
                 debug_memory: bool = False,
                 mps_reverse_rounds: bool = False,
                 mps_layer_swap: bool = False,
@@ -262,6 +264,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         vertical_attraction_radius=vertical_attraction_radius,
         vertical_attraction_cost=vertical_attraction_cost, length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
+        time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory, layer_costs=layer_costs
     )
     if direction_order is not None:
@@ -890,6 +893,12 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--meander-amplitude", type=float, default=1.0,
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
 
+    # Time matching options (alternative to length matching)
+    parser.add_argument("--time-matching", action="store_true",
+                        help="Match by propagation time instead of length (accounts for layer dielectric)")
+    parser.add_argument("--time-match-tolerance", type=float, default=1.0,
+                        help="Acceptable time variance in picoseconds (default: 1.0)")
+
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=defaults.MAX_RIPUP,
                         help=f"Maximum blockers to rip up at once during rip-up and retry (default: {defaults.MAX_RIPUP})")
@@ -1053,6 +1062,8 @@ For differential pair routing, use route_diff.py:
                 length_match_groups=args.length_match_groups,
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,
+                time_matching=args.time_matching,
+                time_match_tolerance=args.time_match_tolerance,
                 debug_memory=args.debug_memory,
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
