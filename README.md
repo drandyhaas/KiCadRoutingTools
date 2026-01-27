@@ -31,11 +31,13 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 - **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced. Uses 0° when clearance to the nearest stub is sufficient (≥2× spacing), only angling away when stubs are too close
 - **U-turn prevention** - Prevents differential pair routes from making U-turns (>180° cumulative turn)
 - **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
+- **Automatic polarity swap** - Detects when differential pair P/N polarity differs between source and target pads and automatically swaps target pad net assignments to match. Use `--no-fix-polarity` to disable
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
 - **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
+- **Time matching** - Alternative to length matching that matches propagation delay instead of physical length. Accounts for different signal speeds on outer layers (microstrip, faster) vs inner layers (stripline, slower) using effective dielectric constants from the board stackup. Use `--time-matching` to enable. Tolerance specified in picoseconds
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Impedance-controlled routing** - Specify target impedance (e.g., 50Ω single-ended, 100Ω differential) and track widths are automatically calculated per layer from the board stackup. Uses IPC-2141 formulas for microstrip (outer layers) and stripline (inner layers). Widths adjust automatically when switching layers via vias to maintain target impedance
 - **Power net routing** - Route power nets (GND, VCC, etc.) with wider tracks than signal nets. Specify patterns and corresponding widths (e.g., `--power-nets "*GND*" "*VCC*" --power-nets-widths 0.4 0.5`). First matching pattern determines width for each net. Obstacle clearances automatically adjust for wider power traces. Power net widths are never smaller than the base track width
@@ -618,6 +620,10 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --length-match-tolerance 0.1    # Acceptable length variance within group (mm)
 --meander-amplitude 1.0         # Height of meanders perpendicular to trace (mm)
 
+# Time matching (alternative to length matching)
+--time-matching                 # Match propagation time instead of length (accounts for layer dielectric)
+--time-match-tolerance 1.0      # Acceptable time variance within group (ps)
+
 # Debug
 --verbose               # Print detailed diagnostic output
 --debug-lines           # Output debug geometry on User layers
@@ -803,8 +809,7 @@ Features:
 - No blind or buried vias
 - No net class support (KiCad native)
 - No User-Defined Keepout Zones
-- No Bus/Parallel Routing 
-- No Propagation Delay Matching
+- No Bus/Parallel Routing
 - No GND via auto return path placements for single-ended routing
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost learning/tuning

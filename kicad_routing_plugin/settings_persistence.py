@@ -78,6 +78,8 @@ def get_dialog_settings(dialog):
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
+        'time_matching_check': dialog.time_matching_check.GetValue(),
+        'time_match_tolerance': dialog.time_match_tolerance.GetValue(),
         'debug_lines_check': dialog.debug_lines_check.GetValue(),
         'verbose_check': dialog.verbose_check.GetValue(),
         'skip_routing_check': dialog.skip_routing_check.GetValue(),
@@ -278,6 +280,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.length_match_tolerance.SetValue(settings['length_match_tolerance'])
     if 'meander_amplitude' in settings:
         dialog.meander_amplitude.SetValue(settings['meander_amplitude'])
+    if 'time_matching_check' in settings:
+        dialog.time_matching_check.SetValue(settings['time_matching_check'])
+    if 'time_match_tolerance' in settings:
+        dialog.time_match_tolerance.SetValue(settings['time_match_tolerance'])
     if 'debug_lines_check' in settings:
         dialog.debug_lines_check.SetValue(settings['debug_lines_check'])
     if 'verbose_check' in settings:

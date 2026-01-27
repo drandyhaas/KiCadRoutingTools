@@ -44,6 +44,10 @@ MAX_PROBE_ITERATIONS = 5000
 LENGTH_MATCH_TOLERANCE = 0.1  # mm
 MEANDER_AMPLITUDE = 1.0  # mm
 
+# Time matching (alternative to length matching)
+TIME_MATCHING = False  # If True, match propagation time instead of length
+TIME_MATCH_TOLERANCE = 1.0  # ps
+
 # Algorithm parameters
 MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 1.9
@@ -124,6 +128,7 @@ PARAM_RANGES = {
     'max_probe_iterations': {'min': 100, 'max': 100000},
     'length_match_tolerance': {'min': 0.01, 'max': 5.0, 'inc': 0.01, 'digits': 2},
     'meander_amplitude': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
+    'time_match_tolerance': {'min': 0.1, 'max': 50.0, 'inc': 0.1, 'digits': 1},
     # Fanout parameters
     'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'diff_pair_gap': {'min': 0.05, 'max': 1.0, 'inc': 0.01, 'digits': 2},

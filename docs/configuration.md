@@ -179,6 +179,30 @@ Groups nets by byte lane: DQ0-7 + DQS0, DQ8-15 + DQS1, etc.
 - Uses 45° chamfered corners for smooth trombone patterns
 - Supports multi-layer routes: meanders are applied to same-layer sections, preserving via positions
 
+### Time Matching Options
+
+Time matching is an alternative to length matching that matches propagation delay instead of physical length. This accounts for different signal speeds on different layers:
+- **Outer layers (microstrip)**: Faster propagation, effective dielectric = (Er + 1) / 2
+- **Inner layers (stripline)**: Slower propagation, effective dielectric = Er
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--time-matching` | false | Match propagation time instead of length |
+| `--time-match-tolerance` | 1.0 | Acceptable time variance within group (ps) |
+
+**When to use time matching:**
+- When routes in a group use different layers with different dielectric properties
+- For high-speed signals where propagation delay matters more than physical length
+- Typical FR4: outer layers ~5.4 ps/mm, inner layers ~6.9 ps/mm (~28% difference)
+
+**Example:**
+```bash
+python route.py input.kicad_pcb output.kicad_pcb --nets "*DQ*" \
+    --length-match-group auto \
+    --time-matching \
+    --time-match-tolerance 1.0
+```
+
 ### Visualization Options
 
 | Option | Default | Description |
@@ -269,6 +293,10 @@ class GridRouteConfig:
     meander_amplitude: float = 1.0             # mm - height of meander perpendicular to trace
     diff_chamfer_extra: float = 1.5            # chamfer multiplier for diff pair meanders
     diff_pair_intra_match: bool = False        # match P/N lengths within each diff pair
+
+    # Time matching (alternative to length matching)
+    time_matching: bool = False                # match propagation time instead of length
+    time_match_tolerance: float = 1.0          # ps - acceptable time variance
 
     # Debug
     debug_lines: bool = False

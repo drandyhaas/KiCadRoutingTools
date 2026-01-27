@@ -480,6 +480,8 @@ class RoutingDialog(wx.Dialog):
         crossing_sizer.Add(self.crossing_penalty, 1, wx.EXPAND)
         options_inner.Add(crossing_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        options_inner.AddSpacer(10)
+
         # Length matching
         length_label = wx.StaticText(options_scroll, label="Length Matching:")
         length_label.SetFont(length_label.GetFont().Bold())
@@ -506,6 +508,23 @@ class RoutingDialog(wx.Dialog):
         self.meander_amplitude.SetDigits(r['digits'])
         length_params_sizer.Add(self.meander_amplitude, 0)
         options_inner.Add(length_params_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Time matching option
+        time_match_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.time_matching_check = wx.CheckBox(options_scroll, label="Time matching")
+        self.time_matching_check.SetValue(False)
+        self.time_matching_check.SetToolTip("Match propagation time instead of length (accounts for layer dielectric)")
+        time_match_sizer.Add(self.time_matching_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        time_match_sizer.Add(wx.StaticText(options_scroll, label="Time tol (ps):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['time_match_tolerance']
+        self.time_match_tolerance = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                      initial=defaults.TIME_MATCH_TOLERANCE, inc=r['inc'])
+        self.time_match_tolerance.SetDigits(r['digits'])
+        self.time_match_tolerance.SetToolTip("Acceptable time variance in picoseconds")
+        time_match_sizer.Add(self.time_match_tolerance, 0)
+        options_inner.Add(time_match_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        options_inner.AddSpacer(10)
 
         # Debug options
         debug_label = wx.StaticText(options_scroll, label="Debug:")
@@ -1070,6 +1089,8 @@ class RoutingDialog(wx.Dialog):
         self.length_match_groups_ctrl.SetValue("")
         self.length_match_tolerance.SetValue(defaults.LENGTH_MATCH_TOLERANCE)
         self.meander_amplitude.SetValue(defaults.MEANDER_AMPLITUDE)
+        self.time_matching_check.SetValue(defaults.TIME_MATCHING)
+        self.time_match_tolerance.SetValue(defaults.TIME_MATCH_TOLERANCE)
         self.debug_lines_check.SetValue(False)
         self.verbose_check.SetValue(False)
         self.skip_routing_check.SetValue(False)
@@ -1275,6 +1296,9 @@ class RoutingDialog(wx.Dialog):
             'length_match_groups': self._parse_length_match_groups(),
             'length_match_tolerance': self.length_match_tolerance.GetValue(),
             'meander_amplitude': self.meander_amplitude.GetValue(),
+            # Time matching
+            'time_matching': self.time_matching_check.GetValue(),
+            'time_match_tolerance': self.time_match_tolerance.GetValue(),
         }
 
         # Parse power nets and widths
@@ -1427,6 +1451,8 @@ class RoutingDialog(wx.Dialog):
                 length_match_groups=config.get('length_match_groups'),
                 length_match_tolerance=config.get('length_match_tolerance', 0.1),
                 meander_amplitude=config.get('meander_amplitude', 1.0),
+                time_matching=config.get('time_matching', False),
+                time_match_tolerance=config.get('time_match_tolerance', 1.0),
                 add_teardrops=config.get('add_teardrops', False),
                 verbose=config.get('verbose', False),
                 skip_routing=config.get('skip_routing', False),

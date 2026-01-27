@@ -379,6 +379,23 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" "*CK*" \
 
 **Execution order**: Inter-pair matching runs first (on centerline), then intra-pair matching adds meanders to individual P/N tracks. This order is intentional - inter-pair regenerates P/N from the meandered centerline, so intra-pair must run last to preserve its meanders.
 
+### Time Matching
+
+Use `--time-matching` as an alternative to length matching when routes traverse layers with different dielectric properties. Time matching accounts for the different signal propagation speeds:
+
+- **Outer layers (microstrip)**: ~5.4 ps/mm for typical FR4
+- **Inner layers (stripline)**: ~6.9 ps/mm for typical FR4
+
+This is useful when differential pairs in a group are routed on different layers. Time matching ensures equal propagation delay rather than equal physical length.
+
+```bash
+# Time match differential pairs
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
+    --length-match-group auto \
+    --time-matching \
+    --time-match-tolerance 1.0
+```
+
 ## Limitations
 
 1. **Polarity swap** - Enabled by default; use `--no-fix-polarity` to disable automatic target pad swapping
