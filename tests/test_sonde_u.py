@@ -23,6 +23,9 @@ def main():
     # Route with wide tracks
     run(f"python3 route.py kicad_files/sonde_u.kicad_pcb {OPTIONS}", unbuffered)
 
+    # Add some gnd vias and the gnd plane
+    run('python3 route_planes.py kicad_files/sonde_u_routed.kicad_pcb --nets GND --plane-layers B.Cu --add-gnd-vias')
+
     if not args.no_checks:
         # Check for DRC errors
         run("python3 check_drc.py kicad_files/sonde_u_routed.kicad_pcb --clearance 0.2", unbuffered)
