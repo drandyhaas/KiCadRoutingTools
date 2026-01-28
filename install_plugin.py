@@ -21,6 +21,8 @@ import argparse
 import subprocess
 from pathlib import Path
 
+from startup_checks import get_cargo_version
+
 
 PLUGIN_NAME = "KiCadRoutingTools"
 PLUGIN_DISPLAY_NAME = "KiCad Routing Tools"
@@ -103,6 +105,49 @@ def install_dependencies():
     except Exception as e:
         print(f"  Warning: Could not install dependencies: {e}")
         return False
+
+
+def check_rust_router():
+    """
+    Check that the Rust router is built and version matches Cargo.toml.
+
+    Returns:
+        True if check passes, False otherwise
+    """
+    source_dir = get_source_dir()
+    rust_dir = source_dir / "rust_router"
+
+    # Get expected version from Cargo.toml
+    cargo_version = get_cargo_version()
+    if cargo_version is None:
+        print("  Warning: Could not read version from Cargo.toml")
+        return False
+
+    # Add rust_router to path for import
+    if str(rust_dir) not in sys.path:
+        sys.path.insert(0, str(rust_dir))
+
+    # Try to import the Rust library
+    try:
+        import grid_router
+        installed_version = getattr(grid_router, '__version__', 'unknown')
+    except ImportError:
+        print("  Error: Rust router module not found")
+        print("  Please build it first with:")
+        print("    python build_router.py")
+        return False
+
+    # Check version match
+    if installed_version != cargo_version:
+        print(f"  Error: Rust router version mismatch")
+        print(f"    Installed: {installed_version}")
+        print(f"    Expected:  {cargo_version}")
+        print("  Please rebuild with:")
+        print("    python build_router.py")
+        return False
+
+    print(f"  Rust router v{installed_version} OK")
+    return True
 
 
 def copy_plugin(source_dir: Path, dest_dir: Path):
@@ -213,6 +258,13 @@ Examples:
         install_dependencies()
         print()
 
+    # Check Rust router is built and up to date
+    if not args.uninstall:
+        print("Checking Rust router...")
+        if not check_rust_router():
+            return 1
+        print()
+
     # Process each KiCad version
     installed_count = 0
     for version, dest_base in plugin_dirs:
@@ -251,7 +303,7 @@ Examples:
         print("To use the plugin:")
         print("  1. Open KiCad 9.0 or later")
         print("  2. Open a PCB in Pcbnew")
-        print("  3. Go to Tools -> External Plugins -> Route Nets")
+        print("  3. Go to Tools -> External Plugins -> KiCadRoutingTools")
         print()
 
         if args.symlink:
