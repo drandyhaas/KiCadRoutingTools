@@ -17,6 +17,71 @@ if ROOT_DIR not in sys.path:
 import routing_defaults as defaults
 
 
+def _get_net_classes_from_board():
+    """Get net class mapping from pcbnew.
+
+    Returns:
+        tuple: (net_to_class dict mapping net_name -> class_name,
+                list of class names sorted with 'Default' first)
+    """
+    try:
+        import pcbnew
+        board = pcbnew.GetBoard()
+        if board is None:
+            return {}, ['Default']
+
+        net_to_class = {}
+        netclass_names = set()
+
+        # Get net settings which has the net class info
+        ds = board.GetDesignSettings()
+        net_settings = ds.m_NetSettings
+
+        # Get all defined net classes
+        net_classes = net_settings.GetNetclasses()
+        for class_name in net_classes.keys():
+            netclass_names.add(str(class_name))
+
+        # Always include Default
+        netclass_names.add('Default')
+
+        # Get net class for each net using GetEffectiveNetClass
+        net_info = board.GetNetInfo()
+        nets_by_name = net_info.NetsByName()
+
+        for net_name_wx, net in nets_by_name.items():
+            net_name = str(net_name_wx)
+            if not net_name or net_name.lower().startswith('unconnected-'):
+                continue
+
+            try:
+                # GetEffectiveNetClass returns the actual NETCLASS object
+                netclass = net_settings.GetEffectiveNetClass(net_name)
+                if netclass:
+                    class_name_raw = str(netclass.GetName())
+                    # Handle composite class names like 'Wide,Default'
+                    # Use the first non-Default class, or 'Default' if only Default
+                    if ',' in class_name_raw:
+                        parts = [p.strip() for p in class_name_raw.split(',')]
+                        non_default = [p for p in parts if p != 'Default']
+                        class_name = non_default[0] if non_default else 'Default'
+                    else:
+                        class_name = class_name_raw
+                else:
+                    class_name = 'Default'
+                net_to_class[net_name] = class_name
+            except Exception:
+                net_to_class[net_name] = 'Default'
+
+        # Sort with 'Default' first
+        sorted_classes = ['Default'] if 'Default' in netclass_names else []
+        sorted_classes.extend(sorted(c for c in netclass_names if c != 'Default'))
+
+        return net_to_class, sorted_classes
+    except Exception:
+        return {}, ['Default']
+
+
 class NetSelectionPanel(wx.Panel):
     """Reusable net selection panel with filtering."""
 
@@ -63,6 +128,13 @@ class NetSelectionPanel(wx.Panel):
         self._differential_mode = False  # When True, show diff pairs as "name_P/N"
         self._diff_pairs = {}  # base_name -> (p_net_id, n_net_id) when in diff mode
 
+        # Net class separation
+        self._separate_by_netclass = False
+        self._net_to_class = {}  # net_name -> netclass_name
+        self._netclass_names = ['Default']
+        self._tabbed_net_lists = {}  # netclass_name -> wx.CheckListBox
+        self._netclass_notebook = None
+
         self._create_ui(instructions, hide_label, hide_tooltip, show_hide_checkbox,
                        show_component_filter, show_component_dropdown)
         self._load_nets()
@@ -98,6 +170,13 @@ class NetSelectionPanel(wx.Panel):
         else:
             self.hide_diff_check = None
 
+        # Separate by net class checkbox
+        self.separate_netclass_check = wx.CheckBox(self, label="Separate by net class")
+        self.separate_netclass_check.SetValue(False)
+        self.separate_netclass_check.SetToolTip("Organize nets by KiCad net class in tabs")
+        self.separate_netclass_check.Bind(wx.EVT_CHECKBOX, self._on_separate_netclass_changed)
+        sizer.Add(self.separate_netclass_check, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
+
         # Component dropdown (optional) - shows components with many pads
         if show_component_dropdown:
             comp_dropdown_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -131,10 +210,12 @@ class NetSelectionPanel(wx.Panel):
         else:
             self.component_filter_ctrl = None
 
-        # Net list
+        # Net list (wrapped in container for view swapping)
+        self._list_container_sizer = wx.BoxSizer(wx.VERTICAL)
         self.net_list = wx.CheckListBox(self, size=(200, -1), style=wx.LB_EXTENDED)
         self.net_list.Bind(wx.EVT_KEY_DOWN, self._on_net_list_key)
-        sizer.Add(self.net_list, 1, wx.EXPAND | wx.ALL, 5)
+        self._list_container_sizer.Add(self.net_list, 1, wx.EXPAND)
+        sizer.Add(self._list_container_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
         # Select/Unselect buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -257,12 +338,7 @@ class NetSelectionPanel(wx.Panel):
 
         # Save checked state before filtering (only if syncing from visible)
         if sync_from_visible:
-            for i in range(self.net_list.GetCount()):
-                name = self.net_list.GetString(i)
-                if self.net_list.IsChecked(i):
-                    self._checked_nets.add(name)
-                else:
-                    self._checked_nets.discard(name)
+            self._sync_checked_state_from_view()
 
         # Build set of nets connected to the filtered component
         component_nets = set()
@@ -300,7 +376,14 @@ class NetSelectionPanel(wx.Panel):
         if self._auto_hide_differential and not self._differential_mode:
             hide_diff = True
 
-        # Populate list
+        # Populate either single list or tabbed lists
+        if self._separate_by_netclass and self._tabbed_net_lists:
+            self._populate_tabbed_lists(filtered_nets, hide_checked, hide_diff)
+        else:
+            self._populate_single_list(filtered_nets, hide_checked, hide_diff)
+
+    def _populate_single_list(self, filtered_nets, hide_checked, hide_diff):
+        """Populate the single CheckListBox."""
         self.net_list.Clear()
         for name, net_id in filtered_nets:
             # Check if should be hidden (connected)
@@ -319,6 +402,35 @@ class NetSelectionPanel(wx.Panel):
         for i in range(self.net_list.GetCount()):
             self.net_list.SetSelection(i)
 
+    def _populate_tabbed_lists(self, filtered_nets, hide_checked, hide_diff):
+        """Populate the tabbed CheckListBoxes by net class."""
+        # Group nets by class
+        nets_by_class = {c: [] for c in self._netclass_names}
+
+        for name, net_id in filtered_nets:
+            # Check if should be hidden (connected)
+            if hide_checked and self._check_fn and not self._suspend_check:
+                if self._check_fn(net_id):
+                    continue
+            # Check if should be hidden (differential)
+            if hide_diff and self._is_differential_net(name):
+                continue
+            class_name = self._net_to_class.get(name, 'Default')
+            if class_name in nets_by_class:
+                nets_by_class[class_name].append((name, net_id))
+
+        # Populate each tab
+        for class_name, check_list in self._tabbed_net_lists.items():
+            check_list.Clear()
+            for name, net_id in nets_by_class.get(class_name, []):
+                idx = check_list.Append(name)
+                if name in self._checked_nets:
+                    check_list.Check(idx, True)
+
+            # Highlight all items
+            for i in range(check_list.GetCount()):
+                check_list.SetSelection(i)
+
     def _on_filter_changed(self, event):
         """Handle filter text change."""
         self._update_net_list()
@@ -333,29 +445,36 @@ class NetSelectionPanel(wx.Panel):
             event.Skip()
 
     def _get_selected_indices(self):
-        """Get indices of selected (highlighted) items in the list."""
-        return list(self.net_list.GetSelections())
+        """Get indices of selected (highlighted) items in the active list."""
+        check_list = self._get_active_check_list()
+        if check_list:
+            return list(check_list.GetSelections())
+        return []
 
     def _on_select(self, event):
         """Check the highlighted nets."""
-        for i in self._get_selected_indices():
-            self.net_list.Check(i, True)
+        check_list = self._get_active_check_list()
+        if check_list:
+            for i in self._get_selected_indices():
+                check_list.Check(i, True)
+                # Also update _checked_nets
+                name = check_list.GetString(i)
+                self._checked_nets.add(name)
 
     def _on_unselect(self, event):
         """Uncheck the highlighted nets."""
-        for i in self._get_selected_indices():
-            self.net_list.Check(i, False)
+        check_list = self._get_active_check_list()
+        if check_list:
+            for i in self._get_selected_indices():
+                check_list.Check(i, False)
+                # Also update _checked_nets
+                name = check_list.GetString(i)
+                self._checked_nets.discard(name)
 
     def get_selected_nets(self):
         """Get list of selected net names."""
-        # Update _checked_nets with current visible state
-        for i in range(self.net_list.GetCount()):
-            name = self.net_list.GetString(i)
-            if self.net_list.IsChecked(i):
-                self._checked_nets.add(name)
-            else:
-                self._checked_nets.discard(name)
-
+        # Sync from the current view
+        self._sync_checked_state_from_view()
         # Return all checked nets
         return list(self._checked_nets)
 
@@ -372,6 +491,106 @@ class NetSelectionPanel(wx.Panel):
         """Check if a net name looks like a differential pair net."""
         from net_queries import extract_diff_pair_base
         return extract_diff_pair_base(name) is not None
+
+    def _on_separate_netclass_changed(self, event):
+        """Handle the separate by net class checkbox toggle."""
+        enable_tabs = self.separate_netclass_check.GetValue()
+
+        # Sync checked state from current view before switching
+        self._sync_checked_state_from_view()
+
+        if enable_tabs:
+            if not self._create_tabbed_view():
+                return  # Failed to create tabs, checkbox already unchecked
+
+            # Hide single list, show notebook
+            self.net_list.Hide()
+            self._list_container_sizer.Clear()
+            self._list_container_sizer.Add(self._netclass_notebook, 1, wx.EXPAND)
+            self._netclass_notebook.Show()
+            self._separate_by_netclass = True
+        else:
+            # Hide notebook, show single list
+            self._destroy_tabbed_view()
+            self._list_container_sizer.Clear()
+            self._list_container_sizer.Add(self.net_list, 1, wx.EXPAND)
+            self.net_list.Show()
+            self._separate_by_netclass = False
+
+        self.Layout()
+        # Don't sync again - we already synced before switching views
+        self._update_net_list(sync_from_visible=False)
+
+    def _create_tabbed_view(self):
+        """Create the tabbed notebook view for net class separation.
+
+        Returns:
+            bool: True if tabs were created, False if only Default class exists
+        """
+        # Fetch net classes from pcbnew
+        self._net_to_class, self._netclass_names = _get_net_classes_from_board()
+
+        # If we only have Default or couldn't get classes, don't switch
+        if len(self._netclass_names) <= 1:
+            wx.MessageBox(
+                "No custom net classes found. All nets are in 'Default' class.",
+                "Net Classes",
+                wx.OK | wx.ICON_INFORMATION
+            )
+            self.separate_netclass_check.SetValue(False)
+            return False
+
+        # Create notebook
+        self._netclass_notebook = wx.Notebook(self)
+        self._tabbed_net_lists = {}
+
+        for class_name in self._netclass_names:
+            panel = wx.Panel(self._netclass_notebook)
+            panel_sizer = wx.BoxSizer(wx.VERTICAL)
+
+            check_list = wx.CheckListBox(panel, size=(200, -1), style=wx.LB_EXTENDED)
+            check_list.Bind(wx.EVT_KEY_DOWN, self._on_net_list_key)
+            panel_sizer.Add(check_list, 1, wx.EXPAND)
+
+            panel.SetSizer(panel_sizer)
+            self._netclass_notebook.AddPage(panel, class_name)
+            self._tabbed_net_lists[class_name] = check_list
+
+        return True
+
+    def _destroy_tabbed_view(self):
+        """Destroy the tabbed notebook and return to single list view."""
+        if self._netclass_notebook:
+            self._netclass_notebook.Destroy()
+            self._netclass_notebook = None
+            self._tabbed_net_lists = {}
+
+    def _sync_checked_state_from_view(self):
+        """Sync _checked_nets from the currently visible view."""
+        if self._separate_by_netclass and self._tabbed_net_lists:
+            for class_name, check_list in self._tabbed_net_lists.items():
+                for i in range(check_list.GetCount()):
+                    name = check_list.GetString(i)
+                    if check_list.IsChecked(i):
+                        self._checked_nets.add(name)
+                    else:
+                        self._checked_nets.discard(name)
+        else:
+            for i in range(self.net_list.GetCount()):
+                name = self.net_list.GetString(i)
+                if self.net_list.IsChecked(i):
+                    self._checked_nets.add(name)
+                else:
+                    self._checked_nets.discard(name)
+
+    def _get_active_check_list(self):
+        """Get the currently active CheckListBox (either single list or current tab)."""
+        if self._separate_by_netclass and self._netclass_notebook:
+            current_tab = self._netclass_notebook.GetSelection()
+            if current_tab >= 0 and current_tab < len(self._netclass_names):
+                class_name = self._netclass_names[current_tab]
+                return self._tabbed_net_lists.get(class_name)
+        return self.net_list
 
     def set_differential_mode(self, enabled):
         """Switch between single-ended and differential pair display mode."""
@@ -405,13 +624,8 @@ class NetSelectionPanel(wx.Panel):
         if not self._differential_mode:
             return []
 
-        # Update _checked_nets with current visible state
-        for i in range(self.net_list.GetCount()):
-            name = self.net_list.GetString(i)
-            if self.net_list.IsChecked(i):
-                self._checked_nets.add(name)
-            else:
-                self._checked_nets.discard(name)
+        # Sync from the current view
+        self._sync_checked_state_from_view()
 
         # Return pair info for checked pairs
         result = []
