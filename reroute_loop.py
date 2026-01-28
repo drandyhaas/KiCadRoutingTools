@@ -33,6 +33,7 @@ def run_reroute_loop(
     route_index_start: int = 0,
     cancel_check=None,
     progress_callback=None,
+    failed_so_far: int = 0,
 ) -> Tuple[int, int, float, int, int]:
     """
     Run the unified reroute loop for all nets ripped during routing.
@@ -42,6 +43,7 @@ def run_reroute_loop(
         route_index_start: Starting route index (continues from previous routing phases)
         cancel_check: Optional callable returning True if routing should be cancelled
         progress_callback: Optional callable(current, total, net_name) for progress updates
+        failed_so_far: Number of failed routes from previous routing phases
 
     Returns:
         Tuple of (successful, failed, total_time, total_iterations, route_index)
@@ -106,13 +108,17 @@ def run_reroute_loop(
 
             route_index += 1
             current_total = total_routes + len(reroute_queue)
-            failed_str = f" ({failed} failed)" if failed > 0 else ""
+            total_failed = failed_so_far + failed
+            failed_str = f" ({total_failed} failed)" if total_failed > 0 else ""
             print(f"\n[REROUTE {route_index}/{current_total}{failed_str}] Re-routing ripped net {ripped_net_name}")
             print("-" * 40)
 
             # Update progress for reroute
             if progress_callback:
-                progress_callback(route_index, current_total, f"Reroute: {ripped_net_name}")
+                msg = f"Reroute: {ripped_net_name}"
+                if total_failed > 0:
+                    msg += f" ({total_failed} failed)"
+                progress_callback(route_index, current_total, msg)
 
             # Calculate stub length before routing
             stub_length = calculate_stub_length(pcb_data, ripped_net_id)
@@ -474,13 +480,17 @@ def run_reroute_loop(
 
             route_index += 1
             current_total = total_routes + len(reroute_queue)
-            failed_str = f" ({failed} failed)" if failed > 0 else ""
+            total_failed = failed_so_far + failed
+            failed_str = f" ({total_failed} failed)" if total_failed > 0 else ""
             print(f"\n[REROUTE {route_index}/{current_total}{failed_str}] Re-routing ripped diff pair {ripped_pair_name}")
             print("-" * 40)
 
             # Update progress for diff pair reroute
             if progress_callback:
-                progress_callback(route_index, current_total, f"Reroute: {ripped_pair_name}")
+                msg = f"Reroute: {ripped_pair_name}"
+                if total_failed > 0:
+                    msg += f" ({total_failed} failed)"
+                progress_callback(route_index, current_total, msg)
 
             start_time = time.time()
             obstacles, unrouted_stubs = build_diff_pair_obstacles(

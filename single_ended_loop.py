@@ -111,7 +111,10 @@ def route_single_ended_nets(
 
         # Report progress
         if progress_callback is not None:
-            progress_callback(route_index, total_routes, net_name)
+            msg = net_name
+            if failed > 0:
+                msg += f" ({failed} failed)"
+            progress_callback(route_index, total_routes, msg)
         print("-" * 40)
 
         # Periodic memory reporting (every 10 nets)

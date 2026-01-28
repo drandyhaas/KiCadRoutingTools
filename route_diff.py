@@ -583,7 +583,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Run reroute loop for nets that were ripped during diff pair routing
     rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
         state, route_index_start=route_index,
-        cancel_check=cancel_check
+        cancel_check=cancel_check, progress_callback=progress_callback,
+        failed_so_far=failed
     )
     successful += rq_successful
     failed += rq_failed

@@ -93,7 +93,10 @@ def route_diff_pairs(
 
         # Update progress
         if state.progress_callback is not None:
-            state.progress_callback(route_index, total_routes, pair_name)
+            msg = pair_name
+            if failed > 0:
+                msg += f" ({failed} failed)"
+            state.progress_callback(route_index, total_routes, msg)
 
         # Periodic memory reporting (every 5 diff pairs)
         if config.debug_memory and (route_index % 5 == 1 or route_index == len(diff_pair_ids_to_route)):

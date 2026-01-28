@@ -531,17 +531,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Counters (kept as locals, not aliased from state)
     route_index = 0
 
-    # Wrap progress callback to show "net_name (X/N)"
-    def routing_progress_callback(current, total, net_name):
-        if progress_callback:
-            progress_callback(current, total_routes, net_name)
-
     # Route single-ended nets
     se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
         state, single_ended_nets,
         visualize=visualize, vis_callback=vis_callback, base_vis_data=base_vis_data,
         route_index_start=route_index,
-        cancel_check=cancel_check, progress_callback=routing_progress_callback
+        cancel_check=cancel_check, progress_callback=progress_callback
     )
     successful += se_successful
     failed += se_failed
@@ -551,7 +546,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Run reroute loop for nets that were ripped during diff pair or single-ended routing
     rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
         state, route_index_start=route_index,
-        cancel_check=cancel_check, progress_callback=routing_progress_callback
+        cancel_check=cancel_check, progress_callback=progress_callback,
+        failed_so_far=failed
     )
     successful += rq_successful
     failed += rq_failed
