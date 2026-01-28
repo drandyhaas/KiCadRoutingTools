@@ -128,6 +128,7 @@ class NetSelectionPanel(wx.Panel):
         self._differential_mode = False  # When True, show diff pairs as "name_P/N"
         self._diff_pairs = {}  # base_name -> (p_net_id, n_net_id) when in diff mode
         self._on_selection_changed = None  # Callback when selection changes
+        self._on_tabbed_view_changed = None  # Callback when tabbed view is created/destroyed
 
         # Net class separation
         self._separate_by_netclass = False
@@ -311,6 +312,20 @@ class NetSelectionPanel(wx.Panel):
         """Notify that selection has changed."""
         if self._on_selection_changed:
             self._on_selection_changed()
+
+    def set_tabbed_view_changed_callback(self, fn):
+        """Set callback to be called when tabbed view is created/destroyed.
+
+        Args:
+            fn: Function(notebook_or_none) called with the notebook when created,
+                or None when destroyed
+        """
+        self._on_tabbed_view_changed = fn
+
+    def _notify_tabbed_view_changed(self):
+        """Notify that tabbed view has changed."""
+        if self._on_tabbed_view_changed:
+            self._on_tabbed_view_changed(self._netclass_notebook)
 
     def suspend_check(self):
         """Temporarily disable connectivity checking during settings restore."""
@@ -531,6 +546,7 @@ class NetSelectionPanel(wx.Panel):
             self._list_container_sizer.Add(self._netclass_notebook, 1, wx.EXPAND)
             self._netclass_notebook.Show()
             self._separate_by_netclass = True
+            self._notify_tabbed_view_changed()
         else:
             # Hide notebook, show single list
             self._destroy_tabbed_view()
@@ -538,6 +554,7 @@ class NetSelectionPanel(wx.Panel):
             self._list_container_sizer.Add(self.net_list, 1, wx.EXPAND)
             self.net_list.Show()
             self._separate_by_netclass = False
+            self._notify_tabbed_view_changed()
 
         self.Layout()
         # Don't sync again - we already synced before switching views
