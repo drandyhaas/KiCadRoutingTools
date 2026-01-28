@@ -155,7 +155,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 add_teardrops: bool = False,
                 return_results: bool = False,
                 pcb_data=None,
-                cancel_check=None) -> Tuple[int, int, float]:
+                cancel_check=None,
+                progress_callback=None) -> Tuple[int, int, float]:
     """
     Route differential pairs using the Rust router.
 
@@ -549,6 +550,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         net_obstacles_cache=net_obstacles_cache,
         working_obstacles=working_obstacles,
         cancel_check=cancel_check,
+        progress_callback=progress_callback,
     )
 
     # Create local aliases for frequently-used state fields
@@ -580,7 +582,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     # Run reroute loop for nets that were ripped during diff pair routing
     rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
-        state, route_index_start=route_index
+        state, route_index_start=route_index,
+        cancel_check=cancel_check
     )
     successful += rq_successful
     failed += rq_failed

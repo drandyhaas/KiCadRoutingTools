@@ -1568,10 +1568,6 @@ class RoutingDialog(wx.Dialog):
         # connectivity checks see the new tracks
         self._sync_pcb_data_from_board()
 
-        # Repopulate connectivity cache before showing message box
-        # so the net list refresh after OK is fast
-        self._check_connectivity_with_progress()
-
         # Update UI and show completion message
         self.progress_bar.SetValue(100)
         self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed")
@@ -1590,6 +1586,9 @@ class RoutingDialog(wx.Dialog):
         msg += "\nUse Edit -> Undo to revert changes."
 
         wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
+
+        # Check connectivity after dialog is dismissed
+        self._check_connectivity_with_progress()
 
         # Refresh net list to hide newly connected nets
         self._update_net_list()

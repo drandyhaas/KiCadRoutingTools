@@ -57,6 +57,7 @@ def run_phase3_tap_routing(
     track_proximity_cache: Dict[int, Dict],
     layer_map: Dict[str, int],
     progress_callback: Any = None,
+    cancel_check: Any = None,
 ) -> Phase3Stats:
     """
     Route tap connections for all pending multi-point nets.
@@ -111,6 +112,11 @@ def run_phase3_tap_routing(
     total_multipoint_nets = len(state.pending_multipoint_nets)
     net_index = 0
     for net_id, main_result in list(state.pending_multipoint_nets.items()):
+        # Check for cancellation at start of each phase 3 iteration
+        if cancel_check and cancel_check():
+            print("\nPhase 3 cancelled by user")
+            break
+
         # Skip if already processed (removed during a Phase 3 rip-up reroute of another net)
         if net_id not in state.pending_multipoint_nets:
             continue

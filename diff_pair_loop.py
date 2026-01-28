@@ -91,6 +91,10 @@ def route_diff_pairs(
         print(f"  N: {pair.n_net_name} (id={pair.n_net_id})")
         print("-" * 40)
 
+        # Update progress
+        if state.progress_callback is not None:
+            state.progress_callback(route_index, total_routes, pair_name)
+
         # Periodic memory reporting (every 5 diff pairs)
         if config.debug_memory and (route_index % 5 == 1 or route_index == len(diff_pair_ids_to_route)):
             current_mem = get_process_memory_mb()

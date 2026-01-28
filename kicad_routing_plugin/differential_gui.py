@@ -534,9 +534,22 @@ class DifferentialTab(wx.Panel):
         # Poll for completion
         self._poll_routing()
 
+    def _update_progress(self, current, total, step_name):
+        """Update progress bar and status."""
+        if total > 0:
+            percent = int(100 * current / total)
+            self.progress_bar.SetValue(percent)
+            self.progress_bar.SetRange(100)
+            self.status_text.SetLabel(f"{step_name} ({current}/{total})")
+        else:
+            # Setup phase - no count, just show the step name
+            self.progress_bar.Pulse()
+            self.status_text.SetLabel(step_name)
+
     def _run_diff_routing(self, config, net_names):
         """Run differential pair routing in a background thread."""
         import sys
+        import time
 
         original_stdout = sys.stdout
         if self.append_log:
@@ -548,6 +561,11 @@ class DifferentialTab(wx.Panel):
             # Run differential pair routing with return_results=True
             def check_cancel():
                 return self._cancel_requested
+
+            def on_progress(current, total, pair_name=""):
+                wx.CallAfter(self._update_progress, current, total, pair_name)
+                # Brief sleep releases GIL, allowing main thread to process CallAfter events
+                time.sleep(0.01)
 
             successful, failed, total_time, results_data = batch_route_diff_pairs(
                 input_file=self.board_filename,
@@ -575,6 +593,7 @@ class DifferentialTab(wx.Panel):
                 return_results=True,
                 pcb_data=self.pcb_data,
                 cancel_check=check_cancel,
+                progress_callback=on_progress,
             )
 
             self._routing_result = {

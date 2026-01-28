@@ -550,7 +550,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Run reroute loop for nets that were ripped during diff pair or single-ended routing
     rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
-        state, route_index_start=route_index
+        state, route_index_start=route_index,
+        cancel_check=cancel_check, progress_callback=routing_progress_callback
     )
     successful += rq_successful
     failed += rq_failed
@@ -592,6 +593,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         track_proximity_cache=track_proximity_cache,
         layer_map=layer_map,
         progress_callback=phase3_progress_callback,
+        cancel_check=cancel_check,
     )
 
     # Final progress update
