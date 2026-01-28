@@ -40,6 +40,46 @@ def _build_layer_mappings():
     return name_to_id, id_to_name
 
 
+def _get_netclass_parameters(class_name):
+    """Get routing parameters for a specific net class from pcbnew.
+
+    Args:
+        class_name: Name of the net class (e.g., 'Default', 'Wide')
+
+    Returns:
+        dict with keys: track_width, clearance, via_size, via_drill (all in mm)
+        Returns None if net class not found or error occurs.
+    """
+    try:
+        import pcbnew
+        board = pcbnew.GetBoard()
+        if board is None:
+            return None
+
+        ds = board.GetDesignSettings()
+        net_settings = ds.m_NetSettings
+
+        # Get the net class by name
+        netclass = net_settings.GetNetClassByName(class_name)
+        if not netclass:
+            # Try getting default
+            netclass = net_settings.GetDefaultNetclass()
+        if not netclass:
+            return None
+
+        # KiCad stores values in nanometers, convert to mm
+        nm_to_mm = 1e-6
+
+        return {
+            'track_width': netclass.GetTrackWidth() * nm_to_mm,
+            'clearance': netclass.GetClearance() * nm_to_mm,
+            'via_size': netclass.GetViaDiameter() * nm_to_mm,
+            'via_drill': netclass.GetViaDrill() * nm_to_mm,
+        }
+    except Exception:
+        return None
+
+
 class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
@@ -169,6 +209,11 @@ class RoutingDialog(wx.Dialog):
 
         # Add notebook to main sizer
         main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
+
+        # Status bar at bottom
+        self.status_bar = wx.StaticText(main_panel, label="")
+        main_sizer.Add(self.status_bar, 0, wx.EXPAND | wx.ALL, 5)
+
         main_panel.SetSizer(main_sizer)
 
     def _create_about_tab(self):
@@ -198,6 +243,7 @@ class RoutingDialog(wx.Dialog):
             show_hide_differential=True,
             hide_differential_default=True
         )
+        self.net_panel.set_selection_changed_callback(self._update_status_bar)
         net_sizer.Add(self.net_panel, 1, wx.EXPAND)
 
         h_sizer.Add(net_sizer, 1, wx.EXPAND | wx.ALL, 5)
@@ -219,6 +265,14 @@ class RoutingDialog(wx.Dialog):
         """Create the parameters panel with basic settings only."""
         param_box = wx.StaticBox(panel, label="Parameters")
         param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
+
+        # Use net class definitions checkbox
+        self.use_netclass_check = wx.CheckBox(panel, label="Use net class definitions")
+        self.use_netclass_check.SetValue(False)
+        self.use_netclass_check.SetToolTip("Use track width, clearance, via size from selected net class")
+        self.use_netclass_check.Bind(wx.EVT_CHECKBOX, self._on_use_netclass_changed)
+        param_box_sizer.Add(self.use_netclass_check, 0, wx.ALL, 5)
+
         param_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
         param_scroll.SetScrollRate(0, 10)
         param_inner = wx.BoxSizer(wx.VERTICAL)
@@ -918,14 +972,8 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab.net_panel.refresh(sync_from_visible=False)
         self.planes_tab.net_panel.refresh(sync_from_visible=False)
 
-        # Update status with connectivity info
-        connected_count = sum(1 for v in self._connectivity_cache.values() if v)
-        remaining = self.net_panel.net_list.GetCount()
-        hide_connected = self.net_panel.hide_check and self.net_panel.hide_check.GetValue()
-        if hide_connected:
-            self.status_text.SetLabel(f"Ready - {remaining} nets to route ({connected_count} connected)")
-        else:
-            self.status_text.SetLabel(f"Ready - {remaining} nets")
+        # Update status bar and progress text
+        self._update_status_bar()
 
     def _is_net_connected(self, net_id):
         """Check if a net is already fully connected using check_connected logic."""
@@ -986,14 +1034,24 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab.net_panel.refresh()
         self.planes_tab.net_panel.refresh()
 
-        # Update status
+        # Update status bar and progress text
+        self._update_status_bar()
+
+    def _update_status_bar(self):
+        """Update the status bar with net counts."""
+        total_nets = len(self.all_nets)
         connected_count = sum(1 for v in self._connectivity_cache.values() if v)
-        remaining = self.net_panel.net_list.GetCount()
-        hide_connected = self.net_panel.hide_check and self.net_panel.hide_check.GetValue()
-        if hide_connected:
-            self.status_text.SetLabel(f"Ready - {remaining} nets to route ({connected_count} connected)")
-        else:
-            self.status_text.SetLabel(f"Ready - {remaining} nets")
+        remaining = total_nets - connected_count
+        selected_count = len(self.net_panel.get_selected_nets())
+
+        # Update bottom status bar
+        self.status_bar.SetLabel(
+            f"Total: {total_nets}  |  Connected: {connected_count}  |  "
+            f"To route: {remaining}  |  Selected: {selected_count}"
+        )
+
+        # Update progress text (simplified)
+        self.status_text.SetLabel(f"Ready - {selected_count} nets selected to route")
 
     def _on_clear_log(self, event):
         """Clear the log text control."""
@@ -1338,6 +1396,72 @@ class RoutingDialog(wx.Dialog):
 
         return config
 
+    def _on_use_netclass_changed(self, event):
+        """Handle the 'Use net class definitions' checkbox toggle."""
+        use_netclass = self.use_netclass_check.GetValue()
+
+        # List of controls that are overridden by net class
+        netclass_controls = [self.track_width, self.clearance, self.via_size, self.via_drill]
+
+        if use_netclass:
+            # Get the selected net class name
+            class_name = self._get_selected_netclass_name()
+            params = self._get_netclass_params(class_name)
+
+            if params:
+                # Populate the controls with net class values
+                self.track_width.SetValue(params['track_width'])
+                self.clearance.SetValue(params['clearance'])
+                self.via_size.SetValue(params['via_size'])
+                self.via_drill.SetValue(params['via_drill'])
+
+            # Disable the controls
+            for ctrl in netclass_controls:
+                ctrl.Disable()
+
+            # Connect to net panel's notebook tab changes if in tabbed mode
+            if hasattr(self.net_panel, '_netclass_notebook') and self.net_panel._netclass_notebook:
+                self.net_panel._netclass_notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self._on_netclass_tab_changed)
+        else:
+            # Enable the controls
+            for ctrl in netclass_controls:
+                ctrl.Enable()
+
+            # Unbind tab change handler
+            if hasattr(self.net_panel, '_netclass_notebook') and self.net_panel._netclass_notebook:
+                self.net_panel._netclass_notebook.Unbind(wx.EVT_NOTEBOOK_PAGE_CHANGED)
+
+    def _on_netclass_tab_changed(self, event):
+        """Handle net class tab change to update parameters."""
+        event.Skip()  # Allow normal tab switching
+
+        if not self.use_netclass_check.GetValue():
+            return
+
+        class_name = self._get_selected_netclass_name()
+        params = self._get_netclass_params(class_name)
+
+        if params:
+            self.track_width.SetValue(params['track_width'])
+            self.clearance.SetValue(params['clearance'])
+            self.via_size.SetValue(params['via_size'])
+            self.via_drill.SetValue(params['via_drill'])
+
+    def _get_selected_netclass_name(self):
+        """Get the currently selected net class name from the net panel."""
+        if (hasattr(self.net_panel, '_separate_by_netclass') and
+            self.net_panel._separate_by_netclass and
+            self.net_panel._netclass_notebook):
+            # Get the selected tab's class name
+            current_tab = self.net_panel._netclass_notebook.GetSelection()
+            if current_tab >= 0 and current_tab < len(self.net_panel._netclass_names):
+                return self.net_panel._netclass_names[current_tab]
+        return 'Default'
+
+    def _get_netclass_params(self, class_name):
+        """Get parameters for a net class."""
+        return _get_netclass_parameters(class_name)
+
     def _on_route(self, event):
         """Handle route button click."""
         selected_nets, selected_layers = self._validate_routing_inputs()
@@ -1587,11 +1711,23 @@ class RoutingDialog(wx.Dialog):
 
         wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
 
+        # Clear the selected nets since they've been routed
+        self.net_panel._checked_nets.clear()
+        # Also uncheck all visible checkboxes
+        for i in range(self.net_panel.net_list.GetCount()):
+            self.net_panel.net_list.Check(i, False)
+        # Uncheck in tabbed view if active
+        if self.net_panel._tabbed_net_lists:
+            for check_list in self.net_panel._tabbed_net_lists.values():
+                for i in range(check_list.GetCount()):
+                    check_list.Check(i, False)
+
         # Check connectivity after dialog is dismissed
         self._check_connectivity_with_progress()
 
-        # Refresh net list to hide newly connected nets
-        self._update_net_list()
+        # Refresh net list to hide newly connected nets (don't sync from visible since we just cleared)
+        self.net_panel.refresh(sync_from_visible=False)
+        self._update_status_bar()
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""

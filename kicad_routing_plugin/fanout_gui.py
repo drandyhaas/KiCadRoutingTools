@@ -127,6 +127,7 @@ class NetSelectionPanel(wx.Panel):
         self._min_pads_for_dropdown = min_pads_for_dropdown
         self._differential_mode = False  # When True, show diff pairs as "name_P/N"
         self._diff_pairs = {}  # base_name -> (p_net_id, n_net_id) when in diff mode
+        self._on_selection_changed = None  # Callback when selection changes
 
         # Net class separation
         self._separate_by_netclass = False
@@ -214,6 +215,7 @@ class NetSelectionPanel(wx.Panel):
         self._list_container_sizer = wx.BoxSizer(wx.VERTICAL)
         self.net_list = wx.CheckListBox(self, size=(200, -1), style=wx.LB_EXTENDED)
         self.net_list.Bind(wx.EVT_KEY_DOWN, self._on_net_list_key)
+        self.net_list.Bind(wx.EVT_CHECKLISTBOX, self._on_checklist_toggled)
         self._list_container_sizer.Add(self.net_list, 1, wx.EXPAND)
         sizer.Add(self._list_container_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
@@ -296,6 +298,19 @@ class NetSelectionPanel(wx.Panel):
             fn: Function(net_id) -> bool, returns True if net should be hidden
         """
         self._check_fn = fn
+
+    def set_selection_changed_callback(self, fn):
+        """Set callback to be called when selection changes.
+
+        Args:
+            fn: Function() called when nets are selected/unselected
+        """
+        self._on_selection_changed = fn
+
+    def _notify_selection_changed(self):
+        """Notify that selection has changed."""
+        if self._on_selection_changed:
+            self._on_selection_changed()
 
     def suspend_check(self):
         """Temporarily disable connectivity checking during settings restore."""
@@ -435,6 +450,11 @@ class NetSelectionPanel(wx.Panel):
         """Handle filter text change."""
         self._update_net_list()
 
+    def _on_checklist_toggled(self, event):
+        """Handle checkbox toggle in the net list."""
+        self._notify_selection_changed()
+        event.Skip()
+
     def _on_net_list_key(self, event):
         """Handle keyboard events in net list."""
         # Ctrl+A selects all items
@@ -460,6 +480,7 @@ class NetSelectionPanel(wx.Panel):
                 # Also update _checked_nets
                 name = check_list.GetString(i)
                 self._checked_nets.add(name)
+            self._notify_selection_changed()
 
     def _on_unselect(self, event):
         """Uncheck the highlighted nets."""
@@ -470,6 +491,7 @@ class NetSelectionPanel(wx.Panel):
                 # Also update _checked_nets
                 name = check_list.GetString(i)
                 self._checked_nets.discard(name)
+            self._notify_selection_changed()
 
     def get_selected_nets(self):
         """Get list of selected net names."""
@@ -550,6 +572,7 @@ class NetSelectionPanel(wx.Panel):
 
             check_list = wx.CheckListBox(panel, size=(200, -1), style=wx.LB_EXTENDED)
             check_list.Bind(wx.EVT_KEY_DOWN, self._on_net_list_key)
+            check_list.Bind(wx.EVT_CHECKLISTBOX, self._on_checklist_toggled)
             panel_sizer.Add(check_list, 1, wx.EXPAND)
 
             panel.SetSizer(panel_sizer)

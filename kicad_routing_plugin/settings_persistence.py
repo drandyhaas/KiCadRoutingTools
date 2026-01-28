@@ -92,6 +92,8 @@ def get_dialog_settings(dialog):
         # Hide checkboxes
         'net_panel_hide': dialog.net_panel.hide_check.GetValue() if dialog.net_panel.hide_check else False,
         'net_panel_hide_diff': dialog.net_panel.hide_diff_check.GetValue() if dialog.net_panel.hide_diff_check else False,
+        'net_panel_separate_netclass': dialog.net_panel.separate_netclass_check.GetValue(),
+        'use_netclass_definitions': dialog.use_netclass_check.GetValue(),
         'swappable_hide': dialog.swappable_net_panel.hide_check.GetValue() if dialog.swappable_net_panel.hide_check else False,
         'diff_panel_hide': dialog.differential_tab.pair_panel.hide_check.GetValue() if dialog.differential_tab.pair_panel.hide_check else False,
         'fanout_hide': dialog.fanout_tab.net_panel.hide_check.GetValue() if dialog.fanout_tab.net_panel.hide_check else False,
@@ -309,6 +311,16 @@ def restore_dialog_settings(dialog, settings):
         dialog.net_panel.hide_check.SetValue(settings['net_panel_hide'])
     if 'net_panel_hide_diff' in settings and dialog.net_panel.hide_diff_check:
         dialog.net_panel.hide_diff_check.SetValue(settings['net_panel_hide_diff'])
+    # Restore net class separation checkbox and trigger its handler
+    if 'net_panel_separate_netclass' in settings:
+        dialog.net_panel.separate_netclass_check.SetValue(settings['net_panel_separate_netclass'])
+        if settings['net_panel_separate_netclass']:
+            dialog.net_panel._on_separate_netclass_changed(None)
+    # Restore use net class definitions checkbox and trigger its handler
+    if 'use_netclass_definitions' in settings:
+        dialog.use_netclass_check.SetValue(settings['use_netclass_definitions'])
+        if settings['use_netclass_definitions']:
+            dialog._on_use_netclass_changed(None)
     if 'swappable_hide' in settings and dialog.swappable_net_panel.hide_check:
         dialog.swappable_net_panel.hide_check.SetValue(settings['swappable_hide'])
     if 'diff_panel_hide' in settings and dialog.differential_tab.pair_panel.hide_check:
