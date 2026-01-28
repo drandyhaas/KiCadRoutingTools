@@ -56,6 +56,61 @@ def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 
     return abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance
 
 
+class SpatialIndex:
+    """Grid-based spatial index for fast proximity queries."""
+
+    def __init__(self, cell_size: float = 1.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)  # (gx, gy, layer) -> list of (x, y, point_id, size)
+
+    def _cell(self, x: float, y: float) -> Tuple[int, int]:
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def add(self, x: float, y: float, layer: str, point_id: int, size: float):
+        gx, gy = self._cell(x, y)
+        self.grid[(gx, gy, layer)].append((x, y, point_id, size))
+
+    def query_nearby(self, x: float, y: float, layer: str, radius: float):
+        """Return all points within radius on the same layer."""
+        gx, gy = self._cell(x, y)
+        # Check neighboring cells based on radius
+        cells_to_check = int(radius / self.cell_size) + 1
+        results = []
+        for dx in range(-cells_to_check, cells_to_check + 1):
+            for dy in range(-cells_to_check, cells_to_check + 1):
+                for pt in self.grid.get((gx + dx, gy + dy, layer), []):
+                    results.append(pt)
+        return results
+
+
+class SegmentIndex:
+    """Grid-based spatial index for segments."""
+
+    def __init__(self, cell_size: float = 1.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)  # (gx, gy, layer) -> list of (seg, seg_start_id)
+
+    def _cells_for_segment(self, seg) -> List[Tuple[int, int]]:
+        """Return all grid cells that a segment passes through."""
+        x1, y1, x2, y2 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
+        gx1, gy1 = int(min(x1, x2) // self.cell_size), int(min(y1, y2) // self.cell_size)
+        gx2, gy2 = int(max(x1, x2) // self.cell_size), int(max(y1, y2) // self.cell_size)
+        cells = []
+        for gx in range(gx1, gx2 + 1):
+            for gy in range(gy1, gy2 + 1):
+                cells.append((gx, gy))
+        return cells
+
+    def add(self, seg, seg_start_id: int):
+        for gx, gy in self._cells_for_segment(seg):
+            self.grid[(gx, gy, seg.layer)].append((seg, seg_start_id))
+
+    def query_at(self, x: float, y: float, layer: str):
+        """Return all segments that might contain point (x, y) on layer."""
+        gx, gy = int(x // self.cell_size), int(y // self.cell_size)
+        return self.grid.get((gx, gy, layer), [])
+
+
 def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:
     """Check if point (px, py) lies on the segment from (x1, y1) to (x2, y2) within tolerance.
 
@@ -235,28 +290,36 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             for pid in points_in_zone[1:]:
                 uf.union(points_in_zone[0], pid)
 
+    # Build spatial index for points (use 1mm grid cells)
+    point_index = SpatialIndex(cell_size=1.0)
+    for x, y, layer, pid, size in all_points:
+        point_index.add(x, y, layer, pid, size)
+
     # Connect all points that are within tolerance on the same layer
-    # Use size/4 as the tolerance for each point pair (use the larger of the two)
-    # but ensure we never go below the minimum tolerance parameter
-    for i, (x1, y1, l1, id1, size1) in enumerate(all_points):
-        for j in range(i + 1, len(all_points)):
-            x2, y2, l2, id2, size2 = all_points[j]
-            if l1 != l2:
+    # Use spatial index for O(n) average instead of O(n²)
+    max_tolerance = 1.0  # Maximum possible tolerance (size/4 capped at reasonable value)
+    for x1, y1, l1, id1, size1 in all_points:
+        # Query nearby points on same layer
+        for x2, y2, id2, size2 in point_index.query_nearby(x1, y1, l1, max_tolerance):
+            if id2 <= id1:  # Avoid duplicate checks
                 continue
             # Use max(size1, size2) / 4, but at least the minimum tolerance
             point_tolerance = max(max(size1, size2) / 4, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
                 uf.union(id1, id2)
 
+    # Build spatial index for segments
+    seg_index = SegmentIndex(cell_size=1.0)
+    for seg_idx, seg in enumerate(segments):
+        seg_start_id = seg_idx * 2
+        seg_index.add(seg, seg_start_id)
+
     # Check for T-junctions: points that lie on the middle of a segment (same layer)
-    # This handles cases where a track endpoint meets another track mid-segment
+    # Use spatial index for O(n) average instead of O(n × m)
     for px, py, player, pid, psize in all_points:
-        for seg_idx, seg in enumerate(segments):
-            if seg.layer != player:
-                continue
-            # Get the segment's endpoint IDs (each segment has 2 consecutive point IDs)
-            seg_start_id = seg_idx * 2
-            seg_end_id = seg_idx * 2 + 1
+        # Query segments that might contain this point
+        for seg, seg_start_id in seg_index.query_at(px, py, player):
+            seg_end_id = seg_start_id + 1
             # Skip if this point IS one of the segment's endpoints
             if pid == seg_start_id or pid == seg_end_id:
                 continue
