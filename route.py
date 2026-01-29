@@ -427,12 +427,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     base_vis_data = None
     if visualize:
         base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
-            pcb_data, config, all_net_ids_to_route, net_clearances=net_clearances)
+            pcb_data, config, all_net_ids_to_route,
+            net_clearances=net_clearances)
         # Set bounds for visualization
         base_vis_data.bounds = get_net_bounds(pcb_data, all_net_ids_to_route, padding=5.0)
     else:
         base_obstacles = build_base_obstacle_map(
-            pcb_data, config, all_net_ids_to_route, net_clearances=net_clearances)
+            pcb_data, config, all_net_ids_to_route,
+            net_clearances=net_clearances)
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
