@@ -119,8 +119,10 @@ def iter_pad_blocked_cells(
     buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
 
     # Inner rectangle bounds (where corners start)
-    inner_half_w = half_width - corner_radius if corner_radius > 0 else half_width
-    inner_half_h = half_height - corner_radius if corner_radius > 0 else half_height
+    # For rectangular pads (corner_radius=0), define corner region with a threshold
+    corner_threshold = grid_step / 2 if corner_radius == 0 else 0
+    inner_half_w = half_width - corner_radius - corner_threshold
+    inner_half_h = half_height - corner_radius - corner_threshold
 
     for ex in range(-expand_x, expand_x + 1):
         for ey in range(-expand_y, expand_y + 1):

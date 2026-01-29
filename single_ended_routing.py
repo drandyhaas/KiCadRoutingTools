@@ -289,8 +289,10 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
+    # Compare against layer-specific width (not base track_width) to handle impedance routing
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
-    extra_half_width = (net_track_width - config.track_width) / 2
+    layer_track_width = config.get_track_width(config.layers[0])
+    extra_half_width = (net_track_width - layer_track_width) / 2
     track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     # Determine direction order (always deterministic)
@@ -507,8 +509,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
+    # Compare against layer-specific width (not base track_width) to handle impedance routing
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
-    extra_half_width = (net_track_width - config.track_width) / 2
+    layer_track_width = config.get_track_width(config.layers[0])
+    extra_half_width = (net_track_width - layer_track_width) / 2
     track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     # Determine direction order (always deterministic)
@@ -1012,8 +1016,10 @@ def route_multipoint_main(
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
+    # Compare against layer-specific width (not base track_width) to handle impedance routing
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
-    extra_half_width = (net_track_width - config.track_width) / 2
+    layer_track_width = config.get_track_width(config.layers[0])
+    extra_half_width = (net_track_width - layer_track_width) / 2
     track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     # Use probe routing helper
@@ -1207,8 +1213,10 @@ def route_multipoint_taps(
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
+    # Compare against layer-specific width (not base track_width) to handle impedance routing
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
-    extra_half_width = (net_track_width - config.track_width) / 2
+    layer_track_width = config.get_track_width(config.layers[0])
+    extra_half_width = (net_track_width - layer_track_width) / 2
     track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     total_iterations = 0
