@@ -949,7 +949,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
 
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
-        via_margin = config.via_size / 2 + config.clearance
+        via_margin = config.via_size / 2 + clearance + extra_clearance
         for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin, config.grid_step, corner_radius):
             obstacles.add_blocked_via(cell_gx, cell_gy)
             if blocked_vias is not None:
