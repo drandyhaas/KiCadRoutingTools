@@ -29,6 +29,43 @@ PLUGIN_DISPLAY_NAME = "KiCad Routing Tools"
 KICAD_VERSIONS = ["9.0", "9.99"]  # 9.0 = stable, 9.99 = nightly
 
 
+def get_kicad_python() -> Path | None:
+    """
+    Find KiCad's bundled Python executable.
+
+    Returns:
+        Path to KiCad's Python, or None if not found
+    """
+    system = platform.system()
+
+    if system == "Windows":
+        # Check common KiCad installation paths
+        candidates = [
+            Path(r"C:\Program Files\KiCad\9.0\bin\python.exe"),
+            Path(r"C:\Program Files\KiCad\9.99\bin\python.exe"),
+            Path(r"C:\Program Files (x86)\KiCad\9.0\bin\python.exe"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+    elif system == "Darwin":  # macOS
+        candidates = [
+            Path("/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"),
+            Path("/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+    elif system == "Linux":
+        # Linux KiCad typically uses system Python, but check for flatpak/snap
+        # For now, return None to use system Python
+        pass
+
+    return None
+
+
 def get_kicad_base_dir() -> Path:
     """
     Get the KiCad base directory for the current platform.
@@ -75,7 +112,7 @@ def get_source_dir() -> Path:
 
 
 def install_dependencies():
-    """Install Python dependencies from requirements.txt."""
+    """Install Python dependencies into KiCad's Python environment."""
     source_dir = get_source_dir()
     requirements_file = source_dir / "requirements.txt"
 
@@ -83,25 +120,56 @@ def install_dependencies():
         print("  No requirements.txt found, skipping dependency installation")
         return True
 
-    print("Installing Python dependencies...")
+    # Parse and display requirements
+    print("Required packages:")
+    packages = []
+    with open(requirements_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                packages.append(line)
+                print(f"  - {line}")
+    print()
+
+    # Find KiCad's Python
+    kicad_python = get_kicad_python()
+
+    if kicad_python:
+        print(f"Installing to KiCad's Python: {kicad_python}")
+        python_exe = str(kicad_python)
+    else:
+        print("Warning: KiCad Python not found, using system Python.")
+        print("  KiCad uses its own Python - you may need to install manually.")
+        python_exe = sys.executable
+
+    print()
+
     try:
-        # Try to install dependencies
+        # Run pip with output visible to user (no capture)
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)],
-            capture_output=True,
-            text=True
+            [python_exe, "-m", "pip", "install", "--progress-bar", "on", "-r", str(requirements_file)],
         )
 
         if result.returncode != 0:
-            print(f"  Warning: Failed to install some dependencies:")
-            print(f"  {result.stderr}")
-            print("  You may need to install them manually:")
-            print(f"    pip install -r {requirements_file}")
+            print()
+            print("  Warning: Failed to install some dependencies.")
+            if kicad_python:
+                print("  You may need to run as Administrator:")
+                print(f"    \"{kicad_python}\" -m pip install -r \"{requirements_file}\"")
+            else:
+                print("  You may need to install them manually to KiCad's Python.")
             return False
         else:
+            print()
             print("  Dependencies installed successfully")
             return True
 
+    except PermissionError:
+        print()
+        print("  Error: Permission denied. Try running as Administrator.")
+        if kicad_python:
+            print(f"  Or run manually: \"{kicad_python}\" -m pip install -r \"{requirements_file}\"")
+        return False
     except Exception as e:
         print(f"  Warning: Could not install dependencies: {e}")
         return False
@@ -297,6 +365,17 @@ Examples:
     print("=" * 50)
     if args.uninstall:
         print("Uninstall complete!")
+    elif installed_count == 0:
+        print("Installation FAILED - no versions were installed.")
+        if platform.system() == "Windows" and args.symlink:
+            print()
+            print("On Windows, creating symlinks requires either:")
+            print("  1. Run this script as Administrator, OR")
+            print("  2. Enable Developer Mode in Windows Settings:")
+            print("     Settings -> Update & Security -> For developers -> Developer Mode")
+            print()
+            print("Alternatively, install without --symlink to copy files instead.")
+        return 1
     else:
         print(f"Installation complete! ({installed_count} version(s))")
         print()
