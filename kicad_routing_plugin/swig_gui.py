@@ -81,6 +81,45 @@ def _get_netclass_parameters(class_name):
         return None
 
 
+def _get_board_minimum_constraints():
+    """Get board-level minimum constraints from pcbnew.
+
+    These are the hard floors from Board Setup → Design Rules → Constraints.
+
+    Returns:
+        dict with min_track_width, min_clearance, min_via_size, min_via_drill,
+        min_hole_to_hole, min_copper_edge_clearance (in mm)
+        or None if board not available
+    """
+    try:
+        import pcbnew
+        board = pcbnew.GetBoard()
+        if board is None:
+            return None
+
+        ds = board.GetDesignSettings()
+        nm_to_mm = 1e-6
+
+        result = {
+            'min_track_width': ds.m_TrackMinWidth * nm_to_mm,
+            'min_clearance': ds.m_MinClearance * nm_to_mm,
+            'min_via_size': ds.m_ViasMinSize * nm_to_mm,
+            'min_via_drill': ds.m_MinThroughDrill * nm_to_mm,
+        }
+
+        # Try to get hole-to-hole clearance (may not be available in all versions)
+        if hasattr(ds, 'm_HoleToHoleMin'):
+            result['min_hole_to_hole'] = ds.m_HoleToHoleMin * nm_to_mm
+
+        # Try to get copper-to-edge clearance
+        if hasattr(ds, 'm_CopperEdgeClearance'):
+            result['min_copper_edge_clearance'] = ds.m_CopperEdgeClearance * nm_to_mm
+
+        return result
+    except Exception:
+        return None
+
+
 class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
@@ -276,6 +315,15 @@ class RoutingDialog(wx.Dialog):
         self.use_netclass_check.Bind(wx.EVT_CHECKBOX, self._on_use_netclass_changed)
         param_box_sizer.Add(self.use_netclass_check, 0, wx.ALL, 5)
 
+        # Obey design rule constraints checkbox
+        self.obey_drc_check = wx.CheckBox(panel, label="Obey design rule constraints")
+        self.obey_drc_check.SetValue(True)
+        self.obey_drc_check.SetToolTip(
+            "Enforce KiCad's board-level minimum constraints from Board Setup → Design Rules"
+        )
+        self.obey_drc_check.Bind(wx.EVT_CHECKBOX, self._on_obey_drc_changed)
+        param_box_sizer.Add(self.obey_drc_check, 0, wx.ALL, 5)
+
         param_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
         param_scroll.SetScrollRate(0, 10)
         param_inner = wx.BoxSizer(wx.VERTICAL)
@@ -292,20 +340,54 @@ class RoutingDialog(wx.Dialog):
 
     def _add_basic_parameters(self, parent, grid):
         """Add basic parameter controls to grid."""
+        # Map control names to DRC minimum keys
+        self._drc_min_keys = {
+            'track_width': 'min_track_width',
+            'clearance': 'min_clearance',
+            'via_size': 'min_via_size',
+            'via_drill': 'min_via_drill',
+            'hole_to_hole_clearance': 'min_hole_to_hole',
+            'board_edge_clearance': 'min_copper_edge_clearance',
+        }
         params = [
             ('track_width', 'Track Width (mm):', defaults.TRACK_WIDTH),
             ('clearance', 'Clearance (mm):', defaults.CLEARANCE),
             ('via_size', 'Via Size (mm):', defaults.VIA_SIZE),
             ('via_drill', 'Via Drill (mm):', defaults.VIA_DRILL),
-            ('grid_step', 'Grid Step (mm):', defaults.GRID_STEP),
+            ('hole_to_hole_clearance', 'Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE),
         ]
         for name, label, default in params:
             r = defaults.PARAM_RANGES[name]
             grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
             ctrl = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=default, inc=r['inc'])
             ctrl.SetDigits(r['digits'])
+            ctrl.Bind(wx.EVT_SPINCTRLDOUBLE, lambda evt, n=name: self._on_drc_param_changed(evt, n))
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
+
+        # Edge clearance (checkbox + value)
+        grid.Add(wx.StaticText(parent, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.edge_clearance_check = wx.CheckBox(parent, label="")
+        self.edge_clearance_check.SetValue(False)
+        self.edge_clearance_check.SetToolTip("Enable custom edge clearance (unchecked = use track clearance)")
+        self.edge_clearance_check.Bind(wx.EVT_CHECKBOX, self._on_edge_clearance_check)
+        r = defaults.PARAM_RANGES['board_edge_clearance']
+        self.board_edge_clearance = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
+        self.board_edge_clearance.SetDigits(r['digits'])
+        self.board_edge_clearance.Bind(wx.EVT_SPINCTRLDOUBLE, lambda evt: self._on_drc_param_changed(evt, 'board_edge_clearance'))
+        self.board_edge_clearance.SetToolTip("When disabled, tracks use the Clearance value for board edge spacing")
+        self.board_edge_clearance.Enable(False)
+        edge_sizer.Add(self.edge_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        edge_sizer.Add(self.board_edge_clearance, 1, wx.EXPAND)
+        grid.Add(edge_sizer, 0, wx.EXPAND)
+
+        # Grid step
+        r = defaults.PARAM_RANGES['grid_step']
+        grid.Add(wx.StaticText(parent, label="Grid Step (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.grid_step = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.GRID_STEP, inc=r['inc'])
+        self.grid_step.SetDigits(r['digits'])
+        grid.Add(self.grid_step, 0, wx.EXPAND)
 
         # Via cost (integer)
         r = defaults.PARAM_RANGES['via_cost']
@@ -318,6 +400,79 @@ class RoutingDialog(wx.Dialog):
         grid.Add(wx.StaticText(parent, label="Max Rip-up:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.max_ripup = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=defaults.MAX_RIPUP)
         grid.Add(self.max_ripup, 0, wx.EXPAND)
+
+    def _on_obey_drc_changed(self, event):
+        """Handle checkbox toggle - apply board minimums if enabled."""
+        if self.obey_drc_check.GetValue():
+            self._apply_board_minimums_to_controls()
+
+    def _on_drc_param_changed(self, event, ctrl_name):
+        """Validate parameter change against DRC minimums."""
+        if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
+            event.Skip()
+            return
+
+        minimums = _get_board_minimum_constraints()
+        if minimums is None:
+            event.Skip()
+            return
+
+        min_key = self._drc_min_keys.get(ctrl_name)
+        if not min_key or min_key not in minimums:
+            event.Skip()
+            return
+
+        ctrl = getattr(self, ctrl_name, None)
+        if ctrl is None:
+            event.Skip()
+            return
+
+        minimum = minimums[min_key]
+        current = ctrl.GetValue()
+
+        if current < minimum:
+            # Show warning and revert to minimum
+            label = ctrl_name.replace('_', ' ').title()
+            wx.MessageBox(
+                f"{label} cannot be less than {minimum:.3f} mm\n"
+                f"(Board minimum from Design Rules)",
+                "Design Rule Constraint",
+                wx.OK | wx.ICON_WARNING
+            )
+            ctrl.SetValue(minimum)
+        else:
+            event.Skip()
+
+    def _apply_board_minimums_to_controls(self):
+        """Apply board-level minimum constraints to control values.
+
+        Called when dialog opens, before values are displayed to user.
+        Silently adjusts values to meet board minimums.
+        """
+        if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
+            return
+
+        minimums = _get_board_minimum_constraints()
+        if minimums is None:
+            return
+
+        # Map control names to minimum keys
+        checks = [
+            ('track_width', 'min_track_width'),
+            ('clearance', 'min_clearance'),
+            ('via_size', 'min_via_size'),
+            ('via_drill', 'min_via_drill'),
+            ('hole_to_hole_clearance', 'min_hole_to_hole'),
+            ('board_edge_clearance', 'min_copper_edge_clearance'),
+        ]
+
+        for ctrl_name, min_key in checks:
+            ctrl = getattr(self, ctrl_name, None)
+            if ctrl and minimums.get(min_key):
+                current = ctrl.GetValue()
+                minimum = minimums[min_key]
+                if current < minimum:
+                    ctrl.SetValue(minimum)
 
     def _add_advanced_parameters(self, parent, grid):
         """Add advanced parameter controls to grid."""
@@ -373,7 +528,6 @@ class RoutingDialog(wx.Dialog):
             ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS),
             ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST),
             ('routing_clearance_margin', 'Clearance Margin:', defaults.ROUTING_CLEARANCE_MARGIN),
-            ('hole_to_hole_clearance', 'Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE),
         ]
         for name, label, default in float_params:
             r = defaults.PARAM_RANGES[name]
@@ -382,21 +536,6 @@ class RoutingDialog(wx.Dialog):
             ctrl.SetDigits(r['digits'])
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
-
-        # Board edge clearance with checkbox
-        grid.Add(wx.StaticText(parent, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.edge_clearance_check = wx.CheckBox(parent, label="")
-        self.edge_clearance_check.SetValue(False)
-        self.edge_clearance_check.SetToolTip("Enable custom edge clearance (unchecked = use track clearance)")
-        self.edge_clearance_check.Bind(wx.EVT_CHECKBOX, self._on_edge_clearance_check)
-        r = defaults.PARAM_RANGES['board_edge_clearance']
-        self.board_edge_clearance = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
-        self.board_edge_clearance.SetDigits(r['digits'])
-        self.board_edge_clearance.Enable(False)
-        edge_sizer.Add(self.edge_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        edge_sizer.Add(self.board_edge_clearance, 1, wx.EXPAND)
-        grid.Add(edge_sizer, 0, wx.EXPAND)
 
         # Direction dropdown
         grid.Add(wx.StaticText(parent, label="Routing Direction:"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -932,6 +1071,9 @@ class RoutingDialog(wx.Dialog):
             # Enable hide checkbox by default on Basic tab only
             if self.net_panel.hide_check:
                 self.net_panel.hide_check.SetValue(True)
+
+        # Apply board-level minimum constraints if checkbox is enabled
+        self._apply_board_minimums_to_controls()
 
         # Do initial refresh
         self.refresh_from_board()

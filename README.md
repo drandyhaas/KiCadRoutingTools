@@ -814,7 +814,7 @@ Features:
 ## Limitations
 
 - No push-and-shove (routes around obstacles, doesn't move them)
-- No layer swaps of stubss for multipoint nets (3+ pads)
+- No layer swaps of stubs for multipoint nets (3+ pads)
 - No blind or buried vias
 - No user-defined keepout zones
 - No bus/parallel routing
