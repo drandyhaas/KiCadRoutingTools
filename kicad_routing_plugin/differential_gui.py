@@ -351,8 +351,24 @@ class DifferentialTab(wx.Panel):
         param_box = wx.StaticBox(self, label="Differential Pair Parameters")
         param_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
 
+        # Use net class definitions checkbox
+        self.use_netclass_check = wx.CheckBox(self, label="Use net class definitions")
+        self.use_netclass_check.SetValue(False)
+        self.use_netclass_check.SetToolTip("Use DP width and gap from selected net class")
+        self.use_netclass_check.Bind(wx.EVT_CHECKBOX, self._on_use_netclass_changed)
+        param_sizer.Add(self.use_netclass_check, 0, wx.ALL, 5)
+
         param_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         param_grid.AddGrowableCol(1)
+
+        # Diff pair width
+        param_grid.Add(wx.StaticText(self, label="Pair Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['diff_pair_width']
+        self.diff_pair_width = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                  initial=defaults.DIFF_PAIR_WIDTH, inc=r['inc'])
+        self.diff_pair_width.SetDigits(r['digits'])
+        self.diff_pair_width.SetToolTip("Track width for differential pair traces")
+        param_grid.Add(self.diff_pair_width, 0, wx.EXPAND)
 
         # Diff pair gap
         param_grid.Add(wx.StaticText(self, label="Pair Gap (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -572,7 +588,7 @@ class DifferentialTab(wx.Panel):
                 output_file="",  # Not used when return_results=True
                 net_names=net_names,
                 layers=config.get('layers', defaults.DEFAULT_LAYERS),
-                track_width=config.get('track_width', 0.1),
+                track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
                 clearance=config.get('clearance', 0.1),
                 via_size=config.get('via_size', 0.3),
                 via_drill=config.get('via_drill', 0.2),
@@ -753,6 +769,7 @@ class DifferentialTab(wx.Panel):
     def get_config(self):
         """Get the differential pair configuration."""
         return {
+            'diff_pair_width': self.diff_pair_width.GetValue(),
             'diff_pair_gap': self.diff_pair_gap.GetValue(),
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
@@ -762,6 +779,50 @@ class DifferentialTab(wx.Panel):
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
         }
+
+    def _on_use_netclass_changed(self, event):
+        """Handle the 'Use net class definitions' checkbox toggle."""
+        use_netclass = self.use_netclass_check.GetValue()
+
+        if use_netclass:
+            # Try to get net class from first selected pair, fall back to Default
+            class_name = self._get_selected_pair_netclass() or 'Default'
+            from .swig_gui import _get_netclass_parameters
+            params = _get_netclass_parameters(class_name)
+            if params:
+                # Update diff pair width and gap from net class
+                if 'diff_pair_width' in params and params['diff_pair_width'] > 0:
+                    self.diff_pair_width.SetValue(params['diff_pair_width'])
+                if 'diff_pair_gap' in params and params['diff_pair_gap'] > 0:
+                    self.diff_pair_gap.SetValue(params['diff_pair_gap'])
+            # Disable manual editing
+            self.diff_pair_width.Enable(False)
+            self.diff_pair_gap.Enable(False)
+        else:
+            # Re-enable manual editing
+            self.diff_pair_width.Enable(True)
+            self.diff_pair_gap.Enable(True)
+
+    def _get_selected_pair_netclass(self):
+        """Get the net class name for the first selected pair, or None."""
+        try:
+            import pcbnew
+            board = pcbnew.GetBoard()
+            if board is None:
+                return None
+
+            # Get first selected pair's P net
+            selected = self.get_selected_pair_net_ids()
+            if not selected:
+                return None
+
+            _, p_net_id, _ = selected[0]
+            net = board.FindNet(p_net_id)
+            if net:
+                return net.GetNetClassName()
+            return None
+        except Exception:
+            return None
 
     def get_selected_pairs(self):
         """Get list of selected differential pair base names."""

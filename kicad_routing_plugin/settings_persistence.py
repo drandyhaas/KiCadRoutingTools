@@ -112,6 +112,8 @@ def get_dialog_settings(dialog):
         'fanout_component': dialog.fanout_tab.net_panel.component_dropdown.GetSelection() if dialog.fanout_tab.net_panel.component_dropdown else 0,
 
         # Differential tab parameters
+        'diff_use_netclass': dialog.differential_tab.use_netclass_check.GetValue(),
+        'diff_pair_width': dialog.differential_tab.diff_pair_width.GetValue(),
         'diff_pair_gap': dialog.differential_tab.diff_pair_gap.GetValue(),
         'min_turning_radius': dialog.differential_tab.min_turning_radius.GetValue(),
         'max_setback_angle': dialog.differential_tab.max_setback_angle.GetValue(),
@@ -372,8 +374,14 @@ def restore_dialog_settings(dialog, settings):
                 dialog.fanout_tab.net_panel._component_filter_value = text.split(' (')[0]
 
     # Restore differential tab parameters
+    if 'diff_pair_width' in settings:
+        dialog.differential_tab.diff_pair_width.SetValue(settings['diff_pair_width'])
     if 'diff_pair_gap' in settings:
         dialog.differential_tab.diff_pair_gap.SetValue(settings['diff_pair_gap'])
+    if 'diff_use_netclass' in settings:
+        dialog.differential_tab.use_netclass_check.SetValue(settings['diff_use_netclass'])
+        # Trigger the change to enable/disable controls
+        dialog.differential_tab._on_use_netclass_changed(None)
     if 'min_turning_radius' in settings:
         dialog.differential_tab.min_turning_radius.SetValue(settings['min_turning_radius'])
     if 'max_setback_angle' in settings:

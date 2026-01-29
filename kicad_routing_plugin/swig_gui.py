@@ -48,7 +48,8 @@ def _get_netclass_parameters(class_name):
         class_name: Name of the net class (e.g., 'Default', 'Wide')
 
     Returns:
-        dict with keys: track_width, clearance, via_size, via_drill (all in mm)
+        dict with keys: track_width, clearance, via_size, via_drill,
+        diff_pair_width, diff_pair_gap (all in mm)
         Returns None if net class not found or error occurs.
     """
     try:
@@ -71,12 +72,20 @@ def _get_netclass_parameters(class_name):
         # KiCad stores values in nanometers, convert to mm
         nm_to_mm = 1e-6
 
-        return {
+        result = {
             'track_width': netclass.GetTrackWidth() * nm_to_mm,
             'clearance': netclass.GetClearance() * nm_to_mm,
             'via_size': netclass.GetViaDiameter() * nm_to_mm,
             'via_drill': netclass.GetViaDrill() * nm_to_mm,
         }
+
+        # Add differential pair parameters if available
+        if hasattr(netclass, 'GetDiffPairWidth'):
+            result['diff_pair_width'] = netclass.GetDiffPairWidth() * nm_to_mm
+        if hasattr(netclass, 'GetDiffPairGap'):
+            result['diff_pair_gap'] = netclass.GetDiffPairGap() * nm_to_mm
+
+        return result
     except Exception:
         return None
 
@@ -1338,7 +1347,11 @@ class RoutingDialog(wx.Dialog):
             self.planes_tab.net_panel._component_filter_value = ""
 
         # Reset differential tab
+        self.differential_tab.use_netclass_check.SetValue(False)
+        self.differential_tab.diff_pair_width.SetValue(defaults.DIFF_PAIR_WIDTH)
+        self.differential_tab.diff_pair_width.Enable(True)
         self.differential_tab.diff_pair_gap.SetValue(defaults.DIFF_PAIR_GAP)
+        self.differential_tab.diff_pair_gap.Enable(True)
         self.differential_tab.min_turning_radius.SetValue(defaults.DIFF_PAIR_MIN_TURNING_RADIUS)
         self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
