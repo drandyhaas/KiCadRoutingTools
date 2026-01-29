@@ -19,8 +19,7 @@ def main():
     unbuffered = args.unbuffered
 
     # Common CLI parameter groups
-    GEOMETRY = "" #defaults are OK
-    #GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1"
+    GEOMETRY = "--track-width 0.5 --clearance 0.4 --via-size 0.6 --via-drill 0.5 "
     LAYERS_4 = "--layers F.Cu B.Cu"
 
     # From claude prompt: /analyze-power-nets kicad_files/flat_hierarchy.kicad_pcb
@@ -34,7 +33,7 @@ def main():
 
     if args.checks:
         # Check for DRC errors
-        run("python3 check_drc.py kicad_files/flat_hierarchy_routed.kicad_pcb", unbuffered)
+        run("python3 check_drc.py kicad_files/flat_hierarchy_routed.kicad_pcb --clearance 0.4", unbuffered)
         # Check connectivity
         run("python3 check_connected.py kicad_files/flat_hierarchy_routed.kicad_pcb", unbuffered)
 

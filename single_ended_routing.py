@@ -4,6 +4,7 @@ Single-ended net routing functions.
 Routes individual nets using A* pathfinding on a grid obstacle map.
 """
 
+import math
 import time
 from typing import List, Optional, Set, Tuple
 from terminal_colors import RED, YELLOW, RESET
@@ -287,10 +288,10 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                         layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
-    # Power nets need extra clearance from obstacles based on their wider track width
+    # Use ceiling + 1 to account for grid quantization and diagonal track approaches
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
     extra_half_width = (net_track_width - config.track_width) / 2
-    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+    track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     # Determine direction order (always deterministic)
     if config.direction_order in ("backwards", "backward"):
@@ -505,9 +506,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
+    # Use ceiling + 1 to account for grid quantization and diagonal track approaches
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
     extra_half_width = (net_track_width - config.track_width) / 2
-    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+    track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     # Determine direction order (always deterministic)
     start_backwards = config.direction_order in ("backwards", "backward")
@@ -1009,9 +1011,10 @@ def route_multipoint_main(
                         layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
+    # Use ceiling + 1 to account for grid quantization and diagonal track approaches
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
     extra_half_width = (net_track_width - config.track_width) / 2
-    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+    track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     # Use probe routing helper
     path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _probe_route_with_frontier(
@@ -1203,9 +1206,10 @@ def route_multipoint_taps(
                         layer_costs=config.get_layer_costs())
 
     # Calculate track margin for wide power tracks
+    # Use ceiling + 1 to account for grid quantization and diagonal track approaches
     net_track_width = config.get_net_track_width(net_id, config.layers[0])
     extra_half_width = (net_track_width - config.track_width) / 2
-    track_margin = int(extra_half_width / config.grid_step) if extra_half_width > 0 else 0
+    track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
     total_iterations = 0
 
