@@ -41,6 +41,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Impedance-controlled routing** - Specify target impedance (e.g., 50Ω single-ended, 100Ω differential) and track widths are automatically calculated per layer from the board stackup. Uses IPC-2141 formulas for microstrip (outer layers) and stripline (inner layers). Widths adjust automatically when switching layers via vias to maintain target impedance
 - **Power net routing** - Route power nets (GND, VCC, etc.) with wider tracks than signal nets. Specify patterns and corresponding widths (e.g., `--power-nets "*GND*" "*VCC*" --power-nets-widths 0.4 0.5`). First matching pattern determines width for each net. Obstacle clearances automatically adjust for wider power traces. Power net widths are never smaller than the base track width
+- **Net class support** - The KiCad plugin reads net class parameters (track width, via size, clearance) from the board and uses them automatically. Nets can be organized by net class in separate tabs for easier selection. When routing nets from different classes, obstacle clearances properly account for the larger clearance requirements (e.g., routing "Wide" class nets with 0.4mm clearance near "Default" class pads)
 - **AI-powered power net analysis** - Use the `/analyze-power-nets` skill to identify power nets and recommend track widths. The skill uses WebSearch to look up component datasheets, classifies components by their role (power source, current sink, pass-through, shunt), traces current paths, and generates ready-to-use `--power-nets` configurations. See [Power Net Analysis](docs/power-nets.md) for details
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first, then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
 - **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
@@ -142,7 +143,8 @@ The installer automatically detects your KiCad installation directory:
 
 **Basic Tab:**
 - Net selection with filtering and component filtering
-- Track width, clearance, via size/drill configuration
+- Option to separate nets by net class (organizes into tabs per class)
+- Track width, clearance, via size/drill from net class or manual override
 - Layer selection with per-layer cost multipliers
 - Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
 
@@ -812,11 +814,10 @@ Features:
 ## Limitations
 
 - No push-and-shove (routes around obstacles, doesn't move them)
-- Layer swaps not supported for multi-point nets (3+ pads)
+- No layer swaps of stubss for multipoint nets (3+ pads)
 - No blind or buried vias
-- No net class support (KiCad native)
-- No User-Defined Keepout Zones
-- No Bus/Parallel Routing
+- No user-defined keepout zones
+- No bus/parallel routing
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost learning/tuning
 - No design rule import from KiCad
