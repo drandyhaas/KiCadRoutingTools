@@ -109,9 +109,10 @@ def iter_pad_blocked_cells(
     Yields:
         (gx, gy) tuples for each blocked cell
     """
-    # Add half grid step buffer in corner regions to account for grid discretization
+    # Add half grid step buffer to account for grid discretization
     # (a track through a cell could be grid_step/2 closer to the pad than the cell center)
-    corner_buffer = grid_step / 2 if corner_radius > 0 else 0
+    # This applies to ALL pad shapes since diagonal approaches can occur with rectangular pads too
+    corner_buffer = grid_step / 2
     expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step))
     expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step))
     margin_sq = margin * margin
@@ -127,8 +128,9 @@ def iter_pad_blocked_cells(
             cell_y = ey * grid_step
             abs_x, abs_y = abs(cell_x), abs(cell_y)
 
-            # Use buffered margin only in corner regions of roundrect pads
-            in_corner = corner_radius > 0 and abs_x > inner_half_w and abs_y > inner_half_h
+            # Use buffered margin in corner/diagonal regions where grid discretization
+            # can cause tracks to be closer than expected (applies to all pad shapes)
+            in_corner = abs_x > inner_half_w and abs_y > inner_half_h
             effective_margin_sq = buffered_margin_sq if in_corner else margin_sq
 
             dist_sq = dist_sq_to_rounded_rect(cell_x, cell_y, half_width, half_height, corner_radius)

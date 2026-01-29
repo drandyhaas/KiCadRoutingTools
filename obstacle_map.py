@@ -31,7 +31,8 @@ except ImportError:
 
 def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             nets_to_route: List[int],
-                            extra_clearance: float = 0.0) -> GridObstacleMap:
+                            extra_clearance: float = 0.0,
+                            net_clearances: dict = None) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -39,11 +40,21 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     Args:
         extra_clearance: Additional clearance to add for routing (e.g., for diff pair centerline routing)
+        net_clearances: Optional dict mapping net_id to clearance (mm). When building obstacles,
+            the effective clearance is max(config.clearance, max(net_clearances.values())).
+            This ensures proper spacing when nets have different net class clearance requirements.
     """
+    if net_clearances is None:
+        net_clearances = {}
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
     nets_to_route_set = set(nets_to_route)
+
+    # Use the maximum clearance of any net class to ensure proper spacing
+    # between nets with different clearance requirements
+    max_net_clearance = max(net_clearances.values()) if net_clearances else config.clearance
+    effective_clearance = max(config.clearance, max_net_clearance)
 
     obstacles = GridObstacleMap(num_layers)
 
@@ -63,18 +74,20 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     # Precompute per-layer grid expansions for impedance-controlled routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
+    # Use effective_clearance (max of config.clearance and any net class clearance) to ensure
+    # proper spacing between nets with different clearance requirements
     expansion_grid_by_layer = {}
     via_block_grid_by_layer = {}
     via_track_expansion_grid_list = []
     for layer_name in config.layers:
         layer_width = config.get_track_width(layer_name)
-        expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
+        expansion_mm = layer_width / 2 + effective_clearance + config.track_width / 2 + extra_clearance
         expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
-        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + layer_width / 2 + effective_clearance + extra_clearance
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
-        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_mm = config.via_size / 2 + layer_width / 2 + effective_clearance + extra_clearance
         via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
-    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + effective_clearance))
 
     # Add segments as obstacles (excluding nets we'll route - their stubs added per-net)
     for seg in pcb_data.segments:
@@ -95,11 +108,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid_list, via_via_expansion_grid)
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
+    # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id in nets_to_route_set:
             continue
         for pad in pads:
-            _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance)
+            _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
+                              clearance_override=effective_clearance)
 
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
@@ -913,7 +928,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                       layer_map: Dict[str, int], config: GridRouteConfig,
                       extra_clearance: float = 0.0,
                       blocked_cells: List[Set[Tuple[int, int]]] = None,
-                      blocked_vias: Set[Tuple[int, int]] = None):
+                      blocked_vias: Set[Tuple[int, int]] = None,
+                      clearance_override: float = None):
     """Add a pad as obstacle to the map.
 
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
@@ -927,11 +943,13 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         extra_clearance: Additional clearance to add
         blocked_cells: Optional per-layer sets to collect blocked cells for visualization
         blocked_vias: Optional set to collect blocked via positions for visualization
+        clearance_override: If provided, use this clearance instead of config.clearance
     """
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    margin = config.track_width / 2 + config.clearance + extra_clearance
+    clearance = clearance_override if clearance_override is not None else config.clearance
+    margin = config.track_width / 2 + clearance + extra_clearance
     # Compute corner radius based on pad shape:
     # - circle/oval: use min dimension to model as stadium/capsule shape
     # - roundrect: use the roundrect_rratio from pad
@@ -1082,16 +1100,23 @@ class VisualizationData:
 
 def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
                                       nets_to_route: List[int],
-                                      extra_clearance: float = 0.0) -> Tuple[GridObstacleMap, VisualizationData]:
+                                      extra_clearance: float = 0.0,
+                                      net_clearances: dict = None) -> Tuple[GridObstacleMap, VisualizationData]:
     """Build base obstacle map and capture visualization data.
 
     Same as build_base_obstacle_map, but also returns VisualizationData
     for rendering blocked cells in the visualizer.
     """
+    if net_clearances is None:
+        net_clearances = {}
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
     nets_to_route_set = set(nets_to_route)
+
+    # Use the maximum clearance of any net class to ensure proper spacing
+    max_net_clearance = max(net_clearances.values()) if net_clearances else config.clearance
+    effective_clearance = max(config.clearance, max_net_clearance)
 
     obstacles = GridObstacleMap(num_layers)
 
@@ -1122,18 +1147,19 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
 
     # Precompute per-layer grid expansions for impedance-controlled routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
+    # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
     expansion_grid_by_layer = {}
     via_block_grid_by_layer = {}
     via_track_expansion_grid_list = []
     for layer_name in config.layers:
         layer_width = config.get_track_width(layer_name)
-        expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
+        expansion_mm = layer_width / 2 + effective_clearance + config.track_width / 2 + extra_clearance
         expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
-        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + layer_width / 2 + effective_clearance + extra_clearance
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
-        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_track_mm = config.via_size / 2 + layer_width / 2 + effective_clearance + extra_clearance
         via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
-    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + effective_clearance))
 
     # Add segments as obstacles (excluding nets we'll route)
     for seg in pcb_data.segments:
@@ -1155,12 +1181,13 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
                           blocked_cells=blocked_cells, blocked_vias=blocked_vias)
 
     # Add pads as obstacles (excluding nets we'll route)
+    # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id in nets_to_route_set:
             continue
         for pad in pads:
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
-                              blocked_cells, blocked_vias)
+                              blocked_cells, blocked_vias, clearance_override=effective_clearance)
 
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)

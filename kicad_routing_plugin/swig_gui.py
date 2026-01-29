@@ -1609,6 +1609,30 @@ class RoutingDialog(wx.Dialog):
                 # Brief sleep releases GIL, allowing main thread to process CallAfter events
                 time.sleep(0.01)
 
+            # Build net_clearances for ALL nets on the PCB
+            # This ensures obstacles from nets with larger clearance (e.g., Wide class pads)
+            # are properly expanded even when routing nets from a different class
+            net_clearances = {}
+            net_name_to_id = {net.name: net.net_id for net in self.pcb_data.nets.values()}
+            try:
+                from .fanout_gui import _get_net_classes_from_board
+                all_net_to_class, all_class_names = _get_net_classes_from_board()
+                # Cache class clearances
+                class_clearance_cache = {}
+                for cname in all_class_names:
+                    params = self._get_netclass_params(cname)
+                    if params:
+                        class_clearance_cache[cname] = params.get('clearance', config['clearance'])
+                    else:
+                        class_clearance_cache[cname] = config['clearance']
+                # Build net_clearances for ALL nets
+                for net_name, net_id in net_name_to_id.items():
+                    cname = all_net_to_class.get(net_name, 'Default')
+                    net_clearances[net_id] = class_clearance_cache.get(cname, config['clearance'])
+            except Exception as e:
+                print(f"Warning: Could not get net class clearances: {e}")
+                # Fall back to using config clearance for all nets
+
             def run_batch(net_names, track_width, clearance, via_size, via_drill):
                 """Run batch_route with given parameters."""
                 return batch_route(
@@ -1669,6 +1693,7 @@ class RoutingDialog(wx.Dialog):
                     progress_callback=on_progress,
                     return_results=True,
                     pcb_data=self.pcb_data,
+                    net_clearances=net_clearances,
                 )
 
             # Check if using per-netclass parameters
@@ -1763,6 +1788,7 @@ class RoutingDialog(wx.Dialog):
                         progress_callback=class_progress,
                         return_results=True,
                         pcb_data=self.pcb_data,
+                        net_clearances=net_clearances,
                     )
 
                     total_successful += successful

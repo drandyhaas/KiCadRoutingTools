@@ -149,7 +149,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 cancel_check=None,
                 progress_callback=None,
                 return_results: bool = False,
-                pcb_data=None) -> Tuple[int, int, float]:
+                pcb_data=None,
+                net_clearances: dict = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -425,11 +426,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Use visualization-aware building if callback is provided
     base_vis_data = None
     if visualize:
-        base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(pcb_data, config, all_net_ids_to_route)
+        base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
+            pcb_data, config, all_net_ids_to_route, net_clearances=net_clearances)
         # Set bounds for visualization
         base_vis_data.bounds = get_net_bounds(pcb_data, all_net_ids_to_route, padding=5.0)
     else:
-        base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route)
+        base_obstacles = build_base_obstacle_map(
+            pcb_data, config, all_net_ids_to_route, net_clearances=net_clearances)
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
