@@ -49,6 +49,12 @@ impl PoseRouter {
         Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset, vertical_attraction_radius, vertical_attraction_bonus, proximity_heuristic_cost }
     }
 
+    /// Set the proximity heuristic cost for subsequent routes.
+    /// Call this before each route to adjust based on whether endpoints are in proximity zones.
+    pub fn set_proximity_heuristic_cost(&mut self, cost: i32) {
+        self.proximity_heuristic_cost = cost;
+    }
+
     /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
     ///
     /// Args:

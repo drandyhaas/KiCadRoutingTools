@@ -442,6 +442,18 @@ impl GridObstacleMap {
         false
     }
 
+    /// Check if position is in any proximity zone (stub or BGA)
+    /// Used to determine if a route endpoint requires proximity heuristic
+    #[inline]
+    pub fn is_in_any_proximity_zone(&self, gx: i32, gy: i32) -> bool {
+        // Check stub proximity (has non-zero cost at this position)
+        if self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0) > 0 {
+            return true;
+        }
+        // Check BGA proximity
+        self.is_in_bga_proximity(gx, gy)
+    }
+
     /// Get stub proximity cost
     /// Returns 0 if position is within endpoint_exempt_radius of any endpoint
     #[inline]

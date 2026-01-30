@@ -185,6 +185,7 @@ Methods:
 - `add_cross_layer_track(gx, gy, layer)` - Mark a position as having a track on specified layer (for vertical attraction)
 - `get_cross_layer_attraction(gx, gy, current_layer, radius, bonus)` - Get attraction bonus for positions near tracks on other layers
 - `clear_cross_layer_tracks()` - Clear all cross-layer track data
+- `is_in_any_proximity_zone(gx, gy)` - Check if position is in any proximity zone (stub or BGA). Used to decide if proximity heuristic should be applied for a route.
 - `clone()` - Create a deep copy of the obstacle map (for incremental caching)
 
 ### GridRouter
@@ -213,6 +214,7 @@ Methods:
     - `path`: `List[(gx, gy, layer)]` or `None`
     - `iterations`: Number of A* iterations
     - `stats`: Dict with search statistics (cells_expanded, cells_pushed, heuristic_ratio, expansion_ratio, etc.)
+- `set_proximity_heuristic_cost(cost)` - Set the proximity heuristic cost before each route. Called by Python when source/target endpoints are inside a proximity zone.
 
 ### PoseRouter
 
@@ -242,6 +244,7 @@ Methods:
   - Returns `(path, iterations)` where path is `List[(gx, gy, theta_idx, layer)]` or `None`
 - `route_pose_with_frontier(...)` - Same as `route_pose` but returns blocked cells on failure for blocking analysis
   - Returns `(path, iterations, blocked_cells)` where `blocked_cells` is a list of `(gx, gy, layer)` tuples
+- `set_proximity_heuristic_cost(cost)` - Set the proximity heuristic cost before each route. Called by Python when source/target endpoints are inside a proximity zone.
 
 Constraints enforced by PoseRouter:
 - **First move straight**: First move from start must be in the start direction (no immediate turn)
@@ -284,7 +287,7 @@ src/
 
 ## Version History
 
-- **0.12.0**: Added proximity-aware heuristic for faster routing on dense boards. The heuristic now auto-estimates expected proximity costs per step based on stub/track/BGA proximity settings and radii, dramatically reducing search space (up to 6x speedup) while keeping high proximity costs to prevent blocking later routes. Formula: `sum(cost_i * radius_i) * factor` where factor defaults to 0.02 (tuned for ~5mm typical radius). Diff pair routing uses 1/10th of the factor due to the more constrained pose-based search. New `proximity_heuristic_cost` parameter in both GridRouter and PoseRouter, `--proximity-heuristic-factor` CLI option (route.py and route_diff.py), and `GridRouteConfig.get_proximity_heuristic_cost()` method.
+- **0.12.0**: Added proximity-aware heuristic for faster routing on dense boards. The heuristic now auto-estimates expected proximity costs per step based on stub/track/BGA proximity settings and radii, dramatically reducing search space (up to 6x speedup) while keeping high proximity costs to prevent blocking later routes. Formula: `sum(cost_i * radius_i) * factor` where factor defaults to 0.02 (tuned for ~5mm typical radius). Diff pair routing uses 1/10th of the factor due to the more constrained pose-based search. **Smart endpoint detection**: The heuristic is only applied when source or target is inside a proximity zone (checked via `is_in_any_proximity_zone()`); routes with both endpoints outside proximity zones use h=0 for optimal search. New `proximity_heuristic_cost` parameter and `set_proximity_heuristic_cost()` setter in both GridRouter and PoseRouter, `--proximity-heuristic-factor` CLI option (route.py and route_diff.py), and `GridRouteConfig.get_proximity_heuristic_cost()` method.
 - **0.11.0**: Added A* search statistics collection. `route_multi` now returns `(path, iterations, stats)` where `stats` is a dict containing: `cells_expanded`, `cells_pushed`, `cells_revisited`, `duplicate_skips`, `path_length`, `path_cost`, `initial_h`, `final_g`, `via_count`, and computed metrics `heuristic_ratio`, `expansion_ratio`, `revisit_ratio`, `skip_ratio`. Enable stats printing with `--stats` flag.
 - **0.10.0**: Added direction-aware proximity costs. When routing within stub or BGA proximity zones, steps moving away from zone centers cost less than steps moving towards them. This encourages the router to exit proximity zones efficiently. New methods: `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, `get_directional_proximity_cost()`. Zone centers are automatically registered when adding stub/BGA proximity costs in Python (`add_stub_proximity_costs()`, `add_bga_proximity_costs()`). `clear_stub_proximity()` now also clears zone centers.
 - **0.9.0**: Added `layer_costs` parameter to GridRouter and VisualRouter for layer preference routing. Per-layer cost multipliers (1000 = 1.0x) affect movement costs, source initialization penalty for expensive layers, and via transition costs. Switching to a cheaper layer discounts the via cost (can reduce to 0). Default in route.py: F.Cu=1.0x, all others=3.0x. Values must be 1.0-1000x.

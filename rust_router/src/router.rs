@@ -39,6 +39,12 @@ impl GridRouter {
         }
     }
 
+    /// Set the proximity heuristic cost for subsequent routes.
+    /// Call this before each route to adjust based on whether endpoints are in proximity zones.
+    pub fn set_proximity_heuristic_cost(&mut self, cost: i32) {
+        self.proximity_heuristic_cost = cost;
+    }
+
     /// Route from multiple source points to multiple target points.
     /// Returns (path, iterations, stats) where path is list of (gx, gy, layer) tuples,
     /// or (None, iterations, stats) if no path found. Stats is a dict with search statistics.

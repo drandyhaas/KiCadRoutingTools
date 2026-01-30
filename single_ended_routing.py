@@ -307,6 +307,18 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     sources_grid = [(s[0], s[1], s[2]) for s in sources]
     targets_grid = [(t[0], t[1], t[2]) for t in targets]
 
+    # Get stub free ends for proximity zone checking (where routing actually starts/ends)
+    # This is more accurate than checking all segment endpoints
+    free_end_sources, free_end_targets, _ = get_net_endpoints(pcb_data, net_id, config, use_stub_free_ends=True)
+    if free_end_sources:
+        prox_check_sources = [(s[0], s[1], s[2]) for s in free_end_sources]
+    else:
+        prox_check_sources = sources_grid  # Fallback to all endpoints
+    if free_end_targets:
+        prox_check_targets = [(t[0], t[1], t[2]) for t in free_end_targets]
+    else:
+        prox_check_targets = targets_grid  # Fallback to all endpoints
+
     # Build obstacles
     obstacles = build_obstacle_map(pcb_data, config, net_id, unrouted_stubs)
 
@@ -328,12 +340,26 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
     attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
 
+    # Check which proximity zones the stub free ends are in for precise heuristic estimate
+    src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
+    src_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in prox_check_sources)
+    tgt_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_targets)
+    tgt_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in prox_check_targets)
+    prox_h_cost = config.get_proximity_heuristic_for_zones(src_in_stub, src_in_bga, tgt_in_stub, tgt_in_bga)
+    if config.verbose:
+        zones = []
+        if src_in_stub: zones.append("src:stub")
+        if src_in_bga: zones.append("src:bga")
+        if tgt_in_stub: zones.append("tgt:stub")
+        if tgt_in_bga: zones.append("tgt:bga")
+        print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
+
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
+                        proximity_heuristic_cost=prox_h_cost)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -531,6 +557,17 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     sources_grid = [(s[0], s[1], s[2]) for s in sources]
     targets_grid = [(t[0], t[1], t[2]) for t in targets]
 
+    # Get stub free ends for proximity zone checking (where routing actually starts/ends)
+    free_end_sources, free_end_targets, _ = get_net_endpoints(pcb_data, net_id, config, use_stub_free_ends=True)
+    if free_end_sources:
+        prox_check_sources = [(s[0], s[1], s[2]) for s in free_end_sources]
+    else:
+        prox_check_sources = sources_grid
+    if free_end_targets:
+        prox_check_targets = [(t[0], t[1], t[2]) for t in free_end_targets]
+    else:
+        prox_check_targets = targets_grid
+
     # Add source and target positions as allowed cells to override BGA zone blocking
     # This only affects BGA zone blocking, not regular obstacle blocking (tracks, stubs, pads)
     allow_radius = 10
@@ -549,12 +586,26 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
     attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
 
+    # Check which proximity zones the stub free ends are in for precise heuristic estimate
+    src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
+    src_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in prox_check_sources)
+    tgt_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_targets)
+    tgt_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in prox_check_targets)
+    prox_h_cost = config.get_proximity_heuristic_for_zones(src_in_stub, src_in_bga, tgt_in_stub, tgt_in_bga)
+    if config.verbose:
+        zones = []
+        if src_in_stub: zones.append("src:stub")
+        if src_in_bga: zones.append("src:bga")
+        if tgt_in_stub: zones.append("tgt:stub")
+        if tgt_in_bga: zones.append("tgt:bga")
+        print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
+
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
+                        proximity_heuristic_cost=prox_h_cost)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -1064,9 +1115,34 @@ def route_multipoint_main(
     for gx, gy, layer in sources + targets:
         obstacles.add_source_target_cell(gx, gy, layer)
 
+    # Get stub free ends for proximity zone checking (consistent with route_net)
+    free_end_sources, free_end_targets, _ = get_net_endpoints(pcb_data, net_id, config, use_stub_free_ends=True)
+    if free_end_sources:
+        prox_check_sources = [(s[0], s[1], s[2]) for s in free_end_sources]
+    else:
+        prox_check_sources = sources  # Fallback to pad positions
+    if free_end_targets:
+        prox_check_targets = [(t[0], t[1], t[2]) for t in free_end_targets]
+    else:
+        prox_check_targets = targets  # Fallback to pad positions
+
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
     attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+
+    # Check which proximity zones the stub free ends are in for precise heuristic estimate
+    src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
+    src_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in prox_check_sources)
+    tgt_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_targets)
+    tgt_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in prox_check_targets)
+    prox_h_cost = config.get_proximity_heuristic_for_zones(src_in_stub, src_in_bga, tgt_in_stub, tgt_in_bga)
+    if config.verbose:
+        zones = []
+        if src_in_stub: zones.append("src:stub")
+        if src_in_bga: zones.append("src:bga")
+        if tgt_in_stub: zones.append("tgt:stub")
+        if tgt_in_bga: zones.append("tgt:bga")
+        print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
     # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
@@ -1074,7 +1150,7 @@ def route_multipoint_main(
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
+                        proximity_heuristic_cost=prox_h_cost)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -1272,7 +1348,7 @@ def route_multipoint_taps(
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
+                        proximity_heuristic_cost=0)  # Set per-route below
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -1397,6 +1473,21 @@ def route_multipoint_taps(
         for dx in range(-allow_radius, allow_radius + 1):
             for dy in range(-allow_radius, allow_radius + 1):
                 obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
+
+        # Check which proximity zones the endpoints are in for precise heuristic estimate
+        src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in sources)
+        src_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in sources)
+        tgt_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in targets)
+        tgt_in_bga = any(obstacles.is_in_bga_proximity(gx, gy) for gx, gy, _ in targets)
+        prox_h_cost = config.get_proximity_heuristic_for_zones(src_in_stub, src_in_bga, tgt_in_stub, tgt_in_bga)
+        router.set_proximity_heuristic_cost(prox_h_cost)
+        if config.verbose:
+            zones = []
+            if src_in_stub: zones.append("src:stub")
+            if src_in_bga: zones.append("src:bga")
+            if tgt_in_stub: zones.append("tgt:stub")
+            if tgt_in_bga: zones.append("tgt:bga")
+            print(f"      proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
         # Route from ANY tap point to target - router finds shortest path
         # Use probe routing helper to detect stuck directions early

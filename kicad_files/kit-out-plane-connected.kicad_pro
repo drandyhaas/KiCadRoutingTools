@@ -475,7 +475,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "kit-out.kicad_pro",
+    "filename": "kit-out-plane-connected.kicad_pro",
     "version": 3
   },
   "net_settings": {

@@ -50,7 +50,7 @@ def main():
     unbuffered = args.unbuffered
 
     # Common CLI parameter groups
-    GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1"
+    GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1 --verbose"
     LAYERS_4 = "--layers F.Cu In1.Cu In2.Cu B.Cu"
     LAYERS_5 = "--layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu"
 

@@ -1362,6 +1362,29 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
     attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
 
+    # Check which proximity zones the P/N endpoints are in for precise heuristic estimate
+    p_src_gx, p_src_gy = src[0], src[1]
+    n_src_gx, n_src_gy = src[2], src[3]
+    p_tgt_gx, p_tgt_gy = tgt[0], tgt[1]
+    n_tgt_gx, n_tgt_gy = tgt[2], tgt[3]
+    src_in_stub = (obstacles.get_stub_proximity_cost(p_src_gx, p_src_gy) > 0 or
+                   obstacles.get_stub_proximity_cost(n_src_gx, n_src_gy) > 0)
+    src_in_bga = (obstacles.is_in_bga_proximity(p_src_gx, p_src_gy) or
+                  obstacles.is_in_bga_proximity(n_src_gx, n_src_gy))
+    tgt_in_stub = (obstacles.get_stub_proximity_cost(p_tgt_gx, p_tgt_gy) > 0 or
+                   obstacles.get_stub_proximity_cost(n_tgt_gx, n_tgt_gy) > 0)
+    tgt_in_bga = (obstacles.is_in_bga_proximity(p_tgt_gx, p_tgt_gy) or
+                  obstacles.is_in_bga_proximity(n_tgt_gx, n_tgt_gy))
+    # Diff pairs use 1/10th of the heuristic factor
+    prox_h_cost = config.get_proximity_heuristic_for_zones(src_in_stub, src_in_bga, tgt_in_stub, tgt_in_bga) // 10
+    if config.verbose:
+        zones = []
+        if src_in_stub: zones.append("src:stub")
+        if src_in_bga: zones.append("src:bga")
+        if tgt_in_stub: zones.append("tgt:stub")
+        if tgt_in_bga: zones.append("tgt:bga")
+        print(f"    proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}] (diff_pair 1/10th)")
+
     pose_router = PoseRouter(
         via_cost=config.via_cost * 1000 * 2,
         h_weight=config.heuristic_weight,
@@ -1374,7 +1397,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         gnd_via_along_offset=gnd_via_along_grid,
         vertical_attraction_radius=attraction_radius_grid,
         vertical_attraction_bonus=attraction_bonus,
-        proximity_heuristic_cost=config.get_proximity_heuristic_cost() // 10
+        proximity_heuristic_cost=prox_h_cost
     )
 
     # Route using pose-based A* with Dubins heuristic
