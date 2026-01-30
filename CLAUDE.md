@@ -1,5 +1,17 @@
 # Project Notes for Claude
 
+## Building the Rust Router
+
+Use `build_router.py` to build the Rust router:
+
+```bash
+python build_router.py
+```
+
+This builds the Rust module, copies the library to the correct location, and verifies the version. Do not run `cargo build` directly.
+
+**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`.
+
 ## KiCad Parser Usage
 
 The project uses `kicad_parser` module to parse KiCad PCB files:

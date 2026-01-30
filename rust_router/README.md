@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.10.0**
+**Current Version: 0.11.0**
 
 ## Features
 
@@ -125,12 +125,13 @@ router = GridRouter(via_cost=500000, h_weight=1.5)
 sources = [(100, 200, 0), (101, 200, 0)]  # (gx, gy, layer)
 targets = [(300, 400, 0), (301, 400, 0)]
 
-path, iterations = router.route_multi(obstacles, sources, targets, max_iterations=200000)
+path, iterations, stats = router.route_multi(obstacles, sources, targets, max_iterations=200000)
 
 if path:
     print(f"Found path with {len(path)} points in {iterations} iterations")
     for gx, gy, layer in path:
         print(f"  ({gx}, {gy}) on layer {layer}")
+    # stats contains A* search statistics (cells_expanded, heuristic_ratio, etc.)
 else:
     print(f"No path found after {iterations} iterations")
 ```
@@ -207,7 +208,10 @@ Methods:
 - `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0)` - Find path from any source to any target
   - `collinear_vias`: If True, after a via the route must continue straight for one step, then can only turn ±45° (for differential pair routing)
   - `via_exclusion_radius`: Grid cells to exclude around placed vias. Prevents the route from drifting near its own vias, which is important for diff pair routing where P/N tracks are offset from centerline.
-  - Returns `(path, iterations)` where path is `List[(gx, gy, layer)]` or `None`
+  - Returns `(path, iterations, stats)` where:
+    - `path`: `List[(gx, gy, layer)]` or `None`
+    - `iterations`: Number of A* iterations
+    - `stats`: Dict with search statistics (cells_expanded, cells_pushed, heuristic_ratio, expansion_ratio, etc.)
 
 ### PoseRouter
 
@@ -277,6 +281,7 @@ src/
 
 ## Version History
 
+- **0.11.0**: Added A* search statistics collection. `route_multi` now returns `(path, iterations, stats)` where `stats` is a dict containing: `cells_expanded`, `cells_pushed`, `cells_revisited`, `duplicate_skips`, `path_length`, `path_cost`, `initial_h`, `final_g`, `via_count`, and computed metrics `heuristic_ratio`, `expansion_ratio`, `revisit_ratio`, `skip_ratio`. Enable stats printing with `--stats` flag.
 - **0.10.0**: Added direction-aware proximity costs. When routing within stub or BGA proximity zones, steps moving away from zone centers cost less than steps moving towards them. This encourages the router to exit proximity zones efficiently. New methods: `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, `get_directional_proximity_cost()`. Zone centers are automatically registered when adding stub/BGA proximity costs in Python (`add_stub_proximity_costs()`, `add_bga_proximity_costs()`). `clear_stub_proximity()` now also clears zone centers.
 - **0.9.0**: Added `layer_costs` parameter to GridRouter and VisualRouter for layer preference routing. Per-layer cost multipliers (1000 = 1.0x) affect movement costs, source initialization penalty for expensive layers, and via transition costs. Switching to a cheaper layer discounts the via cost (can reduce to 0). Default in route.py: F.Cu=1.0x, all others=3.0x. Values must be 1.0-1000x.
 - **0.8.4**: Added `vertical_attraction_radius` and `vertical_attraction_bonus` parameters to GridRouter (previously only in PoseRouter). Single-ended routing can now attract to tracks on other layers, consolidating routing corridors and leaving more room for through-hole vias.

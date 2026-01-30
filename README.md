@@ -634,6 +634,7 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --skip-routing          # Skip routing, only do swaps and write debug info
 --debug-memory          # Print memory usage statistics during routing
 --add-teardrops         # Add teardrop settings to all pads in output file
+--stats                 # Print A* search statistics (cells expanded, heuristic efficiency, etc.)
 ```
 
 ### Differential Pair Routing (route_diff.py)
