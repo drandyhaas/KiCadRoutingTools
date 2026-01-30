@@ -56,6 +56,7 @@ GND_VIA_DISTANCE = 2.0  # mm - max distance from signal via to GND via
 # Algorithm parameters
 MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 1.9
+PROXIMITY_HEURISTIC_FACTOR = 0.02
 MAX_RIPUP = 3
 
 # Clearance parameters
@@ -115,6 +116,7 @@ PARAM_RANGES = {
     'via_cost': {'min': 1, 'max': 1000},
     'max_iterations': {'min': 1000, 'max': 1000000},
     'heuristic_weight': {'min': 1.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'proximity_heuristic_factor': {'min': 0.0, 'max': 0.2, 'inc': 0.01, 'digits': 2},
     'turn_cost': {'min': 0, 'max': 10000},
     'max_ripup': {'min': 0, 'max': 10},
     'stub_proximity_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},

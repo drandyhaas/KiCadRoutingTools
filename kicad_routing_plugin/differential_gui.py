@@ -595,6 +595,7 @@ class DifferentialTab(wx.Panel):
                 grid_step=config.get('grid_step', 0.1),
                 via_cost=config.get('via_cost', 50),
                 max_iterations=config.get('max_iterations', 200000),
+                proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                 diff_pair_gap=config.get('diff_pair_gap', 0.101),
                 min_turning_radius=config.get('min_turning_radius', 0.2),
                 max_setback_angle=config.get('max_setback_angle', 45.0),

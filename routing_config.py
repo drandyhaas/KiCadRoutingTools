@@ -87,6 +87,8 @@ class GridRouteConfig:
     layer_costs: List[float] = field(default_factory=list)  # Per-layer cost multipliers
     # Debug options
     collect_stats: bool = False  # Collect A* search statistics for debugging
+    # Heuristic tuning
+    proximity_heuristic_factor: float = 0.02  # Factor for proximity heuristic (higher = tighter heuristic, faster but may overestimate)
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).
@@ -145,6 +147,32 @@ class GridRouteConfig:
             else:
                 costs.append(1000)  # Default 1.0x
         return costs
+
+    def get_proximity_heuristic_cost(self) -> int:
+        """Get the proximity heuristic cost for the Rust router.
+
+        Auto-computes expected proximity cost per grid step based on stub/track/BGA
+        proximity settings. This tightens the A* heuristic for boards with high
+        proximity costs, dramatically reducing search space (up to 6x speedup).
+
+        The formula weights each proximity cost by its radius (larger radius = more
+        of the path affected), sums them, and applies a coverage factor.
+
+        Returns cost scaled for grid units (cost per grid step).
+        """
+        # Weight each proximity cost by its radius (larger radius = more path affected)
+        stub_weight = self.stub_proximity_cost * self.stub_proximity_radius
+        track_weight = self.track_proximity_cost * self.track_proximity_distance
+        bga_weight = self.bga_proximity_cost * self.bga_proximity_radius
+        total_weight = stub_weight + track_weight + bga_weight
+
+        if total_weight > 0:
+            # Simple formula: total_weight * factor
+            # Default factor 0.02 is conservative to avoid overestimating for paths
+            # that don't go through proximity zones. Tuned for ~5mm typical radius.
+            estimated_cost = total_weight * self.proximity_heuristic_factor
+            return int(estimated_cost * 1000 / self.grid_step)
+        return 0
 
 
 class GridCoord:

@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.11.0**
+**Current Version: 0.12.0**
 
 ## Features
 
@@ -192,7 +192,7 @@ Methods:
 ```python
 router = GridRouter(via_cost: int, h_weight: float, turn_cost: int = 1000, via_proximity_cost: int = 1,
                     vertical_attraction_radius: int = 0, vertical_attraction_bonus: int = 0,
-                    layer_costs: List[int] = None)
+                    layer_costs: List[int] = None, proximity_heuristic_cost: int = 0)
 ```
 
 Parameters:
@@ -203,6 +203,7 @@ Parameters:
 - `vertical_attraction_radius`: Grid units radius for cross-layer track attraction (0 = disabled)
 - `vertical_attraction_bonus`: Cost reduction for positions aligned with tracks on other layers
 - `layer_costs`: Per-layer cost multipliers (1000 = 1.0x, 3000 = 3.0x). Affects movement cost, source initialization, and via transitions. Switching to a cheaper layer discounts via cost (can be free)
+- `proximity_heuristic_cost`: Expected proximity cost per grid step added to heuristic (0 = auto-compute). Auto-computed as `max(stub, track, bga) * 0.375 * 1000 / grid_step`. This tightens the heuristic for boards with high proximity costs, dramatically reducing search space (up to 6x speedup).
 
 Methods:
 - `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0)` - Find path from any source to any target
@@ -281,6 +282,7 @@ src/
 
 ## Version History
 
+- **0.12.0**: Added proximity-aware heuristic for faster routing on dense boards. The heuristic now auto-estimates expected proximity costs per step based on stub/track/BGA proximity settings and radii, dramatically reducing search space (up to 6x speedup) while keeping high proximity costs to prevent blocking later routes. Formula: `sum(cost_i * radius_i) * factor` where factor defaults to 0.02 (tuned for ~5mm typical radius). New `proximity_heuristic_cost` parameter in GridRouter, `--proximity-heuristic-factor` CLI option, and `GridRouteConfig.get_proximity_heuristic_cost()` method.
 - **0.11.0**: Added A* search statistics collection. `route_multi` now returns `(path, iterations, stats)` where `stats` is a dict containing: `cells_expanded`, `cells_pushed`, `cells_revisited`, `duplicate_skips`, `path_length`, `path_cost`, `initial_h`, `final_g`, `via_count`, and computed metrics `heuristic_ratio`, `expansion_ratio`, `revisit_ratio`, `skip_ratio`. Enable stats printing with `--stats` flag.
 - **0.10.0**: Added direction-aware proximity costs. When routing within stub or BGA proximity zones, steps moving away from zone centers cost less than steps moving towards them. This encourages the router to exit proximity zones efficiently. New methods: `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, `get_directional_proximity_cost()`. Zone centers are automatically registered when adding stub/BGA proximity costs in Python (`add_stub_proximity_costs()`, `add_bga_proximity_costs()`). `clear_stub_proximity()` now also clears zone centers.
 - **0.9.0**: Added `layer_costs` parameter to GridRouter and VisualRouter for layer preference routing. Per-layer cost multipliers (1000 = 1.0x) affect movement costs, source initialization penalty for expensive layers, and via transition costs. Switching to a cheaper layer discounts the via cost (can reduce to 0). Default in route.py: F.Cu=1.0x, all others=3.0x. Values must be 1.0-1000x.

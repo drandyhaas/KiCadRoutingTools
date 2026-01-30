@@ -332,7 +332,8 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
-                        layer_costs=config.get_layer_costs())
+                        layer_costs=config.get_layer_costs(),
+                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -552,7 +553,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
-                        layer_costs=config.get_layer_costs())
+                        layer_costs=config.get_layer_costs(),
+                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -1071,7 +1073,8 @@ def route_multipoint_main(
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
-                        layer_costs=config.get_layer_costs())
+                        layer_costs=config.get_layer_costs(),
+                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -1268,7 +1271,8 @@ def route_multipoint_taps(
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
-                        layer_costs=config.get_layer_costs())
+                        layer_costs=config.get_layer_costs(),
+                        proximity_heuristic_cost=config.get_proximity_heuristic_cost())
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches

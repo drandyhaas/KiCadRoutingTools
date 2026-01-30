@@ -1310,7 +1310,8 @@ def route_plane_connection_wide(
         h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost,
         via_proximity_cost=0,
-        layer_costs=config.get_layer_costs()
+        layer_costs=config.get_layer_costs(),
+        proximity_heuristic_cost=config.get_proximity_heuristic_cost()
     )
 
     path, iterations, _ = router.route_with_frontier(
