@@ -114,6 +114,8 @@ def build_diff_pair_obstacles(
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
+    if config.verbose:
+        print(f"    stub proximity: {len(stub_proximity_net_ids)} nets, {len(unrouted_stubs)} stubs, {len(chip_pads)} chip pads")
     if all_stubs:
         add_stub_proximity_costs(obstacles, all_stubs, config)
 
