@@ -127,7 +127,6 @@ def get_dialog_settings(dialog):
         'fanout_type': dialog.fanout_tab.fanout_type.GetSelection(),
         'fanout_bga_exit_margin': dialog.fanout_tab.bga_options.exit_margin.GetValue(),
         'fanout_bga_differential': dialog.fanout_tab.bga_options.differential_check.GetValue(),
-        'fanout_bga_diff_gap': dialog.fanout_tab.bga_options.diff_pair_gap.GetValue(),
         'fanout_bga_escape_direction': dialog.fanout_tab.bga_options.escape_direction.GetSelection(),
         'fanout_bga_force_escape': dialog.fanout_tab.bga_options.force_escape.GetValue(),
         'fanout_bga_rebalance': dialog.fanout_tab.bga_options.rebalance_escape.GetValue(),
@@ -144,7 +143,6 @@ def get_dialog_settings(dialog):
         'planes_component': dialog.planes_tab.net_panel.component_dropdown.GetSelection() if dialog.planes_tab.net_panel.component_dropdown else 0,
         # Create mode options
         'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
-        'planes_edge_clearance': dialog.planes_tab.create_options.edge_clearance.GetValue(),
         'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
         'planes_reroute_ripped_check': dialog.planes_tab.create_options.reroute_ripped_check.GetValue(),
@@ -406,10 +404,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.exit_margin.SetValue(settings['fanout_bga_exit_margin'])
     if 'fanout_bga_differential' in settings:
         dialog.fanout_tab.bga_options.differential_check.SetValue(settings['fanout_bga_differential'])
-        # Trigger differential change to show/hide gap control
-        dialog.fanout_tab.bga_options._on_differential_changed(None)
-    if 'fanout_bga_diff_gap' in settings:
-        dialog.fanout_tab.bga_options.diff_pair_gap.SetValue(settings['fanout_bga_diff_gap'])
     if 'fanout_bga_escape_direction' in settings:
         dialog.fanout_tab.bga_options.escape_direction.SetSelection(settings['fanout_bga_escape_direction'])
     if 'fanout_bga_force_escape' in settings:
@@ -444,8 +438,6 @@ def restore_dialog_settings(dialog, settings):
     # Create mode options
     if 'planes_zone_clearance' in settings:
         dialog.planes_tab.create_options.zone_clearance.SetValue(settings['planes_zone_clearance'])
-    if 'planes_edge_clearance' in settings:
-        dialog.planes_tab.create_options.edge_clearance.SetValue(settings['planes_edge_clearance'])
     if 'planes_max_search_radius' in settings:
         dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
     if 'planes_rip_blocker_check' in settings:

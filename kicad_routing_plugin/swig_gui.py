@@ -830,6 +830,7 @@ class RoutingDialog(wx.Dialog):
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
                 'layers': self._get_selected_layers(),
+                'diff_pair_gap': self.differential_tab.diff_pair_gap.GetValue(),
             }
 
         return FanoutTab(
@@ -846,6 +847,7 @@ class RoutingDialog(wx.Dialog):
         from .planes_gui import PlanesTab
 
         def get_shared_params():
+            edge_clearance = self.board_edge_clearance.GetValue() if self.edge_clearance_check.GetValue() else self.clearance.GetValue()
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -855,6 +857,7 @@ class RoutingDialog(wx.Dialog):
                 'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
                 'max_iterations': int(self.max_iterations.GetValue()),
                 'max_ripup': int(self.max_ripup.GetValue()),
+                'board_edge_clearance': edge_clearance,
             }
 
         return PlanesTab(

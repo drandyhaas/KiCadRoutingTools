@@ -194,15 +194,6 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.zone_clearance.SetToolTip("Clearance from zone fill to other copper")
         grid.Add(self.zone_clearance, 0, wx.EXPAND)
 
-        # Edge clearance
-        grid.Add(wx.StaticText(self, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        r = defaults.PARAM_RANGES['plane_edge_clearance']
-        self.edge_clearance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
-                                                 initial=defaults.PLANE_EDGE_CLEARANCE, inc=r['inc'])
-        self.edge_clearance.SetDigits(r['digits'])
-        self.edge_clearance.SetToolTip("Clearance from zone to board edge")
-        grid.Add(self.edge_clearance, 0, wx.EXPAND)
-
         # Max search radius
         grid.Add(wx.StaticText(self, label="Max Search Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['plane_max_search_radius']
@@ -263,7 +254,6 @@ class CreatePlanesOptionsPanel(wx.Panel):
         """Get the configuration values."""
         return {
             'zone_clearance': self.zone_clearance.GetValue(),
-            'edge_clearance': self.edge_clearance.GetValue(),
             'max_search_radius': self.max_search_radius.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),
             'reroute_ripped_nets': self.reroute_ripped_check.GetValue(),
@@ -623,7 +613,7 @@ class PlanesTab(wx.Panel):
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=defaults.PLANE_MAX_VIA_REUSE_RADIUS,
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
-                board_edge_clearance=config.get('edge_clearance', defaults.PLANE_EDGE_CLEARANCE),
+                board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 rip_blocker_nets=config.get('rip_blocker_nets', False),

@@ -729,24 +729,9 @@ class BGAOptionsPanel(wx.Panel):
 
         self.differential_check = wx.CheckBox(self, label="Differential pairs")
         self.differential_check.SetValue(False)
-        self.differential_check.SetToolTip("Route as differential pairs (auto-detects _P/_N nets)")
+        self.differential_check.SetToolTip("Route as differential pairs (uses Pair Gap from Differential tab)")
         self.differential_check.Bind(wx.EVT_CHECKBOX, self._on_differential_changed)
         mode_sizer.Add(self.differential_check, 0, wx.ALL, 5)
-
-        # Diff pair gap (only shown when differential is checked)
-        self.diff_gap_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.diff_gap_label = wx.StaticText(self, label="Diff Pair Gap (mm):")
-        self.diff_gap_sizer.Add(self.diff_gap_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        r = defaults.PARAM_RANGES['diff_pair_gap']
-        self.diff_pair_gap = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
-                                                initial=defaults.BGA_DIFF_PAIR_GAP, inc=r['inc'])
-        self.diff_pair_gap.SetDigits(r['digits'])
-        self.diff_gap_sizer.Add(self.diff_pair_gap, 1, wx.EXPAND)
-        mode_sizer.Add(self.diff_gap_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
-
-        # Initially hide diff pair gap
-        self.diff_gap_label.Hide()
-        self.diff_pair_gap.Hide()
 
         main_sizer.Add(mode_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -789,10 +774,6 @@ class BGAOptionsPanel(wx.Panel):
     def _on_differential_changed(self, event):
         """Handle differential checkbox change."""
         is_diff = self.differential_check.GetValue()
-        self.diff_gap_label.Show(is_diff)
-        self.diff_pair_gap.Show(is_diff)
-        self.Layout()
-        self.GetParent().Layout()
         # Notify callback
         if self._on_differential_changed_callback:
             self._on_differential_changed_callback(is_diff)
@@ -803,7 +784,6 @@ class BGAOptionsPanel(wx.Panel):
         return {
             'exit_margin': self.exit_margin.GetValue(),
             'differential': is_differential,
-            'diff_pair_gap': self.diff_pair_gap.GetValue() if is_differential else 0,
             'diff_pair_patterns': ['*'] if is_differential else [],  # Auto-detect all diff pairs when enabled
             'primary_escape': 'horizontal' if self.escape_direction.GetSelection() == 0 else 'vertical',
             'force_escape_direction': self.force_escape.GetValue(),
@@ -832,7 +812,7 @@ class QFNOptionsPanel(wx.Panel):
 
         # Info text - QFN uses component's layer automatically
         info_text = wx.StaticText(self, label="QFN fanout routes on the component's layer.\nTrack width comes from Basic tab.")
-        info_text.Wrap(250)
+        info_text.Wrap(350)
         main_sizer.Add(info_text, 0, wx.ALL, 10)
 
         # Parameters section
@@ -1081,7 +1061,7 @@ class FanoutTab(wx.Panel):
                 layers=layers,
                 track_width=track_width,
                 clearance=clearance,
-                diff_pair_gap=config['diff_pair_gap'],
+                diff_pair_gap=shared.get('diff_pair_gap', defaults.DIFF_PAIR_GAP),
                 exit_margin=config['exit_margin'],
                 primary_escape=config['primary_escape'],
                 force_escape_direction=config['force_escape_direction'],
