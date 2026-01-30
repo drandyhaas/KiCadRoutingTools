@@ -266,9 +266,15 @@ class CreatePlanesOptionsPanel(wx.Panel):
 class RepairPlanesOptionsPanel(wx.Panel):
     """Options panel for repairing disconnected planes (route_disconnected_planes.py)."""
 
-    def __init__(self, parent):
-        """Create the options panel."""
+    def __init__(self, parent, get_track_width=None):
+        """Create the options panel.
+
+        Args:
+            parent: Parent window
+            get_track_width: Callback to get track width from Basic tab for validation
+        """
         super().__init__(parent)
+        self._get_track_width = get_track_width
         self._create_ui()
 
     def _create_ui(self):
@@ -288,17 +294,9 @@ class RepairPlanesOptionsPanel(wx.Panel):
         self.max_track_width = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                   initial=defaults.REPAIR_MAX_TRACK_WIDTH, inc=r['inc'])
         self.max_track_width.SetDigits(r['digits'])
-        self.max_track_width.SetToolTip("Maximum track width for region connections")
+        self.max_track_width.SetToolTip("Maximum track width for region connections (must be >= Track Width)")
+        self.max_track_width.Bind(wx.EVT_SPINCTRLDOUBLE, self._on_max_track_width_changed)
         grid.Add(self.max_track_width, 0, wx.EXPAND)
-
-        # Min track width
-        grid.Add(wx.StaticText(self, label="Min Track Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        r = defaults.PARAM_RANGES['repair_min_track_width']
-        self.min_track_width = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
-                                                  initial=defaults.REPAIR_MIN_TRACK_WIDTH, inc=r['inc'])
-        self.min_track_width.SetDigits(r['digits'])
-        self.min_track_width.SetToolTip("Minimum track width for region connections")
-        grid.Add(self.min_track_width, 0, wx.EXPAND)
 
         # Analysis grid step
         grid.Add(wx.StaticText(self, label="Analysis Grid (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -323,9 +321,27 @@ class RepairPlanesOptionsPanel(wx.Panel):
         """Get the configuration values."""
         return {
             'max_track_width': self.max_track_width.GetValue(),
-            'min_track_width': self.min_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
         }
+
+    def _on_max_track_width_changed(self, event):
+        """Validate max track width >= track width from Basic tab."""
+        if not self._get_track_width:
+            event.Skip()
+            return
+
+        track_width = self._get_track_width()
+        max_width = self.max_track_width.GetValue()
+
+        if max_width < track_width:
+            wx.MessageBox(
+                f"Max Track Width cannot be less than Track Width ({track_width:.2f} mm)",
+                "Invalid Value",
+                wx.OK | wx.ICON_WARNING
+            )
+            self.max_track_width.SetValue(track_width)
+        else:
+            event.Skip()
 
 
 class PlanesTab(wx.Panel):
@@ -418,7 +434,11 @@ class PlanesTab(wx.Panel):
         right_sizer.Add(self.create_options, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Repair options panel (initially hidden)
-        self.repair_options = RepairPlanesOptionsPanel(self)
+        def get_track_width():
+            if self.get_shared_params:
+                return self.get_shared_params().get('track_width', defaults.TRACK_WIDTH)
+            return defaults.TRACK_WIDTH
+        self.repair_options = RepairPlanesOptionsPanel(self, get_track_width=get_track_width)
         right_sizer.Add(self.repair_options, 0, wx.EXPAND | wx.BOTTOM, 5)
         self.repair_options.Hide()
 
@@ -719,7 +739,7 @@ class PlanesTab(wx.Panel):
                 plane_layers=plane_layers,
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 max_track_width=config.get('max_track_width', defaults.REPAIR_MAX_TRACK_WIDTH),
-                min_track_width=config.get('min_track_width', defaults.REPAIR_MIN_TRACK_WIDTH),
+                min_track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),

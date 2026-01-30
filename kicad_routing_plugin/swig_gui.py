@@ -260,6 +260,9 @@ class RoutingDialog(wx.Dialog):
         # Add notebook to main sizer
         main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
 
+        # Bind tab change to validate settings when switching tabs
+        self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self._on_main_tab_changed)
+
         # Status bar at bottom
         self.status_bar = wx.StaticText(main_panel, label="")
         main_sizer.Add(self.status_bar, 0, wx.EXPAND | wx.ALL, 5)
@@ -1001,6 +1004,18 @@ class RoutingDialog(wx.Dialog):
     def _on_edge_clearance_check(self, event):
         """Handle edge clearance checkbox change."""
         self.board_edge_clearance.Enable(self.edge_clearance_check.GetValue())
+
+    def _on_main_tab_changed(self, event):
+        """Handle main notebook tab change - validate settings when switching tabs."""
+        event.Skip()  # Allow normal tab switching
+
+        # Check if switching to Planes tab (index 4)
+        if event.GetSelection() == 4:
+            # Validate max_track_width >= track_width
+            track_width = self.track_width.GetValue()
+            max_width = self.planes_tab.repair_options.max_track_width.GetValue()
+            if max_width < track_width:
+                self.planes_tab.repair_options.max_track_width.SetValue(track_width)
 
     def _on_update_schematic_changed(self, event):
         """Handle update schematic checkbox change."""
