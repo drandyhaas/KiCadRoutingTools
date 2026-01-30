@@ -87,7 +87,7 @@ def main():
 
     if lvds and not onlychecks:
         # Route LVDS diff pairs
-        lvds_opts = f"--impedance 100 {GEOMETRY} {LAYERS_5}"
+        lvds_opts = f"--impedance 100 --proximity-heuristic-factor 0.02 {GEOMETRY} {LAYERS_5}"
         if quick:
             # Quick test: route just a few rx1_1* pairs
             run(f"python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets '*lvds_rx1_1*' --swappable-nets '*lvds_rx1_1*' {lvds_opts}", unbuffered)

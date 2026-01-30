@@ -1373,7 +1373,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         gnd_via_perp_offset=gnd_via_perp_grid,
         gnd_via_along_offset=gnd_via_along_grid,
         vertical_attraction_radius=attraction_radius_grid,
-        vertical_attraction_bonus=attraction_bonus
+        vertical_attraction_bonus=attraction_bonus,
+        proximity_heuristic_cost=config.get_proximity_heuristic_cost() // 10
     )
 
     # Route using pose-based A* with Dubins heuristic

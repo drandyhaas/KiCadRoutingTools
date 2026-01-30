@@ -824,6 +824,8 @@ Examples:
                         help="Max iterations for quick probe phase per direction (default: 5000)")
     parser.add_argument("--heuristic-weight", type=float, default=1.9,
                         help="A* heuristic weight, higher=faster but less optimal (default: 1.9)")
+    parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
+                        help="Factor for proximity-aware A* heuristic (default: 0.02, 0=disabled)")
     parser.add_argument("--turn-cost", type=int, default=1000,
                         help="Penalty for direction changes, encourages straighter paths (default: 1000)")
 
@@ -975,6 +977,7 @@ Examples:
                 max_iterations=args.max_iterations,
                 max_probe_iterations=args.max_probe_iterations,
                 heuristic_weight=args.heuristic_weight,
+                proximity_heuristic_factor=args.proximity_heuristic_factor,
                 turn_cost=args.turn_cost,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,

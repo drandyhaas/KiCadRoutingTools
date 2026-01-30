@@ -580,7 +580,7 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --max-iterations 200000      # A* iteration limit
 --max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
 --heuristic-weight 1.9       # A* greediness (>1 = faster)
---proximity-heuristic-factor 0.02  # Proximity cost estimate factor (higher = faster but may overestimate)
+--proximity-heuristic-factor 0.02  # Proximity cost estimate factor (higher = faster but may overestimate, diff pairs use 1/10th)
 --turn-cost 1000             # Penalty for direction changes (straighter paths)
 --max-ripup 3                # Max blockers to rip up at once (1-N progressive)
 --routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)

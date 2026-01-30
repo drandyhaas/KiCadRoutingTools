@@ -26,13 +26,14 @@ pub struct PoseRouter {
     gnd_via_along_offset: i32,  // GND via along-heading offset from signal vias (grid units)
     vertical_attraction_radius: i32,  // Grid units for cross-layer attraction lookup (0 = disabled)
     vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
+    proximity_heuristic_cost: i32,  // Expected proximity cost per grid step (added to heuristic)
 }
 
 #[pymethods]
 impl PoseRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=4, gnd_via_perp_offset=0, gnd_via_along_offset=0, vertical_attraction_radius=0, vertical_attraction_bonus=0))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32, vertical_attraction_radius: i32, vertical_attraction_bonus: i32) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=4, gnd_via_perp_offset=0, gnd_via_along_offset=0, vertical_attraction_radius=0, vertical_attraction_bonus=0, proximity_heuristic_cost=0))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32, vertical_attraction_radius: i32, vertical_attraction_bonus: i32, proximity_heuristic_cost: i32) -> Self {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
         let base_straight = (min_radius_grid.ceil() as i32 + 1).max(3);
@@ -45,7 +46,7 @@ impl PoseRouter {
         } else {
             base_straight
         };
-        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset, vertical_attraction_radius, vertical_attraction_bonus }
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset, vertical_attraction_radius, vertical_attraction_bonus, proximity_heuristic_cost }
     }
 
     /// Route from source pose to target pose using pose-based A* with Dubins heuristic.
@@ -696,6 +697,14 @@ impl PoseRouter {
             state.gx as f64, state.gy as f64, theta1,
             goal.gx as f64, goal.gy as f64, theta2,
         );
+
+        // Add expected proximity cost per step (makes heuristic tighter for high-proximity boards)
+        // Note: do this before adding via_cost so we don't count via_cost as path steps
+        if self.proximity_heuristic_cost > 0 {
+            // path_length returns distance * 1000, so divide to get step estimate
+            let estimated_steps = h / 1000;
+            h += estimated_steps * self.proximity_heuristic_cost;
+        }
 
         // Add via cost if layers differ
         if state.layer != goal.layer {
