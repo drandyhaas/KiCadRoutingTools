@@ -819,10 +819,10 @@ Features:
 - No user-defined keepout zones
 - No bus/parallel routing
 - No coarse grid assignment before detailed routing to plan overall topology
-- No via cost learning/tuning
-- No design rule import from KiCad
+- No via cost or other parameter learning/tuning
 - No design rules by region/area support
 
 ## License
 
 MIT License
+
