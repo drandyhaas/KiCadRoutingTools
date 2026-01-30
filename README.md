@@ -13,7 +13,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 
 ## Features
 
-- **Grid-based A* pathfinding** with Rust acceleration (~10x faster than Python)
+- **Grid-based A\* pathfinding** with Rust acceleration (~10x faster than Python)
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
@@ -737,7 +737,7 @@ Features:
 - **Voronoi partitioning** - Multiple nets can share a single plane layer using `|` separator (e.g., `"VA19|VA11"`). Each net's vias get non-overlapping zone polygons. MST edges are routed between all vias using A* pathfinding, with routes sampled as Voronoi seeds to ensure connected zones. Retries with failed nets first (up to 5 iterations)
 - **Automatic pad classification** - Identifies SMD pads needing vias vs through-hole/zone-layer pads
 - **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
-- **A* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
+- **A\* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
 - **Via reuse with fallback** - Prefers nearby vias within reuse radius, falls back to farther vias if placement fails
 - **Blocker rip-up** - When via placement/routing fails, identifies blocking nets and temporarily removes them, then retries
 - **Automatic re-routing** - Optionally re-routes ripped nets after all plane vias are placed
