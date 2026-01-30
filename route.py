@@ -146,6 +146,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 schematic_dir: Optional[str] = None,
                 layer_costs: Optional[List[float]] = None,
                 add_teardrops: bool = False,
+                collect_stats: bool = False,
                 cancel_check=None,
                 progress_callback=None,
                 return_results: bool = False,
@@ -273,6 +274,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if layer_widths:
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
+    if collect_stats:
+        config_kwargs['collect_stats'] = collect_stats
     config = GridRouteConfig(**config_kwargs)
 
     # Identify power nets and set up per-net widths
@@ -934,6 +937,8 @@ For differential pair routing, use route_diff.py:
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads in output file")
+    parser.add_argument("--stats", action="store_true",
+                        help="Collect and print A* search statistics for debugging heuristic efficiency")
 
     # Visualization options
     parser.add_argument("--visualize", "-V", action="store_true",
@@ -1074,4 +1079,5 @@ For differential pair routing, use route_diff.py:
                 vis_callback=vis_callback,
                 schematic_dir=args.schematic_dir,
                 layer_costs=args.layer_costs,
-                add_teardrops=args.add_teardrops)
+                add_teardrops=args.add_teardrops,
+                collect_stats=args.stats)

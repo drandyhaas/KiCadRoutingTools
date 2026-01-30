@@ -5,7 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
 
 use crate::obstacle_map::GridObstacleMap;
-use crate::types::{GridState, OpenEntry, BlockedCellTracker, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
+use crate::types::{GridState, OpenEntry, BlockedCellTracker, RouteStats, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
 /// Grid A* Router
 #[pyclass]
@@ -38,8 +38,8 @@ impl GridRouter {
     }
 
     /// Route from multiple source points to multiple target points.
-    /// Returns (path, iterations) where path is list of (gx, gy, layer) tuples,
-    /// or (None, iterations) if no path found.
+    /// Returns (path, iterations, stats) where path is list of (gx, gy, layer) tuples,
+    /// or (None, iterations, stats) if no path found. Stats is a dict with search statistics.
     ///
     /// collinear_vias: If true, after a via the route must continue in the same
     /// direction as before the via (for diff pair routing to ensure clean via geometry).
@@ -66,7 +66,9 @@ impl GridRouter {
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
         track_margin: i32,
-    ) -> (Option<Vec<(i32, i32, u8)>>, u32) {
+    ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
+        let mut stats = RouteStats::default();
+
         // Convert targets to set for O(1) lookup
         let target_set: FxHashSet<u64> = targets
             .iter()
@@ -151,6 +153,7 @@ impl GridRouter {
 
         // Find minimum layer cost for initial g penalty
         let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+        let mut best_initial_h = i32::MAX;
 
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
@@ -159,6 +162,7 @@ impl GridRouter {
             let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
             let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state, &target_states);
+            best_initial_h = best_initial_h.min(h);
             open_set.push(OpenEntry {
                 f_score: initial_g + h,
                 g_score: initial_g,
@@ -166,6 +170,7 @@ impl GridRouter {
                 counter,
             });
             counter += 1;
+            stats.cells_pushed += 1;
             g_costs.insert(key, initial_g);
             // Source nodes start with no vias on their path
             if via_exclusion_radius > 0 {
@@ -174,6 +179,7 @@ impl GridRouter {
             // Source nodes are at step 0
             steps_from_source.insert(key, 0);
         }
+        stats.initial_h = best_initial_h;
 
         let mut iterations: u32 = 0;
 
@@ -188,8 +194,10 @@ impl GridRouter {
             let g = current_entry.g_score;
 
             if closed.contains(&current_key) {
+                stats.duplicate_skips += 1;
                 continue;
             }
+            stats.cells_expanded += 1;
 
             // Check if reached target
             if target_set.contains(&current_key) {
@@ -221,7 +229,19 @@ impl GridRouter {
                 if arrival_ok {
                     // Reconstruct path
                     let path = self.reconstruct_path(&parents, current_key, &g_costs);
-                    return (Some(path), iterations);
+                    stats.path_length = path.len() as u32;
+                    stats.path_cost = g;
+                    stats.final_g = g;
+                    stats.open_set_size = open_set.len() as u32;
+                    stats.closed_set_size = closed.len() as u32;
+                    // Count vias in path
+                    for i in 1..path.len() {
+                        if path[i].2 != path[i-1].2 {
+                            stats.via_count += 1;
+                        }
+                    }
+                    let stats_dict = self.stats_to_dict(&stats);
+                    return (Some(path), iterations, stats_dict);
                 }
                 // Arrival direction not ok - DON'T add to closed, allow reaching from different direction
                 continue;
@@ -327,6 +347,9 @@ impl GridRouter {
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
+                    if existing_g != i32::MAX {
+                        stats.cells_revisited += 1;
+                    }
                     g_costs.insert(neighbor_key, new_g);
                     parents.insert(neighbor_key, current_key);
                     // Propagate via list to neighbor (same vias since no layer change)
@@ -344,6 +367,7 @@ impl GridRouter {
                         counter,
                     });
                     counter += 1;
+                    stats.cells_pushed += 1;
                 }
             }
 
@@ -437,6 +461,9 @@ impl GridRouter {
 
                     let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                     if new_g < existing_g {
+                        if existing_g != i32::MAX {
+                            stats.cells_revisited += 1;
+                        }
                         g_costs.insert(neighbor_key, new_g);
                         parents.insert(neighbor_key, current_key);
                         // Track via positions (only real vias, not free vias at through-holes)
@@ -460,12 +487,17 @@ impl GridRouter {
                             counter,
                         });
                         counter += 1;
+                        stats.cells_pushed += 1;
                     }
                 }
             }
         }
 
-        (None, iterations)
+        // No path found - fill in final stats
+        stats.open_set_size = open_set.len() as u32;
+        stats.closed_set_size = closed.len() as u32;
+        let stats_dict = self.stats_to_dict(&stats);
+        (None, iterations, stats_dict)
     }
 
     /// Route with frontier analysis - returns blocked cells on failure.
@@ -943,5 +975,40 @@ impl GridRouter {
         }
 
         (None, None)
+    }
+
+    /// Convert RouteStats to a Python-friendly dictionary
+    fn stats_to_dict(&self, stats: &RouteStats) -> std::collections::HashMap<String, f64> {
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("cells_expanded".to_string(), stats.cells_expanded as f64);
+        dict.insert("cells_pushed".to_string(), stats.cells_pushed as f64);
+        dict.insert("cells_revisited".to_string(), stats.cells_revisited as f64);
+        dict.insert("duplicate_skips".to_string(), stats.duplicate_skips as f64);
+        dict.insert("path_length".to_string(), stats.path_length as f64);
+        dict.insert("path_cost".to_string(), stats.path_cost as f64);
+        dict.insert("initial_h".to_string(), stats.initial_h as f64);
+        dict.insert("final_g".to_string(), stats.final_g as f64);
+        dict.insert("max_f_score".to_string(), stats.max_f_score as f64);
+        dict.insert("open_set_size".to_string(), stats.open_set_size as f64);
+        dict.insert("closed_set_size".to_string(), stats.closed_set_size as f64);
+        dict.insert("via_count".to_string(), stats.via_count as f64);
+
+        // Computed metrics
+        if stats.initial_h > 0 && stats.final_g > 0 {
+            // Heuristic efficiency: h/g ratio (1.0 = perfect, <1.0 = underestimate, >1.0 = inadmissible)
+            dict.insert("heuristic_ratio".to_string(), stats.initial_h as f64 / stats.final_g as f64);
+        }
+        if stats.path_length > 0 {
+            // Expansion ratio: cells expanded / path length (lower = more efficient)
+            dict.insert("expansion_ratio".to_string(), stats.cells_expanded as f64 / stats.path_length as f64);
+            // Revisit ratio: how often we improved paths
+            dict.insert("revisit_ratio".to_string(), stats.cells_revisited as f64 / stats.cells_expanded as f64);
+        }
+        if stats.cells_expanded > 0 {
+            // Skip ratio: duplicate pops from open set
+            dict.insert("skip_ratio".to_string(), stats.duplicate_skips as f64 / (stats.cells_expanded + stats.duplicate_skips) as f64);
+        }
+
+        dict
     }
 }

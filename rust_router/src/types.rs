@@ -212,3 +212,32 @@ impl Default for BlockedCellTracker {
         Self::new()
     }
 }
+
+/// Statistics from an A* search for debugging and performance analysis.
+#[derive(Clone, Debug, Default)]
+pub struct RouteStats {
+    /// Cells popped from open set and processed (not skipped as duplicates)
+    pub cells_expanded: u32,
+    /// Total pushes to open set (includes duplicates from path improvements)
+    pub cells_pushed: u32,
+    /// Times we found a better g-cost for an existing node (path improvement)
+    pub cells_revisited: u32,
+    /// Times we skipped a cell because it was already in closed set
+    pub duplicate_skips: u32,
+    /// Final path length in grid steps (0 if no path found)
+    pub path_length: u32,
+    /// Final g-cost at goal (0 if no path found)
+    pub path_cost: i32,
+    /// Initial heuristic estimate from best source to targets
+    pub initial_h: i32,
+    /// Final g-cost (actual cost to reach goal)
+    pub final_g: i32,
+    /// Maximum f-score seen in open set (indicates search spread)
+    pub max_f_score: i32,
+    /// Size of open set at termination
+    pub open_set_size: u32,
+    /// Size of closed set (unique cells visited)
+    pub closed_set_size: u32,
+    /// Number of via transitions in path
+    pub via_count: u32,
+}

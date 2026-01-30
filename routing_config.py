@@ -85,6 +85,8 @@ class GridRouteConfig:
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
     # Layer cost weights - prefer certain layers over others (1.0 = normal, 1.5 = 50% more expensive)
     layer_costs: List[float] = field(default_factory=list)  # Per-layer cost multipliers
+    # Debug options
+    collect_stats: bool = False  # Collect A* search statistics for debugging
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).

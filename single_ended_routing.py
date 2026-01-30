@@ -34,6 +34,53 @@ except ImportError:
     VisualRouter = None
 
 
+def print_route_stats(stats: dict, print_prefix: str = "  "):
+    """Print A* routing statistics in a readable format.
+
+    Args:
+        stats: Dictionary of statistics from route_multi_with_stats
+        print_prefix: Prefix for each line (default: "  ")
+    """
+    print(f"{print_prefix}A* Search Statistics:")
+    print(f"{print_prefix}  Cells expanded:  {int(stats.get('cells_expanded', 0)):,} (popped from open set)")
+    print(f"{print_prefix}  Cells pushed:    {int(stats.get('cells_pushed', 0)):,} (added to open set)")
+    print(f"{print_prefix}  Cells revisited: {int(stats.get('cells_revisited', 0)):,} (path improvements)")
+    print(f"{print_prefix}  Duplicate skips: {int(stats.get('duplicate_skips', 0)):,} (already in closed)")
+    print(f"{print_prefix}  Path length:     {int(stats.get('path_length', 0)):,} grid steps")
+    print(f"{print_prefix}  Path cost:       {int(stats.get('path_cost', 0)):,}")
+    print(f"{print_prefix}  Via count:       {int(stats.get('via_count', 0)):,}")
+    print(f"{print_prefix}  Initial h:       {int(stats.get('initial_h', 0)):,}")
+    print(f"{print_prefix}  Final g:         {int(stats.get('final_g', 0)):,}")
+    print(f"{print_prefix}  Open set size:   {int(stats.get('open_set_size', 0)):,} (at termination)")
+    print(f"{print_prefix}  Closed set size: {int(stats.get('closed_set_size', 0)):,} (unique visited)")
+
+    # Computed ratios
+    h_ratio = stats.get('heuristic_ratio', 0)
+    if h_ratio > 0:
+        # Note: h_ratio > 1.0 is expected when using weighted A* (h_weight > 1.0)
+        # The heuristic is multiplied by h_weight to trade optimality for speed
+        if abs(h_ratio - 1.0) < 0.01:
+            quality = "perfect heuristic"
+        elif h_ratio < 1.0:
+            quality = "admissible (underestimate)"
+        else:
+            quality = f"weighted A* (h_weight ~{h_ratio:.1f})"
+        print(f"{print_prefix}  Heuristic ratio: {h_ratio:.3f} (h/g, {quality})")
+
+    exp_ratio = stats.get('expansion_ratio', 0)
+    if exp_ratio > 0:
+        quality = "excellent" if exp_ratio < 2 else "good" if exp_ratio < 5 else "poor" if exp_ratio < 20 else "very poor"
+        print(f"{print_prefix}  Expansion ratio: {exp_ratio:.1f}x path length ({quality})")
+
+    revisit_ratio = stats.get('revisit_ratio', 0)
+    if revisit_ratio >= 0:
+        print(f"{print_prefix}  Revisit ratio:   {revisit_ratio:.3f} (path improvements / expanded)")
+
+    skip_ratio = stats.get('skip_ratio', 0)
+    if skip_ratio >= 0:
+        print(f"{print_prefix}  Skip ratio:      {skip_ratio:.3f} (duplicates / total pops)")
+
+
 def _print_obstacle_map(obstacles: 'GridObstacleMap', center_gx: int, center_gy: int, layer: int, radius: int = 20, print_prefix: str = ""):
     """Print a visual map of blocking around a center point."""
     print(f"{print_prefix}  Obstacle map around ({center_gx}, {center_gy}) layer={layer} (radius={radius}):")
@@ -317,13 +364,13 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     probe_iterations = config.max_probe_iterations
 
     # Probe first direction
-    path, iterations = router.route_multi(obstacles, first_sources, first_targets, probe_iterations, track_margin=track_margin)
+    path, iterations, _ = router.route_multi(obstacles, first_sources, first_targets, probe_iterations, track_margin=track_margin)
     first_probe_iters = iterations
     total_iterations = first_probe_iters
 
     if path is None:
         # Probe second direction
-        path, iterations = router.route_multi(obstacles, second_sources, second_targets, probe_iterations, track_margin=track_margin)
+        path, iterations, _ = router.route_multi(obstacles, second_sources, second_targets, probe_iterations, track_margin=track_margin)
         second_probe_iters = iterations
         total_iterations += second_probe_iters
 
@@ -350,7 +397,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 # Both probes reached max - do full search on first direction
                 print(f"Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
-                path, full_iters = router.route_multi(obstacles, first_sources, first_targets, config.max_iterations, track_margin=track_margin)
+                path, full_iters, _ = router.route_multi(obstacles, first_sources, first_targets, config.max_iterations, track_margin=track_margin)
                 total_iterations += full_iters
 
                 if path is not None:
@@ -358,7 +405,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 else:
                     # First direction failed, try second
                     print(f"No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
-                    path, fallback_full_iters = router.route_multi(obstacles, second_sources, second_targets, config.max_iterations, track_margin=track_margin)
+                    path, fallback_full_iters, _ = router.route_multi(obstacles, second_sources, second_targets, config.max_iterations, track_margin=track_margin)
                     total_iterations += fallback_full_iters
                     if path is not None:
                         reversed_path = start_backwards
@@ -548,6 +595,18 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         }
 
     print(f"Route found in {total_iterations} iterations, path length: {len(path)}")
+
+    # Collect and print stats if enabled
+    if config.collect_stats:
+        # Re-run with stats collection on the same direction that succeeded
+        # Use the actual source/target that worked
+        if reversed_path:
+            stats_sources, stats_targets = forward_targets, forward_sources
+        else:
+            stats_sources, stats_targets = forward_sources, forward_targets
+        _, _, stats = router.route_multi(
+            obstacles, stats_sources, stats_targets, config.max_iterations, track_margin=track_margin)
+        print_route_stats(stats)
 
     if reversed_path:
         sources, targets = targets, sources
