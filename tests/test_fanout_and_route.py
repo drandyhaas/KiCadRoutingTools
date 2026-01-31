@@ -50,7 +50,7 @@ def main():
     unbuffered = args.unbuffered
 
     # Common CLI parameter groups
-    GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1 --verbose"
+    GEOMETRY = "--clearance 0.1 --via-size 0.3 --via-drill 0.2 --track-width 0.1"
     LAYERS_4 = "--layers F.Cu In1.Cu In2.Cu B.Cu"
     LAYERS_5 = "--layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu"
 
@@ -79,7 +79,7 @@ def main():
 
     if ftdi and not onlychecks:
         # Route the FTDI tracks
-        ftdi_opts = f"--swappable-nets 'Net-(U2A-DATA_*)' --impedance 50 --vertical-attraction-radius 0 {GEOMETRY} {LAYERS_4}"
+        ftdi_opts = f"--swappable-nets 'Net-(U2A-DATA_*)' --proximity-heuristic-factor 0.02 --impedance 50 --vertical-attraction-radius 0 {GEOMETRY} {LAYERS_4}"
         if quick:
             run(f"python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets 'Net-(U2A-DATA_11*)' {ftdi_opts}", unbuffered)
         else:
@@ -87,7 +87,7 @@ def main():
 
     if lvds and not onlychecks:
         # Route LVDS diff pairs
-        lvds_opts = f"--impedance 100 --proximity-heuristic-factor 0.02 {GEOMETRY} {LAYERS_5}"
+        lvds_opts = f"--impedance 100 --proximity-heuristic-factor 0.0 {GEOMETRY} {LAYERS_5}"
         if quick:
             # Quick test: route just a few rx1_1* pairs
             run(f"python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets '*lvds_rx1_1*' --swappable-nets '*lvds_rx1_1*' {lvds_opts}", unbuffered)
@@ -98,7 +98,7 @@ def main():
 
     if ram and not onlychecks:
         # Route RAM
-        ram_opts = f"--bga-proximity-radius 1 --stub-proximity-radius 1 {GEOMETRY} {LAYERS_5}"
+        ram_opts = f"--bga-proximity-radius 1 --stub-proximity-radius 1 --proximity-heuristic-factor 0.02 {GEOMETRY} {LAYERS_5}"
         # DDR diff pairs (DQS, CK)
         run(f"python3 route_diff.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ramdiff.kicad_pcb --nets 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --length-match-group 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --time-matching --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5 {ram_opts}", unbuffered)
         # DDR single-ended (DQ, CA, etc.)

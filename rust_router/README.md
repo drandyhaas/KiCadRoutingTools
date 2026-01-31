@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.12.0**
+**Current Version: 0.12.1**
 
 ## Features
 
@@ -287,6 +287,7 @@ src/
 
 ## Version History
 
+- **0.12.1**: Made VisualRouter fully consistent with GridRouter. Added `turn_cost`, `via_proximity_cost`, `vertical_attraction_radius`, and `vertical_attraction_bonus` parameters. Updated to use direction-aware proximity costs (`get_directional_proximity_cost()` and `get_layer_proximity_cost()`) and cross-layer attraction. Visualization mode now produces identical iteration counts to non-visualization mode.
 - **0.12.0**: Added proximity-aware heuristic for faster routing on dense boards. The heuristic now auto-estimates expected proximity costs per step based on stub/track/BGA proximity settings and radii, dramatically reducing search space (up to 6x speedup) while keeping high proximity costs to prevent blocking later routes. Formula: `sum(cost_i * radius_i) * factor` where factor defaults to 0.02 (tuned for ~5mm typical radius). Diff pair routing uses 1/10th of the factor due to the more constrained pose-based search. **Smart endpoint detection**: The heuristic is only applied when source or target is inside a proximity zone (checked via `is_in_any_proximity_zone()`); routes with both endpoints outside proximity zones use h=0 for optimal search. New `proximity_heuristic_cost` parameter and `set_proximity_heuristic_cost()` setter in both GridRouter and PoseRouter, `--proximity-heuristic-factor` CLI option (route.py and route_diff.py), and `GridRouteConfig.get_proximity_heuristic_cost()` method.
 - **0.11.0**: Added A* search statistics collection. `route_multi` now returns `(path, iterations, stats)` where `stats` is a dict containing: `cells_expanded`, `cells_pushed`, `cells_revisited`, `duplicate_skips`, `path_length`, `path_cost`, `initial_h`, `final_g`, `via_count`, and computed metrics `heuristic_ratio`, `expansion_ratio`, `revisit_ratio`, `skip_ratio`. Enable stats printing with `--stats` flag.
 - **0.10.0**: Added direction-aware proximity costs. When routing within stub or BGA proximity zones, steps moving away from zone centers cost less than steps moving towards them. This encourages the router to exit proximity zones efficiently. New methods: `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, `get_directional_proximity_cost()`. Zone centers are automatically registered when adding stub/BGA proximity costs in Python (`add_stub_proximity_costs()`, `add_bga_proximity_costs()`). `clear_stub_proximity()` now also clears zone centers.
