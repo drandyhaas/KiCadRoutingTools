@@ -601,10 +601,10 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
 --bga-proximity-radius 7.0  # Radius around BGA edges to penalize (mm)
 --bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
---track-proximity-distance 2.0  # Radius around routed tracks to penalize (mm, same layer)
---track-proximity-cost 0.2   # Cost penalty near routed tracks (mm equivalent)
+--track-proximity-distance 2.0  # Radius around routed tracks (mm, same layer)
+--track-proximity-cost 0.0   # Cost penalty near tracks (0 = disabled)
 --vertical-attraction-radius 1.0  # Radius for cross-layer track attraction (mm)
---vertical-attraction-cost 0.1    # Cost bonus for aligning with tracks on other layers (mm)
+--vertical-attraction-cost 0.0    # Cost bonus for cross-layer alignment (0 = disabled)
 
 # Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching

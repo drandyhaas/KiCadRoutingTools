@@ -871,9 +871,9 @@ For differential pair routing, use route_diff.py:
 
     # Track proximity penalty (same layer only)
     parser.add_argument("--track-proximity-distance", type=float, default=defaults.TRACK_PROXIMITY_DISTANCE,
-                        help=f"Distance around routed tracks to penalize routing on same layer in mm (default: {defaults.TRACK_PROXIMITY_DISTANCE})")
+                        help=f"Radius around routed tracks in mm, same layer only (0 = disabled, default: {defaults.TRACK_PROXIMITY_DISTANCE})")
     parser.add_argument("--track-proximity-cost", type=float, default=defaults.TRACK_PROXIMITY_COST,
-                        help=f"Cost penalty near routed tracks in mm equivalent (default: {defaults.TRACK_PROXIMITY_COST})")
+                        help=f"Cost penalty near routed tracks (0 = disabled, default: {defaults.TRACK_PROXIMITY_COST})")
 
     # Layer swap and target swap options
     parser.add_argument("--no-stub-layer-swap", action="store_true",
@@ -922,8 +922,8 @@ For differential pair routing, use route_diff.py:
     # Vertical alignment attraction options
     parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
                         help="Radius in mm for cross-layer track attraction (0 = disabled, default: 1.0)")
-    parser.add_argument("--vertical-attraction-cost", type=float, default=0.1,
-                        help="Cost bonus in mm equivalent for tracks aligned with other layers (default: 0.1)")
+    parser.add_argument("--vertical-attraction-cost", type=float, default=defaults.VERTICAL_ATTRACTION_COST,
+                        help=f"Cost bonus for aligning with tracks on other layers (0 = disabled, default: {defaults.VERTICAL_ATTRACTION_COST})")
 
     # Layer preference options
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],

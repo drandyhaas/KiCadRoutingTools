@@ -55,7 +55,7 @@ class GridRouteConfig:
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
-    track_proximity_cost: float = 0.2  # mm equivalent cost at track center
+    track_proximity_cost: float = 0.0  # mm equivalent cost (0 = disabled)
     target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap
     crossing_layer_check: bool = True  # Only count crossings when routes share a layer
     routing_clearance_margin: float = 1.0  # Multiplier on track-via clearance (1.0 = minimum DRC)
@@ -65,7 +65,7 @@ class GridRouteConfig:
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
     vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
-    vertical_attraction_cost: float = 0.1  # mm equivalent bonus for aligned positions
+    vertical_attraction_cost: float = 0.0  # mm equivalent bonus for aligned positions
     # Length matching for DDR4 signals
     length_match_groups: List[List[str]] = field(default_factory=list)  # Groups of net patterns to match
     length_match_tolerance: float = 0.1  # mm - acceptable length variance within group

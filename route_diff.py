@@ -843,9 +843,9 @@ Examples:
 
     # Track proximity penalty (same layer only)
     parser.add_argument("--track-proximity-distance", type=float, default=2.0,
-                        help="Distance around routed tracks to penalize routing on same layer in mm (default: 2.0)")
-    parser.add_argument("--track-proximity-cost", type=float, default=0.2,
-                        help="Cost penalty near routed tracks in mm equivalent (default: 0.2)")
+                        help="Radius around routed tracks in mm, same layer only (0 = disabled, default: 2.0)")
+    parser.add_argument("--track-proximity-cost", type=float, default=0.0,
+                        help="Cost penalty near routed tracks (0 = disabled, default: 0.0)")
 
     # Differential pair routing options
     parser.add_argument("--diff-pair-gap", type=float, default=0.101,
@@ -913,8 +913,8 @@ Examples:
     # Vertical alignment attraction options
     parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
                         help="Radius in mm for cross-layer track attraction (0 = disabled, default: 1.0)")
-    parser.add_argument("--vertical-attraction-cost", type=float, default=0.1,
-                        help="Cost bonus in mm equivalent for tracks aligned with other layers (default: 0.1)")
+    parser.add_argument("--vertical-attraction-cost", type=float, default=0.0,
+                        help="Cost bonus for aligning with tracks on other layers (0 = disabled, default: 0.0)")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",

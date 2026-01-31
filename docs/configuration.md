@@ -103,9 +103,9 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--bga-proximity-radius` | 7.0 | Radius around BGA edges to penalize (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
-| `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
+| `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
 | `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
-| `--vertical-attraction-cost` | 0.1 | Cost bonus for aligning with tracks on other layers (mm) |
+| `--vertical-attraction-cost` | 0.0 | Cost bonus for aligning with tracks on other layers (0 = disabled) |
 
 ### Differential Pair Options (route_diff.py only)
 

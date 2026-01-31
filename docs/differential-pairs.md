@@ -313,15 +313,15 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty near BGA edges (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize (mm, same layer) |
-| `--track-proximity-cost` | 0.2 | Cost penalty near routed tracks (mm equivalent) |
+| `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair (meander shorter track) |
 
 ## Track Proximity Avoidance
 
-The `--track-proximity-distance` and `--track-proximity-cost` options penalize routes that run close to previously routed tracks on the same layer. This encourages spread-out routing and reduces the risk of DRC violations.
+The `--track-proximity-distance` and `--track-proximity-cost` options penalize routes that run close to previously routed tracks on the same layer. This encourages spread-out routing and reduces the risk of DRC violations. Disabled by default (cost = 0).
 
-**Note:** Track proximity now works correctly for differential pair routing (pose-based A*). Previously, only single-ended routing used track proximity costs.
+**Note:** Track proximity works correctly for differential pair routing (pose-based A*).
 
 ## Target Swap Optimization
 

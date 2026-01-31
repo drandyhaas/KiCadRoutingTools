@@ -79,7 +79,7 @@ def main():
 
     if ftdi and not onlychecks:
         # Route the FTDI tracks
-        ftdi_opts = f"--swappable-nets 'Net-(U2A-DATA_*)' --proximity-heuristic-factor 0.02 --impedance 50 --vertical-attraction-radius 0 {GEOMETRY} {LAYERS_4}"
+        ftdi_opts = f"--swappable-nets 'Net-(U2A-DATA_*)' --proximity-heuristic-factor 0.02 --impedance 50 --track-proximity-cost 0.2 {GEOMETRY} {LAYERS_4}"
         if quick:
             run(f"python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets 'Net-(U2A-DATA_11*)' {ftdi_opts}", unbuffered)
         else:
