@@ -47,7 +47,7 @@ class PyGameVisualizationCallback(VisualizationCallback):
         self._grid_step = grid_step
         self.config.layers = layers
         print(f"\nStarting visualization with {total_nets} nets...")
-        print("Controls: Space=pause, N=next net, R=restart, +/-=speed, Q=quit")
+        print("Controls: Space=pause, N=next net, R=restart, +/-=speed, Z=zoom to net, Q=quit")
 
     def on_net_start(self, net_name: str, net_num: int, net_id: int,
                      sources: List[Tuple[int, int, int]],

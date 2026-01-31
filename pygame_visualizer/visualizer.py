@@ -205,6 +205,23 @@ class RoutingVisualizer:
         self.current_net_num = net_num
         self.total_nets = total_nets
 
+    def zoom_to_current_net(self):
+        """Zoom to fit the current net's sources and targets."""
+        if not self.sources and not self.targets:
+            return
+        all_points = list(self.sources) + list(self.targets)
+        if not all_points:
+            return
+        min_gx = min(p[0] for p in all_points) - 20  # Add padding
+        max_gx = max(p[0] for p in all_points) + 20
+        min_gy = min(p[1] for p in all_points) - 20
+        max_gy = max(p[1] for p in all_points) + 20
+        cell_size = self.config.cell_size
+        self.camera.fit_to_bounds(
+            min_gx * cell_size, min_gy * cell_size,
+            max_gx * cell_size, max_gy * cell_size
+        )
+
     def add_completed_route(self, path: List[Tuple[int, int, int]]):
         """
         Add a completed route to be drawn persistently.
@@ -316,13 +333,40 @@ class RoutingVisualizer:
         max_gx = int(self.bounds[2] / self.grid_step) + 10
         max_gy = int(self.bounds[3] / self.grid_step) + 10
 
+        grid_width = max_gx - min_gx + 1
+        grid_height = max_gy - min_gy + 1
         cell_size = self.config.cell_size
-        width = (max_gx - min_gx + 1) * cell_size
-        height = (max_gy - min_gy + 1) * cell_size
 
-        max_size = 4000
-        if width > max_size or height > max_size:
-            return None
+        # Calculate required surface size and adjust if needed
+        width = grid_width * cell_size
+        height = grid_height * cell_size
+
+        # Soft limit: reduce cell_size to fit within reasonable memory usage
+        # Hard limit: pygame surfaces have maximum texture size (typically 16384)
+        soft_limit = 8192  # Warn and reduce detail above this
+        hard_limit = 16384  # Pygame/GPU texture limit
+
+        max_dim = max(width, height)
+        if max_dim > hard_limit:
+            # Calculate minimum cell_size to fit within hard limit
+            min_cell_size = max(1, hard_limit // max(grid_width, grid_height))
+            if min_cell_size < 1:
+                print(f"[VIS WARNING] Board too large to render obstacles "
+                      f"({grid_width}x{grid_height} grid cells). Skipping obstacle layer.")
+                return None
+            cell_size = min_cell_size
+            width = grid_width * cell_size
+            height = grid_height * cell_size
+            if not hasattr(self, '_size_warning_shown'):
+                print(f"[VIS WARNING] Large board - reduced obstacle detail "
+                      f"(cell_size {self.config.cell_size} -> {cell_size})")
+                self._size_warning_shown = True
+        elif max_dim > soft_limit:
+            # Reduce cell_size to stay under soft limit for better performance
+            scale = soft_limit / max_dim
+            cell_size = max(1, int(cell_size * scale))
+            width = grid_width * cell_size
+            height = grid_height * cell_size
 
         if skip_cells is None:
             skip_cells = set()
@@ -689,6 +733,7 @@ class RoutingVisualizer:
             ("R", "Restart net"),
             ("Ctrl+R", "Restart all"),
             ("+/-", "Speed 2x"),
+            ("Z", "Zoom to net"),
             ("1-4", "Layer filter"),
             ("0", "All layers"),
             ("O/C", "Open/Closed set"),
@@ -780,6 +825,8 @@ class RoutingVisualizer:
                     if layer < len(self.config.layers):
                         self.config.current_layer = layer
                         self._obstacle_dirty = True
+                elif event.key == pygame.K_z:
+                    self.zoom_to_current_net()
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
