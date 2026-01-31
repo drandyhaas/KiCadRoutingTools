@@ -39,6 +39,35 @@ from routing_context import (
 from terminal_colors import RED, GREEN, RESET
 
 
+def _populate_vis_data_from_cache(vis_data, net_obstacles_cache, exclude_net_id: int):
+    """Populate vis_data with blocked cells/vias from other nets in the cache.
+
+    This ensures blocked cells are displayed even when routing all nets (--nets "*"),
+    where the base obstacle map excludes all nets being routed.
+
+    Args:
+        vis_data: VisualizationData to update (modified in place)
+        net_obstacles_cache: Dict mapping net_id to NetObstacleData
+        exclude_net_id: Net ID to exclude (the net currently being routed)
+    """
+    for other_net_id, obstacle_data in net_obstacles_cache.items():
+        if other_net_id == exclude_net_id:
+            continue  # Skip current net - it's being routed
+
+        # Add blocked cells from this net
+        for i in range(len(obstacle_data.blocked_cells)):
+            gx, gy, layer_idx = obstacle_data.blocked_cells[i]
+            # Ensure we have enough layers
+            while layer_idx >= len(vis_data.blocked_cells):
+                vis_data.blocked_cells.append(set())
+            vis_data.blocked_cells[layer_idx].add((gx, gy))
+
+        # Add blocked vias from this net
+        for i in range(len(obstacle_data.blocked_vias)):
+            gx, gy = obstacle_data.blocked_vias[i]
+            vis_data.blocked_vias.add((gx, gy))
+
+
 def route_single_ended_nets(
     state: RoutingState,
     single_ended_nets: List[Tuple[str, int]],
@@ -146,6 +175,9 @@ def route_single_ended_nets(
                     state.net_obstacles_cache
                 )
                 obstacles = state.working_obstacles  # Use same map as GridRouter would
+                # Update vis_data with obstacles from other nets (not the current one)
+                # This ensures blocked cells are shown even when routing all nets
+                _populate_vis_data_from_cache(vis_data, state.net_obstacles_cache, net_id)
             else:
                 # Fallback: build obstacles the same way as non-visualization
                 obstacles, unrouted_stubs = build_single_ended_obstacles(
