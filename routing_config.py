@@ -149,7 +149,7 @@ class GridRouteConfig:
         return costs
 
     def get_proximity_heuristic_cost(self) -> int:
-        """Get the proximity heuristic cost for the Rust router.
+        """Get the maximum proximity heuristic cost for the Rust router.
 
         Auto-computes expected proximity cost per grid step based on stub/track/BGA
         proximity settings. This tightens the A* heuristic for boards with high
@@ -170,6 +170,40 @@ class GridRouteConfig:
             # Simple formula: total_weight * factor
             # Default factor 0.02 is conservative to avoid overestimating for paths
             # that don't go through proximity zones. Tuned for ~5mm typical radius.
+            estimated_cost = total_weight * self.proximity_heuristic_factor
+            return int(estimated_cost * 1000 / self.grid_step)
+        return 0
+
+    def get_proximity_heuristic_for_zones(self, src_in_stub: bool, src_in_bga: bool,
+                                          tgt_in_stub: bool, tgt_in_bga: bool) -> int:
+        """Get proximity heuristic cost based on which zones the endpoints are in.
+
+        More precise than get_proximity_heuristic_cost() - only adds costs for
+        zones that the source or target is actually inside.
+
+        Args:
+            src_in_stub: True if source is in a stub proximity zone
+            src_in_bga: True if source is in a BGA proximity zone
+            tgt_in_stub: True if target is in a stub proximity zone
+            tgt_in_bga: True if target is in a BGA proximity zone
+
+        Returns cost scaled for grid units (cost per grid step).
+        """
+        total_weight = 0.0
+
+        # Source endpoint zones
+        if src_in_stub:
+            total_weight += self.stub_proximity_cost * self.stub_proximity_radius
+        if src_in_bga:
+            total_weight += self.bga_proximity_cost * self.bga_proximity_radius
+
+        # Target endpoint zones
+        if tgt_in_stub:
+            total_weight += self.stub_proximity_cost * self.stub_proximity_radius
+        if tgt_in_bga:
+            total_weight += self.bga_proximity_cost * self.bga_proximity_radius
+
+        if total_weight > 0:
             estimated_cost = total_weight * self.proximity_heuristic_factor
             return int(estimated_cost * 1000 / self.grid_step)
         return 0

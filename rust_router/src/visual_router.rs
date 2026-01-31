@@ -5,7 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
 
 use crate::obstacle_map::GridObstacleMap;
-use crate::types::{GridState, OpenEntry, DIRECTIONS, ORTHO_COST, DIAG_COST};
+use crate::types::{GridState, OpenEntry, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
 /// Search state snapshot for visualization
 #[pyclass]
@@ -46,7 +46,12 @@ impl SearchSnapshot {
 pub struct VisualRouter {
     via_cost: i32,
     h_weight: f32,
+    turn_cost: i32,
+    via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias
+    vertical_attraction_radius: i32,  // Grid units for cross-layer attraction lookup (0 = disabled)
+    vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
     layer_costs: Vec<i32>,  // Per-layer cost multipliers (1000 = 1.0x, 1500 = 1.5x penalty)
+    proximity_heuristic_cost: i32,  // Expected proximity cost per grid step (added to heuristic)
     // Search state
     open_set: BinaryHeap<OpenEntry>,
     g_costs: FxHashMap<u64, i32>,
@@ -60,17 +65,28 @@ pub struct VisualRouter {
     // Result
     found: bool,
     final_path: Option<Vec<(i32, i32, u8)>>,
+    // Stats
+    cells_expanded: u32,
+    duplicate_skips: u32,
+    cells_pushed: u32,
 }
 
 #[pymethods]
 impl VisualRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, layer_costs=None))]
-    pub fn new(via_cost: i32, h_weight: f32, layer_costs: Option<Vec<i32>>) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=0))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
+               vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
+               layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: i32) -> Self {
         Self {
             via_cost,
             h_weight,
+            turn_cost: turn_cost.unwrap_or(DEFAULT_TURN_COST),
+            via_proximity_cost: via_proximity_cost.unwrap_or(1),
+            vertical_attraction_radius,
+            vertical_attraction_bonus,
             layer_costs: layer_costs.unwrap_or_default(),
+            proximity_heuristic_cost,
             open_set: BinaryHeap::new(),
             g_costs: FxHashMap::default(),
             parents: FxHashMap::default(),
@@ -82,6 +98,9 @@ impl VisualRouter {
             target_states: Vec::new(),
             found: false,
             final_path: None,
+            cells_expanded: 0,
+            duplicate_skips: 0,
+            cells_pushed: 0,
         }
     }
 
@@ -102,6 +121,9 @@ impl VisualRouter {
         self.max_iterations = max_iterations;
         self.found = false;
         self.final_path = None;
+        self.cells_expanded = 0;
+        self.duplicate_skips = 0;
+        self.cells_pushed = 0;
 
         // Set up targets
         self.target_set = targets
@@ -156,24 +178,45 @@ impl VisualRouter {
             let g = current_entry.g_score;
 
             if self.closed.contains(&current_key) {
+                self.duplicate_skips += 1;
                 continue;
             }
-            self.closed.insert(current_key);
-            current_node = Some(current);
 
-            // Check if reached target
+            // Check if reached target (before adding to closed, matching GridRouter)
             if self.target_set.contains(&current_key) {
+                self.cells_expanded += 1;
+                current_node = Some(current);
                 self.found = true;
                 self.final_path = Some(self.reconstruct_path(current_key));
                 break;
             }
+
+            self.closed.insert(current_key);
+            self.cells_expanded += 1;
+            current_node = Some(current);
+
+            // Get previous direction (parent -> current) for turn cost calculation
+            let prev_direction: Option<(i32, i32)> = self.parents.get(&current_key).map(|&parent_key| {
+                let py = ((parent_key >> 8) & 0xFFFFF) as i32;
+                let px = ((parent_key >> 28) & 0xFFFFF) as i32;
+                let px = if px & 0x80000 != 0 { px | !0xFFFFF_i32 } else { px };
+                let py = if py & 0x80000 != 0 { py | !0xFFFFF_i32 } else { py };
+                let pdx = current.gx - px;
+                let pdy = current.gy - py;
+                // Normalize to unit direction (handle vias where position is same)
+                if pdx == 0 && pdy == 0 {
+                    (0, 0) // Via (same position), no direction
+                } else {
+                    (pdx.signum(), pdy.signum())
+                }
+            });
 
             // Expand neighbors - 8 directions
             for (dx, dy) in DIRECTIONS {
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
-                if obstacles.is_blocked(ngx, ngy, current.layer as usize) {
+                if obstacles.is_blocked_with_margin(ngx, ngy, current.layer as usize, 0) {
                     continue;
                 }
 
@@ -188,8 +231,21 @@ impl VisualRouter {
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
                 let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
                 let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
-                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy);
-                let new_g = g + move_cost + proximity_cost;
+                // Add turn cost if direction changes (encourages straighter paths)
+                let turn_cost = match prev_direction {
+                    Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
+                        if dx != pdx || dy != pdy { self.turn_cost } else { 0 }
+                    }
+                    _ => 0, // No previous direction (source node or via)
+                };
+                // Stub and layer proximity costs
+                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
+                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
+                // Subtract attraction bonus for positions aligned with tracks on other layers
+                let attraction_bonus = obstacles.get_cross_layer_attraction(
+                    ngx, ngy, current.layer as usize,
+                    self.vertical_attraction_radius, self.vertical_attraction_bonus);
+                let new_g = g + move_cost + turn_cost + proximity_cost - attraction_bonus;
 
                 let existing_g = self.g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
@@ -204,6 +260,7 @@ impl VisualRouter {
                         counter: self.counter,
                     });
                     self.counter += 1;
+                    self.cells_pushed += 1;
                 }
             }
 
@@ -215,7 +272,7 @@ impl VisualRouter {
                     }
 
                     // Check if destination layer is blocked at this position
-                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
+                    if obstacles.is_blocked_with_margin(current.gx, current.gy, layer as usize, 0) {
                         continue;
                     }
 
@@ -226,13 +283,18 @@ impl VisualRouter {
                         continue;
                     }
 
-                    let proximity_cost = obstacles.get_stub_proximity_cost(current.gx, current.gy) * 2;
+                    // Use zero cost for free via positions (through-hole pads on same net)
+                    let is_free = obstacles.is_free_via(current.gx, current.gy);
+                    let via_cost = if is_free { 0 } else { self.via_cost };
+                    let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
+                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
+                        * self.via_proximity_cost;
                     // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
                     let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
                     let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
                     let layer_transition_cost = dest_layer_cost - current_layer_cost;
                     // Combined via cost can be as low as 0 when switching to a much cheaper layer
-                    let combined_via_cost = (self.via_cost + layer_transition_cost).max(0);
+                    let combined_via_cost = (via_cost + layer_transition_cost).max(0);
                     let new_g = g + combined_via_cost + proximity_cost;
 
                     let existing_g = self.g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -248,6 +310,7 @@ impl VisualRouter {
                             counter: self.counter,
                         });
                         self.counter += 1;
+                        self.cells_pushed += 1;
                     }
                 }
             }
@@ -271,6 +334,18 @@ impl VisualRouter {
     pub fn get_iterations(&self) -> u32 {
         self.iterations
     }
+
+    /// Get search statistics
+    pub fn get_stats(&self) -> std::collections::HashMap<String, u32> {
+        let mut stats = std::collections::HashMap::new();
+        stats.insert("iterations".to_string(), self.iterations);
+        stats.insert("cells_expanded".to_string(), self.cells_expanded);
+        stats.insert("duplicate_skips".to_string(), self.duplicate_skips);
+        stats.insert("cells_pushed".to_string(), self.cells_pushed);
+        stats.insert("closed_size".to_string(), self.closed.len() as u32);
+        stats.insert("open_size".to_string(), self.open_set.len() as u32);
+        stats
+    }
 }
 
 impl VisualRouter {
@@ -291,6 +366,11 @@ impl VisualRouter {
             let mut h = (base_dist as i64 * min_layer_cost as i64 / 1000) as i32;
             if state.layer != target.layer {
                 h += self.via_cost;
+            }
+            // Add expected proximity cost per step (makes heuristic tighter for high-proximity boards)
+            if self.proximity_heuristic_cost > 0 {
+                let path_steps = diag + orth;
+                h += path_steps * self.proximity_heuristic_cost;
             }
             min_h = min_h.min(h);
         }

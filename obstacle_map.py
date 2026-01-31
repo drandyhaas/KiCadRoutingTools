@@ -58,6 +58,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     obstacles = GridObstacleMap(num_layers)
 
+    # Set BGA proximity radius for is_in_bga_proximity() checks
+    bga_prox_radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
+    obstacles.set_bga_proximity_radius(bga_prox_radius_grid)
+
     # Set BGA exclusion zones - block vias AND tracks on ALL layers
     for zone in config.bga_exclusion_zones:
         min_x, min_y, max_x, max_y = zone[:4]

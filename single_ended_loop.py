@@ -126,41 +126,35 @@ def route_single_ended_nets(
 
         start_time = time.time()
 
-        # Build obstacles (use helper for non-visualization case)
+        # Build obstacles - use same approach for both visualization and non-visualization
+        # to ensure VisualRouter replicates GridRouter behavior exactly
         vis_data = None
+        same_net_via_cells = None  # Track cells for in-place restore (only used when not visualizing)
         if visualize:
-            # Clone the base vis data
+            # Clone the base vis data for visualization display
             vis_data = VisualizationData(
                 blocked_cells=[set(s) for s in base_vis_data.blocked_cells],
                 blocked_vias=set(base_vis_data.blocked_vias),
                 bga_zones_grid=list(base_vis_data.bga_zones_grid),
                 bounds=base_vis_data.bounds
             )
-            # Build obstacles with visualization data
-            obstacles = base_obstacles.clone_fresh()
-            for routed_id in routed_net_ids:
-                add_net_obstacles_with_vis(obstacles, pcb_data, routed_id, config, 0.0,
-                                            vis_data.blocked_cells, vis_data.blocked_vias, diagonal_margin=0.25)
-            if gnd_net_id is not None:
-                add_net_vias_as_obstacles(obstacles, pcb_data, gnd_net_id, config, diagonal_margin=0.25)
-            other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
-            for other_net_id in other_unrouted:
-                add_net_obstacles_with_vis(obstacles, pcb_data, other_net_id, config, 0.0,
-                                            vis_data.blocked_cells, vis_data.blocked_vias, diagonal_margin=0.25)
-            stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
-                                       if nid != net_id and nid not in routed_net_ids]
-            unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
-            chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
-            all_stubs = unrouted_stubs + chip_pads
-            if all_stubs:
-                add_stub_proximity_costs(obstacles, all_stubs, config)
-            merge_track_proximity_costs(obstacles, track_proximity_cache)
-            add_cross_layer_tracks(obstacles, pcb_data, config, layer_map, exclude_net_ids={net_id})
-            add_same_net_via_clearance(obstacles, pcb_data, net_id, config)
-            add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, config)
+            # Use the SAME obstacle preparation as non-visualization path for consistency
+            if state.working_obstacles is not None and state.net_obstacles_cache:
+                unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
+                    state.working_obstacles, pcb_data, config, net_id,
+                    all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
+                    state.net_obstacles_cache
+                )
+                obstacles = state.working_obstacles  # Use same map as GridRouter would
+            else:
+                # Fallback: build obstacles the same way as non-visualization
+                obstacles, unrouted_stubs = build_single_ended_obstacles(
+                    base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                    all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
+                    net_obstacles_cache=state.net_obstacles_cache
+                )
         else:
             # Use in-place approach if working map is available (saves memory by not cloning)
-            same_net_via_cells = None  # Track cells for restore
             if state.working_obstacles is not None and state.net_obstacles_cache:
                 unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
                     state.working_obstacles, pcb_data, config, net_id,

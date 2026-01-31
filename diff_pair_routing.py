@@ -1212,7 +1212,8 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
 def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                          coord, layer_names, spacing_mm, p_net_id, n_net_id,
                          max_iterations_override=None, neighbor_stubs=None,
-                         preferred_angles=None, direction_label=None, is_backward=False):
+                         preferred_angles=None, direction_label=None, is_backward=False,
+                         prox_h_cost=0):
     """
     Attempt to route a diff pair in one direction.
 
@@ -1362,6 +1363,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
     attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
 
+    # prox_h_cost is now passed as a parameter (checked before endpoint exemptions are set)
+
     pose_router = PoseRouter(
         via_cost=config.via_cost * 1000 * 2,
         h_weight=config.heuristic_weight,
@@ -1374,7 +1377,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         gnd_via_along_offset=gnd_via_along_grid,
         vertical_attraction_radius=attraction_radius_grid,
         vertical_attraction_bonus=attraction_bonus,
-        proximity_heuristic_cost=config.get_proximity_heuristic_cost() // 10
+        proximity_heuristic_cost=prox_h_cost
     )
 
     # Route using pose-based A* with Dubins heuristic
@@ -1621,6 +1624,31 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     original_src = sources[0]
     original_tgt = targets[0]
 
+    # Check proximity zones BEFORE setting endpoint exemptions (which would zero them out)
+    p_src_gx, p_src_gy = original_src[0], original_src[1]
+    n_src_gx, n_src_gy = original_src[2], original_src[3]
+    p_tgt_gx, p_tgt_gy = original_tgt[0], original_tgt[1]
+    n_tgt_gx, n_tgt_gy = original_tgt[2], original_tgt[3]
+    p_src_prox = obstacles.get_stub_proximity_cost(p_src_gx, p_src_gy)
+    n_src_prox = obstacles.get_stub_proximity_cost(n_src_gx, n_src_gy)
+    p_tgt_prox = obstacles.get_stub_proximity_cost(p_tgt_gx, p_tgt_gy)
+    n_tgt_prox = obstacles.get_stub_proximity_cost(n_tgt_gx, n_tgt_gy)
+    src_in_stub = (p_src_prox > 0 or n_src_prox > 0)
+    src_in_bga = (obstacles.is_in_bga_proximity(p_src_gx, p_src_gy) or
+                  obstacles.is_in_bga_proximity(n_src_gx, n_src_gy))
+    tgt_in_stub = (p_tgt_prox > 0 or n_tgt_prox > 0)
+    tgt_in_bga = (obstacles.is_in_bga_proximity(p_tgt_gx, p_tgt_gy) or
+                  obstacles.is_in_bga_proximity(n_tgt_gx, n_tgt_gy))
+    # Diff pairs use 1/10th of the heuristic factor
+    prox_h_cost = config.get_proximity_heuristic_for_zones(src_in_stub, src_in_bga, tgt_in_stub, tgt_in_bga) // 10
+    if config.verbose:
+        zones = []
+        if src_in_stub: zones.append("src:stub")
+        if src_in_bga: zones.append("src:bga")
+        if tgt_in_stub: zones.append("tgt:stub")
+        if tgt_in_bga: zones.append("tgt:bga")
+        print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}] (diff_pair 1/10th)")
+
     # Set endpoint exempt positions for stub proximity costs
     # This allows routes to reach endpoints without being penalized by nearby stubs
     min_stub_pair_spacing = config.track_width + config.diff_pair_gap + config.clearance
@@ -1658,7 +1686,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         first_src, first_tgt, pcb_data, config, obstacles, base_obstacles,
         coord, layer_names, spacing_mm, p_net_id, n_net_id,
         max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
-        direction_label=first_label, is_backward=(first_label == "backward")
+        direction_label=first_label, is_backward=(first_label == "backward"),
+        prox_h_cost=prox_h_cost
     )
 
     # Check if first probe was blocked (all angles failed)
@@ -1694,7 +1723,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             second_src, second_tgt, pcb_data, config, obstacles, base_obstacles,
             coord, layer_names, spacing_mm, p_net_id, n_net_id,
             max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
-            direction_label=second_label, is_backward=(second_label == "backward")
+            direction_label=second_label, is_backward=(second_label == "backward"),
+            prox_h_cost=prox_h_cost
         )
 
         # Check if second probe was blocked (all angles failed)
@@ -1772,7 +1802,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                 promising_src, promising_tgt, pcb_data, config, obstacles, base_obstacles,
                 coord, layer_names, spacing_mm, p_net_id, n_net_id,
                 neighbor_stubs=unrouted_stubs, preferred_angles=preferred,
-                direction_label=None, is_backward=(promising_label == "backward")
+                direction_label=None, is_backward=(promising_label == "backward"),
+                prox_h_cost=prox_h_cost
             )
             total_iterations = first_probe_iters + second_probe_iters + full_iters
 
@@ -1802,7 +1833,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                     fallback_src, fallback_tgt, pcb_data, config, obstacles, base_obstacles,
                     coord, layer_names, spacing_mm, p_net_id, n_net_id,
                     neighbor_stubs=unrouted_stubs, preferred_angles=fallback_preferred,
-                    direction_label=None, is_backward=(fallback_label == "backward")
+                    direction_label=None, is_backward=(fallback_label == "backward"),
+                    prox_h_cost=prox_h_cost
                 )
                 total_iterations += fallback_full_iters
 
