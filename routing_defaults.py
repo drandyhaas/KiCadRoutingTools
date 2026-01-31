@@ -114,7 +114,7 @@ PARAM_RANGES = {
     'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 2},
     'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 2},
     'via_cost': {'min': 1, 'max': 1000},
-    'max_iterations': {'min': 1000, 'max': 1000000},
+    'max_iterations': {'min': 1000, 'max': 100000000},
     'heuristic_weight': {'min': 1.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'proximity_heuristic_factor': {'min': 0.0, 'max': 0.2, 'inc': 0.01, 'digits': 2},
     'turn_cost': {'min': 0, 'max': 10000},

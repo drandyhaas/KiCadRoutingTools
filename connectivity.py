@@ -646,7 +646,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     # Case 1: Multiple segment groups
     if len(net_segments) >= 2:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) >= 2:
             groups.sort(key=len, reverse=True)
             source_segs = groups[0]
@@ -697,7 +697,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     # Case 2: One segment group + unconnected pads
     if len(net_segments) >= 1 and len(net_pads) >= 1:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) == 1:
             # Check if any pad is NOT connected to the segment group
             seg_group = groups[0]
@@ -798,7 +798,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     if len(net_segments) == 0 and len(net_pads) < 2:
         return [], [], f"Net has no segments and only {len(net_pads)} pad(s) - need at least 2 endpoints"
     if len(net_segments) >= 1:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) == 1:
             return [], [], "Net segments are already connected (single group) with no unconnected pads"
 
@@ -838,6 +838,7 @@ def get_multipoint_net_pads(
 
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
     net_pads = pcb_data.pads_by_net.get(net_id, [])
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
     # Case 1: No segments and 3+ pads
     if len(net_segments) == 0 and len(net_pads) >= 3:
@@ -861,7 +862,7 @@ def get_multipoint_net_pads(
 
     # Case 2: Check for 3+ disconnected segment groups
     if len(net_segments) >= 2:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) >= 3:
             # Find stub free ends for each group (endpoints not touching pads)
             endpoint_info = []
@@ -886,7 +887,7 @@ def get_multipoint_net_pads(
     # Case 3: Segment group(s) + unconnected pads totaling 3+ endpoints
     # This handles the case where some pads have fanout stubs and others don't
     if len(net_segments) >= 1:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
 
         # Find pads NOT connected to any segment group
         seg_points = set()
@@ -1002,7 +1003,8 @@ def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[floa
         net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
         if len(net_segments) < 2:
             continue
-        groups = find_connected_groups(net_segments)
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) < 2:
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
@@ -1023,7 +1025,8 @@ def get_net_stub_centroids(pcb_data: PCBData, net_id: int) -> List[Tuple[float, 
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
     if len(net_segments) < 2:
         return []
-    groups = find_connected_groups(net_segments)
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    groups = find_connected_groups(net_segments, vias=net_vias)
     if len(groups) < 2:
         return []
 
@@ -1127,10 +1130,11 @@ def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[flo
     """
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
     net_pads = pcb_data.pads_by_net.get(net_id, [])
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
     # Case 1: Has stubs - use stub free ends
     if net_segments:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) >= 2:
             # Multiple stub groups - get free end of each
             points = []
@@ -1170,10 +1174,11 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
     """
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
     net_pads = pcb_data.pads_by_net.get(net_id, [])
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
     # Case 1: Multiple stub groups - use their centroids
     if len(net_segments) >= 2:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) >= 2:
             centroids = []
             for group in groups:
@@ -1189,7 +1194,7 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
 
     # Case 2: One stub group + pads - find unconnected pads
     if len(net_segments) >= 1 and len(net_pads) >= 1:
-        groups = find_connected_groups(net_segments)
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) == 1:
             # Get stub centroid
             group = groups[0]
