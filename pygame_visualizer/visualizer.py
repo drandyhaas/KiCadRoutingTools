@@ -153,6 +153,7 @@ class RoutingVisualizer:
         self._obstacle_surface: Optional[Surface] = None
         self._obstacle_dirty = True
         self._obstacle_offset = (0, 0)
+        self._obstacle_cell_size = self.config.cell_size  # Cell size used for obstacle surface
 
         # Blocked cells cache for rendering (from Python obstacle building)
         self._blocked_cells_cache: List[Set[Tuple[int, int]]] = []
@@ -430,6 +431,7 @@ class RoutingVisualizer:
             pygame.draw.rect(surface, bga_zone_color, rect, 2)  # Outline only, width=2
 
         self._obstacle_offset = (min_gx, min_gy)
+        self._obstacle_cell_size = cell_size  # Store the cell size used for this surface
         return surface
 
     def render(self):
@@ -448,9 +450,12 @@ class RoutingVisualizer:
         if self._obstacle_surface and self.config.show_obstacles:
             min_gx, min_gy = self._obstacle_offset
             dest_x, dest_y = self.camera.world_to_screen(min_gx * cell_size, min_gy * cell_size)
+            # Scale factor: convert from obstacle surface cell_size to display cell_size, then apply zoom
+            # This handles large boards where obstacle surface uses reduced cell_size
+            scale_factor = (cell_size / self._obstacle_cell_size) * self.camera.zoom
             scaled_size = (
-                int(self._obstacle_surface.get_width() * self.camera.zoom),
-                int(self._obstacle_surface.get_height() * self.camera.zoom)
+                int(self._obstacle_surface.get_width() * scale_factor),
+                int(self._obstacle_surface.get_height() * scale_factor)
             )
             if scaled_size[0] > 0 and scaled_size[1] > 0:
                 scaled = pygame.transform.scale(self._obstacle_surface, scaled_size)
