@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.12.1**
+**Current Version: 0.12.2**
 
 ## Features
 
@@ -10,8 +10,7 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - Multi-source, multi-target routing
 - Via cost and layer transitions
 - BGA exclusion zone with allowed cell overrides
-- Stub proximity costs to avoid blocking unrouted nets
-- **Direction-aware proximity costs** - steps moving away from zone centers cost less, encouraging efficient zone exit
+- Stub proximity costs to discourage routing near unrouted stubs (flat cost model for accurate heuristic estimation)
 - **Turn cost penalty** for direction changes - encourages straighter paths with fewer wiggles
 - **Cross-layer track attraction** for vertical alignment - attracts routes to stack on top of tracks on other layers
 - **Layer cost preferences** - per-layer cost multipliers to prefer certain layers (e.g., keep signals on F.Cu, avoid B.Cu). Default: F.Cu=1.0x, others=3.0x
@@ -178,10 +177,6 @@ Methods:
 - `is_blocked(gx, gy, layer)` - Check if cell is blocked
 - `is_via_blocked(gx, gy)` - Check if via position is blocked
 - `get_stub_proximity_cost(gx, gy)` - Get proximity cost for a cell
-- `get_directional_proximity_cost(from_gx, from_gy, to_gx, to_gy)` - Get direction-aware proximity cost (reduced when moving away from zone centers)
-- `add_proximity_zone_center(gx, gy, radius)` - Register a proximity zone center for direction-aware costs
-- `add_proximity_zone_centers_batch(centers)` - Batch register zone centers. `centers` is a list of `(gx, gy, radius)` tuples
-- `clear_proximity_zone_centers()` - Clear all registered zone centers
 - `add_cross_layer_track(gx, gy, layer)` - Mark a position as having a track on specified layer (for vertical attraction)
 - `get_cross_layer_attraction(gx, gy, current_layer, radius, bonus)` - Get attraction bonus for positions near tracks on other layers
 - `clear_cross_layer_tracks()` - Clear all cross-layer track data
@@ -287,6 +282,7 @@ src/
 
 ## Version History
 
+- **0.12.2**: Reverted to flat proximity costs (removed direction-aware cost adjustment from v0.10.0). Testing showed flat costs produce better results: 19% fewer iterations, 40% faster, and improved routing success (100% vs 97.9% on benchmark). The direction-aware heuristic mismatch caused more search exploration than the "efficient zone exit" guidance saved. Removed dead code: `get_directional_proximity_cost()`, `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, and `proximity_zone_centers` field.
 - **0.12.1**: Made VisualRouter fully consistent with GridRouter. Added `turn_cost`, `via_proximity_cost`, `vertical_attraction_radius`, and `vertical_attraction_bonus` parameters. Updated to use direction-aware proximity costs (`get_directional_proximity_cost()` and `get_layer_proximity_cost()`) and cross-layer attraction. Visualization mode now produces identical iteration counts to non-visualization mode.
 - **0.12.0**: Added proximity-aware heuristic for faster routing on dense boards. The heuristic now auto-estimates expected proximity costs per step based on stub/track/BGA proximity settings and radii, dramatically reducing search space (up to 6x speedup) while keeping high proximity costs to prevent blocking later routes. Formula: `sum(cost_i * radius_i) * factor` where factor defaults to 0.02 (tuned for ~5mm typical radius). Diff pair routing uses 1/10th of the factor due to the more constrained pose-based search. **Smart endpoint detection**: The heuristic is only applied when source or target is inside a proximity zone (checked via `is_in_any_proximity_zone()`); routes with both endpoints outside proximity zones use h=0 for optimal search. New `proximity_heuristic_cost` parameter and `set_proximity_heuristic_cost()` setter in both GridRouter and PoseRouter, `--proximity-heuristic-factor` CLI option (route.py and route_diff.py), and `GridRouteConfig.get_proximity_heuristic_cost()` method.
 - **0.11.0**: Added A* search statistics collection. `route_multi` now returns `(path, iterations, stats)` where `stats` is a dict containing: `cells_expanded`, `cells_pushed`, `cells_revisited`, `duplicate_skips`, `path_length`, `path_cost`, `initial_h`, `final_g`, `via_count`, and computed metrics `heuristic_ratio`, `expansion_ratio`, `revisit_ratio`, `skip_ratio`. Enable stats printing with `--stats` flag.
