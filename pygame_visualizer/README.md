@@ -63,6 +63,7 @@ All standard batch router options are also supported (--ordering, --via-cost, et
 | R | Restart current net |
 | Ctrl+R | Restart all nets |
 | +/- | Double/Halve speed (1x to 65536x) |
+| Z | Zoom to current net |
 | 1-4 | Show layer 1-4 only |
 | 0 | Show all layers |
 | G | Toggle grid lines |
@@ -159,3 +160,12 @@ batch_route(
 - Cell lists are limited to 50,000 entries to prevent memory issues
 - Pre-rendered obstacle surface is cached for efficient rendering
 - Results match batch router exactly
+
+## Large Board Handling
+
+For very large boards, the visualizer automatically handles PyGame surface size limits:
+
+- **Soft limit (8192 pixels)**: Reduces obstacle surface detail for better performance
+- **Hard limit (16384 pixels)**: Maximum texture size supported by most GPUs
+
+When limits are triggered, a warning is shown and obstacle rendering uses reduced resolution. Routes, sources, and targets remain at full resolution and are correctly aligned with the scaled obstacle layer.
