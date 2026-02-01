@@ -112,7 +112,9 @@ def route_diff_pairs(
             diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
             all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
             track_proximity_cache, layer_map, diff_pair_extra_clearance,
-            add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair
+            add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+            ripped_route_layer_costs=state.ripped_route_layer_costs,
+            ripped_route_via_positions=state.ripped_route_via_positions
         )
 
         # Get source/target coordinates for blocking analysis (center of P/N endpoints)
@@ -193,7 +195,9 @@ def route_diff_pairs(
                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                 results, config, track_proximity_cache,
-                state.working_obstacles, state.net_obstacles_cache
+                state.working_obstacles, state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                layer_map
             )
             probe_ripped_items.append((blocker, saved_result, ripped_ids, was_in_results))
 
@@ -202,7 +206,9 @@ def route_diff_pairs(
                 diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                 all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
                 track_proximity_cache, layer_map, diff_pair_extra_clearance,
-                add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair
+                add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions
             )
 
             # Retry the route
@@ -470,7 +476,9 @@ def route_diff_pairs(
                                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                                 results, config, track_proximity_cache,
-                                state.working_obstacles, state.net_obstacles_cache
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                layer_map
                             )
                             if saved_result is None:
                                 rip_successful = False
@@ -495,7 +503,8 @@ def route_diff_pairs(
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
                                            results, config, track_proximity_cache, layer_map,
-                                           state.working_obstacles, state.net_obstacles_cache)
+                                           state.working_obstacles, state.net_obstacles_cache,
+                                           state.ripped_route_layer_costs, state.ripped_route_via_positions)
                                 if was_in_results:
                                     successful += 1
                                 ripped_items.pop()
@@ -506,7 +515,9 @@ def route_diff_pairs(
                             diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                             all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
                             track_proximity_cache, layer_map, diff_pair_extra_clearance,
-                            add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair
+                            add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+                            ripped_route_layer_costs=state.ripped_route_layer_costs,
+                            ripped_route_via_positions=state.ripped_route_via_positions
                         )
 
                         retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
@@ -630,7 +641,8 @@ def route_diff_pairs(
                                        pcb_data, routed_net_ids, routed_net_paths,
                                        routed_results, diff_pair_by_net_id, remaining_net_ids,
                                        results, config, track_proximity_cache, layer_map,
-                                       state.working_obstacles, state.net_obstacles_cache)
+                                       state.working_obstacles, state.net_obstacles_cache,
+                                       state.ripped_route_layer_costs, state.ripped_route_via_positions)
                             if was_in_results:
                                 successful += 1
 

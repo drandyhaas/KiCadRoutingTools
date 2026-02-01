@@ -42,6 +42,11 @@ class RoutingState:
     layer_map: Dict[str, int] = field(default_factory=dict)
     net_obstacles_cache: Dict[int, Any] = field(default_factory=dict)  # Pre-computed net obstacles
 
+    # Ripped route avoidance costs - layer-specific (for segments)
+    ripped_route_layer_costs: Dict[int, Any] = field(default_factory=dict)  # net_id -> numpy array [layer, gx, gy, cost]
+    # Ripped route via positions (grid coords) - all-layer costs computed at merge time
+    ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
+
     # Reroute queue for ripped-up nets
     reroute_queue: List[Tuple] = field(default_factory=list)
     # Track which nets are already queued (to prevent duplicate entries)

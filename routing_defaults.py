@@ -31,6 +31,10 @@ BGA_PROXIMITY_COST = 0.2
 VERTICAL_ATTRACTION_RADIUS = 1.0  # mm
 VERTICAL_ATTRACTION_COST = 0.0
 
+# Ripped route avoidance
+RIPPED_ROUTE_AVOIDANCE_RADIUS = 1.0  # mm
+RIPPED_ROUTE_AVOIDANCE_COST = 0.1
+
 # Impedance routing
 IMPEDANCE_DEFAULT = 50  # ohms
 
@@ -131,6 +135,8 @@ PARAM_RANGES = {
     'bga_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'vertical_attraction_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'vertical_attraction_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'ripped_route_avoidance_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
+    'ripped_route_avoidance_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'impedance': {'min': 10, 'max': 200, 'inc': 1, 'digits': 0},
     'crossing_penalty': {'min': 0.0, 'max': 10000.0, 'inc': 100.0, 'digits': 0},
     'max_probe_iterations': {'min': 100, 'max': 100000},

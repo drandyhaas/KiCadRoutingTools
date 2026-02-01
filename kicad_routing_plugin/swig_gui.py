@@ -530,12 +530,6 @@ class RoutingDialog(wx.Dialog):
         self.proximity_heuristic_factor.SetToolTip("Factor for proximity-aware A* heuristic (0 = disabled)")
         grid.Add(self.proximity_heuristic_factor, 0, wx.EXPAND)
 
-        # Ordering strategy
-        grid.Add(wx.StaticText(parent, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original"])
-        self.ordering_strategy.SetSelection(0)
-        grid.Add(self.ordering_strategy, 0, wx.EXPAND)
-
         # Float parameters
         float_params = [
             ('bga_proximity_radius', 'BGA Proximity (mm):', defaults.BGA_PROXIMITY_RADIUS),
@@ -547,6 +541,8 @@ class RoutingDialog(wx.Dialog):
             ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST),
             ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS),
             ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST),
+            ('ripped_route_avoidance_radius', 'Rip Avoid (mm):', defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS),
+            ('ripped_route_avoidance_cost', 'Rip Avoid Cost:', defaults.RIPPED_ROUTE_AVOIDANCE_COST),
             ('routing_clearance_margin', 'Clearance Margin:', defaults.ROUTING_CLEARANCE_MARGIN),
         ]
         for name, label, default in float_params:
@@ -556,6 +552,12 @@ class RoutingDialog(wx.Dialog):
             ctrl.SetDigits(r['digits'])
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
+
+        # Ordering strategy
+        grid.Add(wx.StaticText(parent, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original"])
+        self.ordering_strategy.SetSelection(0)
+        grid.Add(self.ordering_strategy, 0, wx.EXPAND)
 
         # Direction dropdown
         grid.Add(wx.StaticText(parent, label="Routing Direction:"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -1312,6 +1314,8 @@ class RoutingDialog(wx.Dialog):
         self.track_proximity_cost.SetValue(defaults.TRACK_PROXIMITY_COST)
         self.vertical_attraction_radius.SetValue(defaults.VERTICAL_ATTRACTION_RADIUS)
         self.vertical_attraction_cost.SetValue(defaults.VERTICAL_ATTRACTION_COST)
+        self.ripped_route_avoidance_radius.SetValue(defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS)
+        self.ripped_route_avoidance_cost.SetValue(defaults.RIPPED_ROUTE_AVOIDANCE_COST)
         self.routing_clearance_margin.SetValue(defaults.ROUTING_CLEARANCE_MARGIN)
         self.hole_to_hole_clearance.SetValue(defaults.HOLE_TO_HOLE_CLEARANCE)
         self.edge_clearance_check.SetValue(False)
@@ -1515,6 +1519,8 @@ class RoutingDialog(wx.Dialog):
             'bga_proximity_cost': self.bga_proximity_cost.GetValue(),
             'vertical_attraction_radius': self.vertical_attraction_radius.GetValue(),
             'vertical_attraction_cost': self.vertical_attraction_cost.GetValue(),
+            'ripped_route_avoidance_radius': self.ripped_route_avoidance_radius.GetValue(),
+            'ripped_route_avoidance_cost': self.ripped_route_avoidance_cost.GetValue(),
             'crossing_penalty': self.crossing_penalty.GetValue(),
             'routing_clearance_margin': self.routing_clearance_margin.GetValue(),
             'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
@@ -1848,6 +1854,8 @@ class RoutingDialog(wx.Dialog):
                     bga_proximity_cost=config.get('bga_proximity_cost', 0.2),
                     vertical_attraction_radius=config.get('vertical_attraction_radius', 1.0),
                     vertical_attraction_cost=config.get('vertical_attraction_cost', 0.1),
+                    ripped_route_avoidance_radius=config.get('ripped_route_avoidance_radius', 1.0),
+                    ripped_route_avoidance_cost=config.get('ripped_route_avoidance_cost', 0.1),
                     crossing_penalty=config.get('crossing_penalty', 1000.0),
                     routing_clearance_margin=config['routing_clearance_margin'],
                     hole_to_hole_clearance=config['hole_to_hole_clearance'],
@@ -1944,6 +1952,8 @@ class RoutingDialog(wx.Dialog):
                         bga_proximity_cost=config.get('bga_proximity_cost', 0.2),
                         vertical_attraction_radius=config.get('vertical_attraction_radius', 1.0),
                         vertical_attraction_cost=config.get('vertical_attraction_cost', 0.1),
+                        ripped_route_avoidance_radius=config.get('ripped_route_avoidance_radius', 1.0),
+                        ripped_route_avoidance_cost=config.get('ripped_route_avoidance_cost', 0.1),
                         crossing_penalty=config.get('crossing_penalty', 1000.0),
                         routing_clearance_margin=config['routing_clearance_margin'],
                         hole_to_hole_clearance=config['hole_to_hole_clearance'],

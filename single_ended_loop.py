@@ -172,7 +172,8 @@ def route_single_ended_nets(
                 unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
                     state.working_obstacles, pcb_data, config, net_id,
                     all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                    state.net_obstacles_cache
+                    state.net_obstacles_cache,
+                    state.ripped_route_layer_costs, state.ripped_route_via_positions
                 )
                 obstacles = state.working_obstacles  # Use same map as GridRouter would
                 # Update vis_data with obstacles from other nets (not the current one)
@@ -183,7 +184,9 @@ def route_single_ended_nets(
                 obstacles, unrouted_stubs = build_single_ended_obstacles(
                     base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                     all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                    net_obstacles_cache=state.net_obstacles_cache
+                    net_obstacles_cache=state.net_obstacles_cache,
+                    ripped_route_layer_costs=state.ripped_route_layer_costs,
+                    ripped_route_via_positions=state.ripped_route_via_positions
                 )
         else:
             # Use in-place approach if working map is available (saves memory by not cloning)
@@ -191,7 +194,8 @@ def route_single_ended_nets(
                 unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
                     state.working_obstacles, pcb_data, config, net_id,
                     all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                    state.net_obstacles_cache
+                    state.net_obstacles_cache,
+                    state.ripped_route_layer_costs, state.ripped_route_via_positions
                 )
                 obstacles = state.working_obstacles  # Use directly, no clone!
             else:
@@ -199,7 +203,9 @@ def route_single_ended_nets(
                 obstacles, unrouted_stubs = build_single_ended_obstacles(
                     base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                     all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                    net_obstacles_cache=state.net_obstacles_cache
+                    net_obstacles_cache=state.net_obstacles_cache,
+                    ripped_route_layer_costs=state.ripped_route_layer_costs,
+                    ripped_route_via_positions=state.ripped_route_via_positions
                 )
 
         # Calculate stub length BEFORE routing (stubs are existing segments for this net)
@@ -440,7 +446,9 @@ def route_single_ended_nets(
                                 blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                                 results, config, track_proximity_cache,
-                                state.working_obstacles, state.net_obstacles_cache
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                layer_map
                             )
                             if saved_result is None:
                                 rip_successful = False
@@ -472,7 +480,8 @@ def route_single_ended_nets(
                                            pcb_data, routed_net_ids, routed_net_paths,
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
                                            results, config, track_proximity_cache, layer_map,
-                                           state.working_obstacles, state.net_obstacles_cache)
+                                           state.working_obstacles, state.net_obstacles_cache,
+                                           state.ripped_route_layer_costs, state.ripped_route_via_positions)
                                 if was_in_results:
                                     successful += 1
                                 ripped_items.pop()
@@ -484,13 +493,16 @@ def route_single_ended_nets(
                             _, retry_via_cells = prepare_obstacles_inplace(
                                 state.working_obstacles, pcb_data, config, net_id,
                                 all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                                state.net_obstacles_cache
+                                state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions
                             )
                             retry_obstacles = state.working_obstacles
                         else:
                             retry_obstacles, _ = build_single_ended_obstacles(
                                 base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
-                                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map
+                                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
+                                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                                ripped_route_via_positions=state.ripped_route_via_positions
                             )
 
                         # Check for multi-point net in retry as well
@@ -595,7 +607,8 @@ def route_single_ended_nets(
                                        pcb_data, routed_net_ids, routed_net_paths,
                                        routed_results, diff_pair_by_net_id, remaining_net_ids,
                                        results, config, track_proximity_cache, layer_map,
-                                       state.working_obstacles, state.net_obstacles_cache)
+                                       state.working_obstacles, state.net_obstacles_cache,
+                                       state.ripped_route_layer_costs, state.ripped_route_via_positions)
                             if was_in_results:
                                 successful += 1
 

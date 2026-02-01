@@ -5,9 +5,9 @@ This module provides helper functions for common routing operations
 like building obstacle maps and recording route results.
 """
 
-from typing import List, Set, Dict, Optional, Tuple
+from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
 import numpy as np
-from routing_config import GridCoord
+from routing_config import GridCoord, GridRouteConfig
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
@@ -45,6 +45,44 @@ def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
         obstacles.add_free_vias_batch(free_via_positions)
 
 
+def merge_ripped_route_costs(obstacles, ripped_route_layer_costs: Dict[int, np.ndarray],
+                              ripped_route_via_positions: Dict[int, List[Tuple[int, int]]],
+                              config: GridRouteConfig):
+    """Merge ripped route avoidance costs into the obstacle map.
+
+    When a net is ripped up, we want to apply soft penalties to its former corridor
+    so the current routing avoids that area, increasing the chance the ripped net
+    can be rerouted later.
+
+    Args:
+        obstacles: GridObstacleMap to add costs to
+        ripped_route_layer_costs: Dict of net_id -> numpy array [layer, gx, gy, cost] for segments
+        ripped_route_via_positions: Dict of net_id -> list of (gx, gy) for vias
+        config: Routing configuration
+    """
+    if config.ripped_route_avoidance_cost <= 0:
+        return  # Feature disabled
+
+    # Merge layer-specific costs (segments) - same as track proximity
+    if ripped_route_layer_costs:
+        merge_track_proximity_costs(obstacles, ripped_route_layer_costs)
+
+    # Merge via costs into stub_proximity (all-layer)
+    # Uses existing add_stub_proximity_costs_batch() with via positions
+    if ripped_route_via_positions:
+        coord = GridCoord(config.grid_step)
+        radius_grid = coord.to_grid_dist(config.ripped_route_avoidance_radius)
+        cost_grid = int(config.ripped_route_avoidance_cost * 1000 / config.grid_step)
+
+        all_via_positions = []
+        for via_list in ripped_route_via_positions.values():
+            all_via_positions.extend(via_list)
+
+        if all_via_positions:
+            # Use batch method with block_vias=False since we just want soft costs
+            obstacles.add_stub_proximity_costs_batch(all_via_positions, radius_grid, cost_grid, False)
+
+
 def build_diff_pair_obstacles(
     diff_pair_base_obstacles,
     pcb_data,
@@ -59,7 +97,9 @@ def build_diff_pair_obstacles(
     layer_map: Dict,
     extra_clearance: float,
     add_own_stubs_func=None,
-    net_obstacles_cache: Optional[Dict[int, NetObstacleData]] = None
+    net_obstacles_cache: Optional[Dict[int, NetObstacleData]] = None,
+    ripped_route_layer_costs: Dict[int, np.ndarray] = None,
+    ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None
 ):
     """
     Build complete obstacle map for diff pair routing.
@@ -79,6 +119,8 @@ def build_diff_pair_obstacles(
         extra_clearance: Extra clearance for diff pair routing
         add_own_stubs_func: Optional function to add own stubs as obstacles
         net_obstacles_cache: Optional pre-computed net obstacles for fast batch adding
+        ripped_route_layer_costs: Optional dict of ripped route layer-specific costs
+        ripped_route_via_positions: Optional dict of ripped route via positions
 
     Returns:
         Tuple of (obstacles, unrouted_stubs)
@@ -122,6 +164,13 @@ def build_diff_pair_obstacles(
     # Add track proximity costs
     merge_track_proximity_costs(obstacles, track_proximity_cache)
 
+    # Add ripped route avoidance costs
+    if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
+        merge_ripped_route_costs(obstacles,
+                                  ripped_route_layer_costs or {},
+                                  ripped_route_via_positions or {},
+                                  config)
+
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
                            exclude_net_ids={p_net_id, n_net_id})
@@ -156,7 +205,9 @@ def build_single_ended_obstacles(
     track_proximity_cache: Dict,
     layer_map: Dict,
     diagonal_margin: float = 0.25,
-    net_obstacles_cache: Optional[Dict[int, NetObstacleData]] = None
+    net_obstacles_cache: Optional[Dict[int, NetObstacleData]] = None,
+    ripped_route_layer_costs: Dict[int, np.ndarray] = None,
+    ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None
 ):
     """
     Build complete obstacle map for single-ended routing.
@@ -174,6 +225,8 @@ def build_single_ended_obstacles(
         layer_map: Layer name to index mapping
         diagonal_margin: Margin for diagonal segment clearance
         net_obstacles_cache: Optional pre-computed net obstacles for fast batch adding
+        ripped_route_layer_costs: Optional dict of ripped route layer-specific costs
+        ripped_route_via_positions: Optional dict of ripped route via positions
 
     Returns:
         Tuple of (obstacles, unrouted_stubs)
@@ -212,6 +265,13 @@ def build_single_ended_obstacles(
 
     # Add track proximity costs
     merge_track_proximity_costs(obstacles, track_proximity_cache)
+
+    # Add ripped route avoidance costs
+    if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
+        merge_ripped_route_costs(obstacles,
+                                  ripped_route_layer_costs or {},
+                                  ripped_route_via_positions or {},
+                                  config)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -308,7 +368,9 @@ def prepare_obstacles_inplace(
     routed_net_ids: List[int],
     track_proximity_cache: Dict,
     layer_map: Dict,
-    net_obstacles_cache: Dict[int, NetObstacleData]
+    net_obstacles_cache: Dict[int, NetObstacleData],
+    ripped_route_layer_costs: Dict[int, np.ndarray] = None,
+    ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None
 ) -> Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]:
     """
     Prepare working_obstacles IN-PLACE for routing a single-ended net.
@@ -326,6 +388,8 @@ def prepare_obstacles_inplace(
         track_proximity_cache: Cache of track proximity costs
         layer_map: Layer name to index mapping
         net_obstacles_cache: Pre-computed net obstacles
+        ripped_route_layer_costs: Optional dict of ripped route layer-specific costs
+        ripped_route_via_positions: Optional dict of ripped route via positions
 
     Returns:
         Tuple of (unrouted_stubs, same_net_via_clearance_cells) for use by restore
@@ -354,6 +418,13 @@ def prepare_obstacles_inplace(
 
     # Add track proximity costs
     merge_track_proximity_costs(working_obstacles, track_proximity_cache)
+
+    # Add ripped route avoidance costs (soft penalty for routing through ripped corridors)
+    if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
+        merge_ripped_route_costs(working_obstacles,
+                                  ripped_route_layer_costs or {},
+                                  ripped_route_via_positions or {},
+                                  config)
 
     # Add cross-layer track data
     add_cross_layer_tracks(working_obstacles, pcb_data, config, layer_map,

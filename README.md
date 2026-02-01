@@ -18,6 +18,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
 - **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes.
+- **Ripped route corridor avoidance** - When a net is ripped up, soft penalties are applied to its former corridor. This encourages the current route to avoid that area, increasing the chance the ripped net can be successfully re-routed later.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
 - **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations. Validates that stub endpoints won't be too close to other stubs on the destination layer.
 - **Batch routing** with incremental obstacle caching (~7x speedup)
@@ -605,6 +606,8 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --track-proximity-cost 0.0   # Cost penalty near tracks (0 = disabled)
 --vertical-attraction-radius 1.0  # Radius for cross-layer track attraction (mm)
 --vertical-attraction-cost 0.0    # Cost bonus for cross-layer alignment (0 = disabled)
+--ripped-route-avoidance-radius 1.0  # Radius around ripped route corridors (mm)
+--ripped-route-avoidance-cost 0.1    # Cost penalty for routing through ripped corridors (0 = disabled)
 
 # Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching

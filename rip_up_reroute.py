@@ -10,12 +10,13 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
-from obstacle_costs import compute_track_proximity_for_net
+from obstacle_costs import compute_track_proximity_for_net, compute_ripped_route_costs
 from obstacle_cache import (
     precompute_net_obstacles, add_net_obstacles_from_cache, remove_net_obstacles_from_cache
 )
 
 if TYPE_CHECKING:
+    import numpy as np
     from grid_router import GridObstacleMap
     from obstacle_cache import NetObstacleData
 
@@ -27,7 +28,10 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
                config: GridRouteConfig,
                track_proximity_cache: Dict[int, dict] = None,
                working_obstacles: 'GridObstacleMap' = None,
-               net_obstacles_cache: Dict[int, 'NetObstacleData'] = None) -> Tuple[Optional[dict], List[int], bool]:
+               net_obstacles_cache: Dict[int, 'NetObstacleData'] = None,
+               ripped_route_layer_costs: Dict[int, 'np.ndarray'] = None,
+               ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None,
+               layer_map: Dict[str, int] = None) -> Tuple[Optional[dict], List[int], bool]:
     """Rip up a routed net (or diff pair), removing it from pcb_data and tracking structures.
 
     Args:
@@ -43,6 +47,9 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
         track_proximity_cache: Optional cache for track proximity costs
         working_obstacles: Optional working obstacle map for incremental updates
         net_obstacles_cache: Optional cache of net obstacles for incremental updates
+        ripped_route_layer_costs: Optional dict to store ripped route layer-specific costs
+        ripped_route_via_positions: Optional dict to store ripped route via positions
+        layer_map: Optional layer name to index mapping (required for ripped route costs)
 
     Returns:
         tuple: (saved_result, ripped_net_ids, was_in_results) for later restoration
@@ -112,6 +119,14 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             net_obstacles_cache[rid] = precompute_net_obstacles(pcb_data, rid, config)
             add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
 
+    # Compute and store ripped route avoidance costs if enabled
+    if config.ripped_route_avoidance_cost > 0 and ripped_route_layer_costs is not None and layer_map is not None:
+        layer_costs, via_positions = compute_ripped_route_costs(saved_result, config, layer_map)
+        for rid in ripped_net_ids:
+            ripped_route_layer_costs[rid] = layer_costs
+            if ripped_route_via_positions is not None:
+                ripped_route_via_positions[rid] = via_positions
+
     return saved_result, ripped_net_ids, was_in_results
 
 
@@ -124,7 +139,9 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 track_proximity_cache: Dict[int, dict] = None,
                 layer_map: Dict[str, int] = None,
                 working_obstacles: 'GridObstacleMap' = None,
-                net_obstacles_cache: Dict[int, 'NetObstacleData'] = None):
+                net_obstacles_cache: Dict[int, 'NetObstacleData'] = None,
+                ripped_route_layer_costs: Dict[int, 'np.ndarray'] = None,
+                ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None):
     """Restore a previously ripped net to pcb_data and tracking structures.
 
     Args:
@@ -144,6 +161,8 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
         layer_map: Optional layer name to index mapping
         working_obstacles: Optional working obstacle map for incremental updates
         net_obstacles_cache: Optional cache of net obstacles for incremental updates
+        ripped_route_layer_costs: Optional dict to clear ripped route layer-specific costs
+        ripped_route_via_positions: Optional dict to clear ripped route via positions
     """
     if saved_result is None:
         return
@@ -204,3 +223,11 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
             # Recompute cache - now has route again (restored to pcb_data)
             net_obstacles_cache[rid] = precompute_net_obstacles(pcb_data, rid, config)
             add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
+
+    # Clear ripped route avoidance costs since net is restored
+    if ripped_route_layer_costs is not None:
+        for rid in ripped_net_ids:
+            ripped_route_layer_costs.pop(rid, None)
+    if ripped_route_via_positions is not None:
+        for rid in ripped_net_ids:
+            ripped_route_via_positions.pop(rid, None)

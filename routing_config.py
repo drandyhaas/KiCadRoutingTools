@@ -66,6 +66,9 @@ class GridRouteConfig:
     # Vertical alignment attraction - encourages tracks on different layers to stack
     vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
     vertical_attraction_cost: float = 0.0  # mm equivalent bonus for aligned positions
+    # Ripped route avoidance - soft penalty for routing through a ripped net's former corridor
+    ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route segments/vias
+    ripped_route_avoidance_cost: float = 0.1  # mm equivalent cost (0 = disabled)
     # Length matching for DDR4 signals
     length_match_groups: List[List[str]] = field(default_factory=list)  # Groups of net patterns to match
     length_match_tolerance: float = 0.1  # mm - acceptable length variance within group

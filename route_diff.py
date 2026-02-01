@@ -35,6 +35,7 @@ from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
+import routing_defaults as defaults
 from routing_utils import pos_key
 from connectivity import (
     get_stub_endpoints, find_stub_free_ends, find_connected_groups,
@@ -141,6 +142,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 gnd_via_enabled: bool = True,
                 vertical_attraction_radius: float = 1.0,
                 vertical_attraction_cost: float = 0.1,
+                ripped_route_avoidance_radius: float = 1.0,
+                ripped_route_avoidance_cost: float = 0.1,
                 length_match_groups: Optional[List[List[str]]] = None,
                 length_match_tolerance: float = 0.1,
                 meander_amplitude: float = 1.0,
@@ -238,7 +241,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
         hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
         vertical_attraction_radius=vertical_attraction_radius,
-        vertical_attraction_cost=vertical_attraction_cost, length_match_groups=length_match_groups,
+        vertical_attraction_cost=vertical_attraction_cost,
+        ripped_route_avoidance_radius=ripped_route_avoidance_radius,
+        ripped_route_avoidance_cost=ripped_route_avoidance_cost,
+        length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
         time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory
@@ -916,6 +922,12 @@ Examples:
     parser.add_argument("--vertical-attraction-cost", type=float, default=0.0,
                         help="Cost bonus for aligning with tracks on other layers (0 = disabled, default: 0.0)")
 
+    # Ripped route avoidance options
+    parser.add_argument("--ripped-route-avoidance-radius", type=float, default=defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS,
+                        help=f"Radius in mm around ripped route segments/vias for soft penalty (default: {defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS})")
+    parser.add_argument("--ripped-route-avoidance-cost", type=float, default=defaults.RIPPED_ROUTE_AVOIDANCE_COST,
+                        help=f"Soft penalty cost for routing through ripped corridors (0 = disabled, default: {defaults.RIPPED_ROUTE_AVOIDANCE_COST})")
+
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
@@ -1007,6 +1019,8 @@ Examples:
                 gnd_via_enabled=not args.no_gnd_vias,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
+                ripped_route_avoidance_radius=args.ripped_route_avoidance_radius,
+                ripped_route_avoidance_cost=args.ripped_route_avoidance_cost,
                 length_match_groups=args.length_match_groups,
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,

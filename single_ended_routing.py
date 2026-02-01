@@ -6,7 +6,7 @@ Routes individual nets using A* pathfinding on a grid obstacle map.
 
 import math
 import time
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from terminal_colors import RED, YELLOW, RESET
 
 from kicad_parser import PCBData, Segment, Via
@@ -20,6 +20,7 @@ from connectivity import (
     get_zone_connected_pad_groups
 )
 from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
+from bresenham_utils import walk_line
 
 # Import Rust router
 import sys
@@ -97,11 +98,143 @@ def _print_obstacle_map(obstacles: 'GridObstacleMap', center_gx: int, center_gy:
         print(f"{print_prefix}    {''.join(row)}")
 
 
-def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: str, print_prefix: str = "", track_margin: int = 0):
+def _identify_blocking_obstacles(
+    blocked_positions: List[Tuple[int, int, int]],
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    current_net_id: int = -1
+) -> Dict[int, Tuple[str, int]]:
+    """
+    Identify which nets are blocking specific grid positions.
+
+    Args:
+        blocked_positions: List of (gx, gy, layer) blocked cells
+        pcb_data: PCB data with segments, vias, pads
+        config: Routing configuration
+        current_net_id: Current net ID to exclude from results
+
+    Returns:
+        Dict of net_id -> (net_name, count) for blocking nets
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = build_layer_map(config.layers)
+
+    # Calculate expansion radius (same as obstacle map uses)
+    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2
+    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+    via_expansion_mm = config.via_size / 2 + config.track_width / 2 + config.clearance
+    via_expansion_grid = max(1, coord.to_grid_dist(via_expansion_mm))
+
+    blockers: Dict[int, Tuple[str, int]] = {}
+
+    # Convert blocked positions to set for faster lookup
+    blocked_set = set(blocked_positions)
+
+    # Check segments
+    for seg in pcb_data.segments:
+        if seg.net_id == current_net_id:
+            continue
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+        # Check if segment's expanded cells overlap with blocked positions
+        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+            for ex in range(-expansion_grid, expansion_grid + 1):
+                for ey in range(-expansion_grid, expansion_grid + 1):
+                    if (gx + ex, gy + ey, layer_idx) in blocked_set:
+                        net_name = pcb_data.nets[seg.net_id].name if seg.net_id in pcb_data.nets else f"net_{seg.net_id}"
+                        if seg.net_id in blockers:
+                            blockers[seg.net_id] = (net_name, blockers[seg.net_id][1] + 1)
+                        else:
+                            blockers[seg.net_id] = (net_name, 1)
+                        break  # Found overlap, move to next segment point
+                else:
+                    continue
+                break
+            else:
+                continue
+            break
+
+    # Check vias
+    for via in pcb_data.vias:
+        if via.net_id == current_net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+
+        # Vias block all layers within via expansion radius
+        for layer_idx in range(len(config.layers)):
+            for ex in range(-via_expansion_grid, via_expansion_grid + 1):
+                for ey in range(-via_expansion_grid, via_expansion_grid + 1):
+                    if (gx + ex, gy + ey, layer_idx) in blocked_set:
+                        net_name = pcb_data.nets[via.net_id].name if via.net_id in pcb_data.nets else f"net_{via.net_id}"
+                        if via.net_id in blockers:
+                            blockers[via.net_id] = (net_name, blockers[via.net_id][1] + 1)
+                        else:
+                            blockers[via.net_id] = (net_name, 1)
+                        break
+                else:
+                    continue
+                break
+            else:
+                continue
+            break
+
+    # Check pads (from other nets)
+    for ref, footprint in pcb_data.footprints.items():
+        for pad in footprint.pads:
+            if pad.net_id == current_net_id or pad.net_id == 0:
+                continue
+
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+
+            # Compute pad expansion
+            pad_half_x = pad.size_x / 2 if hasattr(pad, 'size_x') else 0.5
+            pad_half_y = pad.size_y / 2 if hasattr(pad, 'size_y') else 0.5
+            pad_expansion_x = max(1, coord.to_grid_dist(pad_half_x + config.clearance + config.track_width / 2))
+            pad_expansion_y = max(1, coord.to_grid_dist(pad_half_y + config.clearance + config.track_width / 2))
+
+            # Check pad layers
+            pad_layers = []
+            if pad.drill and pad.drill > 0:
+                # Through-hole pad - blocks all layers
+                pad_layers = list(range(len(config.layers)))
+            else:
+                # SMD pad - only specific layer
+                for layer_name in pad.layers:
+                    if layer_name in layer_map:
+                        pad_layers.append(layer_map[layer_name])
+
+            for layer_idx in pad_layers:
+                for ex in range(-pad_expansion_x, pad_expansion_x + 1):
+                    for ey in range(-pad_expansion_y, pad_expansion_y + 1):
+                        if (gx + ex, gy + ey, layer_idx) in blocked_set:
+                            net_name = pcb_data.nets[pad.net_id].name if pad.net_id in pcb_data.nets else f"net_{pad.net_id}"
+                            if pad.net_id in blockers:
+                                blockers[pad.net_id] = (net_name, blockers[pad.net_id][1] + 1)
+                            else:
+                                blockers[pad.net_id] = (net_name, 1)
+                            break
+                    else:
+                        continue
+                    break
+                else:
+                    continue
+                break
+
+    return blockers
+
+
+def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: str, print_prefix: str = "", track_margin: int = 0,
+                            pcb_data: PCBData = None, config: GridRouteConfig = None, current_net_id: int = -1):
     """
     Diagnose why routing couldn't start from the given cells.
 
     Checks blocking status of start cells and their immediate neighbors.
+    If pcb_data and config are provided, also identifies which nets are blocking.
     """
     if not cells:
         print(f"{print_prefix}  {label}: no cells to check")
@@ -146,6 +279,31 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
         if blocked_neighbors == total_neighbors and blocked_neighbors > 0:
             print(f"{print_prefix}    ALL neighbors blocked: {', '.join(blocked_details)}")
 
+        # Identify what's blocking if pcb_data and config are provided
+        if blocked_neighbors > 0 and pcb_data is not None and config is not None:
+            # Collect blocked neighbor positions
+            blocked_positions = []
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx == 0 and dy == 0:
+                        continue
+                    if track_margin > 0:
+                        for mx in range(-track_margin, track_margin + 1):
+                            for my in range(-track_margin, track_margin + 1):
+                                if obstacles.is_blocked(gx + dx + mx, gy + dy + my, layer):
+                                    blocked_positions.append((gx + dx + mx, gy + dy + my, layer))
+                    else:
+                        if obstacles.is_blocked(gx + dx, gy + dy, layer):
+                            blocked_positions.append((gx + dx, gy + dy, layer))
+
+            if blocked_positions:
+                blockers = _identify_blocking_obstacles(blocked_positions, pcb_data, config, current_net_id)
+                if blockers:
+                    # Sort by count descending
+                    sorted_blockers = sorted(blockers.items(), key=lambda x: x[1][1], reverse=True)
+                    blocker_strs = [f"{name}({count})" for net_id, (name, count) in sorted_blockers[:5]]
+                    print(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
+
 
 def _probe_route_with_frontier(
     router: 'GridRouter',
@@ -155,7 +313,9 @@ def _probe_route_with_frontier(
     config: 'GridRouteConfig',
     print_prefix: str = "",
     direction_labels: Tuple[str, str] = ("forward", "backward"),
-    track_margin: int = 0
+    track_margin: int = 0,
+    pcb_data: PCBData = None,
+    current_net_id: int = -1
 ) -> Tuple[Optional[List], int, List, List, bool, int, int]:
     """
     Probe routing with fail-fast on stuck directions.
@@ -172,6 +332,8 @@ def _probe_route_with_frontier(
         print_prefix: Prefix for print messages (e.g., "  " or "      ")
         direction_labels: Names for forward/backward directions
         track_margin: Extra margin in grid cells for wide tracks (power nets)
+        pcb_data: Optional PCB data for blocking obstacle identification
+        current_net_id: Current net ID (for excluding from blocking analysis)
 
     Returns:
         (path, total_iterations, forward_blocked, backward_blocked, reversed_path, forward_iters, backward_iters)
@@ -240,14 +402,18 @@ def _probe_route_with_frontier(
         # At least one probe didn't reach max - that direction is stuck, skip full search
         if not first_reached_max and not second_reached_max:
             print(f"{print_prefix}Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
-            _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin)
-            _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin)
+            _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin,
+                                    pcb_data=pcb_data, config=config, current_net_id=current_net_id)
+            _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin,
+                                    pcb_data=pcb_data, config=config, current_net_id=current_net_id)
         elif not first_reached_max:
             print(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
-            _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin)
+            _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin,
+                                    pcb_data=pcb_data, config=config, current_net_id=current_net_id)
         else:
             print(f"{print_prefix}{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
-            _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin)
+            _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin,
+                                    pcb_data=pcb_data, config=config, current_net_id=current_net_id)
             # Print visual obstacle map around the stuck target
             if forward_targets and config.debug_lines:
                 tgt = forward_targets[0]
@@ -412,14 +578,18 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 # At least one probe didn't reach max - that direction is stuck, skip full search
                 if not first_reached_max and not second_reached_max:
                     print(f"Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
-                    _diagnose_blocked_start(obstacles, first_sources, first_label, "", track_margin)
-                    _diagnose_blocked_start(obstacles, second_sources, second_label, "", track_margin)
+                    _diagnose_blocked_start(obstacles, first_sources, first_label, "", track_margin,
+                                            pcb_data=pcb_data, config=config, current_net_id=net_id)
+                    _diagnose_blocked_start(obstacles, second_sources, second_label, "", track_margin,
+                                            pcb_data=pcb_data, config=config, current_net_id=net_id)
                 elif not first_reached_max:
                     print(f"{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
-                    _diagnose_blocked_start(obstacles, first_sources, first_label, "", track_margin)
+                    _diagnose_blocked_start(obstacles, first_sources, first_label, "", track_margin,
+                                            pcb_data=pcb_data, config=config, current_net_id=net_id)
                 else:
                     print(f"{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
-                    _diagnose_blocked_start(obstacles, second_sources, second_label, "", track_margin)
+                    _diagnose_blocked_start(obstacles, second_sources, second_label, "", track_margin,
+                                            pcb_data=pcb_data, config=config, current_net_id=net_id)
             else:
                 # Both probes reached max - do full search on first direction
                 print(f"Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
@@ -632,7 +802,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         print(f"    GridRouter targets: {forward_targets[:3]}{'...' if len(forward_targets) > 3 else ''}")
     path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _probe_route_with_frontier(
         router, obstacles, forward_sources, forward_targets, config,
-        print_prefix="", direction_labels=direction_labels, track_margin=track_margin
+        print_prefix="", direction_labels=direction_labels, track_margin=track_margin,
+        pcb_data=pcb_data, current_net_id=net_id
     )
 
     # Adjust reversed_path based on start direction
@@ -1211,7 +1382,8 @@ def route_multipoint_main(
     # Use probe routing helper
     path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _probe_route_with_frontier(
         router, obstacles, sources, targets, config,
-        print_prefix="  ", direction_labels=("forward", "backward"), track_margin=track_margin
+        print_prefix="  ", direction_labels=("forward", "backward"), track_margin=track_margin,
+        pcb_data=pcb_data, current_net_id=net_id
     )
 
     if path is None:
@@ -1543,7 +1715,8 @@ def route_multipoint_taps(
 
         path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _ = _probe_route_with_frontier(
             router, obstacles, sources, targets, config,
-            print_prefix="      ", direction_labels=("forward", "backward"), track_margin=track_margin
+            print_prefix="      ", direction_labels=("forward", "backward"), track_margin=track_margin,
+            pcb_data=pcb_data, current_net_id=net_id
         )
 
         # If path was found in reverse direction, reverse it so it goes sources -> targets

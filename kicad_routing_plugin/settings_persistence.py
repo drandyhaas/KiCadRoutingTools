@@ -63,6 +63,8 @@ def get_dialog_settings(dialog):
         'track_proximity_cost': dialog.track_proximity_cost.GetValue(),
         'vertical_attraction_radius': dialog.vertical_attraction_radius.GetValue(),
         'vertical_attraction_cost': dialog.vertical_attraction_cost.GetValue(),
+        'ripped_route_avoidance_radius': dialog.ripped_route_avoidance_radius.GetValue(),
+        'ripped_route_avoidance_cost': dialog.ripped_route_avoidance_cost.GetValue(),
         'routing_clearance_margin': dialog.routing_clearance_margin.GetValue(),
         'hole_to_hole_clearance': dialog.hole_to_hole_clearance.GetValue(),
         'edge_clearance_check': dialog.edge_clearance_check.GetValue(),
@@ -256,6 +258,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.vertical_attraction_radius.SetValue(settings['vertical_attraction_radius'])
     if 'vertical_attraction_cost' in settings:
         dialog.vertical_attraction_cost.SetValue(settings['vertical_attraction_cost'])
+    if 'ripped_route_avoidance_radius' in settings:
+        dialog.ripped_route_avoidance_radius.SetValue(settings['ripped_route_avoidance_radius'])
+    if 'ripped_route_avoidance_cost' in settings:
+        dialog.ripped_route_avoidance_cost.SetValue(settings['ripped_route_avoidance_cost'])
     if 'routing_clearance_margin' in settings:
         dialog.routing_clearance_margin.SetValue(settings['routing_clearance_margin'])
     if 'hole_to_hole_clearance' in settings:

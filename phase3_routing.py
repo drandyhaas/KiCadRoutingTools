@@ -151,7 +151,9 @@ def run_phase3_tap_routing(
             obstacles, _ = build_single_ended_obstacles(
                 base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
                 all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                net_obstacles_cache=state.net_obstacles_cache
+                net_obstacles_cache=state.net_obstacles_cache,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions
             )
 
         # Build input - use LENGTH-MATCHED segments (so taps connect to actual final route)
@@ -176,7 +178,7 @@ def run_phase3_tap_routing(
             failed_edge_blocking = completed_result.get('failed_edge_blocking', {})
             if failed_edge_blocking and not length_matching_active and config.max_rip_up_count > 0:
                 # Try rip-up for failed tap routes
-                retry_result = _try_phase3_ripup(
+                retry_result = try_phase3_ripup(
                     net_id, completed_result, failed_edge_blocking, lm_segments, lm_vias,
                     pcb_data, config, state, routed_net_ids, remaining_net_ids,
                     all_unrouted_net_ids, routed_net_paths, routed_results,
@@ -255,7 +257,7 @@ def run_phase3_tap_routing(
     return stats
 
 
-def _try_phase3_ripup(
+def try_phase3_ripup(
     net_id, completed_result, failed_edge_blocking, lm_segments, lm_vias,
     pcb_data, config, state, routed_net_ids, remaining_net_ids,
     all_unrouted_net_ids, routed_net_paths, routed_results,
@@ -352,7 +354,9 @@ def _try_phase3_ripup(
             blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
             routed_results, diff_pair_by_net_id, remaining_net_ids,
             results, config, track_proximity_cache,
-            state.working_obstacles, state.net_obstacles_cache
+            state.working_obstacles, state.net_obstacles_cache,
+            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+            layer_map
         )
 
         if saved_result is None:
@@ -385,7 +389,9 @@ def _try_phase3_ripup(
             obstacles, _ = build_single_ended_obstacles(
                 base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
                 all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                net_obstacles_cache=state.net_obstacles_cache
+                net_obstacles_cache=state.net_obstacles_cache,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions
             )
 
         # Retry tap routing
@@ -478,7 +484,8 @@ def _try_phase3_ripup(
                 pcb_data, routed_net_ids, routed_net_paths,
                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                 results, config, track_proximity_cache, layer_map,
-                state.working_obstacles, state.net_obstacles_cache
+                state.working_obstacles, state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions
             )
 
     return None
@@ -496,6 +503,7 @@ def _reroute_phase3_ripped_nets(
     This includes routing their main route and any tap connections.
     If tap routing fails, attempts rip-up retry (up to config.max_rip_up_count depth).
     """
+
     for ripped_net_id, saved_result, ripped_ids, was_in_results in phase3_ripped_nets:
         net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"net_{ripped_net_id}"
         print(f"\n  Re-routing {net_name} (net {ripped_net_id})...")
@@ -517,7 +525,9 @@ def _reroute_phase3_ripped_nets(
             obstacles, _ = build_single_ended_obstacles(
                 base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
                 all_unrouted_net_ids, ripped_net_id, gnd_net_id, track_proximity_cache, layer_map,
-                net_obstacles_cache=state.net_obstacles_cache
+                net_obstacles_cache=state.net_obstacles_cache,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions
             )
 
         # Check if this was originally a multi-point net (from saved_result)
@@ -601,7 +611,7 @@ def _reroute_phase3_ripped_nets(
                             lm_segments = result['new_segments']
                             lm_vias = result.get('new_vias', [])
 
-                            retry_result = _try_phase3_ripup(
+                            retry_result = try_phase3_ripup(
                                 ripped_net_id, tap_result, failed_edge_blocking, lm_segments, lm_vias,
                                 pcb_data, config, state, routed_net_ids, remaining_net_ids,
                                 all_unrouted_net_ids, routed_net_paths, routed_results,

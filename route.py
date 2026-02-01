@@ -133,6 +133,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 board_edge_clearance: float = 0.0,
                 vertical_attraction_radius: float = 1.0,
                 vertical_attraction_cost: float = 0.1,
+                ripped_route_avoidance_radius: float = 1.0,
+                ripped_route_avoidance_cost: float = 0.1,
                 length_match_groups: Optional[List[List[str]]] = None,
                 length_match_tolerance: float = 0.1,
                 meander_amplitude: float = 1.0,
@@ -266,7 +268,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
         hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
         vertical_attraction_radius=vertical_attraction_radius,
-        vertical_attraction_cost=vertical_attraction_cost, length_match_groups=length_match_groups,
+        vertical_attraction_cost=vertical_attraction_cost,
+        ripped_route_avoidance_radius=ripped_route_avoidance_radius,
+        ripped_route_avoidance_cost=ripped_route_avoidance_cost,
+        length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
         time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory, layer_costs=layer_costs
@@ -925,6 +930,12 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--vertical-attraction-cost", type=float, default=defaults.VERTICAL_ATTRACTION_COST,
                         help=f"Cost bonus for aligning with tracks on other layers (0 = disabled, default: {defaults.VERTICAL_ATTRACTION_COST})")
 
+    # Ripped route avoidance options
+    parser.add_argument("--ripped-route-avoidance-radius", type=float, default=defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS,
+                        help=f"Radius in mm around ripped route segments/vias for soft penalty (default: {defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS})")
+    parser.add_argument("--ripped-route-avoidance-cost", type=float, default=defaults.RIPPED_ROUTE_AVOIDANCE_COST,
+                        help=f"Soft penalty cost for routing through ripped corridors (0 = disabled, default: {defaults.RIPPED_ROUTE_AVOIDANCE_COST})")
+
     # Layer preference options
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
                         help="Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0). "
@@ -1072,6 +1083,8 @@ For differential pair routing, use route_diff.py:
                 board_edge_clearance=args.board_edge_clearance,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
+                ripped_route_avoidance_radius=args.ripped_route_avoidance_radius,
+                ripped_route_avoidance_cost=args.ripped_route_avoidance_cost,
                 length_match_groups=args.length_match_groups,
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,

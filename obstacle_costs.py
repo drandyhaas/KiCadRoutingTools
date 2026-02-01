@@ -315,3 +315,75 @@ def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
     for net_id in routed_net_ids:
         per_net_costs[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
     merge_track_proximity_costs(obstacles, per_net_costs)
+
+
+def compute_ripped_route_costs(saved_result: dict, config: GridRouteConfig,
+                                layer_map: Dict[str, int]) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+    """Compute avoidance costs for a ripped route's former segment/via locations.
+
+    When a net is ripped up to route another net, we want to apply soft penalties
+    to the ripped net's former corridor. This increases the chance the ripped net
+    can be successfully rerouted later by keeping its path available.
+
+    Args:
+        saved_result: The saved routing result from the ripped net (contains new_segments, new_vias)
+        config: Routing configuration with ripped_route_avoidance_radius and _cost
+        layer_map: Mapping of layer names to layer indices
+
+    Returns:
+        (layer_costs, via_positions) where:
+        - layer_costs: numpy array of [layer, gx, gy, cost] for segment proximity (layer-specific)
+        - via_positions: list of (gx, gy) grid coordinates for vias
+    """
+    # Return empty results if feature is disabled
+    if config.ripped_route_avoidance_cost <= 0 or config.ripped_route_avoidance_radius <= 0:
+        return np.empty((0, 4), dtype=np.int32), []
+
+    coord = GridCoord(config.grid_step)
+    radius_grid = coord.to_grid_dist(config.ripped_route_avoidance_radius)
+    cost_grid = int(config.ripped_route_avoidance_cost * 1000 / config.grid_step)
+
+    # Get pre-computed offset table (cached)
+    offsets = _get_proximity_offsets(radius_grid, cost_grid)
+
+    # Use dict internally for efficient max tracking
+    result: Dict[Tuple[int, int, int], int] = {}  # (layer, gx, gy) -> cost
+
+    # Sample every ~1mm along segments (not every grid step) for performance
+    sample_interval = max(1, int(1.0 / config.grid_step))
+
+    # Process segments (layer-specific costs)
+    new_segments = saved_result.get('new_segments', [])
+    for seg in new_segments:
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+
+        # Walk along segment using walk_line, sampling every sample_interval points
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+
+        for step_count, (gx, gy) in enumerate(walk_line(gx1, gy1, gx2, gy2)):
+            # Only process every sample_interval'th point
+            if step_count % sample_interval == 0:
+                # Add proximity costs using pre-computed offset table
+                for ex, ey, cost in offsets:
+                    key = (layer_idx, gx + ex, gy + ey)
+                    # Store max cost at each cell
+                    if key not in result or cost > result[key]:
+                        result[key] = cost
+
+    # Convert layer costs to numpy array
+    if result:
+        layer_costs = np.array([[layer, gx, gy, cost] for (layer, gx, gy), cost in result.items()], dtype=np.int32)
+    else:
+        layer_costs = np.empty((0, 4), dtype=np.int32)
+
+    # Extract via positions (grid coords)
+    via_positions = []
+    new_vias = saved_result.get('new_vias', [])
+    for via in new_vias:
+        gx, gy = coord.to_grid(via.x, via.y)
+        via_positions.append((gx, gy))
+
+    return layer_costs, via_positions
