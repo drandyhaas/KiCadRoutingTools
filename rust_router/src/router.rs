@@ -18,15 +18,18 @@ pub struct GridRouter {
     vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
     layer_costs: Vec<i32>,  // Per-layer cost multipliers (1000 = 1.0x, 1500 = 1.5x penalty)
     proximity_heuristic_cost: i32,  // Expected proximity cost per grid step (added to heuristic)
+    layer_direction_preferences: Vec<u8>,  // Per-layer direction preference (0=horizontal, 1=vertical, 255=none)
+    direction_preference_cost: i32,  // Cost penalty for non-preferred direction moves
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
                vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
-               layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: Option<i32>) -> Self {
+               layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: Option<i32>,
+               layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32) -> Self {
         Self {
             via_cost,
             h_weight,
@@ -36,6 +39,8 @@ impl GridRouter {
             vertical_attraction_bonus,
             layer_costs: layer_costs.unwrap_or_default(),
             proximity_heuristic_cost: proximity_heuristic_cost.unwrap_or(0),  // Default: no proximity estimate
+            layer_direction_preferences: layer_direction_preferences.unwrap_or_default(),
+            direction_preference_cost,
         }
     }
 
@@ -351,7 +356,16 @@ impl GridRouter {
                 let attraction_bonus = obstacles.get_cross_layer_attraction(
                     ngx, ngy, current.layer as usize,
                     self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                let new_g = g + move_cost + turn_cost + proximity_cost - attraction_bonus;
+                // Layer direction preference penalty (0=horizontal preferred, 1=vertical preferred)
+                let direction_penalty = if self.direction_preference_cost > 0 {
+                    let preferred = self.layer_direction_preferences.get(current.layer as usize).copied().unwrap_or(255);
+                    match preferred {
+                        0 => if dy != 0 && dx == 0 { self.direction_preference_cost } else { 0 },  // Horizontal pref, penalize pure vertical
+                        1 => if dx != 0 && dy == 0 { self.direction_preference_cost } else { 0 },  // Vertical pref, penalize pure horizontal
+                        _ => 0  // No preference (255 or other)
+                    }
+                } else { 0 };
+                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
@@ -699,7 +713,16 @@ impl GridRouter {
                 let attraction_bonus = obstacles.get_cross_layer_attraction(
                     ngx, ngy, current.layer as usize,
                     self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                let new_g = g + move_cost + turn_cost + proximity_cost - attraction_bonus;
+                // Layer direction preference penalty (0=horizontal preferred, 1=vertical preferred)
+                let direction_penalty = if self.direction_preference_cost > 0 {
+                    let preferred = self.layer_direction_preferences.get(current.layer as usize).copied().unwrap_or(255);
+                    match preferred {
+                        0 => if dy != 0 && dx == 0 { self.direction_preference_cost } else { 0 },
+                        1 => if dx != 0 && dy == 0 { self.direction_preference_cost } else { 0 },
+                        _ => 0
+                    }
+                } else { 0 };
+                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {

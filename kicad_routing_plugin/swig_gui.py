@@ -507,6 +507,7 @@ class RoutingDialog(wx.Dialog):
             ('max_iterations', 'Max Iterations:', defaults.MAX_ITERATIONS),
             ('max_probe_iterations', 'Probe Iterations:', defaults.MAX_PROBE_ITERATIONS),
             ('turn_cost', 'Turn Cost:', defaults.TURN_COST),
+            ('direction_preference_cost', 'Dir. Pref. Cost:', defaults.DIRECTION_PREFERENCE_COST),
         ]
         for name, label, default in int_params:
             r = defaults.PARAM_RANGES[name]
@@ -911,6 +912,7 @@ class RoutingDialog(wx.Dialog):
                 'heuristic_weight': self.heuristic_weight.GetValue(),
                 'proximity_heuristic_factor': self.proximity_heuristic_factor.GetValue(),
                 'turn_cost': self.turn_cost.GetValue(),
+                'direction_preference_cost': self.direction_preference_cost.GetValue(),
                 'max_ripup': self.max_ripup.GetValue(),
                 'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
                 'debug_lines': self.debug_lines_check.GetValue(),
@@ -1304,6 +1306,7 @@ class RoutingDialog(wx.Dialog):
         self.heuristic_weight.SetValue(defaults.HEURISTIC_WEIGHT)
         self.proximity_heuristic_factor.SetValue(defaults.PROXIMITY_HEURISTIC_FACTOR)
         self.turn_cost.SetValue(defaults.TURN_COST)
+        self.direction_preference_cost.SetValue(defaults.DIRECTION_PREFERENCE_COST)
         self.ordering_strategy.SetSelection(0)
         self.bga_proximity_radius.SetValue(defaults.BGA_PROXIMITY_RADIUS)
         self.bga_proximity_cost.SetValue(defaults.BGA_PROXIMITY_COST)
@@ -1508,6 +1511,7 @@ class RoutingDialog(wx.Dialog):
             'heuristic_weight': self.heuristic_weight.GetValue(),
             'proximity_heuristic_factor': self.proximity_heuristic_factor.GetValue(),
             'turn_cost': self.turn_cost.GetValue(),
+            'direction_preference_cost': self.direction_preference_cost.GetValue(),
             'max_ripup': self.max_ripup.GetValue(),
             'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
             'stub_proximity_radius': self.stub_proximity_radius.GetValue(),
@@ -1842,6 +1846,7 @@ class RoutingDialog(wx.Dialog):
                     heuristic_weight=config['heuristic_weight'],
                     proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                     turn_cost=config['turn_cost'],
+                    direction_preference_cost=config.get('direction_preference_cost', 300),
                     max_rip_up_count=config['max_ripup'],
                     ordering_strategy=config['ordering_strategy'],
                     direction_order=config.get('direction'),
@@ -1940,6 +1945,7 @@ class RoutingDialog(wx.Dialog):
                         heuristic_weight=config['heuristic_weight'],
                         proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                         turn_cost=config['turn_cost'],
+                        direction_preference_cost=config.get('direction_preference_cost', 300),
                         max_rip_up_count=config['max_ripup'],
                         ordering_strategy=config['ordering_strategy'],
                         direction_order=config.get('direction'),

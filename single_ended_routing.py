@@ -526,7 +526,9 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=prox_h_cost)
+                        proximity_heuristic_cost=prox_h_cost,
+                        layer_direction_preferences=config.get_layer_direction_preferences(),
+                        direction_preference_cost=config.direction_preference_cost)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -779,7 +781,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=prox_h_cost)
+                        proximity_heuristic_cost=prox_h_cost,
+                        layer_direction_preferences=config.get_layer_direction_preferences(),
+                        direction_preference_cost=config.direction_preference_cost)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -1379,7 +1383,9 @@ def route_multipoint_main(
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=prox_h_cost)
+                        proximity_heuristic_cost=prox_h_cost,
+                        layer_direction_preferences=config.get_layer_direction_preferences(),
+                        direction_preference_cost=config.direction_preference_cost)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -1578,7 +1584,9 @@ def route_multipoint_taps(
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
-                        proximity_heuristic_cost=0)  # Set per-route below
+                        proximity_heuristic_cost=0,  # Set per-route below
+                        layer_direction_preferences=config.get_layer_direction_preferences(),
+                        direction_preference_cost=config.direction_preference_cost)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches

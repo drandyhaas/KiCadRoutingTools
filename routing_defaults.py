@@ -63,6 +63,10 @@ HEURISTIC_WEIGHT = 1.9
 PROXIMITY_HEURISTIC_FACTOR = 0.02
 MAX_RIPUP = 3
 
+# Layer direction preference (0=horizontal, 1=vertical, 255=none)
+# Alternates H/V starting with horizontal on top layer
+DIRECTION_PREFERENCE_COST = 300  # Cost penalty for non-preferred direction (0 = disabled)
+
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0
 HOLE_TO_HOLE_CLEARANCE = 0.2  # mm
@@ -122,6 +126,7 @@ PARAM_RANGES = {
     'heuristic_weight': {'min': 1.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'proximity_heuristic_factor': {'min': 0.0, 'max': 0.2, 'inc': 0.01, 'digits': 2},
     'turn_cost': {'min': 0, 'max': 10000},
+    'direction_preference_cost': {'min': 0, 'max': 10000},
     'max_ripup': {'min': 0, 'max': 10},
     'stub_proximity_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},

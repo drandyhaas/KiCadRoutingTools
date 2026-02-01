@@ -53,6 +53,7 @@ def get_dialog_settings(dialog):
         'max_probe_iterations': dialog.max_probe_iterations.GetValue(),
         'heuristic_weight': dialog.heuristic_weight.GetValue(),
         'turn_cost': dialog.turn_cost.GetValue(),
+        'direction_preference_cost': dialog.direction_preference_cost.GetValue(),
         'ordering_strategy': dialog.ordering_strategy.GetSelection(),
         'bga_proximity_radius': dialog.bga_proximity_radius.GetValue(),
         'bga_proximity_cost': dialog.bga_proximity_cost.GetValue(),
@@ -238,6 +239,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.heuristic_weight.SetValue(settings['heuristic_weight'])
     if 'turn_cost' in settings:
         dialog.turn_cost.SetValue(settings['turn_cost'])
+    if 'direction_preference_cost' in settings:
+        dialog.direction_preference_cost.SetValue(settings['direction_preference_cost'])
     if 'ordering_strategy' in settings:
         dialog.ordering_strategy.SetSelection(settings['ordering_strategy'])
     if 'bga_proximity_radius' in settings:

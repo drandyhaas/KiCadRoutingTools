@@ -583,6 +583,8 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --heuristic-weight 1.9       # A* greediness (>1 = faster)
 --proximity-heuristic-factor 0.02  # Proximity cost estimate (only applied when endpoints in zones, diff pairs use 1/10th)
 --turn-cost 1000             # Penalty for direction changes (straighter paths)
+--direction-preference-cost 300  # Penalty for non-preferred layer direction (0=disabled)
+                                 # Alternates H/V: F.Cu=horizontal, In1.Cu=vertical, etc.
 --max-ripup 3                # Max blockers to rip up at once (1-N progressive)
 --routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)
 --hole-to-hole-clearance 0.2 # Minimum drill hole edge-to-edge clearance (mm)

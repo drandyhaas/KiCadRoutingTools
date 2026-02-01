@@ -92,6 +92,8 @@ class GridRouteConfig:
     collect_stats: bool = False  # Collect A* search statistics for debugging
     # Heuristic tuning
     proximity_heuristic_factor: float = 0.02  # Factor for proximity heuristic (higher = tighter heuristic, faster but may overestimate)
+    # Layer direction preference - alternates H/V starting with horizontal on top
+    direction_preference_cost: int = 300  # Cost penalty for non-preferred direction (0 = disabled)
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).
@@ -150,6 +152,21 @@ class GridRouteConfig:
             else:
                 costs.append(1000)  # Default 1.0x
         return costs
+
+    def get_layer_direction_preferences(self) -> List[int]:
+        """Get layer direction preferences for the Rust router.
+
+        Returns list of preferences: 0=horizontal, 1=vertical, 255=none.
+        Pattern alternates H/V starting with horizontal on top layer.
+        Returns empty list if direction_preference_cost is 0 (disabled).
+        """
+        if self.direction_preference_cost == 0:
+            return []  # Disabled
+        prefs = []
+        for i in range(len(self.layers)):
+            # Alternate: even layers (0, 2, 4) = horizontal (0), odd layers (1, 3, 5) = vertical (1)
+            prefs.append(i % 2)
+        return prefs
 
     def get_proximity_heuristic_cost(self) -> int:
         """Get the maximum proximity heuristic cost for the Rust router.

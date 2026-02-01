@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.12.2**
+**Current Version: 0.13.0**
 
 ## Features
 
@@ -282,6 +282,7 @@ src/
 
 ## Version History
 
+- **0.13.0**: Added layer direction preference feature. New `layer_direction_preferences` parameter (list of u8: 0=horizontal, 1=vertical, 255=none) and `direction_preference_cost` parameter (penalty for non-preferred direction moves). Encourages horizontal routing on some layers and vertical on others, creating more organized, human-like routing patterns.
 - **0.12.2**: Reverted to flat proximity costs (removed direction-aware cost adjustment from v0.10.0). Testing showed flat costs produce better results: 19% fewer iterations, 40% faster, and improved routing success (100% vs 97.9% on benchmark). The direction-aware heuristic mismatch caused more search exploration than the "efficient zone exit" guidance saved. Removed dead code: `get_directional_proximity_cost()`, `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, and `proximity_zone_centers` field.
 - **0.12.1**: Made VisualRouter fully consistent with GridRouter. Added `turn_cost`, `via_proximity_cost`, `vertical_attraction_radius`, and `vertical_attraction_bonus` parameters. Updated to use direction-aware proximity costs (`get_directional_proximity_cost()` and `get_layer_proximity_cost()`) and cross-layer attraction. Visualization mode now produces identical iteration counts to non-visualization mode.
 - **0.12.0**: Added proximity-aware heuristic for faster routing on dense boards. The heuristic now auto-estimates expected proximity costs per step based on stub/track/BGA proximity settings and radii, dramatically reducing search space (up to 6x speedup) while keeping high proximity costs to prevent blocking later routes. Formula: `sum(cost_i * radius_i) * factor` where factor defaults to 0.02 (tuned for ~5mm typical radius). Diff pair routing uses 1/10th of the factor due to the more constrained pose-based search. **Smart endpoint detection**: The heuristic is only applied when source or target is inside a proximity zone (checked via `is_in_any_proximity_zone()`); routes with both endpoints outside proximity zones use h=0 for optimal search. New `proximity_heuristic_cost` parameter and `set_proximity_heuristic_cost()` setter in both GridRouter and PoseRouter, `--proximity-heuristic-factor` CLI option (route.py and route_diff.py), and `GridRouteConfig.get_proximity_heuristic_cost()` method.

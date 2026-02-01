@@ -110,6 +110,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 max_probe_iterations: int = 5000,
                 heuristic_weight: float = 1.9,
                 turn_cost: int = 1000,
+                direction_preference_cost: int = 300,
                 proximity_heuristic_factor: float = 0.02,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
@@ -258,7 +259,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_drill=via_drill, grid_step=grid_step, via_cost=via_cost,
         layers=layers, max_iterations=max_iterations,
         max_probe_iterations=max_probe_iterations, heuristic_weight=heuristic_weight,
-        turn_cost=turn_cost, proximity_heuristic_factor=proximity_heuristic_factor,
+        turn_cost=turn_cost, direction_preference_cost=direction_preference_cost,
+        proximity_heuristic_factor=proximity_heuristic_factor,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
         via_proximity_cost=via_proximity_cost, bga_proximity_radius=bga_proximity_radius,
@@ -859,6 +861,8 @@ For differential pair routing, use route_diff.py:
                         help=f"A* heuristic weight, higher=faster but less optimal (default: {defaults.HEURISTIC_WEIGHT})")
     parser.add_argument("--turn-cost", type=int, default=defaults.TURN_COST,
                         help=f"Penalty for direction changes, encourages straighter paths (default: {defaults.TURN_COST})")
+    parser.add_argument("--direction-preference-cost", type=int, default=defaults.DIRECTION_PREFERENCE_COST,
+                        help=f"Penalty for non-preferred layer direction, 0=disabled (default: {defaults.DIRECTION_PREFERENCE_COST})")
     parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
                         help="Factor for proximity heuristic estimation (default: 0.02, higher=faster but may find suboptimal paths)")
 
@@ -1061,6 +1065,7 @@ For differential pair routing, use route_diff.py:
                 max_probe_iterations=args.max_probe_iterations,
                 heuristic_weight=args.heuristic_weight,
                 turn_cost=args.turn_cost,
+                direction_preference_cost=args.direction_preference_cost,
                 proximity_heuristic_factor=args.proximity_heuristic_factor,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
