@@ -21,6 +21,7 @@ from connectivity import (
 )
 from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
 from bresenham_utils import walk_line
+from geometry_utils import simplify_path
 
 # Import Rust router
 import sys
@@ -636,6 +637,9 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
 
+    # Simplify path by removing collinear intermediate points
+    path = simplify_path(path)
+
     # Convert path to segments and vias
     new_segments = []
     new_vias = []
@@ -855,6 +859,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
+
+    # Simplify path by removing collinear intermediate points
+    path = simplify_path(path)
 
     new_segments = []
     new_vias = []
@@ -1121,6 +1128,9 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
+
+    # Simplify path by removing collinear intermediate points
+    path = simplify_path(path)
 
     new_segments = []
     new_vias = []
@@ -1847,6 +1857,9 @@ def _path_to_segments_vias(
 
     if not path:
         return segments, vias
+
+    # Simplify path by removing collinear intermediate points
+    path = simplify_path(path)
 
     path_start = path[0]
     path_end = path[-1]

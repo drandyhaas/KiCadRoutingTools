@@ -7,6 +7,7 @@ This module consolidates geometry calculations used across multiple modules:
 - Segment intersection detection
 - Closest point calculations
 - Union-Find data structure for connectivity
+- Path simplification (removing collinear points)
 """
 
 import math
@@ -271,3 +272,51 @@ def segment_to_segment_closest_points(seg1: "Segment", seg2: "Segment") -> Tuple
     candidates.append((d4, p4, (seg2.end_x, seg2.end_y)))
 
     return min(candidates, key=lambda x: x[0])
+
+
+def simplify_path(path):
+    """
+    Simplify a path by removing intermediate points on straight lines.
+    Only keeps corner points and endpoints.
+
+    Args:
+        path: List of (gx, gy, layer) grid coordinates
+
+    Returns:
+        Simplified path with collinear points removed
+    """
+    if len(path) <= 2:
+        return list(path)
+
+    result = [path[0]]
+
+    for i in range(1, len(path) - 1):
+        prev = path[i - 1]
+        curr = path[i]
+        next_pt = path[i + 1]
+
+        # Keep if layer changes
+        if prev[2] != curr[2] or curr[2] != next_pt[2]:
+            result.append(curr)
+            continue
+
+        # Direction vectors
+        dx1 = curr[0] - prev[0]
+        dy1 = curr[1] - prev[1]
+        dx2 = next_pt[0] - curr[0]
+        dy2 = next_pt[1] - curr[1]
+
+        # Normalize (handle zero case)
+        len1 = math.sqrt(dx1*dx1 + dy1*dy1) or 1
+        len2 = math.sqrt(dx2*dx2 + dy2*dy2) or 1
+
+        # Check if directions are the same (collinear)
+        ndx1, ndy1 = dx1/len1, dy1/len1
+        ndx2, ndy2 = dx2/len2, dy2/len2
+
+        # Not collinear if directions differ (keep this corner point)
+        if abs(ndx1 - ndx2) > 0.01 or abs(ndy1 - ndy2) > 0.01:
+            result.append(curr)
+
+    result.append(path[-1])
+    return result
