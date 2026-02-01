@@ -271,7 +271,7 @@ class GridRouteConfig:
 
     # Vertical track alignment (cross-layer attraction)
     vertical_attraction_radius: float = 1.0  # mm
-    vertical_attraction_cost: float = 0.1    # mm equivalent bonus
+    vertical_attraction_cost: float = 0.0    # mm equivalent bonus
 
     # Direction
     direction_order: str = "forward"     # forward or backward

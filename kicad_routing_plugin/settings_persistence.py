@@ -79,6 +79,13 @@ def get_dialog_settings(dialog):
         'no_crossing_layer_check': dialog.no_crossing_layer_check.GetValue(),
         'can_swap_to_top': dialog.can_swap_to_top.GetValue(),
         'crossing_penalty': dialog.crossing_penalty.GetValue(),
+
+        # Bus routing options
+        'bus_enabled': dialog.bus_enabled.GetValue(),
+        'bus_detection_radius': dialog.bus_detection_radius.GetValue(),
+        'bus_attraction_radius': dialog.bus_attraction_radius.GetValue(),
+        'bus_attraction_bonus': dialog.bus_attraction_bonus.GetValue(),
+
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
@@ -290,6 +297,17 @@ def restore_dialog_settings(dialog, settings):
         dialog.can_swap_to_top.SetValue(settings['can_swap_to_top'])
     if 'crossing_penalty' in settings:
         dialog.crossing_penalty.SetValue(settings['crossing_penalty'])
+
+    # Restore bus routing options
+    if 'bus_enabled' in settings:
+        dialog.bus_enabled.SetValue(settings['bus_enabled'])
+    if 'bus_detection_radius' in settings:
+        dialog.bus_detection_radius.SetValue(settings['bus_detection_radius'])
+    if 'bus_attraction_radius' in settings:
+        dialog.bus_attraction_radius.SetValue(settings['bus_attraction_radius'])
+    if 'bus_attraction_bonus' in settings:
+        dialog.bus_attraction_bonus.SetValue(settings['bus_attraction_bonus'])
+
     if 'length_match_groups' in settings:
         dialog.length_match_groups_ctrl.SetValue(settings['length_match_groups'])
     if 'length_match_tolerance' in settings:

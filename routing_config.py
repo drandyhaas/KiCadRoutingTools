@@ -93,13 +93,13 @@ class GridRouteConfig:
     # Heuristic tuning
     proximity_heuristic_factor: float = 0.02  # Factor for proximity heuristic (higher = tighter heuristic, faster but may overestimate)
     # Layer direction preference - alternates H/V starting with horizontal on top
-    direction_preference_cost: int = 300  # Cost penalty for non-preferred direction (0 = disabled)
+    direction_preference_cost: int = 50  # Cost penalty for non-preferred direction (0 = disabled)
     # Bus routing - auto-detection and parallel routing of grouped nets
     bus_enabled: bool = False  # Enable bus detection and routing
     bus_detection_radius: float = 5.0  # mm - max endpoint distance to form bus
     bus_min_nets: int = 2  # Minimum nets to form a bus
     bus_attraction_radius: float = 5.0  # mm - attraction radius from neighbor track
-    bus_attraction_bonus: int = 1000  # Cost bonus for staying near neighbor
+    bus_attraction_bonus: int = 5000  # Cost bonus for staying near neighbor
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).

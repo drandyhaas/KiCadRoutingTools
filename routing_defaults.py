@@ -65,13 +65,13 @@ MAX_RIPUP = 3
 
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
-DIRECTION_PREFERENCE_COST = 300  # Cost penalty for non-preferred direction (0 = disabled)
+DIRECTION_PREFERENCE_COST = 50  # Cost penalty for non-preferred direction (0 = disabled)
 
 # Bus routing - auto-detection and parallel routing of grouped nets
 BUS_DETECTION_RADIUS = 5.0  # mm - max endpoint distance to form bus
 BUS_MIN_NETS = 2  # Minimum nets to form a bus
 BUS_ATTRACTION_RADIUS = 5.0  # mm - attraction radius from neighbor track
-BUS_ATTRACTION_BONUS = 1000  # Cost bonus for staying near neighbor
+BUS_ATTRACTION_BONUS = 5000  # Cost bonus for staying near neighbor
 
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0

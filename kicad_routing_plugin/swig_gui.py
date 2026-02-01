@@ -578,8 +578,8 @@ class RoutingDialog(wx.Dialog):
         self.layer_checks = {}
         for layer in self.pcb_data.board_info.copper_layers:
             cb = wx.CheckBox(layer_scroll, label=layer)
-            # Default to only F.Cu and B.Cu, matching CLI defaults
-            cb.SetValue(layer in defaults.DEFAULT_LAYERS)
+            # Default to all copper layers defined in the PCB
+            cb.SetValue(True)
             self.layer_checks[layer] = cb
             layer_inner.Add(cb, 0, wx.ALL, 3)
 
@@ -678,6 +678,48 @@ class RoutingDialog(wx.Dialog):
         self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
         options_inner.Add(self.mps_segment_intersection, 0, wx.ALL, 3)
+
+        options_inner.AddSpacer(10)
+
+        # Bus routing options
+        bus_label = wx.StaticText(options_scroll, label="Bus Routing:")
+        bus_label.SetFont(bus_label.GetFont().Bold())
+        options_inner.Add(bus_label, 0, wx.LEFT | wx.TOP, 3)
+
+        self.bus_enabled = wx.CheckBox(options_scroll, label="Enable bus routing")
+        self.bus_enabled.SetToolTip("Auto-detect and route parallel groups of nets together")
+        options_inner.Add(self.bus_enabled, 0, wx.ALL, 3)
+
+        bus_detect_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        bus_detect_sizer.Add(wx.StaticText(options_scroll, label="Detection radius:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['bus_detection_radius']
+        self.bus_detection_radius = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                       initial=defaults.BUS_DETECTION_RADIUS, inc=r['inc'])
+        self.bus_detection_radius.SetDigits(r['digits'])
+        self.bus_detection_radius.SetToolTip("Max endpoint distance to form bus group (mm)")
+        bus_detect_sizer.Add(self.bus_detection_radius, 1, wx.EXPAND)
+        options_inner.Add(bus_detect_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        bus_attract_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        bus_attract_sizer.Add(wx.StaticText(options_scroll, label="Attraction radius:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['bus_attraction_radius']
+        self.bus_attraction_radius = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                        initial=defaults.BUS_ATTRACTION_RADIUS, inc=r['inc'])
+        self.bus_attraction_radius.SetDigits(r['digits'])
+        self.bus_attraction_radius.SetToolTip("Attraction radius from neighbor track (mm)")
+        bus_attract_sizer.Add(self.bus_attraction_radius, 1, wx.EXPAND)
+        options_inner.Add(bus_attract_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        bus_bonus_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        bus_bonus_sizer.Add(wx.StaticText(options_scroll, label="Attraction bonus:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['bus_attraction_bonus']
+        self.bus_attraction_bonus = wx.SpinCtrl(options_scroll, min=r['min'], max=r['max'],
+                                                 initial=defaults.BUS_ATTRACTION_BONUS)
+        self.bus_attraction_bonus.SetToolTip("Cost bonus for staying parallel to neighbor track")
+        bus_bonus_sizer.Add(self.bus_attraction_bonus, 1, wx.EXPAND)
+        options_inner.Add(bus_bonus_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        options_inner.AddSpacer(10)
 
         # Crossing/swap options
         self.no_crossing_layer_check = wx.CheckBox(options_scroll, label="Ignore crossing layers")
@@ -1285,9 +1327,9 @@ class RoutingDialog(wx.Dialog):
         self.via_cost.SetValue(defaults.VIA_COST)
         self.max_ripup.SetValue(defaults.MAX_RIPUP)
 
-        # Reset layer selections (select F.Cu and B.Cu by default)
+        # Reset layer selections (select all copper layers by default)
         for layer, cb in self.layer_checks.items():
-            cb.SetValue(layer in ['F.Cu', 'B.Cu'])
+            cb.SetValue(True)
 
         # Reset basic options
         self.enable_layer_switch.SetValue(True)
@@ -1330,6 +1372,10 @@ class RoutingDialog(wx.Dialog):
         self.mps_reverse_rounds.SetValue(True)
         self.mps_layer_swap.SetValue(True)
         self.mps_segment_intersection.SetValue(True)
+        self.bus_enabled.SetValue(False)
+        self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
+        self.bus_attraction_radius.SetValue(defaults.BUS_ATTRACTION_RADIUS)
+        self.bus_attraction_bonus.SetValue(defaults.BUS_ATTRACTION_BONUS)
         self.no_crossing_layer_check.SetValue(False)
         self.can_swap_to_top.SetValue(True)
         self.crossing_penalty.SetValue(defaults.CROSSING_PENALTY)
@@ -1541,6 +1587,11 @@ class RoutingDialog(wx.Dialog):
             'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
+            # Bus routing options
+            'bus_enabled': self.bus_enabled.GetValue(),
+            'bus_detection_radius': self.bus_detection_radius.GetValue(),
+            'bus_attraction_radius': self.bus_attraction_radius.GetValue(),
+            'bus_attraction_bonus': self.bus_attraction_bonus.GetValue(),
             # Crossing/swap options
             'no_crossing_layer_check': self.no_crossing_layer_check.GetValue(),
             'can_swap_to_top_layer': self.can_swap_to_top.GetValue(),
@@ -1846,7 +1897,7 @@ class RoutingDialog(wx.Dialog):
                     heuristic_weight=config['heuristic_weight'],
                     proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                     turn_cost=config['turn_cost'],
-                    direction_preference_cost=config.get('direction_preference_cost', 300),
+                    direction_preference_cost=config.get('direction_preference_cost', 50),
                     max_rip_up_count=config['max_ripup'],
                     ordering_strategy=config['ordering_strategy'],
                     direction_order=config.get('direction'),
@@ -1858,7 +1909,7 @@ class RoutingDialog(wx.Dialog):
                     bga_proximity_radius=config.get('bga_proximity_radius', 7.0),
                     bga_proximity_cost=config.get('bga_proximity_cost', 0.2),
                     vertical_attraction_radius=config.get('vertical_attraction_radius', 1.0),
-                    vertical_attraction_cost=config.get('vertical_attraction_cost', 0.1),
+                    vertical_attraction_cost=config.get('vertical_attraction_cost', 0.0),
                     ripped_route_avoidance_radius=config.get('ripped_route_avoidance_radius', 1.0),
                     ripped_route_avoidance_cost=config.get('ripped_route_avoidance_cost', 0.1),
                     crossing_penalty=config.get('crossing_penalty', 1000.0),
@@ -1873,6 +1924,10 @@ class RoutingDialog(wx.Dialog):
                     mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                     mps_layer_swap=config.get('mps_layer_swap', False),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
+                    bus_routing=config.get('bus_enabled', False),
+                    bus_detection_radius=config.get('bus_detection_radius', 5.0),
+                    bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
+                    bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
@@ -1945,7 +2000,7 @@ class RoutingDialog(wx.Dialog):
                         heuristic_weight=config['heuristic_weight'],
                         proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                         turn_cost=config['turn_cost'],
-                        direction_preference_cost=config.get('direction_preference_cost', 300),
+                        direction_preference_cost=config.get('direction_preference_cost', 50),
                         max_rip_up_count=config['max_ripup'],
                         ordering_strategy=config['ordering_strategy'],
                         direction_order=config.get('direction'),
@@ -1957,7 +2012,7 @@ class RoutingDialog(wx.Dialog):
                         bga_proximity_radius=config.get('bga_proximity_radius', 7.0),
                         bga_proximity_cost=config.get('bga_proximity_cost', 0.2),
                         vertical_attraction_radius=config.get('vertical_attraction_radius', 1.0),
-                        vertical_attraction_cost=config.get('vertical_attraction_cost', 0.1),
+                        vertical_attraction_cost=config.get('vertical_attraction_cost', 0.0),
                         ripped_route_avoidance_radius=config.get('ripped_route_avoidance_radius', 1.0),
                         ripped_route_avoidance_cost=config.get('ripped_route_avoidance_cost', 0.1),
                         crossing_penalty=config.get('crossing_penalty', 1000.0),
@@ -1972,6 +2027,10 @@ class RoutingDialog(wx.Dialog):
                         mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                         mps_layer_swap=config.get('mps_layer_swap', False),
                         mps_segment_intersection=config.get('mps_segment_intersection', False),
+                        bus_routing=config.get('bus_enabled', False),
+                        bus_detection_radius=config.get('bus_detection_radius', 5.0),
+                        bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
+                        bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
                         power_nets=config.get('power_nets', []),
                         power_nets_widths=config.get('power_nets_widths', []),
                         disable_bga_zones=config.get('no_bga_zones'),

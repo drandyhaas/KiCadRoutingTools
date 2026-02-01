@@ -141,7 +141,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 max_turn_angle: float = 180.0,
                 gnd_via_enabled: bool = True,
                 vertical_attraction_radius: float = 1.0,
-                vertical_attraction_cost: float = 0.1,
+                vertical_attraction_cost: float = 0.0,
                 ripped_route_avoidance_radius: float = 1.0,
                 ripped_route_avoidance_cost: float = 0.1,
                 length_match_groups: Optional[List[List[str]]] = None,
