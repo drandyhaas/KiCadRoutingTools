@@ -67,6 +67,12 @@ MAX_RIPUP = 3
 # Alternates H/V starting with horizontal on top layer
 DIRECTION_PREFERENCE_COST = 300  # Cost penalty for non-preferred direction (0 = disabled)
 
+# Bus routing - auto-detection and parallel routing of grouped nets
+BUS_DETECTION_RADIUS = 10.0  # mm - max endpoint distance to form bus
+BUS_MIN_NETS = 2  # Minimum nets to form a bus
+BUS_ATTRACTION_RADIUS = 5.0  # mm - attraction radius from neighbor track
+BUS_ATTRACTION_BONUS = 1000  # Cost bonus for staying near neighbor
+
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0
 HOLE_TO_HOLE_CLEARANCE = 0.2  # mm
@@ -116,18 +122,18 @@ REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI
 PARAM_RANGES = {
-    'track_width': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
+    'track_width': {'min': 0.05, 'max': 25.0, 'inc': 0.05, 'digits': 2},
     'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
     'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 2},
     'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 2},
     'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 2},
     'via_cost': {'min': 1, 'max': 1000},
     'max_iterations': {'min': 1000, 'max': 100000000},
-    'heuristic_weight': {'min': 1.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'heuristic_weight': {'min': 1.0, 'max': 10.0, 'inc': 0.1, 'digits': 1},
     'proximity_heuristic_factor': {'min': 0.0, 'max': 0.2, 'inc': 0.01, 'digits': 2},
     'turn_cost': {'min': 0, 'max': 10000},
     'direction_preference_cost': {'min': 0, 'max': 10000},
-    'max_ripup': {'min': 0, 'max': 10},
+    'max_ripup': {'min': 0, 'max': 50},
     'stub_proximity_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'via_proximity_cost': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
@@ -151,8 +157,8 @@ PARAM_RANGES = {
     'gnd_via_distance': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     # Fanout parameters
     'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
-    'diff_pair_gap': {'min': 0.05, 'max': 1.0, 'inc': 0.01, 'digits': 2},
-    'qfn_extension': {'min': 0.05, 'max': 2.0, 'inc': 0.05, 'digits': 2},
+    'diff_pair_gap': {'min': 0.05, 'max': 5.0, 'inc': 0.01, 'digits': 2},
+    'qfn_extension': {'min': 0.05, 'max': 10.0, 'inc': 0.05, 'digits': 2},
     # Differential pair routing parameters
     'diff_pair_width': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
     'diff_pair_min_turning_radius': {'min': 0.05, 'max': 2.0, 'inc': 0.05, 'digits': 2},
@@ -170,4 +176,8 @@ PARAM_RANGES = {
     'repair_max_track_width': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
     'repair_min_track_width': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
     'repair_analysis_grid_step': {'min': 0.1, 'max': 2.0, 'inc': 0.1, 'digits': 1},
+    # Bus routing parameters
+    'bus_detection_radius': {'min': 0.5, 'max': 100.0, 'inc': 0.5, 'digits': 1},
+    'bus_attraction_radius': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
+    'bus_attraction_bonus': {'min': 0, 'max': 10000},
 }

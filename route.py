@@ -111,6 +111,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 heuristic_weight: float = 1.9,
                 turn_cost: int = 1000,
                 direction_preference_cost: int = 300,
+                bus_enabled: bool = False,
+                bus_detection_radius: float = 2.0,
+                bus_attraction_radius: float = 1.0,
+                bus_attraction_bonus: int = 500,
                 proximity_heuristic_factor: float = 0.02,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
@@ -260,6 +264,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers=layers, max_iterations=max_iterations,
         max_probe_iterations=max_probe_iterations, heuristic_weight=heuristic_weight,
         turn_cost=turn_cost, direction_preference_cost=direction_preference_cost,
+        bus_enabled=bus_enabled, bus_detection_radius=bus_detection_radius,
+        bus_attraction_radius=bus_attraction_radius, bus_attraction_bonus=bus_attraction_bonus,
         proximity_heuristic_factor=proximity_heuristic_factor,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
@@ -863,6 +869,14 @@ For differential pair routing, use route_diff.py:
                         help=f"Penalty for direction changes, encourages straighter paths (default: {defaults.TURN_COST})")
     parser.add_argument("--direction-preference-cost", type=int, default=defaults.DIRECTION_PREFERENCE_COST,
                         help=f"Penalty for non-preferred layer direction, 0=disabled (default: {defaults.DIRECTION_PREFERENCE_COST})")
+    parser.add_argument("--bus", action="store_true",
+                        help="Enable auto-detection and routing of bus groups (nets with clustered endpoints)")
+    parser.add_argument("--bus-detection-radius", type=float, default=defaults.BUS_DETECTION_RADIUS,
+                        help=f"Max endpoint distance to form bus in mm (default: {defaults.BUS_DETECTION_RADIUS})")
+    parser.add_argument("--bus-attraction-radius", type=float, default=defaults.BUS_ATTRACTION_RADIUS,
+                        help=f"Attraction radius from neighbor track in mm (default: {defaults.BUS_ATTRACTION_RADIUS})")
+    parser.add_argument("--bus-attraction-bonus", type=int, default=defaults.BUS_ATTRACTION_BONUS,
+                        help=f"Cost bonus for staying near neighbor track (default: {defaults.BUS_ATTRACTION_BONUS})")
     parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
                         help="Factor for proximity heuristic estimation (default: 0.02, higher=faster but may find suboptimal paths)")
 
@@ -1066,6 +1080,10 @@ For differential pair routing, use route_diff.py:
                 heuristic_weight=args.heuristic_weight,
                 turn_cost=args.turn_cost,
                 direction_preference_cost=args.direction_preference_cost,
+                bus_enabled=args.bus,
+                bus_detection_radius=args.bus_detection_radius,
+                bus_attraction_radius=args.bus_attraction_radius,
+                bus_attraction_bonus=args.bus_attraction_bonus,
                 proximity_heuristic_factor=args.proximity_heuristic_factor,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,

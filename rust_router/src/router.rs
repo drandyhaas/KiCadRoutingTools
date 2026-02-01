@@ -20,16 +20,23 @@ pub struct GridRouter {
     proximity_heuristic_cost: i32,  // Expected proximity cost per grid step (added to heuristic)
     layer_direction_preferences: Vec<u8>,  // Per-layer direction preference (0=horizontal, 1=vertical, 255=none)
     direction_preference_cost: i32,  // Cost penalty for non-preferred direction moves
+    // Bus routing: attraction to a previously routed path (same layer only)
+    attraction_path: Vec<(i32, i32, u8)>,  // Path to attract to (gx, gy, layer)
+    attraction_radius: i32,  // Grid units for attraction (0 = disabled)
+    attraction_bonus: i32,   // Cost reduction when near path (same layer)
+    // Spatial hash for efficient path distance lookup
+    attraction_path_hash: FxHashMap<u64, i32>,  // cell_key -> min distance to path point in that cell
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
                vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
                layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: Option<i32>,
-               layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32) -> Self {
+               layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32,
+               attraction_radius: i32, attraction_bonus: i32) -> Self {
         Self {
             via_cost,
             h_weight,
@@ -41,6 +48,10 @@ impl GridRouter {
             proximity_heuristic_cost: proximity_heuristic_cost.unwrap_or(0),  // Default: no proximity estimate
             layer_direction_preferences: layer_direction_preferences.unwrap_or_default(),
             direction_preference_cost,
+            attraction_path: Vec::new(),
+            attraction_radius,
+            attraction_bonus,
+            attraction_path_hash: FxHashMap::default(),
         }
     }
 
@@ -48,6 +59,52 @@ impl GridRouter {
     /// Call this before each route to adjust based on whether endpoints are in proximity zones.
     pub fn set_proximity_heuristic_cost(&mut self, cost: i32) {
         self.proximity_heuristic_cost = cost;
+    }
+
+    /// Set the attraction path for bus routing.
+    /// The router will give a cost bonus to positions near this path (same layer only).
+    /// Call this before routing each subsequent bus member with the previously routed path.
+    /// Pass an empty Vec to clear the attraction.
+    pub fn set_attraction_path(&mut self, path: Vec<(i32, i32, u8)>) {
+        self.attraction_path_hash.clear();
+
+        if path.is_empty() || self.attraction_radius <= 0 {
+            self.attraction_path = path;
+            return;
+        }
+
+        // Build spatial hash for efficient distance lookups
+        // Key: (gx / bucket_size, gy / bucket_size, layer) packed into u64
+        // We use a bucket size related to attraction_radius for efficiency
+        let bucket_size = (self.attraction_radius / 2).max(1);
+
+        for &(px, py, layer) in &path {
+            // Add this path point to its bucket and neighboring buckets within radius
+            let bx = px / bucket_size;
+            let by = py / bucket_size;
+
+            // Mark cells within attraction radius
+            let cells_to_check = (self.attraction_radius / bucket_size) + 1;
+            for dbx in -cells_to_check..=cells_to_check {
+                for dby in -cells_to_check..=cells_to_check {
+                    let cell_bx = bx + dbx;
+                    let cell_by = by + dby;
+                    // Pack bucket coords + layer into key
+                    let key = Self::pack_bucket_key(cell_bx, cell_by, layer, bucket_size);
+                    // Store that this bucket has path points nearby
+                    // We'll do actual distance calc at query time
+                    self.attraction_path_hash.entry(key).or_insert(0);
+                }
+            }
+        }
+
+        self.attraction_path = path;
+    }
+
+    /// Clear the attraction path
+    pub fn clear_attraction_path(&mut self) {
+        self.attraction_path.clear();
+        self.attraction_path_hash.clear();
     }
 
     /// Route from multiple source points to multiple target points.
@@ -365,7 +422,9 @@ impl GridRouter {
                         _ => 0  // No preference (255 or other)
                     }
                 } else { 0 };
-                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus;
+                // Path attraction bonus for bus routing (same layer only)
+                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer);
+                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
@@ -722,7 +781,9 @@ impl GridRouter {
                         _ => 0
                     }
                 } else { 0 };
-                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus;
+                // Path attraction bonus for bus routing (same layer only)
+                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer);
+                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                 if new_g < existing_g {
@@ -1011,6 +1072,68 @@ impl GridRouter {
         }
 
         (None, None)
+    }
+
+    /// Pack bucket coordinates into a key for spatial hash lookup
+    #[inline]
+    fn pack_bucket_key(bx: i32, by: i32, layer: u8, bucket_size: i32) -> u64 {
+        // Use bucket_size as part of key to avoid collisions between different bucket sizes
+        let _ = bucket_size; // Currently not used in key, but kept for future flexibility
+        let layer_bits = layer as u64;
+        let bx_bits = ((bx as u32) & 0xFFFFF) as u64;
+        let by_bits = ((by as u32) & 0xFFFFF) as u64;
+        layer_bits | (by_bits << 8) | (bx_bits << 28)
+    }
+
+    /// Calculate minimum Manhattan distance to attraction path on same layer
+    /// Returns i32::MAX if path is empty or no points on same layer
+    #[inline]
+    fn distance_to_path_same_layer(&self, x: i32, y: i32, layer: u8) -> i32 {
+        if self.attraction_path.is_empty() {
+            return i32::MAX;
+        }
+
+        // Quick check: is this position potentially near the path?
+        let bucket_size = (self.attraction_radius / 2).max(1);
+        let bx = x / bucket_size;
+        let by = y / bucket_size;
+        let key = Self::pack_bucket_key(bx, by, layer, bucket_size);
+
+        if !self.attraction_path_hash.contains_key(&key) {
+            return i32::MAX;
+        }
+
+        // Linear scan through path points on same layer to find minimum distance
+        let mut min_dist = i32::MAX;
+        for &(px, py, pl) in &self.attraction_path {
+            if pl != layer {
+                continue;
+            }
+            let dist = (x - px).abs() + (y - py).abs();  // Manhattan distance
+            if dist < min_dist {
+                min_dist = dist;
+                if min_dist == 0 {
+                    break;  // Can't do better than 0
+                }
+            }
+        }
+        min_dist
+    }
+
+    /// Calculate attraction bonus for a position near the attraction path (same layer only)
+    #[inline]
+    fn get_path_attraction_bonus(&self, x: i32, y: i32, layer: u8) -> i32 {
+        if self.attraction_bonus <= 0 || self.attraction_radius <= 0 || self.attraction_path.is_empty() {
+            return 0;
+        }
+
+        let dist = self.distance_to_path_same_layer(x, y, layer);
+        if dist > self.attraction_radius {
+            return 0;
+        }
+
+        // Linear falloff: full bonus at distance 0, zero bonus at attraction_radius
+        self.attraction_bonus * (self.attraction_radius - dist) / self.attraction_radius
     }
 
     /// Convert RouteStats to a Python-friendly dictionary

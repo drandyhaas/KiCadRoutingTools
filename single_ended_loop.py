@@ -6,9 +6,10 @@ extracted from route.py for better maintainability.
 """
 
 import time
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any, Dict, Set
 
 from routing_state import RoutingState, record_net_event
+from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -123,6 +124,47 @@ def route_single_ended_nets(
 
     # Cache for obstacle cells - persists across retry iterations for performance
     obstacle_cache = {}
+
+    # Bus detection: reorder nets so bus members are routed together (middle first, then outward)
+    # Also track bus membership for attraction during routing
+    bus_net_to_group: Dict[int, BusGroup] = {}  # Maps net_id to its bus group
+    bus_routed_paths: Dict[int, List[Tuple[int, int, int]]] = {}  # Stores routed paths for attraction
+
+    if config.bus_enabled:
+        net_ids_to_check = [net_id for _, net_id in single_ended_nets]
+        bus_groups = detect_bus_groups(
+            pcb_data, net_ids_to_check,
+            detection_radius=config.bus_detection_radius,
+            min_nets=config.bus_min_nets
+        )
+
+        if bus_groups:
+            print(f"\n=== Bus Detection: Found {len(bus_groups)} bus group(s) ===")
+            for bus in bus_groups:
+                net_names_list = [pcb_data.nets[nid].name for nid in bus.net_ids]
+                print(f"  {bus.name}: {len(bus.net_ids)} nets - {', '.join(net_names_list[:5])}{'...' if len(net_names_list) > 5 else ''}")
+                # Track bus membership
+                for nid in bus.net_ids:
+                    bus_net_to_group[nid] = bus
+
+            # Reorder nets: bus nets in routing order first, then non-bus nets
+            bus_net_ids_set = set(bus_net_to_group.keys())
+            reordered_nets = []
+
+            # Add bus nets in proper routing order (middle first, then outward)
+            for bus in bus_groups:
+                route_order = get_bus_routing_order(bus)
+                for nid in route_order:
+                    net_name = pcb_data.nets[nid].name
+                    reordered_nets.append((net_name, nid))
+
+            # Add non-bus nets in original order
+            for net_name, nid in single_ended_nets:
+                if nid not in bus_net_ids_set:
+                    reordered_nets.append((net_name, nid))
+
+            single_ended_nets = reordered_nets
+            print(f"  Reordered {len(bus_net_ids_set)} bus nets to route middle-first\n")
 
     for net_name, net_id in single_ended_nets:
         if user_quit:
@@ -249,7 +291,12 @@ def route_single_ended_nets(
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     state.pending_multipoint_nets[net_id] = result
             else:
-                result = route_net_with_obstacles(pcb_data, net_id, config, obstacles)
+                # Check for bus attraction
+                attraction_path = None
+                if net_id in bus_net_to_group:
+                    attraction_path = get_attraction_neighbor(bus_net_to_group[net_id], net_id, bus_routed_paths)
+                result = route_net_with_obstacles(pcb_data, net_id, config, obstacles,
+                                                  attraction_path=attraction_path)
 
         elapsed = time.time() - start_time
         total_time += elapsed
@@ -269,6 +316,9 @@ def route_single_ended_nets(
                 remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
             routed_results[net_id] = result
+            # Store path for bus attraction (if this net is in a bus)
+            if net_id in bus_net_to_group:
+                bus_routed_paths[net_id] = result.get('path', [])
             record_net_event(state, net_id, "initial_route", {
                 "type": "single-ended",
                 "segments": len(result['new_segments']),
@@ -513,7 +563,12 @@ def route_single_ended_nets(
                             if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                 state.pending_multipoint_nets[net_id] = retry_result
                         else:
-                            retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles)
+                            # Check for bus attraction in retry
+                            retry_attraction_path = None
+                            if net_id in bus_net_to_group:
+                                retry_attraction_path = get_attraction_neighbor(bus_net_to_group[net_id], net_id, bus_routed_paths)
+                            retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
+                                                                     attraction_path=retry_attraction_path)
 
                         if retry_result and not retry_result.get('failed'):
                             route_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)
@@ -534,6 +589,9 @@ def route_single_ended_nets(
                             })
                             if retry_result.get('path'):
                                 routed_net_paths[net_id] = retry_result['path']
+                                # Store path for bus attraction
+                                if net_id in bus_net_to_group:
+                                    bus_routed_paths[net_id] = retry_result['path']
                             track_proximity_cache[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
                             # Allow re-queuing if this net gets ripped again later
                             queued_net_ids.discard(net_id)

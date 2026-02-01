@@ -715,8 +715,18 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
 
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
-                              obstacles: GridObstacleMap) -> Optional[dict]:
-    """Route a single net using pre-built obstacles (for incremental routing)."""
+                              obstacles: GridObstacleMap,
+                              attraction_path: Optional[List[Tuple[int, int, int]]] = None) -> Optional[dict]:
+    """Route a single net using pre-built obstacles (for incremental routing).
+
+    Args:
+        pcb_data: PCB data
+        net_id: Net ID to route
+        config: Routing configuration
+        obstacles: Pre-built obstacle map
+        attraction_path: Optional path to attract to (for bus routing).
+                        List of (gx, gy, layer) tuples from a previously routed neighbor.
+    """
     # Find endpoints (segments or pads)
     sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
     if error:
@@ -776,6 +786,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         if tgt_in_bga: zones.append("tgt:bga")
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
+    # Calculate bus attraction parameters
+    bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
+    bus_attraction_bonus = int(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
+
     router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
@@ -783,7 +797,13 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         layer_costs=config.get_layer_costs(),
                         proximity_heuristic_cost=prox_h_cost,
                         layer_direction_preferences=config.get_layer_direction_preferences(),
-                        direction_preference_cost=config.direction_preference_cost)
+                        direction_preference_cost=config.direction_preference_cost,
+                        attraction_radius=bus_attraction_radius_grid,
+                        attraction_bonus=bus_attraction_bonus)
+
+    # Set attraction path for bus routing (if provided)
+    if attraction_path:
+        router.set_attraction_path(attraction_path)
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
