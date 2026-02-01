@@ -115,6 +115,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bus_detection_radius: float = 5.0,
                 bus_attraction_radius: float = 5.0,
                 bus_attraction_bonus: int = 5000,
+                bus_min_nets: int = 2,
                 proximity_heuristic_factor: float = 0.02,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
@@ -266,7 +267,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         turn_cost=turn_cost, direction_preference_cost=direction_preference_cost,
         bus_enabled=bus_enabled, bus_detection_radius=bus_detection_radius,
         bus_attraction_radius=bus_attraction_radius, bus_attraction_bonus=bus_attraction_bonus,
-        proximity_heuristic_factor=proximity_heuristic_factor,
+        bus_min_nets=bus_min_nets, proximity_heuristic_factor=proximity_heuristic_factor,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
         via_proximity_cost=via_proximity_cost, bga_proximity_radius=bga_proximity_radius,
@@ -877,6 +878,8 @@ For differential pair routing, use route_diff.py:
                         help=f"Attraction radius from neighbor track in mm (default: {defaults.BUS_ATTRACTION_RADIUS})")
     parser.add_argument("--bus-attraction-bonus", type=int, default=defaults.BUS_ATTRACTION_BONUS,
                         help=f"Cost bonus for staying near neighbor track (default: {defaults.BUS_ATTRACTION_BONUS})")
+    parser.add_argument("--bus-min-nets", type=int, default=defaults.BUS_MIN_NETS,
+                        help=f"Minimum nets to form a bus group (default: {defaults.BUS_MIN_NETS})")
     parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
                         help="Factor for proximity heuristic estimation (default: 0.02, higher=faster but may find suboptimal paths)")
 
@@ -1084,6 +1087,7 @@ For differential pair routing, use route_diff.py:
                 bus_detection_radius=args.bus_detection_radius,
                 bus_attraction_radius=args.bus_attraction_radius,
                 bus_attraction_bonus=args.bus_attraction_bonus,
+                bus_min_nets=args.bus_min_nets,
                 proximity_heuristic_factor=args.proximity_heuristic_factor,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,

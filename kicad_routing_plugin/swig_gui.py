@@ -719,6 +719,15 @@ class RoutingDialog(wx.Dialog):
         bus_bonus_sizer.Add(self.bus_attraction_bonus, 1, wx.EXPAND)
         options_inner.Add(bus_bonus_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        bus_min_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        bus_min_sizer.Add(wx.StaticText(options_scroll, label="Min nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['bus_min_nets']
+        self.bus_min_nets = wx.SpinCtrl(options_scroll, min=r['min'], max=r['max'],
+                                         initial=defaults.BUS_MIN_NETS)
+        self.bus_min_nets.SetToolTip("Minimum number of nets to form a bus group")
+        bus_min_sizer.Add(self.bus_min_nets, 1, wx.EXPAND)
+        options_inner.Add(bus_min_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         options_inner.AddSpacer(10)
 
         # Crossing/swap options
@@ -808,6 +817,10 @@ class RoutingDialog(wx.Dialog):
         self.debug_memory_check = wx.CheckBox(options_scroll, label="Debug memory")
         self.debug_memory_check.SetToolTip("Print memory usage statistics at key points")
         options_inner.Add(self.debug_memory_check, 0, wx.ALL, 3)
+
+        self.stats_check = wx.CheckBox(options_scroll, label="Show A* statistics")
+        self.stats_check.SetToolTip("Show A* search statistics (iterations, expansions, etc.)")
+        options_inner.Add(self.stats_check, 0, wx.ALL, 3)
 
         options_scroll.SetSizer(options_inner)
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
@@ -1376,6 +1389,7 @@ class RoutingDialog(wx.Dialog):
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
         self.bus_attraction_radius.SetValue(defaults.BUS_ATTRACTION_RADIUS)
         self.bus_attraction_bonus.SetValue(defaults.BUS_ATTRACTION_BONUS)
+        self.bus_min_nets.SetValue(defaults.BUS_MIN_NETS)
         self.no_crossing_layer_check.SetValue(False)
         self.can_swap_to_top.SetValue(True)
         self.crossing_penalty.SetValue(defaults.CROSSING_PENALTY)
@@ -1388,6 +1402,7 @@ class RoutingDialog(wx.Dialog):
         self.verbose_check.SetValue(False)
         self.skip_routing_check.SetValue(False)
         self.debug_memory_check.SetValue(False)
+        self.stats_check.SetValue(False)
 
         # Reset hide checkboxes
         if self.net_panel.hide_check:
@@ -1583,6 +1598,7 @@ class RoutingDialog(wx.Dialog):
             'verbose': self.verbose_check.GetValue(),
             'skip_routing': self.skip_routing_check.GetValue(),
             'debug_memory': self.debug_memory_check.GetValue(),
+            'stats': self.stats_check.GetValue(),
             # MPS options
             'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
@@ -1592,6 +1608,7 @@ class RoutingDialog(wx.Dialog):
             'bus_detection_radius': self.bus_detection_radius.GetValue(),
             'bus_attraction_radius': self.bus_attraction_radius.GetValue(),
             'bus_attraction_bonus': self.bus_attraction_bonus.GetValue(),
+            'bus_min_nets': self.bus_min_nets.GetValue(),
             # Crossing/swap options
             'no_crossing_layer_check': self.no_crossing_layer_check.GetValue(),
             'can_swap_to_top_layer': self.can_swap_to_top.GetValue(),
@@ -1928,6 +1945,7 @@ class RoutingDialog(wx.Dialog):
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),
                     bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
                     bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
+                    bus_min_nets=config.get('bus_min_nets', 2),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
@@ -1941,6 +1959,7 @@ class RoutingDialog(wx.Dialog):
                     verbose=config.get('verbose', False),
                     skip_routing=config.get('skip_routing', False),
                     debug_memory=config.get('debug_memory', False),
+                    stats=config.get('stats', False),
                     debug_lines=config['debug_lines'],
                     cancel_check=check_cancel,
                     progress_callback=on_progress,
@@ -2031,6 +2050,7 @@ class RoutingDialog(wx.Dialog):
                         bus_detection_radius=config.get('bus_detection_radius', 5.0),
                         bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
                         bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
+                        bus_min_nets=config.get('bus_min_nets', 2),
                         power_nets=config.get('power_nets', []),
                         power_nets_widths=config.get('power_nets_widths', []),
                         disable_bga_zones=config.get('no_bga_zones'),
@@ -2044,6 +2064,7 @@ class RoutingDialog(wx.Dialog):
                         verbose=config.get('verbose', False),
                         skip_routing=config.get('skip_routing', False),
                         debug_memory=config.get('debug_memory', False),
+                        stats=config.get('stats', False),
                         debug_lines=config['debug_lines'],
                         cancel_check=check_cancel,
                         progress_callback=class_progress,

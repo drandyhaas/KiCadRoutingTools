@@ -85,6 +85,7 @@ def get_dialog_settings(dialog):
         'bus_detection_radius': dialog.bus_detection_radius.GetValue(),
         'bus_attraction_radius': dialog.bus_attraction_radius.GetValue(),
         'bus_attraction_bonus': dialog.bus_attraction_bonus.GetValue(),
+        'bus_min_nets': dialog.bus_min_nets.GetValue(),
 
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
@@ -95,6 +96,7 @@ def get_dialog_settings(dialog):
         'verbose_check': dialog.verbose_check.GetValue(),
         'skip_routing_check': dialog.skip_routing_check.GetValue(),
         'debug_memory_check': dialog.debug_memory_check.GetValue(),
+        'stats_check': dialog.stats_check.GetValue(),
 
         # Swappable nets options
         'update_schematic_check': dialog.update_schematic_check.GetValue(),
@@ -129,6 +131,7 @@ def get_dialog_settings(dialog):
         'max_setback_angle': dialog.differential_tab.max_setback_angle.GetValue(),
         'max_turn_angle': dialog.differential_tab.max_turn_angle.GetValue(),
         'chamfer_extra': dialog.differential_tab.chamfer_extra.GetValue(),
+        'centerline_setback': dialog.differential_tab.centerline_setback.GetValue(),
         'fix_polarity_check': dialog.differential_tab.fix_polarity_check.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
@@ -307,6 +310,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.bus_attraction_radius.SetValue(settings['bus_attraction_radius'])
     if 'bus_attraction_bonus' in settings:
         dialog.bus_attraction_bonus.SetValue(settings['bus_attraction_bonus'])
+    if 'bus_min_nets' in settings:
+        dialog.bus_min_nets.SetValue(settings['bus_min_nets'])
 
     if 'length_match_groups' in settings:
         dialog.length_match_groups_ctrl.SetValue(settings['length_match_groups'])
@@ -326,6 +331,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.skip_routing_check.SetValue(settings['skip_routing_check'])
     if 'debug_memory_check' in settings:
         dialog.debug_memory_check.SetValue(settings['debug_memory_check'])
+    if 'stats_check' in settings:
+        dialog.stats_check.SetValue(settings['stats_check'])
 
     # Restore swappable nets options
     if 'update_schematic_check' in settings:
@@ -414,6 +421,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.max_turn_angle.SetValue(settings['max_turn_angle'])
     if 'chamfer_extra' in settings:
         dialog.differential_tab.chamfer_extra.SetValue(settings['chamfer_extra'])
+    if 'centerline_setback' in settings:
+        dialog.differential_tab.centerline_setback.SetValue(settings['centerline_setback'])
     if 'fix_polarity_check' in settings:
         dialog.differential_tab.fix_polarity_check.SetValue(settings['fix_polarity_check'])
     if 'gnd_via_check' in settings:

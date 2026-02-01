@@ -617,6 +617,7 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --bus-detection-radius 5.0      # Max endpoint distance to form bus group (mm)
 --bus-attraction-radius 5.0     # Attraction radius from neighbor track (mm)
 --bus-attraction-bonus 5000     # Cost bonus for staying parallel to neighbor
+--bus-min-nets 2                # Minimum nets to form a bus group
 
 # Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching

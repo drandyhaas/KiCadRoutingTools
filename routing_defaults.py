@@ -104,6 +104,7 @@ DIFF_PAIR_MIN_TURNING_RADIUS = 0.2  # mm
 DIFF_PAIR_MAX_SETBACK_ANGLE = 45.0  # degrees
 DIFF_PAIR_MAX_TURN_ANGLE = 180.0  # degrees
 DIFF_PAIR_CHAMFER_EXTRA = 1.5  # multiplier for meander chamfers
+DIFF_PAIR_CENTERLINE_SETBACK = 0.0  # mm - 0 = auto (2x P-N spacing)
 
 # Plane routing defaults (route_planes.py)
 PLANE_ZONE_CLEARANCE = 0.2  # mm - zone fill clearance from other copper
@@ -165,6 +166,7 @@ PARAM_RANGES = {
     'diff_pair_max_setback_angle': {'min': 10.0, 'max': 90.0, 'inc': 5.0, 'digits': 0},
     'diff_pair_max_turn_angle': {'min': 45.0, 'max': 360.0, 'inc': 15.0, 'digits': 0},
     'diff_pair_chamfer_extra': {'min': 1.0, 'max': 3.0, 'inc': 0.1, 'digits': 1},
+    'diff_pair_centerline_setback': {'min': 0.0, 'max': 10.0, 'inc': 0.1, 'digits': 1},  # 0 = auto
     # Plane routing parameters
     'plane_zone_clearance': {'min': 0.05, 'max': 2.0, 'inc': 0.05, 'digits': 2},
     'plane_min_thickness': {'min': 0.05, 'max': 1.0, 'inc': 0.05, 'digits': 2},
@@ -180,4 +182,5 @@ PARAM_RANGES = {
     'bus_detection_radius': {'min': 0.5, 'max': 100.0, 'inc': 0.5, 'digits': 1},
     'bus_attraction_radius': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'bus_attraction_bonus': {'min': 0, 'max': 10000},
+    'bus_min_nets': {'min': 2, 'max': 20},
 }

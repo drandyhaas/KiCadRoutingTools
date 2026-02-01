@@ -415,6 +415,15 @@ class DifferentialTab(wx.Panel):
         self.chamfer_extra.SetToolTip("Chamfer multiplier for meanders (>1 avoids P/N crossings)")
         param_grid.Add(self.chamfer_extra, 0, wx.EXPAND)
 
+        # Centerline setback
+        param_grid.Add(wx.StaticText(self, label="Centerline Setback (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['diff_pair_centerline_setback']
+        self.centerline_setback = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                     initial=defaults.DIFF_PAIR_CENTERLINE_SETBACK, inc=r['inc'])
+        self.centerline_setback.SetDigits(r['digits'])
+        self.centerline_setback.SetToolTip("Distance in front of stubs to start centerline route (0 = auto: 2x P-N spacing)")
+        param_grid.Add(self.centerline_setback, 0, wx.EXPAND)
+
         param_sizer.Add(param_grid, 0, wx.EXPAND | wx.ALL, 5)
 
         right_sizer.Add(param_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
@@ -601,6 +610,7 @@ class DifferentialTab(wx.Panel):
                 max_setback_angle=config.get('max_setback_angle', 45.0),
                 max_turn_angle=config.get('max_turn_angle', 180.0),
                 diff_chamfer_extra=config.get('diff_chamfer_extra', 1.5),
+                diff_pair_centerline_setback=config.get('diff_pair_centerline_setback'),
                 fix_polarity=config.get('fix_polarity', True),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
@@ -769,6 +779,7 @@ class DifferentialTab(wx.Panel):
 
     def get_config(self):
         """Get the differential pair configuration."""
+        setback = self.centerline_setback.GetValue()
         return {
             'diff_pair_width': self.diff_pair_width.GetValue(),
             'diff_pair_gap': self.diff_pair_gap.GetValue(),
@@ -776,6 +787,7 @@ class DifferentialTab(wx.Panel):
             'max_setback_angle': self.max_setback_angle.GetValue(),
             'max_turn_angle': self.max_turn_angle.GetValue(),
             'diff_chamfer_extra': self.chamfer_extra.GetValue(),
+            'diff_pair_centerline_setback': setback if setback > 0 else None,  # 0 = auto
             'fix_polarity': self.fix_polarity_check.GetValue(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
