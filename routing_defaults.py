@@ -68,7 +68,7 @@ MAX_RIPUP = 3
 DIRECTION_PREFERENCE_COST = 300  # Cost penalty for non-preferred direction (0 = disabled)
 
 # Bus routing - auto-detection and parallel routing of grouped nets
-BUS_DETECTION_RADIUS = 10.0  # mm - max endpoint distance to form bus
+BUS_DETECTION_RADIUS = 5.0  # mm - max endpoint distance to form bus
 BUS_MIN_NETS = 2  # Minimum nets to form a bus
 BUS_ATTRACTION_RADIUS = 5.0  # mm - attraction radius from neighbor track
 BUS_ATTRACTION_BONUS = 1000  # Cost bonus for staying near neighbor

@@ -38,14 +38,14 @@ def detect_bus_groups(
     min_nets: int = 2,
 ) -> List[BusGroup]:
     """
-    Detect bus groups by finding nets where ALL sources are within radius
-    of each other AND ALL targets are within radius of each other.
+    Detect bus groups by finding nets where EITHER all sources are within radius
+    of each other OR all targets are within radius of each other.
 
     Args:
         pcb_data: PCB data with net information
         net_ids: List of net IDs to analyze for bus grouping
-        detection_radius: Maximum distance (mm) - all sources must be within this
-                         of each other, and all targets must be within this of each other
+        detection_radius: Maximum distance (mm) - either all sources or all targets
+                         must be within this distance of each other
         min_nets: Minimum number of nets to form a bus (default 2)
 
     Returns:
@@ -67,30 +67,18 @@ def detect_bus_groups(
     remaining = set(net_endpoints.keys())
 
     while len(remaining) >= min_nets:
-        # Find largest group where sources are all within radius AND targets are all within radius
         source_positions = {nid: net_endpoints[nid][0] for nid in remaining}
         target_positions = {nid: net_endpoints[nid][1] for nid in remaining}
 
-        # Find largest clique of sources
+        # Find largest clique from sources OR targets
         source_clique = _find_largest_clique(source_positions, detection_radius, min_nets)
+        target_clique = _find_largest_clique(target_positions, detection_radius, min_nets)
 
-        if not source_clique:
-            break
-
-        # Check which of these also have targets within radius of each other
-        # Try largest subset first
-        best_bus_nets = []
-        for size in range(len(source_clique), min_nets - 1, -1):
-            # Try all combinations of this size (for small sizes this is fast)
-            from itertools import combinations
-            for combo in combinations(source_clique, size):
-                combo_list = list(combo)
-                combo_targets = {nid: target_positions[nid] for nid in combo_list}
-                if _all_within_radius(combo_list, combo_targets, detection_radius):
-                    best_bus_nets = combo_list
-                    break
-            if best_bus_nets:
-                break
+        # Use whichever is larger
+        if len(source_clique) >= len(target_clique):
+            best_bus_nets = source_clique
+        else:
+            best_bus_nets = target_clique
 
         if len(best_bus_nets) >= min_nets:
             bus_counter += 1
@@ -110,9 +98,8 @@ def detect_bus_groups(
             for nid in best_bus_nets:
                 remaining.discard(nid)
         else:
-            # No valid bus found from this source clique, remove seed to try others
-            if source_clique:
-                remaining.discard(source_clique[0])
+            # No valid bus found, done
+            break
 
     return bus_groups
 
