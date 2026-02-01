@@ -37,6 +37,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 - **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
+- **Bus routing** - Automatically detects groups of nets with clustered endpoints (buses) and routes them together. Uses direction-based attraction so each net follows its neighbor's path in parallel, creating clean parallel traces. Routes from the middle of the bus outward, alternating sides. Enable with `--bus` flag. Configurable detection radius, attraction radius, and attraction bonus
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
 - **Time matching** - Alternative to length matching that matches propagation delay instead of physical length. Accounts for different signal speeds on outer layers (microstrip, faster) vs inner layers (stripline, slower) using effective dielectric constants from the board stackup. Use `--time-matching` to enable. Tolerance specified in picoseconds
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
@@ -611,6 +612,12 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --ripped-route-avoidance-radius 1.0  # Radius around ripped route corridors (mm)
 --ripped-route-avoidance-cost 0.1    # Cost penalty for routing through ripped corridors (0 = disabled)
 
+# Bus routing (parallel groups of nets)
+--bus                           # Enable bus detection and parallel routing
+--bus-detection-radius 5.0      # Max endpoint distance to form bus group (mm)
+--bus-attraction-radius 5.0     # Attraction radius from neighbor track (mm)
+--bus-attraction-bonus 1000     # Cost bonus for staying parallel to neighbor
+
 # Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching
 
@@ -824,7 +831,6 @@ Features:
 - No layer swaps of stubs for multipoint nets (3+ pads)
 - No blind or buried vias
 - No user-defined keepout zones
-- No bus/parallel routing
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
 - No design rules by region/area support

@@ -316,7 +316,8 @@ def _probe_route_with_frontier(
     direction_labels: Tuple[str, str] = ("forward", "backward"),
     track_margin: int = 0,
     pcb_data: PCBData = None,
-    current_net_id: int = -1
+    current_net_id: int = -1,
+    single_direction: bool = False
 ) -> Tuple[Optional[List], int, List, List, bool, int, int]:
     """
     Probe routing with fail-fast on stuck directions.
@@ -335,6 +336,7 @@ def _probe_route_with_frontier(
         track_margin: Extra margin in grid cells for wide tracks (power nets)
         pcb_data: Optional PCB data for blocking obstacle identification
         current_net_id: Current net ID (for excluding from blocking analysis)
+        single_direction: If True, only try forward direction (for bus routing)
 
     Returns:
         (path, total_iterations, forward_blocked, backward_blocked, reversed_path, forward_iters, backward_iters)
@@ -379,7 +381,32 @@ def _probe_route_with_frontier(
         fwd_iters, bwd_iters = get_fwd_bwd_iters()
         return path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters
 
-    # Probe backward direction
+    # For single_direction mode (bus routing), skip backward probe entirely
+    if single_direction:
+        first_reached_max = first_probe_iters >= probe_iterations
+        if not first_reached_max:
+            # Forward is stuck
+            print(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}) [single-direction bus mode]")
+            _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin,
+                                    pcb_data=pcb_data, config=config, current_net_id=current_net_id)
+            fwd_iters, bwd_iters = get_fwd_bwd_iters()
+            return None, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
+
+        # Forward probe reached max - do full search
+        print(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
+        path, full_iters, full_blocked = router.route_with_frontier(
+            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin)
+        first_total_iters += full_iters
+        total_iterations += full_iters
+
+        if path is not None:
+            forward_blocked = []
+        else:
+            forward_blocked = full_blocked
+        fwd_iters, bwd_iters = get_fwd_bwd_iters()
+        return path, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
+
+    # Probe backward direction (bidirectional mode)
     path, iterations, blocked_cells = router.route_with_frontier(
         obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin)
     second_probe_iters = iterations
@@ -716,7 +743,8 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
-                              attraction_path: Optional[List[Tuple[int, int, int]]] = None) -> Optional[dict]:
+                              attraction_path: Optional[List[Tuple[int, int, int]]] = None,
+                              reverse_direction: bool = False) -> Optional[dict]:
     """Route a single net using pre-built obstacles (for incremental routing).
 
     Args:
@@ -726,6 +754,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         obstacles: Pre-built obstacle map
         attraction_path: Optional path to attract to (for bus routing).
                         List of (gx, gy, layer) tuples from a previously routed neighbor.
+        reverse_direction: If True, swap sources and targets (route from targets to sources).
+                          Used for bus routing when the clique was formed by targets.
     """
     # Find endpoints (segments or pads)
     sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
@@ -736,6 +766,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     if not sources or not targets:
         print(f"  No valid source/target endpoints found")
         return None
+
+    # Swap source/target for bus routing from clustered targets
+    if reverse_direction:
+        sources, targets = targets, sources
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
@@ -804,6 +838,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Set attraction path for bus routing (if provided)
     if attraction_path:
         router.set_attraction_path(attraction_path)
+        if config.verbose:
+            layers_in_path = set(p[2] for p in attraction_path)
+            print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -825,13 +862,18 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         direction_labels = ("forward", "backward")
 
     # Use probe routing helper
+    # For bus routing with reverse_direction, use single-direction mode to ensure
+    # routes start from the clustered endpoints (where attraction can guide them)
+    use_single_direction = reverse_direction
     if config.verbose:
         print(f"    GridRouter sources: {forward_sources[:3]}{'...' if len(forward_sources) > 3 else ''}")
         print(f"    GridRouter targets: {forward_targets[:3]}{'...' if len(forward_targets) > 3 else ''}")
+        if use_single_direction:
+            print(f"    Bus routing: single-direction mode (start from clustered endpoints)")
     path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _probe_route_with_frontier(
         router, obstacles, forward_sources, forward_targets, config,
         print_prefix="", direction_labels=direction_labels, track_margin=track_margin,
-        pcb_data=pcb_data, current_net_id=net_id
+        pcb_data=pcb_data, current_net_id=net_id, single_direction=use_single_direction
     )
 
     # Adjust reversed_path based on start direction
@@ -839,7 +881,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         reversed_path = not reversed_path
 
     if path is None:
-        print(f"No route found after {total_iterations} iterations (both directions)")
+        dir_msg = "single direction" if use_single_direction else "both directions"
+        print(f"No route found after {total_iterations} iterations ({dir_msg})")
         return {
             'failed': True,
             'iterations': total_iterations,

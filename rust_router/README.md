@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.14.0**
+**Current Version: 0.15.0**
 
 ## Features
 
@@ -282,6 +282,7 @@ src/
 
 ## Version History
 
+- **0.15.0**: Changed bus routing attraction from proximity-based to direction-based. The router now only gives attraction bonus when moving in the same direction as the neighbor path was moving, not just for being near it. This prevents spiraling behavior where strong attraction could cause the router to circle around the neighbor path instead of making progress toward the target. Same direction = full bonus, 45° off = 70% bonus, perpendicular or opposite = no bonus. Bonus has quadratic distance falloff (stronger near the guide path). Python-side changes: bus detection now tracks `clique_endpoint` (source vs target clustering), routes from clustered endpoints using single-direction mode, and uses dense path sampling for direction vectors.
 - **0.14.0**: Added path attraction feature for bus routing. New `attraction_path`, `attraction_radius`, and `attraction_bonus` parameters to GridRouter. Routes can be attracted to a previously routed path (same layer only) using `set_attraction_path()`. Enables parallel routing of bus groups where each net follows its neighbor.
 - **0.13.0**: Added layer direction preference feature. New `layer_direction_preferences` parameter (list of u8: 0=horizontal, 1=vertical, 255=none) and `direction_preference_cost` parameter (penalty for non-preferred direction moves). Encourages horizontal routing on some layers and vertical on others, creating more organized, human-like routing patterns.
 - **0.12.2**: Reverted to flat proximity costs (removed direction-aware cost adjustment from v0.10.0). Testing showed flat costs produce better results: 19% fewer iterations, 40% faster, and improved routing success (100% vs 97.9% on benchmark). The direction-aware heuristic mismatch caused more search exploration than the "efficient zone exit" guidance saved. Removed dead code: `get_directional_proximity_cost()`, `add_proximity_zone_center()`, `add_proximity_zone_centers_batch()`, `clear_proximity_zone_centers()`, and `proximity_zone_centers` field.

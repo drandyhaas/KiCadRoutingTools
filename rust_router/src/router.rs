@@ -21,9 +21,10 @@ pub struct GridRouter {
     layer_direction_preferences: Vec<u8>,  // Per-layer direction preference (0=horizontal, 1=vertical, 255=none)
     direction_preference_cost: i32,  // Cost penalty for non-preferred direction moves
     // Bus routing: attraction to a previously routed path (same layer only)
-    attraction_path: Vec<(i32, i32, u8)>,  // Path to attract to (gx, gy, layer)
+    // Stores path with direction vectors: (gx, gy, layer, dx, dy) where dx,dy are normalized direction
+    attraction_path: Vec<(i32, i32, u8, i8, i8)>,  // Path to attract to with direction
     attraction_radius: i32,  // Grid units for attraction (0 = disabled)
-    attraction_bonus: i32,   // Cost reduction when near path (same layer)
+    attraction_bonus: i32,   // Cost reduction when moving parallel to path (same layer)
     // Spatial hash for efficient path distance lookup
     attraction_path_hash: FxHashMap<u64, i32>,  // cell_key -> min distance to path point in that cell
 }
@@ -62,23 +63,47 @@ impl GridRouter {
     }
 
     /// Set the attraction path for bus routing.
-    /// The router will give a cost bonus to positions near this path (same layer only).
+    /// The router will give a cost bonus for moving parallel to this path (same layer only).
+    /// Direction-based attraction prevents spiraling by only rewarding moves in the same
+    /// direction the neighbor was moving, not just proximity.
     /// Call this before routing each subsequent bus member with the previously routed path.
     /// Pass an empty Vec to clear the attraction.
     pub fn set_attraction_path(&mut self, path: Vec<(i32, i32, u8)>) {
         self.attraction_path_hash.clear();
+        self.attraction_path.clear();
 
         if path.is_empty() || self.attraction_radius <= 0 {
-            self.attraction_path = path;
             return;
         }
 
+        // Convert path to include direction vectors
+        // Direction at each point is computed from the move to the next point
+        // (or from previous point for the last point)
+        let path_with_directions: Vec<(i32, i32, u8, i8, i8)> = path.iter().enumerate().map(|(i, &(gx, gy, layer))| {
+            let (dx, dy) = if i < path.len() - 1 {
+                // Direction to next point
+                let (nx, ny, _) = path[i + 1];
+                let raw_dx = nx - gx;
+                let raw_dy = ny - gy;
+                (raw_dx.signum() as i8, raw_dy.signum() as i8)
+            } else if i > 0 {
+                // Last point: use direction from previous point
+                let (px, py, _) = path[i - 1];
+                let raw_dx = gx - px;
+                let raw_dy = gy - py;
+                (raw_dx.signum() as i8, raw_dy.signum() as i8)
+            } else {
+                // Single point path - no direction
+                (0, 0)
+            };
+            (gx, gy, layer, dx, dy)
+        }).collect();
+
         // Build spatial hash for efficient distance lookups
         // Key: (gx / bucket_size, gy / bucket_size, layer) packed into u64
-        // We use a bucket size related to attraction_radius for efficiency
         let bucket_size = (self.attraction_radius / 2).max(1);
 
-        for &(px, py, layer) in &path {
+        for &(px, py, layer, _, _) in &path_with_directions {
             // Add this path point to its bucket and neighboring buckets within radius
             let bx = px / bucket_size;
             let by = py / bucket_size;
@@ -92,13 +117,12 @@ impl GridRouter {
                     // Pack bucket coords + layer into key
                     let key = Self::pack_bucket_key(cell_bx, cell_by, layer, bucket_size);
                     // Store that this bucket has path points nearby
-                    // We'll do actual distance calc at query time
                     self.attraction_path_hash.entry(key).or_insert(0);
                 }
             }
         }
 
-        self.attraction_path = path;
+        self.attraction_path = path_with_directions;
     }
 
     /// Clear the attraction path
@@ -422,8 +446,8 @@ impl GridRouter {
                         _ => 0  // No preference (255 or other)
                     }
                 } else { 0 };
-                // Path attraction bonus for bus routing (same layer only)
-                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer);
+                // Path attraction bonus for bus routing - direction-based to prevent spiraling
+                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
                 let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -781,8 +805,8 @@ impl GridRouter {
                         _ => 0
                     }
                 } else { 0 };
-                // Path attraction bonus for bus routing (same layer only)
-                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer);
+                // Path attraction bonus for bus routing - direction-based to prevent spiraling
+                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
                 let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
                 let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -1085,12 +1109,26 @@ impl GridRouter {
         layer_bits | (by_bits << 8) | (bx_bits << 28)
     }
 
-    /// Calculate minimum Manhattan distance to attraction path on same layer
-    /// Returns i32::MAX if path is empty or no points on same layer
+    /// Calculate parallel-movement attraction bonus for bus routing.
+    ///
+    /// This rewards moving in the SAME DIRECTION as the neighbor path:
+    /// 1. Find nearby path points on the same layer
+    /// 2. Give bonus for moving in the same direction as the path at those points
+    /// 3. No bonus for perpendicular or opposite movement
+    ///
+    /// This creates parallel tracks because:
+    /// - Tracks are rewarded for moving the same direction as neighbor
+    /// - Natural clearances keep them at appropriate spacing
+    /// - No "pull toward" that would cause convergence
+    ///
+    /// Arguments:
+    /// - x, y: Current position
+    /// - layer: Current layer
+    /// - move_dx, move_dy: Direction of the current move (normalized to -1, 0, 1)
     #[inline]
-    fn distance_to_path_same_layer(&self, x: i32, y: i32, layer: u8) -> i32 {
-        if self.attraction_path.is_empty() {
-            return i32::MAX;
+    fn get_path_attraction_bonus(&self, x: i32, y: i32, layer: u8, move_dx: i32, move_dy: i32) -> i32 {
+        if self.attraction_bonus <= 0 || self.attraction_radius <= 0 || self.attraction_path.is_empty() {
+            return 0;
         }
 
         // Quick check: is this position potentially near the path?
@@ -1100,40 +1138,51 @@ impl GridRouter {
         let key = Self::pack_bucket_key(bx, by, layer, bucket_size);
 
         if !self.attraction_path_hash.contains_key(&key) {
-            return i32::MAX;
+            return 0;
         }
 
-        // Linear scan through path points on same layer to find minimum distance
-        let mut min_dist = i32::MAX;
-        for &(px, py, pl) in &self.attraction_path {
+        // Find all nearby path points and accumulate direction-matching bonus
+        // Using the closest point's direction
+        let mut nearest_dist = i32::MAX;
+        let mut nearest_dir: Option<(i8, i8)> = None;
+
+        for &(px, py, pl, path_dx, path_dy) in &self.attraction_path {
             if pl != layer {
                 continue;
             }
-            let dist = (x - px).abs() + (y - py).abs();  // Manhattan distance
-            if dist < min_dist {
-                min_dist = dist;
-                if min_dist == 0 {
-                    break;  // Can't do better than 0
-                }
+
+            let dist = (x - px).abs() + (y - py).abs();
+            if dist <= self.attraction_radius && dist < nearest_dist {
+                nearest_dist = dist;
+                nearest_dir = Some((path_dx, path_dy));
             }
         }
-        min_dist
-    }
 
-    /// Calculate attraction bonus for a position near the attraction path (same layer only)
-    #[inline]
-    fn get_path_attraction_bonus(&self, x: i32, y: i32, layer: u8) -> i32 {
-        if self.attraction_bonus <= 0 || self.attraction_radius <= 0 || self.attraction_path.is_empty() {
+        let (path_dx, path_dy) = match nearest_dir {
+            Some(d) => d,
+            None => return 0,
+        };
+
+        // Check direction alignment using dot product
+        let dot = move_dx * (path_dx as i32) + move_dy * (path_dy as i32);
+
+        // Only give bonus for moves in the same general direction
+        // dot >= 2: same diagonal (perfect)
+        // dot == 1: same orthogonal or 45° off (good)
+        // dot <= 0: perpendicular or opposite (no bonus)
+        if dot < 1 {
             return 0;
         }
 
-        let dist = self.distance_to_path_same_layer(x, y, layer);
-        if dist > self.attraction_radius {
-            return 0;
-        }
+        // Alignment factor: 100% for perfect match, 70% for 45° off
+        let alignment = if dot >= 2 { 100 } else { 70 };
 
-        // Linear falloff: full bonus at distance 0, zero bonus at attraction_radius
-        self.attraction_bonus * (self.attraction_radius - dist) / self.attraction_radius
+        // Proximity factor with quadratic falloff (stronger near path)
+        let proximity_ratio = (self.attraction_radius - nearest_dist) as f32 / self.attraction_radius as f32;
+        let proximity_pct = (proximity_ratio * proximity_ratio * 100.0) as i32;
+
+        // Calculate bonus: base * proximity% * alignment%
+        (self.attraction_bonus as i64 * proximity_pct as i64 * alignment as i64 / 10000) as i32
     }
 
     /// Convert RouteStats to a Python-friendly dictionary

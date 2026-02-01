@@ -25,6 +25,8 @@ class BusGroup:
     # Source and target positions per net (parallel lists with net_ids)
     source_positions: List[Tuple[float, float]] = field(default_factory=list)
     target_positions: List[Tuple[float, float]] = field(default_factory=list)
+    # Which endpoint type formed the clique (determines routing direction)
+    clique_endpoint: str = "source"  # "source" or "target"
 
     @property
     def count(self) -> int:
@@ -74,15 +76,17 @@ def detect_bus_groups(
         source_clique = _find_largest_clique(source_positions, detection_radius, min_nets)
         target_clique = _find_largest_clique(target_positions, detection_radius, min_nets)
 
-        # Use whichever is larger
+        # Use whichever is larger, and track which endpoint formed the clique
         if len(source_clique) >= len(target_clique):
             best_bus_nets = source_clique
+            clique_endpoint = "source"
         else:
             best_bus_nets = target_clique
+            clique_endpoint = "target"
 
         if len(best_bus_nets) >= min_nets:
             bus_counter += 1
-            bus = BusGroup(name=f"bus_{bus_counter}")
+            bus = BusGroup(name=f"bus_{bus_counter}", clique_endpoint=clique_endpoint)
 
             # Order nets by physical position
             ordered_nets = _order_nets_by_position(best_bus_nets, net_endpoints)
@@ -208,15 +212,13 @@ def _order_nets_by_position(
     x_spread = max(xs) - min(xs)
     y_spread = max(ys) - min(ys)
 
-    # Sort by the axis with less spread (perpendicular to bus direction)
-    # If bus runs horizontally (large X spread), sort by Y position
-    # If bus runs vertically (large Y spread), sort by X position
-    if x_spread > y_spread:
-        # Bus runs horizontally, sort by Y
-        sources.sort(key=lambda item: item[1][1])
-    else:
-        # Bus runs vertically, sort by X
+    # Sort by the axis with larger spread to get physical ordering
+    if x_spread >= y_spread:
+        # Sort by X (left to right)
         sources.sort(key=lambda item: item[1][0])
+    else:
+        # Sort by Y (top to bottom)
+        sources.sort(key=lambda item: item[1][1])
 
     return [nid for nid, _ in sources]
 

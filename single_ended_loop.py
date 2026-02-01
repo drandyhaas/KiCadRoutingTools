@@ -8,6 +8,53 @@ extracted from route.py for better maintainability.
 import time
 from typing import List, Tuple, Optional, Any, Dict, Set
 
+
+def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[int, int, int]]:
+    """
+    Sample along a simplified path to create a denser path for bus attraction.
+
+    Interpolates between consecutive waypoints, creating points every `step` grid units.
+
+    Args:
+        path: Simplified path as list of (gx, gy, layer) tuples
+        step: Grid step between sampled points (default 1 = every grid cell)
+
+    Returns:
+        Densely sampled path
+    """
+    if len(path) < 2:
+        return list(path)
+
+    sampled = []
+    for i in range(len(path) - 1):
+        x1, y1, layer1 = path[i]
+        x2, y2, layer2 = path[i + 1]
+
+        # Add start point
+        sampled.append((x1, y1, layer1))
+
+        # If layer change (via), just add the endpoint - no interpolation
+        if layer1 != layer2:
+            continue
+
+        # Interpolate between points
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = max(abs(dx), abs(dy))  # Chebyshev distance
+
+        if dist > step:
+            # Normalize direction
+            steps = dist // step
+            for s in range(1, steps):
+                t = s / steps
+                ix = int(x1 + dx * t)
+                iy = int(y1 + dy * t)
+                sampled.append((ix, iy, layer1))
+
+    # Add final point
+    sampled.append(path[-1])
+    return sampled
+
 from routing_state import RoutingState, record_net_event
 from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
@@ -142,7 +189,33 @@ def route_single_ended_nets(
             print(f"\n=== Bus Detection: Found {len(bus_groups)} bus group(s) ===")
             for bus in bus_groups:
                 net_names_list = [pcb_data.nets[nid].name for nid in bus.net_ids]
-                print(f"  {bus.name}: {len(bus.net_ids)} nets - {', '.join(net_names_list[:5])}{'...' if len(net_names_list) > 5 else ''}")
+                direction = "targets→sources" if bus.clique_endpoint == "target" else "sources→targets"
+                print(f"  {bus.name}: {len(bus.net_ids)} nets ({direction})")
+                print(f"    Physical order: {' → '.join(net_names_list)}")
+
+                # Show routing order with guide track and attraction info
+                route_order = get_bus_routing_order(bus)
+                route_names = [pcb_data.nets[nid].name for nid in route_order]
+                print(f"    Routing order:  {' → '.join(route_names)}")
+                print(f"    Guide track:    {route_names[0]} (routed first, no attraction)")
+
+                # Show attraction relationships
+                for i, nid in enumerate(route_order[1:], 1):
+                    net_name = pcb_data.nets[nid].name
+                    # Find which neighbor this net will attract to
+                    pos_in_bus = bus.net_ids.index(nid)
+                    left_neighbor = bus.net_ids[pos_in_bus - 1] if pos_in_bus > 0 else None
+                    right_neighbor = bus.net_ids[pos_in_bus + 1] if pos_in_bus < len(bus.net_ids) - 1 else None
+                    # Check which neighbors are already routed (appear earlier in route_order)
+                    already_routed = set(route_order[:i])
+                    if left_neighbor and left_neighbor in already_routed:
+                        attract_to = pcb_data.nets[left_neighbor].name
+                    elif right_neighbor and right_neighbor in already_routed:
+                        attract_to = pcb_data.nets[right_neighbor].name
+                    else:
+                        attract_to = "none"
+                    print(f"    {net_name} attracts to: {attract_to}")
+
                 # Track bus membership
                 for nid in bus.net_ids:
                     bus_net_to_group[nid] = bus
@@ -164,7 +237,7 @@ def route_single_ended_nets(
                     reordered_nets.append((net_name, nid))
 
             single_ended_nets = reordered_nets
-            print(f"  Reordered {len(bus_net_ids_set)} bus nets to route middle-first\n")
+            print()
 
     for net_name, net_id in single_ended_nets:
         if user_quit:
@@ -291,12 +364,17 @@ def route_single_ended_nets(
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     state.pending_multipoint_nets[net_id] = result
             else:
-                # Check for bus attraction
+                # Check for bus attraction and routing direction
                 attraction_path = None
+                reverse_direction = False
                 if net_id in bus_net_to_group:
-                    attraction_path = get_attraction_neighbor(bus_net_to_group[net_id], net_id, bus_routed_paths)
+                    bus_group = bus_net_to_group[net_id]
+                    attraction_path = get_attraction_neighbor(bus_group, net_id, bus_routed_paths)
+                    # Route from clustered endpoints (targets if clique was target-based)
+                    reverse_direction = (bus_group.clique_endpoint == "target")
                 result = route_net_with_obstacles(pcb_data, net_id, config, obstacles,
-                                                  attraction_path=attraction_path)
+                                                  attraction_path=attraction_path,
+                                                  reverse_direction=reverse_direction)
 
         elapsed = time.time() - start_time
         total_time += elapsed
@@ -318,7 +396,12 @@ def route_single_ended_nets(
             routed_results[net_id] = result
             # Store path for bus attraction (if this net is in a bus)
             if net_id in bus_net_to_group:
-                bus_routed_paths[net_id] = result.get('path', [])
+                simplified_path = result.get('path', [])
+                # Sample along simplified path to create dense path for attraction
+                sampled_path = _sample_path(simplified_path, step=1)
+                bus_routed_paths[net_id] = sampled_path
+                if config.verbose:
+                    print(f"    Stored bus path: {len(sampled_path)} points (sampled from {len(simplified_path)} waypoints)")
             record_net_event(state, net_id, "initial_route", {
                 "type": "single-ended",
                 "segments": len(result['new_segments']),
@@ -565,10 +648,14 @@ def route_single_ended_nets(
                         else:
                             # Check for bus attraction in retry
                             retry_attraction_path = None
+                            retry_reverse_direction = False
                             if net_id in bus_net_to_group:
-                                retry_attraction_path = get_attraction_neighbor(bus_net_to_group[net_id], net_id, bus_routed_paths)
+                                retry_bus_group = bus_net_to_group[net_id]
+                                retry_attraction_path = get_attraction_neighbor(retry_bus_group, net_id, bus_routed_paths)
+                                retry_reverse_direction = (retry_bus_group.clique_endpoint == "target")
                             retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
-                                                                     attraction_path=retry_attraction_path)
+                                                                     attraction_path=retry_attraction_path,
+                                                                     reverse_direction=retry_reverse_direction)
 
                         if retry_result and not retry_result.get('failed'):
                             route_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)
