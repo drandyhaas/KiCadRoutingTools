@@ -24,12 +24,25 @@ class AboutTab(wx.Panel):
         self.on_reset_settings = on_reset_settings
         self.on_transparency_changed = on_transparency_changed
         self._initial_transparency = initial_transparency
+        self._needs_layout_refresh = True
         self._create_ui()
-        # Schedule a layout refresh after the UI is fully realized (fixes Linux rendering)
-        wx.CallAfter(self._refresh_layout)
+        # Bind to paint event to refresh layout on first draw (fixes Linux rendering)
+        self.Bind(wx.EVT_PAINT, self._on_first_paint)
+
+    def _on_first_paint(self, event):
+        """Refresh layout on first paint to fix Linux rendering."""
+        event.Skip()  # Allow normal painting
+        if self._needs_layout_refresh:
+            self._needs_layout_refresh = False
+            # Unbind to avoid overhead on subsequent paints
+            self.Unbind(wx.EVT_PAINT)
+            # Schedule layout after this paint completes
+            wx.CallAfter(self._refresh_layout)
 
     def _refresh_layout(self):
         """Refresh the layout to fix initial rendering on Linux."""
+        self.InvalidateBestSize()
+        self.GetParent().Layout()
         self.Layout()
         self.Refresh()
 
