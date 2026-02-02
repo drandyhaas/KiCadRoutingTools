@@ -457,10 +457,12 @@ class PlanesTab(wx.Panel):
         # Buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.action_btn = wx.Button(self, label="Create Planes")
+        self.action_btn.SetToolTip("Execute plane creation or repair operation")
         self.action_btn.Bind(wx.EVT_BUTTON, self._on_action)
         btn_sizer.Add(self.action_btn, 1, wx.RIGHT, 5)
 
         self.cancel_btn = wx.Button(self, label="Close")
+        self.cancel_btn.SetToolTip("Close dialog (or cancel operation if in progress)")
         self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel_or_close)
         btn_sizer.Add(self.cancel_btn, 1)
 

@@ -168,6 +168,9 @@ def get_dialog_settings(dialog):
 
         # Log content
         'log_content': dialog.log_text.GetValue(),
+
+        # Window transparency
+        'window_transparency': dialog.about_tab.transparency_slider.GetValue() if hasattr(dialog, 'about_tab') else 240,
     }
     return settings
 
@@ -507,6 +510,13 @@ def restore_dialog_settings(dialog, settings):
     # Restore log content
     if 'log_content' in settings and settings['log_content']:
         dialog.log_text.SetValue(settings['log_content'])
+
+    # Restore window transparency
+    if 'window_transparency' in settings:
+        transparency = settings['window_transparency']
+        dialog.SetTransparent(transparency)
+        if hasattr(dialog, 'about_tab'):
+            dialog.about_tab.transparency_slider.SetValue(transparency)
 
     # Resume connectivity checks (actual check happens in refresh_from_board)
     dialog.net_panel.resume_check()

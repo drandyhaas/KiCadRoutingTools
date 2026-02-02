@@ -19,9 +19,11 @@ ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 class AboutTab(wx.Panel):
     """About tab panel with version info, author, and links."""
 
-    def __init__(self, parent, on_reset_settings=None):
+    def __init__(self, parent, on_reset_settings=None, on_transparency_changed=None, initial_transparency=240):
         super().__init__(parent)
         self.on_reset_settings = on_reset_settings
+        self.on_transparency_changed = on_transparency_changed
+        self._initial_transparency = initial_transparency
         self._create_ui()
 
     def _create_ui(self):
@@ -94,6 +96,20 @@ class AboutTab(wx.Panel):
         copyright_text.SetForegroundColour(wx.Colour(128, 128, 128))
         about_sizer.Add(copyright_text, 0, wx.ALIGN_CENTER | wx.TOP, 20)
 
+        # Transparency slider
+        transparency_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        transparency_label = wx.StaticText(self, label="Window Transparency:")
+        transparency_sizer.Add(transparency_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 20)
+        self.transparency_slider = wx.Slider(
+            self, value=self._initial_transparency, minValue=155, maxValue=255,
+            style=wx.SL_HORIZONTAL
+        )
+        self.transparency_slider.SetMinSize((-1, 40))  # Ensure enough height for thumb
+        self.transparency_slider.SetToolTip("Adjust window transparency")
+        self.transparency_slider.Bind(wx.EVT_SLIDER, self._on_transparency_slider)
+        transparency_sizer.Add(self.transparency_slider, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        about_sizer.Add(transparency_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 30)
+
         # Reset settings button
         about_sizer.AddStretchSpacer()
         reset_btn = wx.Button(self, label="Reset All Settings to Defaults")
@@ -113,6 +129,12 @@ class AboutTab(wx.Panel):
         )
         if result == wx.YES and self.on_reset_settings:
             self.on_reset_settings()
+
+    def _on_transparency_slider(self, event):
+        """Handle transparency slider change."""
+        value = self.transparency_slider.GetValue()
+        if self.on_transparency_changed:
+            self.on_transparency_changed(value)
 
     def _get_git_info(self):
         """Get version and date from git."""

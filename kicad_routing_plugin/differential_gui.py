@@ -80,20 +80,24 @@ class DiffPairSelectionPanel(wx.Panel):
         filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         filter_sizer.Add(wx.StaticText(self, label="Filter:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self.filter_ctrl = wx.TextCtrl(self)
+        self.filter_ctrl.SetToolTip("Filter differential pairs by name (case-insensitive)")
         self.filter_ctrl.Bind(wx.EVT_TEXT, self._on_filter_changed)
         filter_sizer.Add(self.filter_ctrl, 1, wx.EXPAND)
         sizer.Add(filter_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         # Pair list
         self.pair_list = wx.CheckListBox(self, size=(200, -1), style=wx.LB_EXTENDED)
+        self.pair_list.SetToolTip("Check differential pairs to route (Ctrl+A to select all highlighted)")
         self.pair_list.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
         sizer.Add(self.pair_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # Select/Unselect buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         select_btn = wx.Button(self, label="Select")
+        select_btn.SetToolTip("Check all highlighted pairs")
         select_btn.Bind(wx.EVT_BUTTON, self._on_select)
         unselect_btn = wx.Button(self, label="Unselect")
+        unselect_btn.SetToolTip("Uncheck all highlighted pairs")
         unselect_btn.Bind(wx.EVT_BUTTON, self._on_unselect)
         btn_sizer.Add(select_btn, 1, wx.RIGHT, 5)
         btn_sizer.Add(unselect_btn, 1)
@@ -464,10 +468,12 @@ class DifferentialTab(wx.Panel):
         # Route and Cancel buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.route_btn = wx.Button(self, label="Route")
+        self.route_btn.SetToolTip("Start routing selected differential pairs")
         self.route_btn.Bind(wx.EVT_BUTTON, self._on_route)
         btn_sizer.Add(self.route_btn, 1, wx.RIGHT, 5)
 
         self.cancel_btn = wx.Button(self, label="Close")
+        self.cancel_btn.SetToolTip("Close dialog (or cancel routing if in progress)")
         self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel_or_close)
         btn_sizer.Add(self.cancel_btn, 1)
 

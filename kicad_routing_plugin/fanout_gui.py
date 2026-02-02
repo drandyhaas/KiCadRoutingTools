@@ -196,6 +196,7 @@ class NetSelectionPanel(wx.Panel):
         filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         filter_sizer.Add(wx.StaticText(self, label="Filter:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self.filter_ctrl = wx.TextCtrl(self)
+        self.filter_ctrl.SetToolTip("Filter nets by name (case-insensitive)")
         self.filter_ctrl.Bind(wx.EVT_TEXT, self._on_filter_changed)
         filter_sizer.Add(self.filter_ctrl, 1, wx.EXPAND)
         sizer.Add(filter_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -215,6 +216,7 @@ class NetSelectionPanel(wx.Panel):
         # Net list (wrapped in container for view swapping)
         self._list_container_sizer = wx.BoxSizer(wx.VERTICAL)
         self.net_list = wx.CheckListBox(self, size=(200, -1), style=wx.LB_EXTENDED)
+        self.net_list.SetToolTip("Check nets to include in operation (Ctrl+A to select all highlighted)")
         self.net_list.Bind(wx.EVT_KEY_DOWN, self._on_net_list_key)
         self.net_list.Bind(wx.EVT_CHECKLISTBOX, self._on_checklist_toggled)
         self._list_container_sizer.Add(self.net_list, 1, wx.EXPAND)
@@ -223,8 +225,10 @@ class NetSelectionPanel(wx.Panel):
         # Select/Unselect buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.select_btn = wx.Button(self, label="Select")
+        self.select_btn.SetToolTip("Check all highlighted nets")
         self.select_btn.Bind(wx.EVT_BUTTON, self._on_select)
         self.unselect_btn = wx.Button(self, label="Unselect")
+        self.unselect_btn.SetToolTip("Uncheck all highlighted nets")
         self.unselect_btn.Bind(wx.EVT_BUTTON, self._on_unselect)
         btn_sizer.Add(self.select_btn, 1, wx.RIGHT, 5)
         btn_sizer.Add(self.unselect_btn, 1)
@@ -718,6 +722,7 @@ class BGAOptionsPanel(wx.Panel):
         self.exit_margin = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                               initial=defaults.BGA_EXIT_MARGIN, inc=r['inc'])
         self.exit_margin.SetDigits(r['digits'])
+        self.exit_margin.SetToolTip("Distance from BGA edge to route escape vias")
         grid.Add(self.exit_margin, 0, wx.EXPAND)
 
         param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
@@ -743,6 +748,7 @@ class BGAOptionsPanel(wx.Panel):
             self, label="", choices=["Horizontal", "Vertical"],
             majorDimension=2, style=wx.RA_SPECIFY_COLS
         )
+        self.escape_direction.SetToolTip("Primary direction for escape routes from BGA pads")
         escape_sizer.Add(self.escape_direction, 0, wx.EXPAND | wx.ALL, 5)
 
         self.force_escape = wx.CheckBox(self, label="Force escape direction")
@@ -908,6 +914,7 @@ class FanoutTab(wx.Panel):
             self, label="", choices=["BGA", "QFN/QFP"],
             majorDimension=2, style=wx.RA_SPECIFY_COLS
         )
+        self.fanout_type.SetToolTip("BGA: Ball Grid Array with via escape\nQFN/QFP: Side pads with outward extension")
         self.fanout_type.Bind(wx.EVT_RADIOBOX, self._on_type_changed)
         type_sizer.Add(self.fanout_type, 0, wx.EXPAND | wx.ALL, 5)
 
@@ -935,6 +942,7 @@ class FanoutTab(wx.Panel):
         # Buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.fanout_btn = wx.Button(self, label="Fanout")
+        self.fanout_btn.SetToolTip("Generate fanout traces and vias for selected component")
         self.fanout_btn.Bind(wx.EVT_BUTTON, self._on_fanout)
         btn_sizer.Add(self.fanout_btn, 1, wx.RIGHT, 5)
 

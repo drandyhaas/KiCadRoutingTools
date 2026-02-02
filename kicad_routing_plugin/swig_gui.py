@@ -140,6 +140,19 @@ class RoutingDialog(wx.Dialog):
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
         )
 
+        # Get saved transparency or use default
+        self._initial_transparency = 240
+        if saved_settings and 'window_transparency' in saved_settings:
+            self._initial_transparency = saved_settings['window_transparency']
+
+        # Set window transparency (0=fully transparent, 255=opaque)
+        self.SetTransparent(self._initial_transparency)
+
+        # Configure tooltip timing (in milliseconds)
+        wx.ToolTip.SetDelay(250)       # Delay before showing
+        wx.ToolTip.SetAutoPop(10000)   # How long tooltip stays visible
+        wx.ToolTip.SetReshow(50)       # Delay when moving between controls
+
         self.pcb_data = pcb_data
         self.board_filename = board_filename
         self._cancel_requested = False
@@ -254,8 +267,8 @@ class RoutingDialog(wx.Dialog):
         self.notebook.AddPage(log_panel, "Log")
 
         # Tab 7: About
-        about_panel = self._create_about_tab()
-        self.notebook.AddPage(about_panel, "About")
+        self.about_tab = self._create_about_tab()
+        self.notebook.AddPage(self.about_tab, "About")
 
         # Add notebook to main sizer
         main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
@@ -272,7 +285,16 @@ class RoutingDialog(wx.Dialog):
     def _create_about_tab(self):
         """Create the About tab."""
         from .about_tab import AboutTab
-        return AboutTab(self.notebook, on_reset_settings=self._reset_all_settings)
+        return AboutTab(
+            self.notebook,
+            on_reset_settings=self._reset_all_settings,
+            on_transparency_changed=self._on_transparency_changed,
+            initial_transparency=self._initial_transparency
+        )
+
+    def _on_transparency_changed(self, value):
+        """Handle transparency slider change from About tab."""
+        self.SetTransparent(value)
 
     def _create_config_tab(self):
         """Create the Basic tab with basic routing parameters and options."""
@@ -362,17 +384,18 @@ class RoutingDialog(wx.Dialog):
             'board_edge_clearance': 'min_copper_edge_clearance',
         }
         params = [
-            ('track_width', 'Track Width (mm):', defaults.TRACK_WIDTH),
-            ('clearance', 'Clearance (mm):', defaults.CLEARANCE),
-            ('via_size', 'Via Size (mm):', defaults.VIA_SIZE),
-            ('via_drill', 'Via Drill (mm):', defaults.VIA_DRILL),
-            ('hole_to_hole_clearance', 'Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE),
+            ('track_width', 'Track Width (mm):', defaults.TRACK_WIDTH, "Width of routed traces"),
+            ('clearance', 'Clearance (mm):', defaults.CLEARANCE, "Minimum spacing between traces and other copper"),
+            ('via_size', 'Via Size (mm):', defaults.VIA_SIZE, "Outer diameter of vias"),
+            ('via_drill', 'Via Drill (mm):', defaults.VIA_DRILL, "Drill hole diameter for vias"),
+            ('hole_to_hole_clearance', 'Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE, "Minimum spacing between via/pad drill holes"),
         ]
-        for name, label, default in params:
+        for name, label, default, tooltip in params:
             r = defaults.PARAM_RANGES[name]
             grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
             ctrl = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=default, inc=r['inc'])
             ctrl.SetDigits(r['digits'])
+            ctrl.SetToolTip(tooltip)
             ctrl.Bind(wx.EVT_SPINCTRLDOUBLE, lambda evt, n=name: self._on_drc_param_changed(evt, n))
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
@@ -399,18 +422,21 @@ class RoutingDialog(wx.Dialog):
         grid.Add(wx.StaticText(parent, label="Grid Step (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.grid_step = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.GRID_STEP, inc=r['inc'])
         self.grid_step.SetDigits(r['digits'])
+        self.grid_step.SetToolTip("Routing grid resolution (smaller = finer routing, slower)")
         grid.Add(self.grid_step, 0, wx.EXPAND)
 
         # Via cost (integer)
         r = defaults.PARAM_RANGES['via_cost']
         grid.Add(wx.StaticText(parent, label="Via Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.via_cost = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=defaults.VIA_COST)
+        self.via_cost.SetToolTip("Cost penalty for adding vias (higher = fewer layer changes)")
         grid.Add(self.via_cost, 0, wx.EXPAND)
 
         # Max rip-up count
         r = defaults.PARAM_RANGES['max_ripup']
         grid.Add(wx.StaticText(parent, label="Max Rip-up:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.max_ripup = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=defaults.MAX_RIPUP)
+        self.max_ripup.SetToolTip("Maximum number of nets to rip up and reroute when blocked")
         grid.Add(self.max_ripup, 0, wx.EXPAND)
 
     def _on_obey_drc_changed(self, event):
@@ -504,15 +530,16 @@ class RoutingDialog(wx.Dialog):
 
         # Integer parameters
         int_params = [
-            ('max_iterations', 'Max Iterations:', defaults.MAX_ITERATIONS),
-            ('max_probe_iterations', 'Probe Iterations:', defaults.MAX_PROBE_ITERATIONS),
-            ('turn_cost', 'Turn Cost:', defaults.TURN_COST),
-            ('direction_preference_cost', 'Dir. Pref. Cost:', defaults.DIRECTION_PREFERENCE_COST),
+            ('max_iterations', 'Max Iterations:', defaults.MAX_ITERATIONS, "Maximum A* iterations per net before giving up"),
+            ('max_probe_iterations', 'Probe Iterations:', defaults.MAX_PROBE_ITERATIONS, "Iterations for quick probe routing attempts"),
+            ('turn_cost', 'Turn Cost:', defaults.TURN_COST, "Penalty for 90-degree turns (encourages straighter routes)"),
+            ('direction_preference_cost', 'Dir. Pref. Cost:', defaults.DIRECTION_PREFERENCE_COST, "Penalty for routing against layer's preferred direction"),
         ]
-        for name, label, default in int_params:
+        for name, label, default, tooltip in int_params:
             r = defaults.PARAM_RANGES[name]
             grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
             ctrl = wx.SpinCtrl(parent, min=r['min'], max=r['max'], initial=default)
+            ctrl.SetToolTip(tooltip)
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
 
@@ -521,6 +548,7 @@ class RoutingDialog(wx.Dialog):
         grid.Add(wx.StaticText(parent, label="Heuristic Weight:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.heuristic_weight = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.HEURISTIC_WEIGHT, inc=r['inc'])
         self.heuristic_weight.SetDigits(r['digits'])
+        self.heuristic_weight.SetToolTip("A* heuristic weight (higher = faster but less optimal routes)")
         grid.Add(self.heuristic_weight, 0, wx.EXPAND)
 
         # Proximity heuristic factor
@@ -533,24 +561,25 @@ class RoutingDialog(wx.Dialog):
 
         # Float parameters
         float_params = [
-            ('bga_proximity_radius', 'BGA Proximity (mm):', defaults.BGA_PROXIMITY_RADIUS),
-            ('bga_proximity_cost', 'BGA Prox. Cost:', defaults.BGA_PROXIMITY_COST),
-            ('stub_proximity_radius', 'Stub Proximity (mm):', defaults.STUB_PROXIMITY_RADIUS),
-            ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST),
-            ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST),
-            ('track_proximity_distance', 'Track Prox. (mm):', defaults.TRACK_PROXIMITY_DISTANCE),
-            ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST),
-            ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS),
-            ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST),
-            ('ripped_route_avoidance_radius', 'Rip Avoid (mm):', defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS),
-            ('ripped_route_avoidance_cost', 'Rip Avoid Cost:', defaults.RIPPED_ROUTE_AVOIDANCE_COST),
-            ('routing_clearance_margin', 'Clearance Margin:', defaults.ROUTING_CLEARANCE_MARGIN),
+            ('bga_proximity_radius', 'BGA Proximity (mm):', defaults.BGA_PROXIMITY_RADIUS, "Radius around BGA pads to apply extra cost"),
+            ('bga_proximity_cost', 'BGA Prox. Cost:', defaults.BGA_PROXIMITY_COST, "Cost multiplier for routing near BGA pads"),
+            ('stub_proximity_radius', 'Stub Proximity (mm):', defaults.STUB_PROXIMITY_RADIUS, "Radius around stubs to apply extra cost"),
+            ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST, "Cost for routing near stubs of other nets"),
+            ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST, "Cost multiplier for placing vias near other vias"),
+            ('track_proximity_distance', 'Track Prox. (mm):', defaults.TRACK_PROXIMITY_DISTANCE, "Distance to detect parallel tracks for bunching avoidance"),
+            ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST, "Cost for routing parallel to existing tracks"),
+            ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS, "Radius for attracting route toward target vertically"),
+            ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST, "Bonus for moving toward target's vertical position"),
+            ('ripped_route_avoidance_radius', 'Rip Avoid (mm):', defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS, "Radius to avoid area where previous route failed"),
+            ('ripped_route_avoidance_cost', 'Rip Avoid Cost:', defaults.RIPPED_ROUTE_AVOIDANCE_COST, "Cost for routing through previously ripped area"),
+            ('routing_clearance_margin', 'Clearance Margin:', defaults.ROUTING_CLEARANCE_MARGIN, "Extra clearance margin multiplier for safety"),
         ]
-        for name, label, default in float_params:
+        for name, label, default, tooltip in float_params:
             r = defaults.PARAM_RANGES[name]
             grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
             ctrl = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=default, inc=r['inc'])
             ctrl.SetDigits(r['digits'])
+            ctrl.SetToolTip(tooltip)
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
 
@@ -558,6 +587,7 @@ class RoutingDialog(wx.Dialog):
         grid.Add(wx.StaticText(parent, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original"])
         self.ordering_strategy.SetSelection(0)
+        self.ordering_strategy.SetToolTip("Net ordering strategy: mps (minimum planar subset), inside_out, or original order")
         grid.Add(self.ordering_strategy, 0, wx.EXPAND)
 
         # Direction dropdown
@@ -580,6 +610,7 @@ class RoutingDialog(wx.Dialog):
             cb = wx.CheckBox(layer_scroll, label=layer)
             # Default to all copper layers defined in the PCB
             cb.SetValue(True)
+            cb.SetToolTip(f"Include {layer} for routing")
             self.layer_checks[layer] = cb
             layer_inner.Add(cb, 0, wx.ALL, 3)
 
@@ -770,12 +801,14 @@ class RoutingDialog(wx.Dialog):
         self.length_match_tolerance = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
                                                         initial=defaults.LENGTH_MATCH_TOLERANCE, inc=r['inc'])
         self.length_match_tolerance.SetDigits(r['digits'])
+        self.length_match_tolerance.SetToolTip("Acceptable length difference in mm for matched nets")
         length_params_sizer.Add(self.length_match_tolerance, 0, wx.RIGHT, 10)
         length_params_sizer.Add(wx.StaticText(options_scroll, label="Amplitude:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         r = defaults.PARAM_RANGES['meander_amplitude']
         self.meander_amplitude = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
                                                    initial=defaults.MEANDER_AMPLITUDE, inc=r['inc'])
         self.meander_amplitude.SetDigits(r['digits'])
+        self.meander_amplitude.SetToolTip("Height of meander waves for length matching")
         length_params_sizer.Add(self.meander_amplitude, 0)
         options_inner.Add(length_params_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
@@ -844,10 +877,12 @@ class RoutingDialog(wx.Dialog):
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
         self.route_btn = wx.Button(panel, label="Route")
+        self.route_btn.SetToolTip("Start routing selected nets")
         self.route_btn.Bind(wx.EVT_BUTTON, self._on_route)
         button_sizer.Add(self.route_btn, 1, wx.RIGHT, 5)
 
         self.cancel_btn = wx.Button(panel, label="Close")
+        self.cancel_btn.SetToolTip("Close dialog (or cancel routing if in progress)")
         self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel_or_close)
         button_sizer.Add(self.cancel_btn, 1)
 
@@ -882,6 +917,7 @@ class RoutingDialog(wx.Dialog):
 
         # Clear log button
         clear_log_btn = wx.Button(log_panel, label="Clear Log")
+        clear_log_btn.SetToolTip("Clear all log output")
         clear_log_btn.Bind(wx.EVT_BUTTON, self._on_clear_log)
         log_sizer.Add(clear_log_btn, 0, wx.ALIGN_RIGHT | wx.RIGHT | wx.BOTTOM, 5)
 
@@ -1043,6 +1079,7 @@ class RoutingDialog(wx.Dialog):
         self.schematic_dir_ctrl.Enable(False)
         dir_sizer.Add(self.schematic_dir_ctrl, 1, wx.EXPAND | wx.RIGHT, 5)
         self.browse_schematic_btn = wx.Button(panel, label="...")
+        self.browse_schematic_btn.SetToolTip("Browse for schematic directory")
         self.browse_schematic_btn.Bind(wx.EVT_BUTTON, self._on_browse_schematic_dir)
         self.browse_schematic_btn.Enable(False)
         dir_sizer.Add(self.browse_schematic_btn, 0)
@@ -1464,6 +1501,10 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab.mode_selector.SetSelection(0)
         self.planes_tab._on_mode_changed(None)
         self.planes_tab.assignment_panel.clear_assignments()
+
+        # Reset transparency to default
+        self.SetTransparent(240)
+        self.about_tab.transparency_slider.SetValue(240)
 
         # Refresh all net panels
         self._update_net_list()
