@@ -188,33 +188,34 @@ def route_single_ended_nets(
         if bus_groups:
             print(f"\n=== Bus Detection: Found {len(bus_groups)} bus group(s) ===")
             for bus in bus_groups:
-                net_names_list = [pcb_data.nets[nid].name for nid in bus.net_ids]
                 direction = "targets→sources" if bus.clique_endpoint == "target" else "sources→targets"
-                print(f"  {bus.name}: {len(bus.net_ids)} nets ({direction})")
-                print(f"    Physical order: {' → '.join(net_names_list)}")
+                print(f"  {bus.name}: {len(bus.net_ids)} nets ({direction})", end =" ")
+                net_names_list = [pcb_data.nets[nid].name for nid in bus.net_ids]
+                print(f"physical order: {' → '.join(net_names_list)}")
 
+                if config.verbose:
                 # Show routing order with guide track and attraction info
-                route_order = get_bus_routing_order(bus)
-                route_names = [pcb_data.nets[nid].name for nid in route_order]
-                print(f"    Routing order:  {' → '.join(route_names)}")
-                print(f"    Guide track:    {route_names[0]} (routed first, no attraction)")
+                    route_order = get_bus_routing_order(bus)
+                    route_names = [pcb_data.nets[nid].name for nid in route_order]
+                    print(f"    Routing order:  {' → '.join(route_names)}")
+                    print(f"    Guide track:    {route_names[0]} (routed first, no attraction)")
 
-                # Show attraction relationships
-                for i, nid in enumerate(route_order[1:], 1):
-                    net_name = pcb_data.nets[nid].name
-                    # Find which neighbor this net will attract to
-                    pos_in_bus = bus.net_ids.index(nid)
-                    left_neighbor = bus.net_ids[pos_in_bus - 1] if pos_in_bus > 0 else None
-                    right_neighbor = bus.net_ids[pos_in_bus + 1] if pos_in_bus < len(bus.net_ids) - 1 else None
-                    # Check which neighbors are already routed (appear earlier in route_order)
-                    already_routed = set(route_order[:i])
-                    if left_neighbor and left_neighbor in already_routed:
-                        attract_to = pcb_data.nets[left_neighbor].name
-                    elif right_neighbor and right_neighbor in already_routed:
-                        attract_to = pcb_data.nets[right_neighbor].name
-                    else:
-                        attract_to = "none"
-                    print(f"    {net_name} attracts to: {attract_to}")
+                    # Show attraction relationships
+                    for i, nid in enumerate(route_order[1:], 1):
+                        net_name = pcb_data.nets[nid].name
+                        # Find which neighbor this net will attract to
+                        pos_in_bus = bus.net_ids.index(nid)
+                        left_neighbor = bus.net_ids[pos_in_bus - 1] if pos_in_bus > 0 else None
+                        right_neighbor = bus.net_ids[pos_in_bus + 1] if pos_in_bus < len(bus.net_ids) - 1 else None
+                        # Check which neighbors are already routed (appear earlier in route_order)
+                        already_routed = set(route_order[:i])
+                        if left_neighbor and left_neighbor in already_routed:
+                            attract_to = pcb_data.nets[left_neighbor].name
+                        elif right_neighbor and right_neighbor in already_routed:
+                            attract_to = pcb_data.nets[right_neighbor].name
+                        else:
+                            attract_to = "none"
+                        print(f"    {net_name} attracts to: {attract_to}")
 
                 # Track bus membership
                 for nid in bus.net_ids:

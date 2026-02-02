@@ -34,9 +34,9 @@ def main():
     power_nets = '--power-nets "GND" "+3.3V" "GNDA" "/VDDPLL" "/VCCA" "Net-(TB201-P1)" "Net-(F201-Pad1)" "Net-(D201-K)" --power-nets-widths 0.5 0.5 0.3 0.3 0.3 0.5 0.5 0.5'
 
     options = base_options+'--proximity-heuristic-factor 0.02 --direction-preference-cost 50 --ripped-route-avoidance-radius 1.0 --ripped-route-avoidance-cost 10.0 \
-    --via-proximity-cost 10 --via-cost 50 --track-proximity-distance 3.0 --track-proximity-cost 0.0 --vertical-attraction-cost 0.0 \
-    --stub-proximity-cost 2.0 --stub-proximity-radius 4.0 --max-ripup 10 --max-iterations 10000000 \
-    --bus --bus-detection-radius 5 --bus-attraction-bonus 5000 --bus-attraction-radius 3 '+power_nets
+    --via-proximity-cost 10 --via-cost 300 --track-proximity-distance 3.0 --track-proximity-cost 0.0 --vertical-attraction-cost 0.0 \
+    --stub-proximity-cost 4.0 --stub-proximity-radius 5.0 --max-ripup 10 --max-iterations 10000000 \
+    --bus --bus-detection-radius 5 --bus-attraction-bonus 5000 --bus-attraction-radius 1 '+power_nets
 
     # Route some nets from pads (no fanout needed)
     if not args.planes_only:
