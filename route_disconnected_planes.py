@@ -29,6 +29,7 @@ from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generat
 from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
 from plane_region_connector import route_disconnected_regions, build_base_obstacles, add_route_to_obstacles
+import routing_defaults as defaults
 import re
 
 
@@ -121,19 +122,19 @@ def route_planes(
     output_file: str,
     net_names: List[str],
     plane_layers: List[str],
-    track_width: float = 0.2,
-    clearance: float = 0.2,
-    zone_clearance: float = 0.2,
-    grid_step: float = 0.1,
-    analysis_grid_step: float = 0.5,
-    max_track_width: float = 2.0,
-    min_track_width: float = 0.2,
-    track_via_clearance: float = 0.8,
-    hole_to_hole_clearance: float = 0.3,
-    board_edge_clearance: float = 0.5,
-    via_size: float = 0.5,
-    via_drill: float = 0.4,
-    max_iterations: int = 200000,
+    track_width: float = defaults.TRACK_WIDTH,
+    clearance: float = defaults.CLEARANCE,
+    zone_clearance: float = defaults.PLANE_ZONE_CLEARANCE,
+    grid_step: float = defaults.GRID_STEP,
+    analysis_grid_step: float = defaults.REPAIR_ANALYSIS_GRID_STEP,
+    max_track_width: float = defaults.REPAIR_MAX_TRACK_WIDTH,
+    min_track_width: float = defaults.REPAIR_MIN_TRACK_WIDTH,
+    track_via_clearance: float = defaults.PLANE_TRACK_VIA_CLEARANCE,
+    hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE,
+    board_edge_clearance: float = defaults.PLANE_EDGE_CLEARANCE,
+    via_size: float = defaults.VIA_SIZE,
+    via_drill: float = defaults.VIA_DRILL,
+    max_iterations: int = defaults.MAX_ITERATIONS,
     verbose: bool = False,
     dry_run: bool = False,
     debug_lines: bool = False,

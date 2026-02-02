@@ -613,6 +613,9 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --ripped-route-avoidance-cost 0.1    # Cost penalty for routing through ripped corridors (0 = disabled)
 
 # Bus routing (parallel groups of nets)
+# Detects groups of nets with clustered endpoints and routes them together.
+# Routes middle net first (guide track), then alternates outward with attraction
+# to keep traces parallel. Use --verbose to see routing order and attraction relationships.
 --bus                           # Enable bus detection and parallel routing
 --bus-detection-radius 5.0      # Max endpoint distance to form bus group (mm)
 --bus-attraction-radius 5.0     # Attraction radius from neighbor track (mm)

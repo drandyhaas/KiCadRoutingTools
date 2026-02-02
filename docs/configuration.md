@@ -40,11 +40,11 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--track-width` | 0.1 | Track width in mm (ignored if `--impedance` specified) |
+| `--track-width` | 0.3 | Track width in mm (ignored if `--impedance` specified) |
 | `--impedance` | - | Target single-ended impedance in ohms (calculates width per layer from stackup) |
-| `--clearance` | 0.1 | Track-to-track clearance in mm |
-| `--via-size` | 0.3 | Via outer diameter in mm |
-| `--via-drill` | 0.2 | Via drill diameter in mm |
+| `--clearance` | 0.25 | Track-to-track clearance in mm |
+| `--via-size` | 0.5 | Via outer diameter in mm |
+| `--via-drill` | 0.3 | Via drill diameter in mm |
 | `--grid-step` | 0.1 | Grid resolution in mm |
 
 **Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
@@ -72,7 +72,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--via-cost` | 50 | Via penalty in grid steps (doubled for diff pairs) |
+| `--via-cost` | 50 | Via penalty in grid steps (effectively doubled for diff pairs since two vias are placed) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
 | `--max-probe-iterations` | 5000 | Quick probe per direction to detect stuck routes |
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
@@ -82,6 +82,9 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
 | `--hole-to-hole-clearance` | 0.2 | Minimum drill hole edge-to-edge clearance (mm) |
 | `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
+| `--proximity-heuristic-factor` | 0.02 | Factor for proximity-aware A* heuristic (higher = faster but may find suboptimal paths, 0 = disabled) |
+| `--ripped-route-avoidance-radius` | 1.0 | Radius around ripped route corridors to apply soft penalty (mm) |
+| `--ripped-route-avoidance-cost` | 0.1 | Cost penalty for routing through ripped corridors (0 = disabled) |
 
 ### Routing Strategy Options
 
@@ -216,9 +219,11 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "*DQ*" \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
-| `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, etc.) |
+| `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, bus routing order, etc.) |
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |
+| `--stats` | false | Print A* search statistics (cells expanded, heuristic efficiency) |
+| `--add-teardrops` | false | Add teardrop settings to all pads in output file |
 
 ## GridRouteConfig Class
 
@@ -227,18 +232,18 @@ The `GridRouteConfig` dataclass holds all routing parameters:
 ```python
 @dataclass
 class GridRouteConfig:
-    # Track geometry
-    track_width: float = 0.1      # mm (default for non-power nets)
-    clearance: float = 0.1        # mm between tracks
-    via_size: float = 0.3         # mm via outer diameter
-    via_drill: float = 0.2        # mm via drill
+    # Track geometry (see routing_defaults.py for values)
+    track_width: float = 0.3      # mm (default for non-power nets)
+    clearance: float = 0.25       # mm between tracks
+    via_size: float = 0.5         # mm via outer diameter
+    via_drill: float = 0.3        # mm via drill
     power_net_widths: Dict[int, float] = {}  # net_id -> width for power nets
 
     # Grid
     grid_step: float = 0.1        # mm grid resolution
 
     # A* algorithm
-    via_cost: int = 50            # grid steps penalty for via (doubled for diff pairs)
+    via_cost: int = 50            # grid steps penalty per via (diff pairs place 2 vias)
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
     heuristic_weight: float = 1.9
@@ -248,6 +253,9 @@ class GridRouteConfig:
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
     hole_to_hole_clearance: float = 0.2  # mm - minimum drill hole edge-to-edge clearance
     board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
+    proximity_heuristic_factor: float = 0.02  # factor for proximity-aware heuristic (0 = disabled)
+    ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route corridors
+    ripped_route_avoidance_cost: float = 0.1    # cost for routing through ripped corridors
 
     # Layers
     layers: List[str] = ['F.Cu', 'B.Cu']
@@ -267,7 +275,7 @@ class GridRouteConfig:
 
     # Track proximity (same layer)
     track_proximity_distance: float = 2.0  # mm
-    track_proximity_cost: float = 0.2      # mm equivalent
+    track_proximity_cost: float = 0.0      # mm equivalent (0 = disabled)
 
     # Vertical track alignment (cross-layer attraction)
     vertical_attraction_radius: float = 1.0  # mm

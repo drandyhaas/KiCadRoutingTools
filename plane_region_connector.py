@@ -20,6 +20,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
+import routing_defaults as defaults
 
 
 def _collect_anchor_points(
@@ -808,7 +809,7 @@ def route_disconnected_regions(
     zone_clearance: float = 0.2,
     max_track_width: float = 2.0,
     min_track_width: float = 0.2,
-    track_via_clearance: float = 0.8,
+    track_via_clearance: float = defaults.PLANE_TRACK_VIA_CLEARANCE,
     hole_to_hole_clearance: float = 0.3,
     analysis_grid_step: float = 0.5,
     max_iterations: int = 200000,

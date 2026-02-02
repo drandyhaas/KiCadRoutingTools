@@ -520,14 +520,14 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--layers`, `-l` | all Cu | Layer(s) available for routing |
 | `--max-track-width` | 2.0 | Maximum track width for connections (mm) |
 | `--min-track-width` | 0.2 | Minimum track width for connections (mm) |
-| `--track-width` | 0.2 | Default track width for routing config (mm) |
-| `--clearance` | 0.2 | Trace-to-trace clearance (mm) |
+| `--track-width` | 0.3 | Default track width for routing config (mm) |
+| `--clearance` | 0.25 | Trace-to-trace clearance (mm) |
 | `--zone-clearance` | 0.2 | Zone fill clearance around obstacles (mm) |
 | `--track-via-clearance` | 0.8 | Clearance from tracks to other nets' vias (mm) |
-| `--hole-to-hole-clearance` | 0.3 | Minimum clearance between drill holes (mm) |
+| `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes (mm) |
 | `--board-edge-clearance` | 0.5 | Clearance from board edge (mm) |
 | `--via-size` | 0.5 | Via outer diameter (mm) |
-| `--via-drill` | 0.4 | Via drill diameter (mm) |
+| `--via-drill` | 0.3 | Via drill diameter (mm) |
 | `--grid-step` | 0.1 | Routing grid step (mm) |
 | `--analysis-grid-step` | 0.5 | Grid step for connectivity analysis (coarser = faster) |
 | `--max-iterations` | 200000 | Maximum A* iterations per route attempt |

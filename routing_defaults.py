@@ -113,6 +113,7 @@ PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
 PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
 PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
 PLANE_MAX_RIP_NETS = 3  # max blocker nets to rip up
+PLANE_TRACK_VIA_CLEARANCE = 0.8  # mm - clearance from track center to other nets' via centers
 
 # Repair disconnected planes defaults (route_disconnected_planes.py)
 REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
