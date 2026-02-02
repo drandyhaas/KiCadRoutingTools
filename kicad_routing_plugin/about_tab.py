@@ -25,6 +25,13 @@ class AboutTab(wx.Panel):
         self.on_transparency_changed = on_transparency_changed
         self._initial_transparency = initial_transparency
         self._create_ui()
+        # Schedule a layout refresh after the UI is fully realized (fixes Linux rendering)
+        wx.CallAfter(self._refresh_layout)
+
+    def _refresh_layout(self):
+        """Refresh the layout to fix initial rendering on Linux."""
+        self.Layout()
+        self.Refresh()
 
     def _create_ui(self):
         """Create the About tab UI."""
