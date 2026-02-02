@@ -29,7 +29,7 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
         self.category = "Routing"
         self.description = "KiCadRoutingTools, by DrAndyHaas"
         self.show_toolbar_button = True
-        icon_path = os.path.join(PLUGIN_DIR, "icon_512.png")
+        icon_path = os.path.join(PLUGIN_DIR, "icon_24.png")
         if os.path.exists(icon_path):
             self.icon_file_name = icon_path
 
