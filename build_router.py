@@ -46,11 +46,42 @@ def clean(script_dir, rust_dir):
 def build(script_dir, rust_dir):
     """Build the Rust router module."""
     print("Building Rust router...")
-    result = subprocess.run(
-        ['cargo', 'build', '--release'],
-        cwd=rust_dir,
-        capture_output=False
-    )
+    try:
+        result = subprocess.run(
+            ['cargo', 'build', '--release'],
+            cwd=rust_dir,
+            capture_output=False
+        )
+    except FileNotFoundError:
+        print("ERROR: Rust is not installed or 'cargo' is not in PATH.")
+        print()
+        print("To install Rust, follow these instructions:")
+        print()
+        if sys.platform == 'win32':
+            print("  Windows:")
+            print("    1. Download rustup-init.exe from https://rustup.rs/")
+            print("    2. Run the installer and follow the prompts")
+            print("    3. Restart your terminal/command prompt")
+            print()
+            print("  Or using winget:")
+            print("    winget install Rustlang.Rustup")
+        elif sys.platform == 'darwin':
+            print("  macOS:")
+            print("    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh")
+            print()
+            print("  Or using Homebrew:")
+            print("    brew install rust")
+        else:
+            print("  Linux:")
+            print("    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh")
+            print()
+            print("  Or using your package manager:")
+            print("    Ubuntu/Debian: sudo apt install rustc cargo")
+            print("    Fedora: sudo dnf install rust cargo")
+            print("    Arch: sudo pacman -S rust")
+        print()
+        print("After installation, restart your terminal and run this script again.")
+        sys.exit(1)
 
     if result.returncode != 0:
         print("ERROR: Rust build failed!")
