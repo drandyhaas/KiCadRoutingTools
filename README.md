@@ -92,7 +92,22 @@ python install_plugin.py
 # Then in KiCad: Tools → External Plugins → KiCadRoutingTools
 ```
 
-**Option B: Command Line (For scripting and automation)**
+**Option B: Claude Code (AI-assisted routing)**
+
+Use [Claude Code](https://claude.ai/claude-code) to analyze your PCB and generate a routing plan:
+
+```
+> /plan-pcb-routing kicad_files/my_board.kicad_pcb
+```
+
+Claude will:
+- Analyze your board structure and identify components needing fanout (BGA/QFN/PGA)
+- Detect differential pairs and DDR signals requiring length matching
+- Identify power/ground nets and recommend plane vs trace routing
+- Generate a step-by-step routing plan with explanations
+- Run the commands and verify results
+
+**Option C: Manual Command Line (For scripting and automation)**
 
 ```bash
 # Route all nets
@@ -427,7 +442,6 @@ KiCadRoutingTools/
 │   ├── layout.py             # Layout analysis functions
 │   ├── geometry.py           # Stub position calculations
 │   └── types.py              # QFNLayout, PadInfo, FanoutStub
-├── switch_to_layer.py        # Move net segments to a different layer
 ├── list_nets.py              # List nets on a component
 ├── build_router.py           # Rust module build script (--clean to remove artifacts)
 ├── startup_checks.py         # Startup checks (Python deps, Rust library version)
