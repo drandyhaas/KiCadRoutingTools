@@ -26,7 +26,7 @@ def main():
     run('python3 bga_fanout.py kicad_files/interf_u_plane.kicad_pcb --component U9 --output kicad_files/interf_u_fanout.kicad_pcb --nets "/*" ', unbuffered)
 
     # Step 3: Route all signals
-    run("python3 route.py kicad_files/interf_u_fanout.kicad_pcb kicad_files/interf_u_routed.kicad_pcb --proximity-heuristic-factor 0.02 --no-bga-zone --add-teardrops --layer-costs 1 1 --max-ripup 30 --stub-proximity-radius 10 --stub-proximity-cost 3.0 --track-proximity-cost 0.0 --max-iterations 1000000 --board-edge-clearance 0.55", unbuffered)
+    run("python3 route.py kicad_files/interf_u_fanout.kicad_pcb kicad_files/interf_u_routed.kicad_pcb --no-bga-zone --add-teardrops --layer-costs 1 1 --max-ripup 10 --stub-proximity-radius 10 --stub-proximity-cost 3.0 --max-iterations 1000000 --board-edge-clearance 0.55", unbuffered)
 
     # Step 4: Connect disconnected plane regions
     run("python3 route_disconnected_planes.py kicad_files/interf_u_routed.kicad_pcb kicad_files/interf_u_connected.kicad_pcb --board-edge-clearance 0.6", unbuffered)

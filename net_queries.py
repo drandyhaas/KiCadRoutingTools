@@ -10,6 +10,55 @@ import fnmatch
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Set, Union
 
+
+def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
+    """
+    Check if a net name matches a list of filter patterns.
+
+    Patterns can include * and ? wildcards (fnmatch style).
+    Patterns starting with "!" are exclusion patterns.
+
+    Logic:
+    - If there are inclusion patterns (not starting with !), net must match at least one
+    - If there are exclusion patterns (starting with !), net must not match any
+    - If only exclusion patterns are provided, all non-excluded nets match
+
+    Examples:
+        matches_net_filter("GND", ["*"])           -> True
+        matches_net_filter("GND", ["*", "!GND"])   -> False
+        matches_net_filter("VCC", ["*", "!GND"])   -> True
+        matches_net_filter("NET1", ["!GND", "!VCC"]) -> True (no inclusion = match all)
+        matches_net_filter("GND", ["!GND", "!VCC"])  -> False
+
+    Args:
+        net_name: The net name to check
+        patterns: List of patterns (may include wildcards and ! prefix for exclusion)
+
+    Returns:
+        True if the net should be included, False otherwise
+    """
+    if not patterns:
+        return True  # No filter = include all
+
+    include_patterns = [p for p in patterns if not p.startswith('!')]
+    exclude_patterns = [p[1:] for p in patterns if p.startswith('!')]
+
+    # Check exclusion first: if net matches any exclude pattern, reject it
+    if exclude_patterns:
+        for pattern in exclude_patterns:
+            if fnmatch.fnmatch(net_name, pattern):
+                return False
+
+    # Check inclusion: if there are include patterns, must match at least one
+    if include_patterns:
+        for pattern in include_patterns:
+            if fnmatch.fnmatch(net_name, pattern):
+                return True
+        return False  # Has include patterns but didn't match any
+
+    # No include patterns (only exclusions) and didn't match any exclusion
+    return True
+
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from chip_boundary import (
@@ -100,6 +149,11 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
     Patterns can include * and ? wildcards (fnmatch style).
     Example: "Net-(U2A-DATA_*)" matches Net-(U2A-DATA_0), Net-(U2A-DATA_1), etc.
 
+    Patterns starting with "!" are exclusion patterns - they remove matching
+    nets from the result. Process order matters: include patterns add nets,
+    exclude patterns remove them.
+    Example: "*" "!GND" "!VCC" - all nets except GND and VCC
+
     Args:
         pcb_data: PCB data with nets and pads
         patterns: List of net name patterns (may include wildcards)
@@ -126,11 +180,33 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
     all_net_names = list(all_net_names)
     result = []
     seen = set()
+    excluded = set()
 
     for pattern in patterns:
-        if '*' in pattern or '?' in pattern:
+        # Check for exclusion pattern (starts with !)
+        if pattern.startswith('!'):
+            exclude_pattern = pattern[1:]  # Remove the !
+            if '*' in exclude_pattern or '?' in exclude_pattern:
+                # Wildcard exclusion
+                matches = [name for name in all_net_names if fnmatch.fnmatch(name, exclude_pattern)]
+                if matches:
+                    print(f"Exclusion pattern '!{exclude_pattern}' matched {len(matches)} nets")
+                for name in matches:
+                    excluded.add(name)
+                    if name in seen:
+                        result.remove(name)
+                        seen.remove(name)
+            else:
+                # Literal exclusion
+                excluded.add(exclude_pattern)
+                if exclude_pattern in seen:
+                    result.remove(exclude_pattern)
+                    seen.remove(exclude_pattern)
+                    print(f"Excluded net '{exclude_pattern}'")
+        elif '*' in pattern or '?' in pattern:
             # It's a wildcard pattern - find all matching nets
-            matches = sorted([name for name in all_net_names if fnmatch.fnmatch(name, pattern)])
+            matches = sorted([name for name in all_net_names
+                            if fnmatch.fnmatch(name, pattern) and name not in excluded])
             if not matches:
                 print(f"Warning: Pattern '{pattern}' matched no nets")
             else:
@@ -141,8 +217,8 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                     seen.add(name)
         else:
             # Literal net name - allow even if it would be excluded
-            # (user explicitly requested it)
-            if pattern not in seen:
+            # (user explicitly requested it), unless explicitly excluded
+            if pattern not in seen and pattern not in excluded:
                 result.append(pattern)
                 seen.add(pattern)
 

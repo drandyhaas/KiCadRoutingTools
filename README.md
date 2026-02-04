@@ -205,6 +205,26 @@ The installer automatically detects your KiCad installation directory:
 
 ## Command-Line Interface
 
+### Net Pattern Syntax
+
+All `--nets` options support fnmatch-style wildcards and exclusion patterns:
+
+| Pattern | Description |
+|---------|-------------|
+| `*` | All nets |
+| `*DATA*` | Nets containing "DATA" |
+| `/*` | Nets starting with "/" (hierarchical) |
+| `Net-(U1-*)` | Nets matching "Net-(U1-...)" |
+| `!GND` | Exclude net named "GND" |
+| `!*VCC*` | Exclude nets containing "VCC" |
+| `"*" "!GND" "!VCC"` | All nets except GND and VCC |
+
+**Notes:**
+- Exclusion patterns (starting with `!`) remove matching nets from the result
+- Order matters: include patterns add nets, exclude patterns remove them
+- Nets starting with "unconnected-" are automatically excluded
+- Use quotes around patterns with special characters
+
 ### Route Nets
 
 ```bash
@@ -231,6 +251,9 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 
 # Route ALL nets on a component including power (use "*" pattern)
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
+
+# Route all nets except GND and VCC (exclusion patterns with ! prefix)
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" "!GND" "!VCC"
 
 # Route differential pairs (use route_diff.py)
 python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
@@ -577,6 +600,7 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 
 # Net selection (default: "*" = all nets)
 --nets "pattern" ...    # Net names or wildcard patterns to route
+                        # Supports exclusion: --nets "*" "!GND" "!VCC" = all except GND/VCC
 --component U1          # Route all nets on U1 (auto-excludes GND/VCC/VDD/unconnected unless --nets given)
 
 # Geometry

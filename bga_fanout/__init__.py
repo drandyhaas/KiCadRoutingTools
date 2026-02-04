@@ -17,13 +17,13 @@ Key features:
 import math
 from typing import List, Dict, Tuple, Optional, Set
 from collections import defaultdict
-import fnmatch
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
+from net_queries import matches_net_filter
 from kicad_writer import add_tracks_and_vias_to_pcb
 from bga_fanout.types import (
     create_track,
@@ -776,10 +776,12 @@ def generate_bga_fanout(footprint: Footprint,
         if not pad.net_name or pad.net_id == 0:
             continue
 
-        if net_filter:
-            matched = any(fnmatch.fnmatch(pad.net_name, pattern) for pattern in net_filter)
-            if not matched:
-                continue
+        # Skip unconnected nets (KiCad pins not connected in schematic)
+        if pad.net_name.lower().startswith('unconnected-'):
+            continue
+
+        if net_filter and not matches_net_filter(pad.net_name, net_filter):
+            continue
 
         # Skip if this pad already has a fanout (check_for_previous mode)
         if check_for_previous and pad.net_id in fanned_out_nets:

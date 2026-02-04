@@ -16,13 +16,31 @@ Creates escape routing for QFN (Quad Flat No-leads) and QFP (Quad Flat Package) 
 # Basic fanout
 python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb
 
-# With net filter
+# With net filter (include pattern)
 python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb --nets "*DATA*"
+
+# With exclusion pattern (all nets except GND and VCC)
+python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
+    --nets "*" "!GND" "!VCC"
 
 # Specify layer and track width
 python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
     --layer F.Cu --width 0.15
 ```
+
+## Net Pattern Syntax
+
+The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion patterns:
+
+| Pattern | Description |
+|---------|-------------|
+| `*DATA*` | Nets containing "DATA" |
+| `/*` | Nets starting with "/" (hierarchical) |
+| `!GND` | Exclude net named "GND" |
+| `!*VCC*` | Exclude nets containing "VCC" |
+| `"*" "!GND" "!VCC"` | All nets except GND and VCC |
+
+**Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded.
 
 ## Options
 

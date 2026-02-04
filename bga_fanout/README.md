@@ -18,8 +18,12 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 # Basic fanout
 python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb
 
-# With net filter
+# With net filter (include pattern)
 python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb --nets "*DATA*"
+
+# With exclusion pattern (all nets except GND and VCC)
+python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
+    --nets "*" "!GND" "!VCC"
 
 # Differential pairs
 python bga_fanout.py kicad_files/input.kicad_pcb --component IC1 --output kicad_files/output.kicad_pcb \
@@ -29,6 +33,20 @@ python bga_fanout.py kicad_files/input.kicad_pcb --component IC1 --output kicad_
 python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
     --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu
 ```
+
+## Net Pattern Syntax
+
+The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion patterns:
+
+| Pattern | Description |
+|---------|-------------|
+| `*DATA*` | Nets containing "DATA" |
+| `/*` | Nets starting with "/" (hierarchical) |
+| `!GND` | Exclude net named "GND" |
+| `!*VCC*` | Exclude nets containing "VCC" |
+| `"*" "!GND" "!VCC"` | All nets except GND and VCC |
+
+**Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded.
 
 ## Options
 

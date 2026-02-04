@@ -168,14 +168,12 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 
 ### Routing Order Rationale
 
-1. **GND Plane First** - Creates reference plane, handles most-connected net
-2. **Other Power Planes** (if multi-layer) - Dedicated power distribution
-3. **Fanout** (if needed) - Escape routing before signal routing, exclude GND
-4. **Differential Pairs** - Route before single-ended to get best paths
-5. **Power Traces** - VCC and other power with wider traces
-6. **Signal Routing** - All remaining nets
-7. **Plane Repair** - Reconnect any broken plane regions
-8. **Verification** - DRC and connectivity checks
+1. **Power Planes First** - Create GND and VCC planes together, handles most-connected nets
+2. **Fanout** (if needed) - Escape routing before signal routing, exclude plane nets
+3. **Differential Pairs** - Route before single-ended to get best paths (if present)
+4. **Signal Routing** - All remaining nets
+5. **Plane Repair** - Reconnect any broken plane regions
+6. **Verification** - DRC and connectivity checks
 
 ### Example Plan Output Format
 
@@ -190,77 +188,96 @@ Present the plan to the user as a numbered list with explanations:
 - Unrouted (0 existing traces)
 
 ### Components Requiring Special Handling
-- **U9 (PGA120)**: 120-pin grid array - use bga_fanout.py
+- **U9 (PGA120)**: 120-pin grid array - use bga_fanout.py for signals only
 
 ### Differential Pairs
 - None detected
 
 ### Power/Ground Nets
 - **GND**: 42 pads - use plane on B.Cu
-- **VCC**: 23 pads - use 0.5mm traces
+- **VCC**: 23 pads - use plane on F.Cu (or wide traces if planes not desired)
 
 ---
 
 ## Step-by-Step Routing Commands
 
-### Step 1: Create GND Plane
-Creates a solid ground plane on the bottom layer, providing a low-impedance
-return path for all signals and handling the most-connected net efficiently.
+### Step 1: Create Power Planes (GND and VCC)
+Creates power planes in a single call. Each net is paired with its corresponding
+layer (GND→B.Cu, VCC→F.Cu). Through-hole PGA/BGA pads automatically connect to
+planes on their layer; SMD pads get vias routed to the plane.
 
-python3 route_planes.py board.kicad_pcb \
-    --nets GND \
-    --plane-layers B.Cu \
-    --output board_step1.kicad_pcb
+python -X utf8 route_planes.py board.kicad_pcb board_step1.kicad_pcb \
+    --nets GND VCC \
+    --plane-layers B.Cu F.Cu \
+    2>&1 | tee /tmp/step1_planes.txt
 
-### Step 2: Fanout U9 (PGA120)
-Generates escape routing for the dense pin grid array. The pattern "/*"
-matches signal nets (which start with "/" in KiCad hierarchical designs)
-and automatically excludes GND, VCC, and unconnected pads.
+### Step 2: Fanout U9 (PGA120) - All Non-Plane Nets
+Generates escape routing for ALL nets on the component EXCEPT those handled
+by power planes. This ensures every signal net gets fanned out, avoiding
+`--no-bga-zone` workarounds during routing.
 
-python3 bga_fanout.py board_step1.kicad_pcb \
+**Important:** Use `"*" "!GND" "!VCC"` to fan out all nets except the power
+plane nets. Do NOT use `"/*"` alone, as it misses nets with non-hierarchical
+names like `Net-(U9-Pad1)` which would then require `--no-bga-zone` to route.
+
+python -X utf8 bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
-    --nets "/*" \
+    --nets "*" "!GND" "!VCC" \
+    --output board_step2.kicad_pcb \
+    2>&1 | tee /tmp/step2_fanout.txt
+
+### Step 3: Route All Signal Nets
+Routes all remaining unrouted nets. For boards with BGA/PGA components,
+use `--no-bga-zone` to allow the router to find alternative paths through
+the dense pin area (even when fanout was done, some paths may require this).
+Use `--max-ripup 10 --max-iterations 1000000` for difficult 2-layer boards.
+
+python -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
+    --nets "*" \
+    --no-bga-zone \
+    --max-ripup 10 \
+    --max-iterations 1000000 \
+    2>&1 | tee /tmp/step3_routing.txt
+
+### Step 4: Repair Disconnected Plane Regions
+Signal traces may have cut through planes. This step reconnects any
+isolated copper islands.
+
+python -X utf8 route_disconnected_planes.py board_step3.kicad_pcb board_step4.kicad_pcb \
+    2>&1 | tee /tmp/step4_plane_repair.txt
+
+### Step 5: Verify Results
+Check for DRC violations, unrouted nets, and orphan stubs.
+Save outputs to /tmp for analysis if issues are found.
+
+python -X utf8 check_drc.py board_step4.kicad_pcb --clearance 0.25 2>&1 | tee /tmp/step5_drc.txt
+python -X utf8 check_connected.py board_step4.kicad_pcb 2>&1 | tee /tmp/step5_connectivity.txt
+python -X utf8 check_orphan_stubs.py board_step4.kicad_pcb 2>&1 | tee /tmp/step5_orphans.txt
+```
+
+### Alternative: VCC as Wide Traces (No Plane)
+
+If you prefer not to use a VCC plane, route VCC with wide traces instead:
+
+```
+### Step 2 (Alternative): Fanout U9 Including VCC
+python -X utf8 bga_fanout.py board_step1.kicad_pcb \
+    --component U9 \
+    --nets "/*" VCC \
     --output board_step2.kicad_pcb
 
-### Step 3: Route VCC Power Net
-Routes the main power net with wider traces (0.5mm) for better current
-carrying capacity. Since VCC wasn't fanned out (excluded by "/*" pattern),
-use --no-bga-zone to disable the automatic BGA exclusion zone and allow
-the router to enter the dense pin area to connect internal VCC pads.
+### Step 3 (Alternative): Route VCC with Wide Traces
+python -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
+    --nets VCC \
+    --track-width 0.5
+```
 
-python3 route.py board_step2.kicad_pcb \
+Or if VCC wasn't fanned out, use `--no-bga-zone` to allow router access:
+```
+python -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
     --nets VCC \
     --track-width 0.5 \
-    --no-bga-zone U9 \
-    --output board_step3.kicad_pcb
-
-Alternative: Fan out VCC separately before routing:
-python3 bga_fanout.py board_step2.kicad_pcb \
-    --component U9 \
-    --nets VCC \
-    --check-previous \
-    --output board_step2b.kicad_pcb
-
-### Step 4: Route All Signal Nets
-Routes all remaining unrouted nets using default track width.
-
-python3 route.py board_step3.kicad_pcb \
-    --nets "*" \
-    --output board_step4.kicad_pcb
-
-### Step 5: Repair Disconnected Plane Regions
-Signal traces on B.Cu may have cut through the GND plane. This step
-reconnects any isolated copper islands.
-
-python3 route_disconnected_planes.py board_step4.kicad_pcb \
-    --output board_step5.kicad_pcb
-
-### Step 6: Verify Results
-Check for DRC violations, unrouted nets, and orphan stubs.
-
-python3 check_drc.py board_step5.kicad_pcb --clearance 0.25
-python3 check_connected.py board_step5.kicad_pcb
-python3 check_orphan_stubs.py board_step5.kicad_pcb
+    --no-bga-zone U9
 ```
 
 ## Step 7: Check for High-Speed Signal Requirements
@@ -492,7 +509,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 ## Important Notes
 
 1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the plane vias will handle it
-2. **Fanout signal nets only** - Use `--nets "/*"` to match signal nets (starting with "/") and exclude GND, VCC, and unconnected pads. Note: Power nets excluded this way need `--no-bga-zone` when routing (to allow router into the BGA zone), or separate fanout with `--check-previous`
+2. **Fanout ALL non-plane nets** - Use `--nets "*" "!GND" "!VCC"` to fan out all nets except those handled by planes. Do NOT use `"/*"` alone as it misses nets with non-hierarchical names like `Net-(U9-Pad1)`. Unconnected nets are automatically filtered out.
 3. **Order matters** - Planes first, then fanout, then diff pairs, then signals, then repair
 4. **Verify at the end** - Always run DRC, connectivity, and orphan stub checks
 5. **Consider the analyze-power-nets skill** - For complex boards where power net identification isn't obvious, use that skill first to analyze component datasheets
@@ -501,7 +518,12 @@ python3 route.py board.kicad_pcb --nets "*" \
 8. **Schematic sync is disabled by default** - After routing with swaps, offer to re-run with `--schematic-dir` if the user wants to update their schematic
 9. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 10. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
-11. **Nets not fanned out → use no-bga-zone** - When routing nets that weren't fanned out (e.g., VCC excluded by `"/*"` pattern), use `--no-bga-zone <component>` to disable the automatic exclusion zone and allow the router to enter the dense pin area. Alternatively, run `bga_fanout.py --check-previous --nets VCC` to add fanout for those nets first
+11. **Use --no-bga-zone for difficult boards** - Even when fanout is complete, use `--no-bga-zone` during routing to allow the router to find alternative paths through the dense pin area. This is especially important for 2-layer boards where routing channels are limited.
+12. **Windows UTF-8 encoding** - On Windows, use `python -X utf8` to avoid Unicode encoding errors when scripts print special characters (like Ω for resistance). Example: `python -X utf8 route_planes.py ...`
+13. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets. Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
+    - Reduces routing congestion (power pins don't consume escape channels)
+    - Provides lower impedance power connections
+14. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10 --max-iterations 1000000` from the start for boards with dense components. These parameters help resolve routing conflicts that would otherwise fail.
 
 ## Presenting the Plan
 
@@ -516,25 +538,67 @@ After generating the plan:
 
 ## After Routing Completes
 
-After running routing commands:
-1. Report how many nets were routed successfully
-2. **If routes failed**, retry with more aggressive parameters. This may require
-   re-running the full signal routing step (not just the failed nets) since net
-   ordering affects which paths are available:
+### Capture Logs for Analysis
+
+Always capture command output to `/tmp` files for later analysis:
 
 ```bash
-python3 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
-    --nets "*" \
-    --max-ripup 10 \
-    --max-iterations 1000000 \
-    --stub-proximity-radius 5 \
-    --stub-proximity-cost 2.0
+python -X utf8 route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt
+python -X utf8 route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu 2>&1 | tee /tmp/planes_output.txt
+python -X utf8 check_connected.py output.kicad_pcb 2>&1 | tee /tmp/connectivity.txt
+python -X utf8 check_drc.py output.kicad_pcb 2>&1 | tee /tmp/drc.txt
 ```
 
-   Key parameters for difficult boards:
-   - `--max-ripup 30` (default 3) - More rip-up attempts to resolve conflicts
+### Parse Logs for Failure Analysis
+
+After routing, parse the log files to understand failures:
+
+```bash
+# Check routing summary (last 20 lines usually have the summary)
+tail -20 /tmp/route_output.txt
+
+# Look for failed nets
+grep -i "failed\|FAILED" /tmp/route_output.txt
+
+# Check JSON summary for detailed failure info
+grep "JSON_SUMMARY" /tmp/route_output.txt | sed 's/JSON_SUMMARY: //' | python -m json.tool
+
+# Find specific failure reasons
+grep -A5 "FAILED NET HISTORIES" /tmp/route_output.txt
+```
+
+The JSON_SUMMARY line contains structured data including:
+- `failed_single`: List of failed single-ended net names
+- `failed_multipoint`: List of nets with unconnected pads (includes pad coordinates)
+- `multipoint_pads_connected` vs `multipoint_pads_total`: Connection success rate
+
+### Diagnose and Retry
+
+After running routing commands:
+1. Report how many nets were routed successfully
+2. **If routes failed**, parse the logs to understand why, then retry with appropriate parameters:
+
+| Failure Pattern | Likely Cause | Solution |
+|-----------------|--------------|----------|
+| "no rippable blockers found" | Route blocked by non-rippable obstacle | Use `--no-bga-zone` |
+| "Re-route FAILED: no path found" | Ripped net couldn't find new path | Increase `--max-iterations` |
+| Many multipoint pads failed on same component | Congested area | Use `--max-ripup 10` or higher |
+| Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zone` |
+
+```bash
+python -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
+    --nets "*" \
+    --no-bga-zone \
+    --max-ripup 10 \
+    --max-iterations 1000000 \
+    2>&1 | tee /tmp/route_retry.txt
+```
+
+   Key parameters for difficult boards (especially 2-layer with BGA/PGA):
+   - `--no-bga-zone` - **Critical**: Allows router to enter BGA area for alternative paths
+   - `--max-ripup 10` (default 3) - More rip-up attempts to resolve conflicts
    - `--max-iterations 1000000` (default 200000) - 5x more search iterations
-   - `--stub-proximity-radius 10 --stub-proximity-cost 3.0` - Spread out fanout stubs
+   - `--stub-proximity-radius 10 --stub-proximity-cost 3.0` - Spread out fanout stubs (optional, for aesthetics)
 
 3. **If swaps occurred** (polarity or target swaps):
    - Tell the user how many swaps were made
@@ -550,11 +614,10 @@ python3 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
 
 Example cleanup prompt:
 > "Routing complete. The following intermediate files were created:
-> - board_step1.kicad_pcb (after GND plane)
+> - board_step1.kicad_pcb (after GND/VCC planes)
 > - board_step2.kicad_pcb (after fanout)
-> - board_step3.kicad_pcb (after VCC routing)
-> - board_step4.kicad_pcb (after signal routing)
+> - board_step3.kicad_pcb (after signal routing)
 >
-> The final routed board is: board_step5.kicad_pcb
+> The final routed board is: board_step4.kicad_pcb
 >
 > Would you like me to delete the intermediate files?"
