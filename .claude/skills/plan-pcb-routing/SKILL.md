@@ -79,40 +79,50 @@ for ref, fp in pcb.footprints.items():
 | QFN/QFP (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad flat packages |
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
 
+### When to Use Fanout for BGA/PGA
+
+**Rule: Use fanout for any BGA/PGA with more than 2 pins depth from outside to center.**
+
+**Important:** Calculate ACTUAL depth by counting pads from the edge toward center, not grid size.
+Many PGA/BGA packages (especially FPGAs/CPLDs) have hollow centers with only perimeter pins populated.
+
+To calculate actual depth:
+```python
+# Check middle column from top edge toward center
+mid_col = xs[len(xs)//2]
+depth = 0
+for y in ys:  # ys sorted from edge
+    if (mid_col, y) in pad_positions:
+        depth += 1
+    else:
+        break  # Stop at first empty position
+```
+
+Examples:
+- 13×13 grid, fully populated → depth = 7 → **USE FANOUT**
+- 13×13 grid, hollow center (3 rows populated) → depth = 3 → **USE FANOUT**
+- 10×10 grid, hollow center (2 rows populated) → depth = 2 → fanout optional
+- 4×4 grid, fully populated → depth = 2 → fanout optional
+
+Inner pins beyond depth 2 cannot escape without fanout routing through channels between outer pins.
+
 Report to user:
 - List of components that may need fanout
-- Package type and pad count for each
+- Package type, pad count, and grid depth for each
 - Recommended fanout tool
 
-## Step 4: Check for Differential Pairs
+## Step 4: Check for Differential Pairs and Power Nets
 
-Search for common differential pair naming patterns:
+Use `list_nets.py` to detect differential pairs and power/ground nets:
 
-```python
-net_names = [n.name for n in pcb.nets.values() if n.name]
-
-diff_patterns = [
-    ('_P', '_N'),      # USB, PCIe, generic
-    ('+', '-'),        # Some designs
-    ('_DP', '_DN'),    # USB data
-    ('_D+', '_D-'),    # USB alternate
-    ('_TX+', '_TX-'),  # Ethernet TX
-    ('_RX+', '_RX-'),  # Ethernet RX
-    ('_TXP', '_TXN'),  # High-speed serial
-    ('_RXP', '_RXN'),  # High-speed serial
-    ('_A', '_B'),      # CAN, RS485
-    ('P', 'N'),        # LVDS style (as suffix)
-]
-
-found_pairs = []
-for name in net_names:
-    for pos, neg in diff_patterns:
-        if name.endswith(pos):
-            base = name[:-len(pos)]
-            pair_name = base + neg
-            if pair_name in net_names:
-                found_pairs.append((name, pair_name))
+```bash
+python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
+
+This will output:
+- Differential pairs detected (P/N naming conventions)
+- Ground nets with pad counts
+- Power nets with pad counts
 
 If differential pairs are found:
 - List each P/N pair
@@ -121,21 +131,10 @@ If differential pairs are found:
 
 ### Check for DDR/High-Speed Memory Signals
 
-```python
-# DDR signal patterns that may need length matching
-ddr_patterns = {
-    'data': ['*DQ[0-9]*', '*DQ[0-9][0-9]*'],  # DQ0-DQ63
-    'strobe': ['*DQS*', '*DQM*', '*DM*'],      # Data strobes
-    'clock': ['*CLK*', '*CK*'],                 # Clock pairs
-    'control': ['*CAS*', '*RAS*', '*WE*', '*CS*', '*ODT*', '*CKE*', '*BA*']
-}
-
-# Check for DDR-like nets
-has_ddr = any(
-    n.name and ('DQ' in n.name.upper() or 'DQS' in n.name.upper())
-    for n in pcb.nets.values()
-)
-```
+Look for DDR signal patterns in the net list that may need length matching:
+- Data signals: DQ0-DQ63
+- Strobes: DQS, DQM, DM
+- Clocks: CLK, CK
 
 If DDR signals detected:
 - Note that `--length-match-group auto` should be used
@@ -146,22 +145,9 @@ Report to user:
 - Whether `route_diff.py` is needed
 - Whether DDR/length-matching is needed
 
-## Step 5: Identify Power and Ground Nets
+## Step 5: Review Power and Ground Net Strategy
 
-Analyze nets by name patterns and connection count:
-
-```python
-# By name patterns
-gnd_nets = [n.name for n in pcb.nets.values()
-            if n.name and any(g in n.name.upper() for g in ['GND', 'VSS', 'AGND', 'DGND', 'PGND'])]
-
-vcc_nets = [n.name for n in pcb.nets.values()
-            if n.name and any(v in n.name.upper() for v in ['VCC', 'VDD', '+3.3', '+5', '+12', 'VBUS'])]
-
-# By connection count (most-connected nets are often power/ground)
-sorted_nets = sorted([(n.name, len(n.pads)) for n in pcb.nets.values() if n.name],
-                     key=lambda x: -x[1])
-```
+From the `list_nets.py --power` output, analyze:
 
 ### Power Net Routing Strategies
 
@@ -304,6 +290,19 @@ On 2-layer boards, BGA/PGA fanout may fail for some inner pins due to
 insufficient routing channels. Options:
 - Accept partial fanout; router will complete remaining connections
 - Skip fanout entirely; direct routing often works for through-hole PGA
+
+**Important:** If you skip fanout for a BGA/PGA component, use `--no-bga-zone <component>`
+during signal routing to prevent the router from trying to route through the dense pin area:
+
+```bash
+python3 route.py board.kicad_pcb \
+    --nets "*" \
+    --no-bga-zone U9 \
+    --output board_routed.kicad_pcb
+```
+
+This creates a keepout zone around the component, forcing routes to go around rather than
+attempt to squeeze through the tight pin grid.
 
 ### Multi-Layer Boards (4+ layers)
 
@@ -490,6 +489,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 8. **Schematic sync is disabled by default** - After routing with swaps, offer to re-run with `--schematic-dir` if the user wants to update their schematic
 9. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 10. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
+11. **Skip fanout → use no-bga-zone** - If you skip fanout for a BGA/PGA, use `--no-bga-zone <component>` during routing to prevent attempts to route through the dense pin area
 
 ## Presenting the Plan
 

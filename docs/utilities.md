@@ -242,51 +242,96 @@ New orphans in file 2: 0
 Removed orphans (fixed): 2
 ```
 
-## Net Lister (`list_nets.py`)
+## Net Analyzer (`list_nets.py`)
 
-Lists all nets connected to a component.
+Analyzes nets in a PCB file. Can list nets on a component, detect differential pairs, and identify power/ground nets.
 
 ### Usage
 
 ```bash
-python list_nets.py input.kicad_pcb REFERENCE [OPTIONS]
+python list_nets.py input.kicad_pcb [OPTIONS]
 
 Options:
-  --pattern GLOB    Filter nets by pattern
-  --pads            Show pad assignments
+  --component, -c REF   Component reference (e.g., U1)
+  --pads                Show pad-to-net assignments
+  --diff-pairs, -d      Detect differential pairs
+  --power, -p           Show power/ground nets with pad counts
+  --top N               Show top N most-connected nets (default: 10)
+  --pattern GLOB        Filter nets by pattern
 ```
 
 ### Examples
 
 ```bash
+# Board summary with top connected nets
+python list_nets.py board.kicad_pcb
+
+# Detect differential pairs
+python list_nets.py board.kicad_pcb --diff-pairs
+
+# Show power/ground nets
+python list_nets.py board.kicad_pcb --power
+
+# Full board analysis
+python list_nets.py board.kicad_pcb --diff-pairs --power
+
 # List all nets on U2A
-python list_nets.py board.kicad_pcb U2A
+python list_nets.py board.kicad_pcb --component U2A
 
-# List only DATA nets
-python list_nets.py board.kicad_pcb U2A --pattern "*DATA*"
+# Show pad-to-net assignments
+python list_nets.py board.kicad_pcb --component U2A --pads
 
-# Show pad assignments
-python list_nets.py board.kicad_pcb U2A --pads
+# List only DATA nets on a component
+python list_nets.py board.kicad_pcb --component U2A --pattern "*DATA*"
 ```
 
-### Output
+### Output Examples
 
+Board summary (no options):
 ```
-Nets on U2A:
+Board: board.kicad_pcb
+Total nets: 174
+Total components: 25
+
+Top 10 most-connected nets:
+  GND: 42 pads
+  VCC: 23 pads
+  ...
+```
+
+Differential pairs (`--diff-pairs`):
+```
+Differential Pairs (5 found):
+  LVDS_CLK_P  /  LVDS_CLK_N
+  LVDS_DATA0_P  /  LVDS_DATA0_N
+  ...
+```
+
+Power/ground nets (`--power`):
+```
+Ground Nets (2 found):
+  GND: 42 pads
+  AGND: 8 pads
+
+Power Nets (3 found):
+  VCC: 23 pads
+  +3.3V: 15 pads
+  +1.8V: 6 pads
+```
+
+Component nets (`--component U2A`):
+```
+Nets on U2A (42 total):
   Net-(U2A-DATA_0)
   Net-(U2A-DATA_1)
   ...
-  Net-(U2A-CLK)
   GND
   VCC
-
-Total: 42 nets
 ```
 
 With `--pads`:
-
 ```
-Nets on U2A:
+Pads on U2A (64 pads):
   A1: Net-(U2A-DATA_0)
   A2: Net-(U2A-DATA_1)
   A3: GND
