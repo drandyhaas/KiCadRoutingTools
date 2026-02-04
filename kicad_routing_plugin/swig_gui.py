@@ -316,7 +316,7 @@ class RoutingDialog(wx.Dialog):
             show_component_dropdown=True,
             min_pads_for_dropdown=3,
             show_hide_differential=True,
-            hide_differential_default=True
+            hide_differential_default=False
         )
         self.net_panel.set_selection_changed_callback(self._update_status_bar)
         self.net_panel.set_tabbed_view_changed_callback(self._on_tabbed_view_changed)
@@ -663,8 +663,8 @@ class RoutingDialog(wx.Dialog):
         # No BGA zones
         bga_sizer = wx.BoxSizer(wx.HORIZONTAL)
         bga_sizer.Add(wx.StaticText(options_scroll, label="No BGA Zones:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.no_bga_zones_ctrl = wx.TextCtrl(options_scroll)
-        self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty")
+        self.no_bga_zones_ctrl = wx.TextCtrl(options_scroll, value="ALL")
+        self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty to exclude none")
         bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
         options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
@@ -1387,7 +1387,7 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetValue(True)
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
-        self.no_bga_zones_ctrl.SetValue("")
+        self.no_bga_zones_ctrl.SetValue("ALL")
         self.layer_costs_ctrl.SetValue("")
 
         # Reset advanced parameters
