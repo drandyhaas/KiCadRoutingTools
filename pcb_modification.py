@@ -196,30 +196,20 @@ def _process_layer_crossings(
             up_other_end = up_end if up_start == trim_endpoint else up_start
 
             if up_other_end == snap_pt_rounded:
-                # The "upstream" is actually the stub connector - remove it as redundant
+                # The upstream connects from ~snap_pt to trim_endpoint and is
+                # essentially redundant. Remove it and modify the crossing
+                # segment to start/end at snap_pt instead of trim_endpoint.
+                # This eliminates the crossing while preserving connectivity
+                # to whatever is at the other end (via, pad, or more segments).
                 segments_to_remove.add(upstream_idx)
-                segments_to_remove.add(crossing_idx)
 
-                # Find the real upstream at the OTHER endpoint of crossing_seg
                 crossing_start = (round(crossing_seg.start_x, POSITION_DECIMALS), round(crossing_seg.start_y, POSITION_DECIMALS))
                 crossing_end = (round(crossing_seg.end_x, POSITION_DECIMALS), round(crossing_seg.end_y, POSITION_DECIMALS))
-                source_endpoint = crossing_end if trim_endpoint == crossing_start else crossing_start
 
-                real_upstream_idx = None
-                for idx in endpoint_to_segs.get(source_endpoint, []):
-                    if idx != crossing_idx and idx not in segments_to_remove:
-                        real_upstream_idx = idx
-                        break
-
-                if real_upstream_idx is not None:
-                    real_up_seg = layer_segs[real_upstream_idx]
-                    ru_start = (round(real_up_seg.start_x, POSITION_DECIMALS), round(real_up_seg.start_y, POSITION_DECIMALS))
-                    ru_end = (round(real_up_seg.end_x, POSITION_DECIMALS), round(real_up_seg.end_y, POSITION_DECIMALS))
-
-                    if ru_end == source_endpoint:
-                        segment_modifications[real_upstream_idx] = ('end', snap_pt[0], snap_pt[1])
-                    elif ru_start == source_endpoint:
-                        segment_modifications[real_upstream_idx] = ('start', snap_pt[0], snap_pt[1])
+                if trim_endpoint == crossing_start:
+                    segment_modifications[crossing_idx] = ('start', snap_pt[0], snap_pt[1])
+                elif trim_endpoint == crossing_end:
+                    segment_modifications[crossing_idx] = ('end', snap_pt[0], snap_pt[1])
             else:
                 # Normal case: extend upstream to snap_pt
                 if up_end == trim_endpoint:
