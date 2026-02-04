@@ -213,22 +213,33 @@ python3 route_planes.py board.kicad_pcb \
     --output board_step1.kicad_pcb
 
 ### Step 2: Fanout U9 (PGA120)
-Generates escape routing for the dense pin grid array. Excludes GND since
-it's already handled by the plane.
+Generates escape routing for the dense pin grid array. The pattern "/*"
+matches signal nets (which start with "/" in KiCad hierarchical designs)
+and automatically excludes GND, VCC, and unconnected pads.
 
 python3 bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
-    --nets "!GND" \
+    --nets "/*" \
     --output board_step2.kicad_pcb
 
 ### Step 3: Route VCC Power Net
 Routes the main power net with wider traces (0.5mm) for better current
-carrying capacity.
+carrying capacity. Since VCC wasn't fanned out (excluded by "/*" pattern),
+use --no-bga-zone to disable the automatic BGA exclusion zone and allow
+the router to enter the dense pin area to connect internal VCC pads.
 
 python3 route.py board_step2.kicad_pcb \
     --nets VCC \
     --track-width 0.5 \
+    --no-bga-zone U9 \
     --output board_step3.kicad_pcb
+
+Alternative: Fan out VCC separately before routing:
+python3 bga_fanout.py board_step2.kicad_pcb \
+    --component U9 \
+    --nets VCC \
+    --check-previous \
+    --output board_step2b.kicad_pcb
 
 ### Step 4: Route All Signal Nets
 Routes all remaining unrouted nets using default track width.
@@ -291,8 +302,9 @@ insufficient routing channels. Options:
 - Accept partial fanout; router will complete remaining connections
 - Skip fanout entirely; direct routing often works for through-hole PGA
 
-**Important:** If you skip fanout for a BGA/PGA component, use `--no-bga-zone <component>`
-during signal routing to prevent the router from trying to route through the dense pin area:
+**Important:** If you skip fanout for a BGA/PGA component but still need to connect its
+internal pads, use `--no-bga-zone <component>` to disable the automatic exclusion zone
+and allow the router to enter the dense pin area:
 
 ```bash
 python3 route.py board.kicad_pcb \
@@ -301,8 +313,8 @@ python3 route.py board.kicad_pcb \
     --output board_routed.kicad_pcb
 ```
 
-This creates a keepout zone around the component, forcing routes to go around rather than
-attempt to squeeze through the tight pin grid.
+Without this flag, the router auto-detects BGA/PGA zones and avoids them, which would
+leave internal pads unconnected if they weren't fanned out.
 
 ### Multi-Layer Boards (4+ layers)
 
@@ -480,7 +492,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 ## Important Notes
 
 1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the plane vias will handle it
-2. **Fanout excludes plane nets** - Use `--nets "!GND"` to skip nets handled by planes
+2. **Fanout signal nets only** - Use `--nets "/*"` to match signal nets (starting with "/") and exclude GND, VCC, and unconnected pads. Note: Power nets excluded this way need `--no-bga-zone` when routing (to allow router into the BGA zone), or separate fanout with `--check-previous`
 3. **Order matters** - Planes first, then fanout, then diff pairs, then signals, then repair
 4. **Verify at the end** - Always run DRC, connectivity, and orphan stub checks
 5. **Consider the analyze-power-nets skill** - For complex boards where power net identification isn't obvious, use that skill first to analyze component datasheets
@@ -489,7 +501,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 8. **Schematic sync is disabled by default** - After routing with swaps, offer to re-run with `--schematic-dir` if the user wants to update their schematic
 9. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 10. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
-11. **Skip fanout → use no-bga-zone** - If you skip fanout for a BGA/PGA, use `--no-bga-zone <component>` during routing to prevent attempts to route through the dense pin area
+11. **Nets not fanned out → use no-bga-zone** - When routing nets that weren't fanned out (e.g., VCC excluded by `"/*"` pattern), use `--no-bga-zone <component>` to disable the automatic exclusion zone and allow the router to enter the dense pin area. Alternatively, run `bga_fanout.py --check-previous --nets VCC` to add fanout for those nets first
 
 ## Presenting the Plan
 
@@ -506,7 +518,24 @@ After generating the plan:
 
 After running routing commands:
 1. Report how many nets were routed successfully
-2. Report any failures and suggest remedies
+2. **If routes failed**, retry with more aggressive parameters. This may require
+   re-running the full signal routing step (not just the failed nets) since net
+   ordering affects which paths are available:
+
+```bash
+python3 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
+    --nets "*" \
+    --max-ripup 10 \
+    --max-iterations 1000000 \
+    --stub-proximity-radius 5 \
+    --stub-proximity-cost 2.0
+```
+
+   Key parameters for difficult boards:
+   - `--max-ripup 30` (default 3) - More rip-up attempts to resolve conflicts
+   - `--max-iterations 1000000` (default 200000) - 5x more search iterations
+   - `--stub-proximity-radius 10 --stub-proximity-cost 3.0` - Spread out fanout stubs
+
 3. **If swaps occurred** (polarity or target swaps):
    - Tell the user how many swaps were made
    - Ask if they want to sync the schematic
