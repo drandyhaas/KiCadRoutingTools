@@ -1082,30 +1082,51 @@ def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = F
             dist = math.sqrt((points[0][0] - points[1][0])**2 + (points[0][1] - points[1][1])**2)
         return [(0, 1, dist)]
 
-    # Prim's algorithm
-    in_tree = {0}  # Start with first point
+    # Prim's algorithm with min_dist array - O(n^2) instead of O(n^3)
+    n = len(points)
+    in_tree = [False] * n
+    # min_dist[j] = minimum distance from any tree node to j
+    min_dist = [float('inf')] * n
+    # nearest[j] = the tree node closest to j
+    nearest = [0] * n
     edges = []
 
-    while len(in_tree) < len(points):
-        best_edge = None
+    # Start with node 0
+    in_tree[0] = True
+    # Initialize distances from node 0
+    for j in range(1, n):
+        if use_manhattan:
+            min_dist[j] = abs(points[0][0] - points[j][0]) + abs(points[0][1] - points[j][1])
+        else:
+            min_dist[j] = math.sqrt((points[0][0] - points[j][0])**2 +
+                                    (points[0][1] - points[j][1])**2)
+
+    for _ in range(n - 1):
+        # Find non-tree node with minimum distance to tree
+        best_j = -1
         best_dist = float('inf')
+        for j in range(n):
+            if not in_tree[j] and min_dist[j] < best_dist:
+                best_dist = min_dist[j]
+                best_j = j
 
-        for i in in_tree:
-            for j in range(len(points)):
-                if j in in_tree:
-                    continue
+        if best_j == -1:
+            break
+
+        in_tree[best_j] = True
+        edges.append((nearest[best_j], best_j, best_dist))
+
+        # Update min_dist for remaining non-tree nodes
+        for j in range(n):
+            if not in_tree[j]:
                 if use_manhattan:
-                    dist = abs(points[i][0] - points[j][0]) + abs(points[i][1] - points[j][1])
+                    d = abs(points[best_j][0] - points[j][0]) + abs(points[best_j][1] - points[j][1])
                 else:
-                    dist = math.sqrt((points[i][0] - points[j][0])**2 +
-                                    (points[i][1] - points[j][1])**2)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_edge = (i, j, dist)
-
-        if best_edge:
-            in_tree.add(best_edge[1])
-            edges.append(best_edge)
+                    d = math.sqrt((points[best_j][0] - points[j][0])**2 +
+                                  (points[best_j][1] - points[j][1])**2)
+                if d < min_dist[j]:
+                    min_dist[j] = d
+                    nearest[j] = best_j
 
     return edges
 

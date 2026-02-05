@@ -71,6 +71,48 @@ from plane_resistance import (
 import routing_defaults as defaults
 
 
+class ViaSpatialIndex:
+    """Grid-based spatial index for fast nearest-via queries."""
+
+    def __init__(self, bucket_size: float):
+        self.bucket_size = bucket_size
+        self._buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+
+    def _key(self, x: float, y: float) -> Tuple[int, int]:
+        return (int(x // self.bucket_size), int(y // self.bucket_size))
+
+    def add(self, x: float, y: float):
+        key = self._key(x, y)
+        if key not in self._buckets:
+            self._buckets[key] = []
+        self._buckets[key].append((x, y))
+
+    def add_all(self, vias: List[Tuple[float, float]]):
+        for x, y in vias:
+            self.add(x, y)
+
+    def find_nearest(self, x: float, y: float, max_radius: float) -> Optional[Tuple[float, float]]:
+        """Find nearest via within max_radius of (x, y)."""
+        best_via = None
+        best_dist_sq = max_radius * max_radius
+        # Check all buckets within radius
+        r_buckets = int(max_radius / self.bucket_size) + 1
+        cx, cy = self._key(x, y)
+        for bx in range(cx - r_buckets, cx + r_buckets + 1):
+            for by in range(cy - r_buckets, cy + r_buckets + 1):
+                bucket = self._buckets.get((bx, by))
+                if bucket is None:
+                    continue
+                for vx, vy in bucket:
+                    dx = vx - x
+                    dy = vy - y
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq <= best_dist_sq:
+                        best_dist_sq = dist_sq
+                        best_via = (vx, vy)
+        return best_via
+
+
 def find_existing_via_nearby(
     pad: Pad,
     existing_vias: List[Tuple[float, float]],
@@ -112,7 +154,8 @@ def find_via_position(
     net_id: int = None,
     verbose: bool = False,
     failed_route_positions: Optional[Set[Tuple[int, int]]] = None,
-    pending_pads: Optional[List[Dict]] = None
+    pending_pads: Optional[List[Dict]] = None,
+    router: Optional[GridRouter] = None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the closest valid position for a via near a pad.
@@ -253,7 +296,8 @@ def find_via_position(
         route_verbose = verbose and route_failures < 3
         route_result = route_via_to_pad(
             via_pos, pad, pad_layer, net_id,
-            routing_obstacles, config, verbose=route_verbose
+            routing_obstacles, config, verbose=route_verbose,
+            router=router
         )
         if route_result is not None:
             # Routing succeeded - use this position
@@ -297,7 +341,8 @@ def route_via_to_pad(
     config: GridRouteConfig,
     max_iterations: int = 10000,
     verbose: bool = False,
-    return_blocked_cells: bool = False
+    return_blocked_cells: bool = False,
+    router: Optional[GridRouter] = None
 ) -> Optional[List[Dict]]:
     """
     Route from via position to pad center using A* pathfinding.
@@ -371,15 +416,16 @@ def route_via_to_pad(
     sources = [(via_gx, via_gy, layer_idx)]
     targets = [(pad_gx, pad_gy, layer_idx)]
 
-    # Create router and find path
-    router = GridRouter(
-        via_cost=config.via_cost * 1000,
-        h_weight=config.heuristic_weight,
-        turn_cost=config.turn_cost,
-        via_proximity_cost=0,
-        layer_costs=config.get_layer_costs(),
-        proximity_heuristic_cost=config.get_proximity_heuristic_cost()
-    )
+    # Create or reuse router
+    if router is None:
+        router = GridRouter(
+            via_cost=config.via_cost * 1000,
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
 
     path, iterations, blocked_cells = router.route_with_frontier(
         routing_obstacles, sources, targets, max_iterations,
@@ -453,6 +499,151 @@ def route_via_to_pad(
     return segments
 
 
+def _block_route_as_obstacle(obstacles: GridObstacleMap, route_path: List[Tuple[float, float]],
+                              coord: 'GridCoord', layer_idx: int, expansion_grid: int):
+    """Block a route path as obstacle using batched numpy operations."""
+    radius_sq = expansion_grid * expansion_grid
+    # Pre-compute the circle template (offsets that fall within the circle)
+    circle_offsets = []
+    for ex in range(-expansion_grid, expansion_grid + 1):
+        for ey in range(-expansion_grid, expansion_grid + 1):
+            if ex * ex + ey * ey <= radius_sq:
+                circle_offsets.append((ex, ey))
+    circle_offsets_arr = np.array(circle_offsets, dtype=np.int32)  # shape (K, 2)
+    num_offsets = len(circle_offsets)
+
+    # Collect all center points along all segments using Bresenham
+    centers = []
+    for i in range(len(route_path) - 1):
+        p1, p2 = route_path[i], route_path[i + 1]
+        gx1, gy1 = coord.to_grid(p1[0], p1[1])
+        gx2, gy2 = coord.to_grid(p2[0], p2[1])
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        gx, gy = gx1, gy1
+        if dx > dy:
+            err = dx / 2
+            while gx != gx2:
+                centers.append((gx, gy))
+                err -= dy
+                if err < 0:
+                    gy += sy
+                    err += dx
+                gx += sx
+        else:
+            err = dy / 2
+            while gy != gy2:
+                centers.append((gx, gy))
+                err -= dx
+                if err < 0:
+                    gx += sx
+                    err += dy
+                gy += sy
+        centers.append((gx2, gy2))  # endpoint
+
+    if not centers:
+        return
+
+    # Expand all centers by the circle template using numpy broadcasting
+    centers_arr = np.array(centers, dtype=np.int32)  # shape (N, 2)
+    # Broadcast: (N, 1, 2) + (1, K, 2) -> (N, K, 2)
+    all_cells = centers_arr[:, np.newaxis, :] + circle_offsets_arr[np.newaxis, :, :]
+    all_cells = all_cells.reshape(-1, 2)  # shape (N*K, 2)
+    # Add layer column
+    layer_col = np.full((all_cells.shape[0], 1), layer_idx, dtype=np.int32)
+    all_cells_3 = np.hstack([all_cells, layer_col])  # shape (N*K, 3)
+    obstacles.add_blocked_cells_batch(all_cells_3)
+
+
+def build_plane_base_obstacles(
+    plane_layer: str,
+    net_id: int,
+    other_nets_vias: Dict[int, List[Tuple[float, float]]],
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+    proximity_radius: float = 3.0,
+    proximity_cost: float = 2.0,
+    track_via_clearance: float = defaults.PLANE_TRACK_VIA_CLEARANCE,
+    previous_routes: Optional[List[List[Tuple[float, float]]]] = None
+) -> GridObstacleMap:
+    """
+    Build base obstacle map for plane routing (reusable across multiple MST edges).
+
+    Includes: other nets' via blocking + proximity, segment blocking, previous route
+    blocking, and board edge blocking. Does NOT include source/target cells.
+    """
+    coord = GridCoord(config.grid_step)
+    layer_idx = 0
+    obstacles = GridObstacleMap(1)
+
+    # Block other nets' vias as hard obstacles using batched numpy operations
+    via_radius = coord.to_grid_dist(track_via_clearance)
+    radius_sq = via_radius * via_radius
+    # Pre-compute circle template
+    circle_offsets = []
+    for ex in range(-via_radius, via_radius + 1):
+        for ey in range(-via_radius, via_radius + 1):
+            if ex * ex + ey * ey <= radius_sq:
+                circle_offsets.append((ex, ey))
+
+    all_via_centers = []
+    for via_positions in other_nets_vias.values():
+        for vx, vy in via_positions:
+            gx, gy = coord.to_grid(vx, vy)
+            all_via_centers.append((gx, gy))
+
+    if all_via_centers and circle_offsets:
+        centers_arr = np.array(all_via_centers, dtype=np.int32)
+        offsets_arr = np.array(circle_offsets, dtype=np.int32)
+        all_cells = centers_arr[:, np.newaxis, :] + offsets_arr[np.newaxis, :, :]
+        all_cells = all_cells.reshape(-1, 2)
+        layer_col = np.full((all_cells.shape[0], 1), layer_idx, dtype=np.int32)
+        all_cells_3 = np.hstack([all_cells, layer_col])
+        obstacles.add_blocked_cells_batch(all_cells_3)
+
+    # Add proximity costs around other nets' vias
+    proximity_radius_grid = coord.to_grid_dist(proximity_radius)
+    proximity_cost_grid = int(proximity_cost * 1000 / config.grid_step)
+
+    all_other_vias_grid = []
+    for via_positions in other_nets_vias.values():
+        for vx, vy in via_positions:
+            gx, gy = coord.to_grid(vx, vy)
+            all_other_vias_grid.append((gx, gy))
+
+    if all_other_vias_grid:
+        obstacles.add_stub_proximity_costs_batch(
+            all_other_vias_grid,
+            proximity_radius_grid,
+            proximity_cost_grid,
+            False
+        )
+
+    # Block existing segments on this layer from other nets
+    for seg in pcb_data.segments:
+        if seg.net_id == net_id:
+            continue
+        if seg.layer != plane_layer:
+            continue
+        seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
+        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
+        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+
+    # Block previous routes from other nets
+    if previous_routes:
+        route_expansion_mm = config.track_width + config.clearance
+        route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
+        for route_path in previous_routes:
+            _block_route_as_obstacle(obstacles, route_path, coord, layer_idx, route_expansion_grid)
+
+    # Block board edges
+    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
+
+    return obstacles
+
+
 def route_plane_connection(
     via_a: Tuple[float, float],
     via_b: Tuple[float, float],
@@ -466,7 +657,9 @@ def route_plane_connection(
     track_via_clearance: float = defaults.PLANE_TRACK_VIA_CLEARANCE,
     max_iterations: int = 200000,
     verbose: bool = False,
-    previous_routes: Optional[List[List[Tuple[float, float]]]] = None
+    previous_routes: Optional[List[List[Tuple[float, float]]]] = None,
+    base_obstacles: Optional[GridObstacleMap] = None,
+    router: Optional[GridRouter] = None
 ) -> Optional[List[Tuple[float, float]]]:
     """
     Route a trace on the plane layer between two vias, avoiding other nets' vias.
@@ -486,107 +679,24 @@ def route_plane_connection(
         max_iterations: Maximum A* iterations
         verbose: Print debug info
         previous_routes: List of previously routed paths from other nets to avoid (each is a list of (x,y) points)
+        base_obstacles: Optional pre-built obstacle map (cloned for this route).
+            If None, builds from scratch (backward compatible).
+        router: Optional pre-built GridRouter instance to reuse.
 
     Returns:
         List of (x, y) points along the route, or None if routing fails
     """
     coord = GridCoord(config.grid_step)
-
-    # Build single-layer obstacle map
-    num_layers = 1
     layer_idx = 0
-    obstacles = GridObstacleMap(num_layers)
 
-    # Block other nets' vias as hard obstacles
-    # Use track_via_clearance as radius from via center to track center
-    for other_net_id, via_positions in other_nets_vias.items():
-        for vx, vy in via_positions:
-            gx, gy = coord.to_grid(vx, vy)
-            # Block a circular area around each via using track_via_clearance
-            # This ensures routes stay far enough from vias for polygons to fit
-            via_radius = coord.to_grid_dist(track_via_clearance)
-            for ex in range(-via_radius, via_radius + 1):
-                for ey in range(-via_radius, via_radius + 1):
-                    if ex * ex + ey * ey <= via_radius * via_radius:
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-
-    # Add proximity costs around other nets' vias
-    proximity_radius_grid = coord.to_grid_dist(proximity_radius)
-    proximity_cost_grid = int(proximity_cost * 1000 / config.grid_step)
-
-    all_other_vias = []
-    for via_positions in other_nets_vias.values():
-        for vx, vy in via_positions:
-            gx, gy = coord.to_grid(vx, vy)
-            all_other_vias.append((gx, gy))
-
-    if all_other_vias:
-        obstacles.add_stub_proximity_costs_batch(
-            all_other_vias,
-            proximity_radius_grid,
-            proximity_cost_grid,
-            False  # Don't block vias (we just want proximity cost)
+    if base_obstacles is not None:
+        obstacles = base_obstacles.clone_fresh()
+    else:
+        # Backward-compatible: build from scratch
+        obstacles = build_plane_base_obstacles(
+            plane_layer, net_id, other_nets_vias, config, pcb_data,
+            proximity_radius, proximity_cost, track_via_clearance, previous_routes
         )
-
-    # Also block existing segments on this layer from other nets
-    for seg in pcb_data.segments:
-        if seg.net_id == net_id:
-            continue
-        if seg.layer != plane_layer:
-            continue
-        seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
-        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
-
-    # Block previous routes between disconnected regions (same net, avoid self-crossing)
-    if previous_routes:
-        route_expansion_mm = config.track_width + config.clearance
-        route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
-        for route_path in previous_routes:
-            for i in range(len(route_path) - 1):
-                p1, p2 = route_path[i], route_path[i + 1]
-                # Create a temporary segment-like structure for blocking
-                gx1, gy1 = coord.to_grid(p1[0], p1[1])
-                gx2, gy2 = coord.to_grid(p2[0], p2[1])
-                # Block along the line with expansion
-                dx = abs(gx2 - gx1)
-                dy = abs(gy2 - gy1)
-                sx = 1 if gx1 < gx2 else -1
-                sy = 1 if gy1 < gy2 else -1
-                gx, gy = gx1, gy1
-                radius_sq = route_expansion_grid * route_expansion_grid
-                if dx > dy:
-                    err = dx / 2
-                    while gx != gx2:
-                        for ex in range(-route_expansion_grid, route_expansion_grid + 1):
-                            for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                                if ex*ex + ey*ey <= radius_sq:
-                                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-                        err -= dy
-                        if err < 0:
-                            gy += sy
-                            err += dx
-                        gx += sx
-                else:
-                    err = dy / 2
-                    while gy != gy2:
-                        for ex in range(-route_expansion_grid, route_expansion_grid + 1):
-                            for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                                if ex*ex + ey*ey <= radius_sq:
-                                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-                        err -= dx
-                        if err < 0:
-                            gx += sx
-                            err += dy
-                        gy += sy
-                # Block endpoint
-                for ex in range(-route_expansion_grid, route_expansion_grid + 1):
-                    for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                        if ex*ex + ey*ey <= radius_sq:
-                            obstacles.add_blocked_cell(gx2 + ex, gy2 + ey, layer_idx)
-
-    # Block board edges (supports non-rectangular boards)
-    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
 
     # Set up source and target
     via_a_gx, via_a_gy = coord.to_grid(via_a[0], via_a[1])
@@ -599,15 +709,16 @@ def route_plane_connection(
     sources = [(via_a_gx, via_a_gy, layer_idx)]
     targets = [(via_b_gx, via_b_gy, layer_idx)]
 
-    # Create router and find path
-    router = GridRouter(
-        via_cost=config.via_cost * 1000,
-        h_weight=config.heuristic_weight,
-        turn_cost=config.turn_cost,
-        via_proximity_cost=0,
-        layer_costs=config.get_layer_costs(),
-        proximity_heuristic_cost=config.get_proximity_heuristic_cost()
-    )
+    # Create or reuse router
+    if router is None:
+        router = GridRouter(
+            via_cost=config.via_cost * 1000,
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
 
     path, iterations, _ = router.route_with_frontier(
         obstacles, sources, targets, max_iterations,
@@ -685,24 +796,30 @@ def _generate_multinet_layer_zones(
 
     # Build vias_by_net for this layer
     vias_by_net: Dict[int, List[Tuple[float, float]]] = {}
+    vias_by_net_set: Dict[int, Set[Tuple[float, float]]] = {}  # For O(1) dedup
     net_name_to_id = {}
     for net_name in nets_on_layer:
         net_id = next((nid for nid, n in pcb_data.nets.items() if n.name == net_name), None)
         if net_id is not None:
             net_name_to_id[net_name] = net_id
             vias_by_net[net_id] = []
+            vias_by_net_set[net_id] = set()
 
     # Collect via positions for nets on this layer
     for via in all_new_vias:
-        if via['net_id'] in vias_by_net:
-            vias_by_net[via['net_id']].append((via['x'], via['y']))
+        nid = via['net_id']
+        if nid in vias_by_net:
+            pos = (via['x'], via['y'])
+            vias_by_net[nid].append(pos)
+            vias_by_net_set[nid].add(pos)
 
-    # Also include existing vias from the PCB
+    # Also include existing vias from the PCB (dedup with O(1) set lookup)
     for via in pcb_data.vias:
         if via.net_id in vias_by_net:
             via_pos = (via.x, via.y)
-            if via_pos not in vias_by_net[via.net_id]:
+            if via_pos not in vias_by_net_set[via.net_id]:
                 vias_by_net[via.net_id].append(via_pos)
+                vias_by_net_set[via.net_id].add(via_pos)
 
     # Check for nets with no vias
     nets_with_vias = []
@@ -776,6 +893,16 @@ def _generate_multinet_layer_zones(
         failed_nets = set()
         total_failed_edges = 0
 
+        # Create router once per MST iteration (reused across all nets/edges)
+        plane_router = GridRouter(
+            via_cost=config.via_cost * 1000,
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
+
         for net_id in net_order:
             net = pcb_data.nets.get(net_id)
             net_name = net.name if net else f"net_{net_id}"
@@ -787,15 +914,31 @@ def _generate_multinet_layer_zones(
                 if other_net_id != net_id:
                     other_nets_vias[other_net_id] = other_vias
 
+            # Compute other_nets_routes once per net (only contains routes from OTHER nets,
+            # so it doesn't change within this net's MST edge loop)
+            other_nets_routes = [
+                route for route_net_id, _, route in connection_routes
+                if route_net_id != net_id
+            ]
+
+            # Build base obstacle map once per net (includes via blocking, segment blocking,
+            # other nets' route blocking, and board edges - everything except source/target)
+            base_obstacles = build_plane_base_obstacles(
+                plane_layer=layer,
+                net_id=net_id,
+                other_nets_vias=other_nets_vias,
+                config=config,
+                pcb_data=pcb_data,
+                proximity_radius=plane_proximity_radius,
+                proximity_cost=plane_proximity_cost,
+                track_via_clearance=plane_track_via_clearance,
+                previous_routes=other_nets_routes
+            )
+
             routed_count = 0
             failed_count = 0
 
             for via_a, via_b in mst_edges:
-                other_nets_routes = [
-                    route for route_net_id, _, route in connection_routes
-                    if route_net_id != net_id
-                ]
-
                 route_path = route_plane_connection(
                     via_a=via_a,
                     via_b=via_b,
@@ -809,7 +952,9 @@ def _generate_multinet_layer_zones(
                     track_via_clearance=plane_track_via_clearance,
                     max_iterations=plane_max_iterations,
                     verbose=verbose,
-                    previous_routes=other_nets_routes
+                    previous_routes=other_nets_routes,
+                    base_obstacles=base_obstacles,
+                    router=plane_router
                 )
 
                 if route_path:
@@ -1171,6 +1316,16 @@ def create_plane(
     )
     coord = GridCoord(grid_step)
 
+    # Create reusable router for via-to-pad routing
+    via_pad_router = GridRouter(
+        via_cost=config.via_cost * 1000,
+        h_weight=config.heuristic_weight,
+        turn_cost=config.turn_cost,
+        via_proximity_cost=0,
+        layer_costs=config.get_layer_costs(),
+        proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+    )
+
     # Accumulated results across all nets
     all_new_vias = []
     all_new_segments = []
@@ -1268,6 +1423,9 @@ def create_plane(
         for placed_via in all_new_vias:
             if placed_via['net_id'] == net_id:
                 available_vias.append((placed_via['x'], placed_via['y']))
+        # Build spatial index for fast nearest-via queries
+        via_index = ViaSpatialIndex(bucket_size=max_search_radius)
+        via_index.add_all(available_vias)
 
         # Cache for incremental obstacle updates during rip-up
         # Computed lazily when we first encounter each blocker net
@@ -1297,6 +1455,20 @@ def create_plane(
                 all_debug_lines.append(generate_gr_line_sexpr((x2, y2), (x1, y2), 0.05, "User.9"))
                 all_debug_lines.append(generate_gr_line_sexpr((x1, y2), (x1, y1), 0.05, "User.9"))
 
+        # Pre-build base pending pads list (other power net pads) once per net
+        # This avoids rebuilding the same list for every pad in the inner loop
+        base_pending_pads = []
+        for other_net_id in net_ids:
+            if other_net_id == net_id:
+                continue
+            other_pads = pcb_data.pads_by_net.get(other_net_id, [])
+            for op in other_pads:
+                base_pending_pads.append({'pad': op, 'needs_via': False})
+
+        # Track ripped net pads incrementally
+        ripped_pending_pads = []
+        last_ripped_count = 0
+
         if pads_needing_vias:
             print(f"\nConnecting {len(pads_needing_vias)} pads to {plane_layer} plane:")
 
@@ -1310,27 +1482,26 @@ def create_plane(
             if current_pad_key in processed_pad_ids:
                 continue
 
-            # Pending pads are ALL pads from OTHER power nets (cross-net protection)
-            # Plus pads from ripped nets that will need to be rerouted
-            # We protect ALL pads from other nets, not just those needing vias
-            pending_pads = []
-            # Add ALL pads from other power nets (not just those needing vias)
-            for other_net_id in net_ids:
-                if other_net_id == net_id:
-                    continue  # Skip current net's pads
-                other_pads = pcb_data.pads_by_net.get(other_net_id, [])
-                for op in other_pads:
-                    op_key = (op.global_x, op.global_y)
-                    if op_key != current_pad_key and op_key not in processed_pad_ids:
-                        pending_pads.append({'pad': op, 'needs_via': False})
-            # Also protect pads from ripped nets (they need to be rerouted later)
-            for ripped_id in all_ripped_net_ids:
-                ripped_pads = pcb_data.pads_by_net.get(ripped_id, [])
-                for rp in ripped_pads:
-                    rp_key = (rp.global_x, rp.global_y)
-                    if rp_key != current_pad_key and rp_key not in processed_pad_ids:
-                        # Create a pad_info dict compatible with pending_pads format
-                        pending_pads.append({'pad': rp, 'needs_via': True})
+            # Incrementally add pads from newly ripped nets
+            if len(all_ripped_net_ids) > last_ripped_count:
+                for ripped_id in all_ripped_net_ids[last_ripped_count:]:
+                    ripped_pads = pcb_data.pads_by_net.get(ripped_id, [])
+                    for rp in ripped_pads:
+                        ripped_pending_pads.append({'pad': rp, 'needs_via': True})
+                last_ripped_count = len(all_ripped_net_ids)
+
+            # Filter base + ripped pending pads by current state
+            pending_pads = [
+                pp for pp in base_pending_pads
+                if (pp['pad'].global_x, pp['pad'].global_y) != current_pad_key
+                and (pp['pad'].global_x, pp['pad'].global_y) not in processed_pad_ids
+            ]
+            if ripped_pending_pads:
+                pending_pads.extend(
+                    pp for pp in ripped_pending_pads
+                    if (pp['pad'].global_x, pp['pad'].global_y) != current_pad_key
+                    and (pp['pad'].global_x, pp['pad'].global_y) not in processed_pad_ids
+                )
 
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
 
@@ -1338,7 +1509,7 @@ def create_plane(
             # This handles cases like decoupling caps where both pads are on same net
             # Check for nearby existing via before placing a new one
             effective_close_via_radius = close_via_radius if close_via_radius is not None else via_size * 2.5
-            nearby_via = find_existing_via_nearby(pad, available_vias, effective_close_via_radius)
+            nearby_via = via_index.find_nearest(pad.global_x, pad.global_y, effective_close_via_radius)
             if nearby_via:
                 # Via already very close - try to reuse it
                 via_pos = nearby_via
@@ -1348,7 +1519,7 @@ def create_plane(
                     routing_obs = get_routing_obstacles(pad_layer)
                     route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
                                                    routing_obs, config, verbose=verbose,
-                                                   return_blocked_cells=True)
+                                                   return_blocked_cells=True, router=via_pad_router)
                     trace_segments = route_result.segments if route_result.success else None
                     if trace_segments is not None:
                         if trace_segments:
@@ -1406,6 +1577,7 @@ def create_plane(
                     'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
                 })
                 available_vias.append(via_in_pad)
+                via_index.add(via_in_pad[0], via_in_pad[1])
                 vias_placed += 1
                 # Block this via position for hole-to-hole clearance
                 block_via_position(obstacles, via_in_pad[0], via_in_pad[1], coord,
@@ -1418,7 +1590,7 @@ def create_plane(
                 continue  # Move to next pad
 
             # Pad center blocked - check if there's an existing via nearby to reuse
-            existing_via = find_existing_via_nearby(pad, available_vias, max_via_reuse_radius)
+            existing_via = via_index.find_nearest(pad.global_x, pad.global_y, max_via_reuse_radius)
 
             if existing_via:
                 # Try to reuse existing via - route trace to connect
@@ -1429,7 +1601,7 @@ def create_plane(
                     routing_obs = get_routing_obstacles(pad_layer)
                     route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
                                                        routing_obs, config, verbose=verbose,
-                                                       return_blocked_cells=True)
+                                                       return_blocked_cells=True, router=via_pad_router)
                     trace_segments = route_result.segments if route_result.success else None
                     if trace_segments is None:
                         # Routing to existing via failed - fall back to placing new via
@@ -1466,7 +1638,8 @@ def create_plane(
                 net_id=net_id,
                 verbose=verbose,
                 failed_route_positions=failed_route_positions,
-                pending_pads=pending_pads
+                pending_pads=pending_pads,
+                router=via_pad_router
             )
 
             placement_success = False
@@ -1483,7 +1656,7 @@ def create_plane(
                 elif pad_layer:
                     route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
                                                        routing_obs, config, verbose=verbose,
-                                                       return_blocked_cells=True)
+                                                       return_blocked_cells=True, router=via_pad_router)
                     if route_result.success:
                         trace_segments = route_result.segments
                         placement_success = True
@@ -1532,6 +1705,7 @@ def create_plane(
                     vias_placed += 1
                     processed_pad_ids.add(current_pad_key)
                     available_vias.append(result.via_pos)
+                    via_index.add(result.via_pos[0], result.via_pos[1])
                     new_segments.extend(result.segments)
                     traces_added += len(result.segments)
                     block_via_position(obstacles, result.via_pos[0], result.via_pos[1], coord,
@@ -1558,6 +1732,7 @@ def create_plane(
                 vias_placed += 1
                 processed_pad_ids.add(current_pad_key)
                 available_vias.append(via_pos)
+                via_index.add(via_pos[0], via_pos[1])
                 if trace_segments:
                     new_segments.extend(trace_segments)
                     traces_added += len(trace_segments)
@@ -1571,13 +1746,14 @@ def create_plane(
 
             elif not rip_blocker_nets:
                 # Fast path failed, no rip-up enabled - try fallback via reuse
-                fallback_via = find_existing_via_nearby(pad, available_vias, max_search_radius)
+                fallback_via = via_index.find_nearest(pad.global_x, pad.global_y, max_search_radius)
                 if fallback_via:
                     via_pos = fallback_via
                     if pad_layer:
                         routing_obs = get_routing_obstacles(pad_layer)
                         trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                                           routing_obs, config, verbose=verbose)
+                                                           routing_obs, config, verbose=verbose,
+                                                           router=via_pad_router)
                         if trace_segments is None:
                             print(f"{RED}ROUTING FAILED{RESET}")
                             failed_pads += 1

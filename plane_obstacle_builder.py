@@ -9,6 +9,8 @@ Provides functions to build obstacle maps for:
 import math
 from typing import List, Dict, Tuple, Optional
 
+import numpy as np
+
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
@@ -18,6 +20,73 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap
+
+
+def _precompute_circle_offsets(radius_sq: float) -> np.ndarray:
+    """Pre-compute circle offsets for a given squared radius.
+
+    Returns numpy array of shape (N, 2) with (dx, dy) offsets.
+    """
+    radius_int = int(math.ceil(math.sqrt(radius_sq)))
+    offsets = []
+    for ex in range(-radius_int, radius_int + 1):
+        for ey in range(-radius_int, radius_int + 1):
+            if ex * ex + ey * ey <= radius_sq:
+                offsets.append((ex, ey))
+    return np.array(offsets, dtype=np.int32)
+
+
+def _bresenham_centers(gx1: int, gy1: int, gx2: int, gy2: int) -> List[Tuple[int, int]]:
+    """Walk a Bresenham line and return all grid center points."""
+    centers = []
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+    x, y = gx1, gy1
+    if dx > dy:
+        err = dx / 2
+        while x != gx2:
+            centers.append((x, y))
+            err -= dy
+            if err < 0:
+                y += sy
+                err += dx
+            x += sx
+    else:
+        err = dy / 2
+        while y != gy2:
+            centers.append((x, y))
+            err -= dx
+            if err < 0:
+                x += sx
+                err += dy
+            y += sy
+    centers.append((gx2, gy2))
+    return centers
+
+
+def _batch_block_circles_via(obstacles: GridObstacleMap, centers: List[Tuple[int, int]],
+                              circle_offsets: np.ndarray):
+    """Block via positions for multiple centers using batched numpy operations."""
+    if not centers:
+        return
+    centers_arr = np.array(centers, dtype=np.int32)  # (N, 2)
+    # Broadcast: (N, 1, 2) + (1, K, 2) -> (N, K, 2) -> (N*K, 2)
+    all_cells = (centers_arr[:, np.newaxis, :] + circle_offsets[np.newaxis, :, :]).reshape(-1, 2)
+    obstacles.add_blocked_vias_batch(all_cells)
+
+
+def _batch_block_circles_cell(obstacles: GridObstacleMap, centers: List[Tuple[int, int]],
+                               circle_offsets: np.ndarray, layer_idx: int):
+    """Block cells for multiple centers using batched numpy operations."""
+    if not centers:
+        return
+    centers_arr = np.array(centers, dtype=np.int32)  # (N, 2)
+    all_cells = (centers_arr[:, np.newaxis, :] + circle_offsets[np.newaxis, :, :]).reshape(-1, 2)
+    layer_col = np.full((all_cells.shape[0], 1), layer_idx, dtype=np.int32)
+    all_cells_3 = np.hstack([all_cells, layer_col])  # (N*K, 3)
+    obstacles.add_blocked_cells_batch(all_cells_3)
 
 
 def block_circle(obstacles: GridObstacleMap, cx: int, cy: int, radius_sq: float,
@@ -136,14 +205,11 @@ def build_via_obstacle_map(
     via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
 
     # Add existing vias as obstacles (including same net - can't place via too close to another)
+    # Batched: pre-compute circle template, collect all centers, expand with numpy
     t0 = time.time()
-    for via in pcb_data.vias:
-        gx, gy = coord.to_grid(via.x, via.y)
-        # Block via placement within via-via clearance
-        for ex in range(-via_via_radius_int, via_via_radius_int + 1):
-            for ey in range(-via_via_radius_int, via_via_radius_int + 1):
-                if ex*ex + ey*ey <= via_via_radius_sq:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+    circle_offsets = _precompute_circle_offsets(via_via_radius_sq)
+    via_centers = [(coord.to_grid(via.x, via.y)) for via in pcb_data.vias]
+    _batch_block_circles_via(obstacles, via_centers, circle_offsets)
     if verbose:
         print(f"  Vias: {len(pcb_data.vias)} vias in {time.time() - t0:.2f}s")
 
@@ -197,39 +263,14 @@ def build_via_obstacle_map(
 
 def _add_segment_via_obstacle(obstacles: GridObstacleMap, seg: Segment,
                                coord: GridCoord, expansion_mm: float):
-    """Add a segment as via blocking obstacle."""
+    """Add a segment as via blocking obstacle using batched numpy operations."""
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-    # Compute squared radius in grid units (avoids precision loss)
     radius_sq = (expansion_mm / coord.grid_step) ** 2
-
-    # Use Bresenham-style line blocking
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-
-    x, y = gx1, gy1
-    if dx > dy:
-        err = dx / 2
-        while x != gx2:
-            block_circle(obstacles, x, y, radius_sq, via_mode=True)
-            err -= dy
-            if err < 0:
-                y += sy
-                err += dx
-            x += sx
-    else:
-        err = dy / 2
-        while y != gy2:
-            block_circle(obstacles, x, y, radius_sq, via_mode=True)
-            err -= dx
-            if err < 0:
-                x += sx
-                err += dy
-            y += sy
-    block_circle(obstacles, gx2, gy2, radius_sq, via_mode=True)
+    circle_offsets = _precompute_circle_offsets(radius_sq)
+    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
+    _batch_block_circles_via(obstacles, centers, circle_offsets)
 
 
 def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
@@ -421,11 +462,18 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))
 
+    # Group drill holes by radius for batched blocking
+    from collections import defaultdict
+    radius_groups: Dict[float, List[Tuple[int, int]]] = defaultdict(list)
     for hx, hy, drill_dia in drill_holes:
         required_dist = drill_dia / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
         radius_sq = (required_dist / config.grid_step) ** 2
         gx, gy = coord.to_grid(hx, hy)
-        block_circle(obstacles, gx, gy, radius_sq, via_mode=True)
+        radius_groups[radius_sq].append((gx, gy))
+
+    for radius_sq, centers in radius_groups.items():
+        circle_offsets = _precompute_circle_offsets(radius_sq)
+        _batch_block_circles_via(obstacles, centers, circle_offsets)
 
 
 def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
@@ -561,34 +609,11 @@ def build_routing_obstacle_map(
 
 def _add_segment_routing_obstacle(obstacles: GridObstacleMap, seg: Segment,
                                     coord: GridCoord, layer_idx: int, expansion_grid: int):
-    """Add a segment as a routing obstacle on a specific layer."""
+    """Add a segment as a routing obstacle on a specific layer using batched numpy operations."""
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
-    # Bresenham line with expansion
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-
-    x, y = gx1, gy1
     radius_sq = expansion_grid * expansion_grid
-    if dx > dy:
-        err = dx / 2
-        while x != gx2:
-            block_circle(obstacles, x, y, radius_sq, layer_idx=layer_idx, via_mode=False)
-            err -= dy
-            if err < 0:
-                y += sy
-                err += dx
-            x += sx
-    else:
-        err = dy / 2
-        while y != gy2:
-            block_circle(obstacles, x, y, radius_sq, layer_idx=layer_idx, via_mode=False)
-            err -= dx
-            if err < 0:
-                x += sx
-                err += dy
-            y += sy
-    block_circle(obstacles, gx2, gy2, radius_sq, layer_idx=layer_idx, via_mode=False)
+    circle_offsets = _precompute_circle_offsets(radius_sq)
+    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
+    _batch_block_circles_cell(obstacles, centers, circle_offsets, layer_idx)
