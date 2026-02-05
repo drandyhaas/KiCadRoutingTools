@@ -49,6 +49,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a *
 - **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
 - **Disconnected plane region repair** - After power planes are created, regions may be effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects disconnected regions and routes wide, short tracks between them to ensure electrical continuity
 - **GND return via placement** - Automatically places GND vias near signal vias for return current paths. Searches from minimum viable distance outward (24 angles, fine step), placing GND vias as close as possible while respecting track clearances. Through-hole GND pads count as existing return paths. Use `--add-gnd-vias` with route_planes.py
+- **AI-powered high-speed net analysis** - Use the `/find-high-speed-nets` skill to identify which nets carry high-speed signals. Looks up component datasheets via WebSearch to find max interface frequencies and rise times, traces signals through series passives, and recommends `--gnd-via-distance` values based on the fastest signals on the board. See the [GND return via distance guidance](#gnd-return-via-distance-guidance) in the planes documentation
 
 ## Quick Start
 
@@ -104,8 +105,15 @@ Claude will:
 - Analyze your board structure and identify components needing fanout (BGA/QFN/PGA)
 - Detect differential pairs and DDR signals requiring length matching
 - Identify power/ground nets and recommend plane vs trace routing
+- Assess signal speeds and recommend GND return via placement
 - Generate a step-by-step routing plan with explanations
 - Run the commands and verify results
+
+Other useful skills:
+```
+> /find-high-speed-nets kicad_files/my_board.kicad_pcb   # Identify high-speed nets via datasheet lookup
+> /analyze-power-nets kicad_files/my_board.kicad_pcb     # Identify power nets and track widths
+```
 
 **Option C: Manual Command Line (For scripting and automation)**
 
@@ -357,7 +365,28 @@ The skill:
 
 See [Power Net Analysis](docs/power-nets.md) for detailed documentation.
 
-### 6. Integration Tests
+### 6. High-Speed Net Analysis
+
+Use the `/find-high-speed-nets` skill to identify high-speed nets and get GND return via recommendations:
+
+```
+# Ask Claude to analyze signal speeds with datasheet lookup
+/find-high-speed-nets kicad_files/my_board.kicad_pcb
+```
+
+The skill:
+1. Pre-classifies nets by name patterns (DDR, USB, SPI, CLK, etc.)
+2. Pre-classifies components by footprint (FPGA, DDR, PHY, etc.)
+3. Uses WebSearch to look up datasheets for ICs and extract max clock rates and rise times
+4. Traces high-speed signals through series passives (termination resistors, AC coupling caps)
+5. Generates a speed classification (ultra-high/high/medium/low) with recommended `--gnd-via-distance`
+
+The `/plan-pcb-routing` skill includes a lightweight version of this analysis (net name and
+footprint pattern matching only, no datasheet lookup) and automatically includes a GND return
+via step when GND planes are present. Run `/find-high-speed-nets` first for more accurate
+recommendations based on actual component specifications.
+
+### 7. Integration Tests
 
 ```bash
 # Run full integration test (fanout + routing + checks)
@@ -384,6 +413,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
+| [High-Speed Net Analysis](#6-high-speed-net-analysis) | Signal speed classification, GND return via recommendations |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 
 ## Project Structure
@@ -491,7 +521,9 @@ KiCadRoutingTools/
 ├── install_plugin.py         # Plugin installer script
 ├── docs/                     # Documentation
 └── .claude/skills/           # Claude Code skills
-    └── analyze-power-nets/   # AI-powered power net analysis skill
+    ├── analyze-power-nets/   # AI-powered power net analysis skill
+    ├── find-high-speed-nets/ # AI-powered high-speed net identification skill
+    └── plan-pcb-routing/     # AI-powered routing plan generation skill
 ```
 
 ## Module Overview
