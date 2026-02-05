@@ -714,65 +714,63 @@ def _try_route_between_regions(
     Returns:
         Tuple of (route_result, track_width_used, open_space_via_if_used)
     """
-    # Generate width steps: max, max/2, max/4, ..., min
-    track_widths_to_try = []
-    w = max_track_width
-    while w >= min_track_width:
-        track_widths_to_try.append(w)
-        w = w / 2
-    if track_widths_to_try[-1] > min_track_width:
-        track_widths_to_try.append(min_track_width)
+    import time as _time
+    _attempt_count = 0
+    _total_route_time = 0.0
+    _attempt_details = []
 
-    result = None
-    track_width = min_track_width
-    open_space_via = None
-
-    # Try each track width from widest to narrowest
-    for try_width in track_widths_to_try:
-        extra_margin_mm = (try_width - min_track_width) / 2
-        track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
-
-        # Try routing in both directions - A* can find different paths depending on direction
-        result = route_plane_connection_wide(
-            anchors_i, anchors_j,
+    def _try_route(src, tgt, margin, iters, label):
+        """Helper to attempt one route and track stats."""
+        nonlocal _attempt_count, _total_route_time
+        _t0 = _time.time()
+        result, used_iters = route_plane_connection_wide(
+            src, tgt,
             plane_layer_idx=plane_layer_idx,
             routing_layers=routing_layers,
             base_obstacles=base_obstacles,
             config=config,
             net_vias=net_vias,
-            track_margin=track_margin,
-            max_iterations=max_iterations,
+            track_margin=margin,
+            max_iterations=iters,
             verbose=verbose,
             router=router
         )
+        _dt = _time.time() - _t0
+        _attempt_count += 1
+        _total_route_time += _dt
+        _attempt_details.append(f"{label} {'OK' if result else 'fail'} {_dt:.2f}s/{used_iters}it")
+        return result, used_iters
 
-        if result is None:
-            result = route_plane_connection_wide(
-                anchors_j, anchors_i,
-                plane_layer_idx=plane_layer_idx,
-                routing_layers=routing_layers,
-                base_obstacles=base_obstacles,
-                config=config,
-                net_vias=net_vias,
-                track_margin=track_margin,
-                max_iterations=max_iterations,
-                verbose=verbose,
-                router=router
-            )
+    # Generate width steps: min, min*2, min*4, ..., up to max
+    track_widths_narrow_first = [min_track_width]
+    w = min_track_width * 2
+    while w <= max_track_width:
+        track_widths_narrow_first.append(w)
+        w = w * 2
+    if track_widths_narrow_first[-1] < max_track_width:
+        track_widths_narrow_first.append(max_track_width)
 
-        if result is not None:
-            track_width = try_width
-            if verbose and try_width < max_track_width:
-                print(f"width={try_width:.2f}mm...", end=" ", flush=True)
-            break
+    result = None
+    track_width = min_track_width
+    open_space_via = None
+    base_iterations = 0  # iterations used by narrowest successful route
 
-    # Fallback: try routing via open-space points (areas with maximum clearance)
+    # Step 1: Try minimum width first (both directions) with full budget
+    result, base_iterations = _try_route(
+        anchors_i, anchors_j, 0, max_iterations, f"w={min_track_width:.2f}mm A->B")
+
     if result is None:
-        if verbose:
-            print(f"trying open-space...", end=" ", flush=True)
+        result, base_iterations = _try_route(
+            anchors_j, anchors_i, 0, max_iterations, f"w={min_track_width:.2f}mm B->A")
 
+    if result is None:
+        # Can't route even at min width - try open-space fallback
+        _t0 = _time.time()
         open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord)
         open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord)
+        _dt_open = _time.time() - _t0
+        _attempt_details.append(f"open-search {_dt_open:.2f}s")
+        _total_route_time += _dt_open
 
         open_attempts = []
         if open_i:
@@ -783,26 +781,42 @@ def _try_route_between_regions(
             open_attempts.append((anchors_i + [open_i], anchors_j + [open_j], open_i))
 
         for src, tgt, via_candidate in open_attempts:
-            result = route_plane_connection_wide(
-                src, tgt,
-                plane_layer_idx=plane_layer_idx,
-                routing_layers=routing_layers,
-                base_obstacles=base_obstacles,
-                config=config,
-                net_vias=net_vias,
-                track_margin=0,  # min width for open-space
-                max_iterations=max_iterations,
-                verbose=verbose,
-                router=router
-            )
+            result, base_iterations = _try_route(src, tgt, 0, max_iterations, "open")
             if result:
-                track_width = min_track_width
                 route_pts = result[0]
                 for pt in route_pts:
                     if abs(pt[0] - via_candidate[0]) < 0.01 and abs(pt[1] - via_candidate[1]) < 0.01:
                         open_space_via = via_candidate
                         break
                 break
+
+    # Step 2: If we found a route at min width, try wider widths with bounded budget
+    if result is not None and len(track_widths_narrow_first) > 1:
+        narrow_result = result
+        iter_budget = max(base_iterations * 3, 1000)  # at least 1000
+
+        # Try wider widths (skip min_track_width which we already did)
+        for try_width in track_widths_narrow_first[1:]:
+            extra_margin_mm = (try_width - min_track_width) / 2
+            track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
+
+            wider, _ = _try_route(
+                anchors_i, anchors_j, track_margin, iter_budget,
+                f"w={try_width:.2f}mm A->B")
+
+            if wider is None:
+                wider, _ = _try_route(
+                    anchors_j, anchors_i, track_margin, iter_budget,
+                    f"w={try_width:.2f}mm B->A")
+
+            if wider is not None:
+                result = wider
+                track_width = try_width
+            else:
+                break  # If this width fails, wider ones will too
+
+    if verbose or _total_route_time > 2.0:
+        print(f"({_attempt_count} attempts, {_total_route_time:.1f}s: {'; '.join(_attempt_details)}) ", end="", flush=True)
 
     return result, track_width, open_space_via
 
@@ -1357,7 +1371,7 @@ def route_plane_connection_wide(
     if path is None:
         if verbose:
             print(f"    Route failed after {iterations} iterations")
-        return None
+        return None, iterations
 
     if verbose:
         print(f"    Route found in {iterations} iterations, {len(path)} points")
@@ -1395,7 +1409,7 @@ def route_plane_connection_wide(
                 continue  # Skip duplicate
         cleaned_points.append(pt)
 
-    return cleaned_points, new_via_positions
+    return (cleaned_points, new_via_positions), iterations
 
 
 def _block_segment_obstacle(
