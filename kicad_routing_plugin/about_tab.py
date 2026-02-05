@@ -19,10 +19,12 @@ ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 class AboutTab(wx.Panel):
     """About tab panel with version info, author, and links."""
 
-    def __init__(self, parent, on_reset_settings=None, on_transparency_changed=None, initial_transparency=240):
+    def __init__(self, parent, on_reset_settings=None, on_transparency_changed=None,
+                 initial_transparency=240, on_validate_pcb_data=None):
         super().__init__(parent)
         self.on_reset_settings = on_reset_settings
         self.on_transparency_changed = on_transparency_changed
+        self.on_validate_pcb_data = on_validate_pcb_data
         self._initial_transparency = initial_transparency
         self._needs_layout_refresh = True
         self._create_ui()
@@ -130,6 +132,15 @@ class AboutTab(wx.Panel):
         transparency_sizer.Add(self.transparency_slider, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         about_sizer.Add(transparency_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 30)
 
+        # Validate PCB Data button
+        validate_btn = wx.Button(self, label="Validate PCB Data")
+        validate_btn.SetToolTip(
+            "Compare pcbnew-extracted data against file parse to verify correctness.\n"
+            "Results are shown in the Log tab."
+        )
+        validate_btn.Bind(wx.EVT_BUTTON, self._on_validate_pcb_data)
+        about_sizer.Add(validate_btn, 0, wx.ALIGN_CENTER | wx.TOP, 20)
+
         # Reset settings button
         about_sizer.AddStretchSpacer()
         reset_btn = wx.Button(self, label="Reset All Settings to Defaults")
@@ -138,6 +149,11 @@ class AboutTab(wx.Panel):
         about_sizer.Add(reset_btn, 0, wx.ALIGN_CENTER | wx.ALL, 20)
 
         self.SetSizer(about_sizer)
+
+    def _on_validate_pcb_data(self, event):
+        """Handle validate PCB data button click."""
+        if self.on_validate_pcb_data:
+            self.on_validate_pcb_data()
 
     def _on_reset_settings(self, event):
         """Handle reset settings button click."""

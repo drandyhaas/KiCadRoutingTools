@@ -33,6 +33,13 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
         if os.path.exists(icon_path):
             self.icon_file_name = icon_path
 
+        # Pre-import modules so they're cached for faster startup on button click
+        try:
+            import kicad_parser
+            import routing_defaults
+        except Exception:
+            pass
+
     def Run(self):
         """Called when the plugin is invoked from the menu or toolbar."""
         try:
@@ -55,27 +62,20 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
             )
             return
 
-        # Get the board filename
-        board_filename = board.GetFileName()
-        if not board_filename:
-            wx.MessageBox(
-                "Please save the board before routing.",
-                "Board Not Saved",
-                wx.OK | wx.ICON_WARNING
-            )
-            return
+        # Get the board filename (used for settings persistence and validation)
+        board_filename = board.GetFileName() or ""
 
         # Import our modules
-        from kicad_parser import parse_kicad_pcb
+        from kicad_parser import build_pcb_data_from_board
         from .swig_gui import RoutingDialog
 
-        # Parse the board file to get our PCBData structure
+        # Build PCBData directly from pcbnew's in-memory board (fast, no file I/O)
         try:
-            pcb_data = parse_kicad_pcb(board_filename)
+            pcb_data = build_pcb_data_from_board(board)
         except Exception as e:
             wx.MessageBox(
-                f"Failed to parse board file:\n\n{e}",
-                "Parse Error",
+                f"Failed to read board data:\n\n{e}",
+                "Board Read Error",
                 wx.OK | wx.ICON_ERROR
             )
             return

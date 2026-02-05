@@ -160,6 +160,7 @@ class RoutingDialog(wx.Dialog):
         self._connectivity_cache = {}  # Cache: net_id -> is_connected
         self._saved_settings = saved_settings  # Settings to restore after init
         self._last_notebook = None  # Track netclass notebook for cleanup
+        self._initial_load = True  # Skip board sync on first refresh (data is already current)
 
         self._create_ui()
         self._load_nets_immediate()  # Load net names only (fast)
@@ -289,8 +290,44 @@ class RoutingDialog(wx.Dialog):
             self.notebook,
             on_reset_settings=self._reset_all_settings,
             on_transparency_changed=self._on_transparency_changed,
-            initial_transparency=self._initial_transparency
+            initial_transparency=self._initial_transparency,
+            on_validate_pcb_data=self._validate_pcb_data
         )
+
+    def _validate_pcb_data(self):
+        """Compare pcbnew-extracted PCBData against file-parsed PCBData."""
+        from kicad_parser import parse_kicad_pcb, compare_pcb_data
+
+        if not self.board_filename:
+            self._append_log("Validation: Board has no filename (not saved yet). "
+                             "Save the board first to enable file-based validation.\n")
+            return
+
+        self._append_log("=== PCB Data Validation ===\n")
+        self._append_log(f"Comparing pcbnew data vs file parse of: {self.board_filename}\n")
+
+        try:
+            file_data = parse_kicad_pcb(self.board_filename)
+        except Exception as e:
+            self._append_log(f"Error parsing file: {e}\n")
+            return
+
+        diffs = compare_pcb_data(self.pcb_data, file_data)
+
+        if not diffs:
+            self._append_log("PASS: No differences found! pcbnew data matches file parse.\n")
+        else:
+            self._append_log(f"Found {len(diffs)} difference(s):\n")
+            for diff in diffs:
+                self._append_log(f"  - {diff}\n")
+
+        self._append_log("=== Validation Complete ===\n\n")
+
+        # Switch to log tab to show results
+        for i in range(self.notebook.GetPageCount()):
+            if self.notebook.GetPageText(i) == "Log":
+                self.notebook.SetSelection(i)
+                break
 
     def _on_transparency_changed(self, value):
         """Handle transparency slider change from About tab."""
@@ -1228,9 +1265,13 @@ class RoutingDialog(wx.Dialog):
         saved_diff_pairs = set(self.differential_tab.pair_panel._checked_pairs)
 
         # Sync pcb_data with pcbnew's in-memory board state
-        self.status_text.SetLabel("Syncing with board...")
-        wx.Yield()
-        self._sync_pcb_data_from_board()
+        # Skip on initial load since pcb_data was built directly from pcbnew
+        if self._initial_load:
+            self._initial_load = False
+        else:
+            self.status_text.SetLabel("Syncing with board...")
+            wx.Yield()
+            self._sync_pcb_data_from_board()
 
         # Run connectivity check with progress
         self._check_connectivity_with_progress()

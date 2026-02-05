@@ -794,6 +794,688 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
     )
 
 
+def build_pcb_data_from_board(board) -> PCBData:
+    """Build PCBData directly from a pcbnew board object (no file I/O).
+
+    This is much faster than parse_kicad_pcb() since it reads from pcbnew's
+    in-memory data structures rather than parsing the file from disk.
+
+    Args:
+        board: A pcbnew.BOARD object (from pcbnew.GetBoard())
+
+    Returns:
+        PCBData object containing all routing-relevant data
+    """
+    import pcbnew
+
+    def to_mm(val):
+        return pcbnew.ToMM(val)
+
+    # --- Build layer mappings ---
+    id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
+    for i in range(1, 31):
+        layer_id = getattr(pcbnew, f'In{i}_Cu', None)
+        if layer_id is not None:
+            id_to_name[layer_id] = f'In{i}.Cu'
+
+    def get_layer_name(layer_id):
+        if layer_id in id_to_name:
+            return id_to_name[layer_id]
+        return board.GetLayerName(layer_id)
+
+    # --- Pad shape mapping ---
+    pad_shape_map = {}
+    for attr, name in [
+        ('PAD_SHAPE_CIRCLE', 'circle'),
+        ('PAD_SHAPE_RECT', 'rect'),
+        ('PAD_SHAPE_OVAL', 'oval'),
+        ('PAD_SHAPE_ROUNDRECT', 'roundrect'),
+        ('PAD_SHAPE_TRAPEZOID', 'trapezoid'),
+        ('PAD_SHAPE_CUSTOM', 'custom'),
+        ('PAD_SHAPE_CHAMFERED_RECT', 'roundrect'),
+    ]:
+        val = getattr(pcbnew, attr, None)
+        if val is not None:
+            pad_shape_map[val] = name
+
+    def get_pad_shape_name(shape_enum):
+        return pad_shape_map.get(shape_enum, 'rect')
+
+    def get_pad_layers(pad):
+        """Get layer names from a pad's layer set, using wildcards to match file format."""
+        layer_set = pad.GetLayerSet()
+        layers = []
+
+        # Check copper layers - use *.Cu wildcard if pad is on ALL copper layers
+        copper_on = [lname for lid, lname in id_to_name.items() if layer_set.Contains(lid)]
+        if len(copper_on) == len(id_to_name):
+            layers.append('*.Cu')
+        elif copper_on:
+            layers.extend(copper_on)
+
+        # Check mask layers - use *.Mask wildcard if both present
+        f_mask_id = getattr(pcbnew, 'F_Mask', None)
+        b_mask_id = getattr(pcbnew, 'B_Mask', None)
+        has_f_mask = f_mask_id is not None and layer_set.Contains(f_mask_id)
+        has_b_mask = b_mask_id is not None and layer_set.Contains(b_mask_id)
+        if has_f_mask and has_b_mask:
+            layers.append('*.Mask')
+        else:
+            if has_f_mask:
+                layers.append('F.Mask')
+            if has_b_mask:
+                layers.append('B.Mask')
+
+        # Check paste layers - use *.Paste wildcard if both present
+        f_paste_id = getattr(pcbnew, 'F_Paste', None)
+        b_paste_id = getattr(pcbnew, 'B_Paste', None)
+        has_f_paste = f_paste_id is not None and layer_set.Contains(f_paste_id)
+        has_b_paste = b_paste_id is not None and layer_set.Contains(b_paste_id)
+        if has_f_paste and has_b_paste:
+            layers.append('*.Paste')
+        else:
+            if has_f_paste:
+                layers.append('F.Paste')
+            if has_b_paste:
+                layers.append('B.Paste')
+
+        return layers
+
+    # --- Extract board info ---
+    layers_dict = {}
+    copper_layers = []
+    enabled = board.GetEnabledLayers()
+    for lid, lname in id_to_name.items():
+        if enabled.Contains(lid):
+            layers_dict[lid] = lname
+            copper_layers.append(lname)
+
+    # Board bounds from Edge.Cuts drawing coordinates (not bounding box which includes line width)
+    board_bounds = None
+    try:
+        edge_cuts_id = getattr(pcbnew, 'Edge_Cuts', None)
+        if edge_cuts_id is not None:
+            bmin_x = bmin_y = float('inf')
+            bmax_x = bmax_y = float('-inf')
+            found_edge = False
+            for drawing in board.GetDrawings():
+                if drawing.GetLayer() != edge_cuts_id:
+                    continue
+                class_name = drawing.GetClass()
+                if class_name in ("PCB_SHAPE", "DRAWSEGMENT"):
+                    try:
+                        start = drawing.GetStart()
+                        end = drawing.GetEnd()
+                        sx, sy = to_mm(start.x), to_mm(start.y)
+                        ex, ey = to_mm(end.x), to_mm(end.y)
+                        bmin_x = min(bmin_x, sx, ex)
+                        bmin_y = min(bmin_y, sy, ey)
+                        bmax_x = max(bmax_x, sx, ex)
+                        bmax_y = max(bmax_y, sy, ey)
+                        found_edge = True
+                    except Exception:
+                        continue
+            if found_edge:
+                board_bounds = (bmin_x, bmin_y, bmax_x, bmax_y)
+    except Exception:
+        pass
+    # Fallback to bounding box if no Edge.Cuts drawings found
+    if board_bounds is None:
+        try:
+            bbox = board.GetBoardEdgesBoundingBox()
+            if bbox.GetWidth() > 0 and bbox.GetHeight() > 0:
+                board_bounds = (to_mm(bbox.GetX()), to_mm(bbox.GetY()),
+                                to_mm(bbox.GetX() + bbox.GetWidth()),
+                                to_mm(bbox.GetY() + bbox.GetHeight()))
+        except Exception:
+            pass
+
+    # Board outline from Edge.Cuts drawings
+    board_outline = _extract_board_outline_from_pcbnew(board, to_mm)
+
+    # Stackup
+    stackup = _extract_stackup_from_pcbnew(board, to_mm)
+
+    board_info = BoardInfo(
+        layers=layers_dict,
+        copper_layers=copper_layers,
+        board_bounds=board_bounds,
+        stackup=stackup,
+        board_outline=board_outline
+    )
+
+    # --- Extract nets ---
+    nets = {}
+    try:
+        net_info = board.GetNetInfo()
+        # Use NetsByName which is proven to work (see fanout_gui.py)
+        nets_by_name = net_info.NetsByName()
+        for net_name_wx, net_item in nets_by_name.items():
+            net_id = net_item.GetNetCode()
+            name = str(net_name_wx)
+            nets[net_id] = Net(net_id=net_id, name=name)
+    except Exception:
+        # Fallback: iterate by net count
+        try:
+            for i in range(board.GetNetCount()):
+                net_item = board.GetNetInfo().GetNetItem(i)
+                if net_item:
+                    nets[i] = Net(net_id=i, name=net_item.GetNetname())
+        except Exception:
+            pass
+
+    # --- Extract footprints and pads ---
+    footprints = {}
+    pads_by_net: Dict[int, List[Pad]] = {}
+
+    for fp in board.GetFootprints():
+        reference = fp.GetReference()
+
+        # Get footprint name (library:footprint)
+        try:
+            fp_name = fp.GetFPID().GetUniStringLibItemName()
+        except AttributeError:
+            try:
+                fp_name = str(fp.GetFPID().GetLibItemName())
+            except Exception:
+                fp_name = ""
+
+        # Position
+        pos = fp.GetPosition()
+        fp_x = to_mm(pos.x)
+        fp_y = to_mm(pos.y)
+
+        # Rotation
+        try:
+            fp_rotation = fp.GetOrientationDegrees()
+        except AttributeError:
+            try:
+                fp_rotation = fp.GetOrientation().AsDegrees()
+            except Exception:
+                fp_rotation = fp.GetOrientation() / 10.0  # Older KiCad: tenths of degrees
+
+        # Layer
+        fp_layer = get_layer_name(fp.GetLayer())
+
+        # Value
+        try:
+            fp_value = fp.GetValue()
+        except Exception:
+            fp_value = ""
+
+        footprint = Footprint(
+            reference=reference,
+            footprint_name=fp_name,
+            x=fp_x,
+            y=fp_y,
+            rotation=fp_rotation,
+            layer=fp_layer,
+            value=fp_value
+        )
+
+        # Extract pads
+        for pad in fp.Pads():
+            pad_num = pad.GetNumber()
+
+            # Global position
+            pad_pos = pad.GetPosition()
+            global_x = to_mm(pad_pos.x)
+            global_y = to_mm(pad_pos.y)
+
+            # Local position (relative to footprint, before footprint rotation)
+            try:
+                local_pos = pad.GetPos0()
+                local_x = to_mm(local_pos.x)
+                local_y = to_mm(local_pos.y)
+            except Exception:
+                # Fallback: compute from global position
+                local_x, local_y = _global_to_local(fp_x, fp_y, fp_rotation, global_x, global_y)
+
+            # Size
+            pad_size = pad.GetSize()
+            size_x = to_mm(pad_size.x)
+            size_y = to_mm(pad_size.y)
+
+            # Shape
+            shape = get_pad_shape_name(pad.GetShape())
+
+            # Layers
+            pad_layers = get_pad_layers(pad)
+
+            # Net
+            net_id = pad.GetNetCode()
+            net_name = pad.GetNetname()
+
+            # Pad rotation
+            try:
+                pad_rotation = pad.GetOrientationDegrees()
+            except AttributeError:
+                try:
+                    pad_rotation = pad.GetOrientation().AsDegrees()
+                except Exception:
+                    pad_rotation = pad.GetOrientation() / 10.0
+
+            total_rotation = (pad_rotation + fp_rotation) % 360
+
+            # Apply only pad rotation to get board-space dimensions
+            pad_rot_normalized = pad_rotation % 180
+            if 45 < pad_rot_normalized < 135:
+                size_x, size_y = size_y, size_x
+
+            # Pin metadata
+            try:
+                pinfunction = pad.GetPinFunction()
+            except Exception:
+                pinfunction = ""
+
+            try:
+                pintype = pad.GetPinType()
+            except Exception:
+                pintype = ""
+
+            # Drill
+            try:
+                drill_size = pad.GetDrillSize()
+                drill = to_mm(drill_size.x)
+            except Exception:
+                drill = 0.0
+
+            # Roundrect ratio
+            try:
+                roundrect_rratio = pad.GetRoundRectRadiusRatio()
+            except Exception:
+                roundrect_rratio = 0.0
+
+            pad_obj = Pad(
+                component_ref=reference,
+                pad_number=pad_num,
+                global_x=global_x,
+                global_y=global_y,
+                local_x=local_x,
+                local_y=local_y,
+                size_x=size_x,
+                size_y=size_y,
+                shape=shape,
+                layers=pad_layers,
+                net_id=net_id,
+                net_name=net_name,
+                rotation=total_rotation,
+                pinfunction=pinfunction,
+                pintype=pintype,
+                drill=drill,
+                roundrect_rratio=roundrect_rratio
+            )
+
+            footprint.pads.append(pad_obj)
+
+            # Add to pads_by_net
+            if net_id not in pads_by_net:
+                pads_by_net[net_id] = []
+            pads_by_net[net_id].append(pad_obj)
+
+            # Add to Net object
+            if net_id in nets:
+                nets[net_id].pads.append(pad_obj)
+
+        footprints[reference] = footprint
+
+    # --- Extract segments and vias (single pass over tracks) ---
+    segments = []
+    vias = []
+    for track in board.GetTracks():
+        track_class = track.GetClass()
+        if track_class == "PCB_TRACK":
+            seg = Segment(
+                start_x=to_mm(track.GetStart().x),
+                start_y=to_mm(track.GetStart().y),
+                end_x=to_mm(track.GetEnd().x),
+                end_y=to_mm(track.GetEnd().y),
+                width=to_mm(track.GetWidth()),
+                layer=get_layer_name(track.GetLayer()),
+                net_id=track.GetNetCode(),
+            )
+            segments.append(seg)
+        elif track_class == "PCB_VIA":
+            v = Via(
+                x=to_mm(track.GetPosition().x),
+                y=to_mm(track.GetPosition().y),
+                size=to_mm(track.GetWidth()),
+                drill=to_mm(track.GetDrill()),
+                layers=[get_layer_name(track.TopLayer()), get_layer_name(track.BottomLayer())],
+                net_id=track.GetNetCode(),
+            )
+            vias.append(v)
+
+    # --- Extract zones ---
+    zones = _extract_zones_from_pcbnew(board, to_mm, get_layer_name)
+
+    return PCBData(
+        board_info=board_info,
+        nets=nets,
+        footprints=footprints,
+        vias=vias,
+        segments=segments,
+        pads_by_net=pads_by_net,
+        zones=zones
+    )
+
+
+def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
+    """Reverse transform: global board coordinates to local footprint coordinates."""
+    rad = math.radians(fp_rotation_deg)  # Positive rotation to reverse the transform
+    cos_r = math.cos(rad)
+    sin_r = math.sin(rad)
+
+    dx = global_x - fp_x
+    dy = global_y - fp_y
+
+    local_x = dx * cos_r + dy * sin_r
+    local_y = -dx * sin_r + dy * cos_r
+
+    return local_x, local_y
+
+
+def _extract_board_outline_from_pcbnew(board, to_mm):
+    """Extract board outline polygon from Edge.Cuts drawings via pcbnew."""
+    import pcbnew
+
+    edge_cuts_id = getattr(pcbnew, 'Edge_Cuts', None)
+    if edge_cuts_id is None:
+        return []
+
+    segments = []
+    for drawing in board.GetDrawings():
+        if drawing.GetLayer() != edge_cuts_id:
+            continue
+        class_name = drawing.GetClass()
+        if class_name in ("PCB_SHAPE", "DRAWSEGMENT"):
+            try:
+                shape_type = drawing.GetShape()
+                # Line segment
+                if shape_type == getattr(pcbnew, 'SHAPE_T_SEGMENT', getattr(pcbnew, 'S_SEGMENT', -1)):
+                    start = drawing.GetStart()
+                    end = drawing.GetEnd()
+                    segments.append((
+                        (to_mm(start.x), to_mm(start.y)),
+                        (to_mm(end.x), to_mm(end.y))
+                    ))
+                elif shape_type == getattr(pcbnew, 'SHAPE_T_RECT', getattr(pcbnew, 'S_RECT', -1)):
+                    start = drawing.GetStart()
+                    end = drawing.GetEnd()
+                    x1, y1 = to_mm(start.x), to_mm(start.y)
+                    x2, y2 = to_mm(end.x), to_mm(end.y)
+                    segments.append(((x1, y1), (x2, y1)))
+                    segments.append(((x2, y1), (x2, y2)))
+                    segments.append(((x2, y2), (x1, y2)))
+                    segments.append(((x1, y2), (x1, y1)))
+            except Exception:
+                continue
+
+    if len(segments) < 3:
+        return []
+
+    # Check if this is a simple 4-segment rectangle
+    if len(segments) == 4:
+        vertices = set()
+        for seg in segments:
+            vertices.add((round(seg[0][0], 3), round(seg[0][1], 3)))
+            vertices.add((round(seg[1][0], 3), round(seg[1][1], 3)))
+        if len(vertices) == 4:
+            all_axis_aligned = all(
+                abs(s[0][0] - s[1][0]) < 0.001 or abs(s[0][1] - s[1][1]) < 0.001
+                for s in segments
+            )
+            if all_axis_aligned:
+                return []
+
+    # Build polygon by chaining segments
+    polygon = [segments[0][0], segments[0][1]]
+    used = {0}
+
+    def approx_equal(p1, p2, tol=0.01):
+        return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
+
+    max_iterations = len(segments) * 2
+    iteration = 0
+    while len(used) < len(segments) and iteration < max_iterations:
+        iteration += 1
+        current_end = polygon[-1]
+        found_next = False
+        for i, seg in enumerate(segments):
+            if i in used:
+                continue
+            if approx_equal(seg[0], current_end):
+                polygon.append(seg[1])
+                used.add(i)
+                found_next = True
+                break
+            elif approx_equal(seg[1], current_end):
+                polygon.append(seg[0])
+                used.add(i)
+                found_next = True
+                break
+        if not found_next:
+            break
+
+    if len(polygon) > 1 and approx_equal(polygon[0], polygon[-1]):
+        polygon = polygon[:-1]
+
+    if len(used) == len(segments) and len(polygon) >= 3:
+        return polygon
+
+    return []
+
+
+def _extract_stackup_from_pcbnew(board, to_mm):
+    """Extract board stackup from pcbnew design settings.
+
+    Tries the SWIG API first, falls back to parsing the board file since
+    BOARD_STACKUP bindings aren't fully exposed in all KiCad versions.
+    """
+    stackup = []
+
+    # First try the full SWIG API (works in some KiCad versions)
+    try:
+        ds = board.GetDesignSettings()
+        stackup_desc = ds.GetStackupDescriptor()
+        stack_list = stackup_desc.GetList()
+
+        for item in stack_list:
+            try:
+                layer_name = item.GetLayerName()
+                type_name = item.GetTypeName()
+                if type_name not in ('copper', 'core', 'prepreg', 'dielectric'):
+                    continue
+                thickness = to_mm(item.GetThickness())
+                epsilon_r = getattr(item, 'GetEpsilonR', lambda: 0.0)()
+                loss_tangent = getattr(item, 'GetLossTangent', lambda: 0.0)()
+                material = getattr(item, 'GetMaterial', lambda: "")()
+                stackup.append(StackupLayer(
+                    name=layer_name, layer_type=type_name, thickness=thickness,
+                    epsilon_r=epsilon_r, loss_tangent=loss_tangent, material=material
+                ))
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if stackup:
+        return stackup
+
+    # Fallback: parse stackup from the board file
+    try:
+        board_filename = board.GetFileName()
+        if board_filename:
+            with open(board_filename, 'r', encoding='utf-8') as f:
+                content = f.read(8192)  # Stackup is near the top of the file
+            stackup = extract_stackup(content)
+    except Exception:
+        pass
+
+    return stackup
+
+
+def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
+    """Extract filled zones from pcbnew board."""
+    zones = []
+
+    try:
+        for zone in board.Zones():
+            net_id = zone.GetNetCode()
+            net_name = zone.GetNetname()
+            layer = get_layer_name(zone.GetLayer())
+
+            # Extract polygon outline
+            polygon = []
+            try:
+                outline = zone.Outline()
+                if outline and outline.OutlineCount() > 0:
+                    contour = outline.Outline(0)
+                    for j in range(contour.PointCount()):
+                        pt = contour.CPoint(j)
+                        polygon.append((to_mm(pt.x), to_mm(pt.y)))
+            except Exception:
+                continue
+
+            if not polygon:
+                continue
+
+            zone_obj = Zone(
+                net_id=net_id,
+                net_name=net_name,
+                layer=layer,
+                polygon=polygon
+            )
+            zones.append(zone_obj)
+    except Exception:
+        pass
+
+    return zones
+
+
+def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: float = 0.01) -> List[str]:
+    """Compare two PCBData objects and return list of differences.
+
+    Useful for validating that build_pcb_data_from_board() produces the same
+    results as parse_kicad_pcb().
+
+    Args:
+        from_board: PCBData built from pcbnew SWIG API
+        from_file: PCBData parsed from .kicad_pcb file
+        tolerance: Position tolerance in mm for coordinate comparisons
+
+    Returns:
+        List of difference description strings (empty if identical)
+    """
+    diffs = []
+
+    def close(a, b):
+        return abs(a - b) < tolerance
+
+    # --- Compare board info ---
+    bi_b = from_board.board_info
+    bi_f = from_file.board_info
+    if set(bi_b.copper_layers) != set(bi_f.copper_layers):
+        diffs.append(f"Copper layers differ: board={bi_b.copper_layers} file={bi_f.copper_layers}")
+
+    if bi_b.board_bounds and bi_f.board_bounds:
+        for i, label in enumerate(['min_x', 'min_y', 'max_x', 'max_y']):
+            if not close(bi_b.board_bounds[i], bi_f.board_bounds[i]):
+                diffs.append(f"Board bounds {label}: board={bi_b.board_bounds[i]:.3f} file={bi_f.board_bounds[i]:.3f}")
+    elif bi_b.board_bounds != bi_f.board_bounds:
+        diffs.append(f"Board bounds: board={bi_b.board_bounds} file={bi_f.board_bounds}")
+
+    if len(bi_b.stackup) != len(bi_f.stackup):
+        diffs.append(f"Stackup layer count: board={len(bi_b.stackup)} file={len(bi_f.stackup)}")
+
+    # --- Compare nets ---
+    board_net_ids = set(from_board.nets.keys())
+    file_net_ids = set(from_file.nets.keys())
+    if board_net_ids != file_net_ids:
+        only_board = board_net_ids - file_net_ids
+        only_file = file_net_ids - board_net_ids
+        if only_board:
+            diffs.append(f"Nets only in board: {sorted(only_board)[:10]}{'...' if len(only_board) > 10 else ''}")
+        if only_file:
+            diffs.append(f"Nets only in file: {sorted(only_file)[:10]}{'...' if len(only_file) > 10 else ''}")
+
+    for net_id in board_net_ids & file_net_ids:
+        bn = from_board.nets[net_id]
+        fn = from_file.nets[net_id]
+        if bn.name != fn.name:
+            diffs.append(f"Net {net_id} name: board='{bn.name}' file='{fn.name}'")
+        if len(bn.pads) != len(fn.pads):
+            diffs.append(f"Net {net_id} '{bn.name}' pad count: board={len(bn.pads)} file={len(fn.pads)}")
+
+    # --- Compare footprints ---
+    board_refs = set(from_board.footprints.keys())
+    file_refs = set(from_file.footprints.keys())
+    if board_refs != file_refs:
+        only_board = board_refs - file_refs
+        only_file = file_refs - board_refs
+        if only_board:
+            diffs.append(f"Footprints only in board: {sorted(only_board)[:10]}")
+        if only_file:
+            diffs.append(f"Footprints only in file: {sorted(only_file)[:10]}")
+
+    for ref in sorted(board_refs & file_refs):
+        bf = from_board.footprints[ref]
+        ff = from_file.footprints[ref]
+
+        if not close(bf.x, ff.x) or not close(bf.y, ff.y):
+            diffs.append(f"Footprint {ref} position: board=({bf.x:.3f},{bf.y:.3f}) file=({ff.x:.3f},{ff.y:.3f})")
+        if not close(bf.rotation % 360, ff.rotation % 360):
+            diffs.append(f"Footprint {ref} rotation: board={bf.rotation:.1f} file={ff.rotation:.1f}")
+        if len(bf.pads) != len(ff.pads):
+            diffs.append(f"Footprint {ref} pad count: board={len(bf.pads)} file={len(ff.pads)}")
+        else:
+            # Compare individual pads (sorted by pad number for consistency)
+            b_pads = sorted(bf.pads, key=lambda p: p.pad_number)
+            f_pads = sorted(ff.pads, key=lambda p: p.pad_number)
+            for bp, fp in zip(b_pads, f_pads):
+                if bp.pad_number != fp.pad_number:
+                    diffs.append(f"Footprint {ref} pad number mismatch: board={bp.pad_number} file={fp.pad_number}")
+                    continue
+                if not close(bp.global_x, fp.global_x) or not close(bp.global_y, fp.global_y):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} position: board=({bp.global_x:.3f},{bp.global_y:.3f}) file=({fp.global_x:.3f},{fp.global_y:.3f})")
+                if bp.net_id != fp.net_id:
+                    diffs.append(f"Pad {ref}:{bp.pad_number} net_id: board={bp.net_id} file={fp.net_id}")
+                if bp.shape != fp.shape:
+                    diffs.append(f"Pad {ref}:{bp.pad_number} shape: board={bp.shape} file={fp.shape}")
+                if not close(bp.size_x, fp.size_x) or not close(bp.size_y, fp.size_y):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} size: board=({bp.size_x:.3f},{bp.size_y:.3f}) file=({fp.size_x:.3f},{fp.size_y:.3f})")
+                if not close(bp.drill, fp.drill):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} drill: board={bp.drill:.3f} file={fp.drill:.3f}")
+                # Compare layers (as sets since order may differ)
+                if set(bp.layers) != set(fp.layers):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} layers: board={bp.layers} file={fp.layers}")
+
+    # --- Compare segments ---
+    if len(from_board.segments) != len(from_file.segments):
+        diffs.append(f"Segment count: board={len(from_board.segments)} file={len(from_file.segments)}")
+
+    # --- Compare vias ---
+    if len(from_board.vias) != len(from_file.vias):
+        diffs.append(f"Via count: board={len(from_board.vias)} file={len(from_file.vias)}")
+
+    # --- Compare zones ---
+    if len(from_board.zones) != len(from_file.zones):
+        diffs.append(f"Zone count: board={len(from_board.zones)} file={len(from_file.zones)}")
+    else:
+        # Compare zones by net_id and layer
+        b_zones = sorted(from_board.zones, key=lambda z: (z.net_id, z.layer))
+        f_zones = sorted(from_file.zones, key=lambda z: (z.net_id, z.layer))
+        for bz, fz in zip(b_zones, f_zones):
+            if bz.net_id != fz.net_id:
+                diffs.append(f"Zone net_id mismatch: board={bz.net_id} file={fz.net_id}")
+            if bz.layer != fz.layer:
+                diffs.append(f"Zone layer mismatch: board={bz.layer} file={fz.layer}")
+            if len(bz.polygon) != len(fz.polygon):
+                diffs.append(f"Zone net={bz.net_id} layer={bz.layer} vertex count: board={len(bz.polygon)} file={len(fz.polygon)}")
+
+    return diffs
+
+
 def save_extracted_data(pcb_data: PCBData, output_path: str):
     """Save extracted PCB data to JSON file."""
 
