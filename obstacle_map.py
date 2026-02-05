@@ -308,35 +308,122 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[
 
     For each grid cell in the bounding box area, checks if it's outside the board
     polygon or too close to the polygon edge (within clearance distance).
+    Uses numpy vectorization for all geometry computations.
     """
     grid_margin = max(track_expand, via_expand) + 5
 
-    # Iterate over the extended bounding box
-    for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
-        for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            # Convert grid coords to board coords
-            x, y = coord.to_float(gx, gy)
+    # Generate all grid coordinates as numpy arrays
+    gx_range = np.arange(gmin_x - grid_margin, gmax_x + grid_margin + 1, dtype=np.int32)
+    gy_range = np.arange(gmin_y - grid_margin, gmax_y + grid_margin + 1, dtype=np.int32)
+    gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)  # shape (ny, nx)
+    gx_flat = gx_grid.ravel()  # shape (N,)
+    gy_flat = gy_grid.ravel()
 
-            # Check if point is inside the polygon
-            inside = point_in_polygon(x, y, polygon)
+    # Convert grid coords to board coords (float mm)
+    px = gx_flat.astype(np.float64) * coord.grid_step
+    py = gy_flat.astype(np.float64) * coord.grid_step
 
-            if not inside:
-                # Point is outside the board - block for all layers and vias
-                for layer_idx in range(num_layers):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
-                obstacles.add_blocked_via(gx, gy)
-            else:
-                # Point is inside - check distance to edges for clearance
-                edge_dist = point_to_polygon_edge_distance(x, y, polygon)
+    # Build polygon edge arrays: each edge is (x1, y1) -> (x2, y2)
+    poly_arr = np.array(polygon, dtype=np.float64)  # shape (n_edges, 2)
+    n_edges = len(polygon)
+    x1 = poly_arr[:, 0]  # (n_edges,)
+    y1 = poly_arr[:, 1]
+    x2 = np.roll(poly_arr[:, 0], -1)  # next vertex
+    y2 = np.roll(poly_arr[:, 1], -1)
 
-                # Block tracks if too close to edge
-                if edge_dist < track_edge_clearance:
-                    for layer_idx in range(num_layers):
-                        obstacles.add_blocked_cell(gx, gy, layer_idx)
+    # --- Vectorized point-in-polygon (ray casting) ---
+    # For each point (px, py) and each edge (y1, y2, x1, x2):
+    # crossing if ((yi > y) != (yj > y)) and (x < (xj-xi)*(y-yi)/(yj-yi) + xi)
+    # Shape: points are (N,), edges are (E,), broadcast to (N, E)
+    py_col = py[:, np.newaxis]  # (N, 1)
+    px_col = px[:, np.newaxis]  # (N, 1)
 
-                # Block vias if too close to edge
-                if edge_dist < via_edge_clearance:
-                    obstacles.add_blocked_via(gx, gy)
+    # Edge coords broadcast to (1, E)
+    y1_row = y1[np.newaxis, :]
+    y2_row = y2[np.newaxis, :]
+    x1_row = x1[np.newaxis, :]
+    x2_row = x2[np.newaxis, :]
+
+    # Crossing condition
+    cond_y = (y1_row > py_col) != (y2_row > py_col)  # (N, E)
+    # x threshold for the crossing
+    dy = y2_row - y1_row
+    # Avoid division by zero (dy==0 means horizontal edge, which cond_y already excludes)
+    safe_dy = np.where(dy == 0, 1.0, dy)
+    x_intercept = (x2_row - x1_row) * (py_col - y1_row) / safe_dy + x1_row
+    cond_x = px_col < x_intercept
+
+    crossings = np.sum(cond_y & cond_x, axis=1)  # (N,)
+    inside = (crossings % 2) == 1  # (N,) bool
+
+    # --- Vectorized point-to-polygon-edge distance ---
+    # For inside points, compute min distance to any edge
+    # Only compute for points that are inside (saves work for outside points)
+    inside_idx = np.where(inside)[0]
+    outside_idx = np.where(~inside)[0]
+
+    # Block all outside points (all layers + vias)
+    if outside_idx.size > 0:
+        out_gx = gx_flat[outside_idx]
+        out_gy = gy_flat[outside_idx]
+        out_cells = np.column_stack([out_gx, out_gy])
+        for layer_idx in range(num_layers):
+            layer_col = np.full((out_cells.shape[0], 1), layer_idx, dtype=np.int32)
+            obstacles.add_blocked_cells_batch(np.hstack([out_cells, layer_col]))
+        obstacles.add_blocked_vias_batch(out_cells)
+
+    # Compute edge distances for inside points
+    if inside_idx.size > 0:
+        in_px = px[inside_idx]  # (M,)
+        in_py = py[inside_idx]
+
+        # For each inside point and each edge, compute point-to-segment distance
+        # Points: (M, 1), Edges: (1, E) -> broadcast (M, E)
+        in_px_col = in_px[:, np.newaxis]
+        in_py_col = in_py[:, np.newaxis]
+
+        # Edge vectors
+        dx_e = x2_row - x1_row  # (1, E)
+        dy_e = y2_row - y1_row  # (1, E)
+        seg_len_sq = dx_e * dx_e + dy_e * dy_e  # (1, E)
+
+        # Project point onto line, clamp to [0, 1]
+        safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
+        t = ((in_px_col - x1_row) * dx_e + (in_py_col - y1_row) * dy_e) / safe_len_sq
+        t = np.clip(t, 0.0, 1.0)  # (M, E)
+
+        # Closest point on segment
+        closest_x = x1_row + t * dx_e
+        closest_y = y1_row + t * dy_e
+
+        # Distance to closest point
+        dist_sq = (in_px_col - closest_x) ** 2 + (in_py_col - closest_y) ** 2  # (M, E)
+        # Handle degenerate segments
+        degen = seg_len_sq < 1e-10  # (1, E)
+        degen_dist_sq = (in_px_col - x1_row) ** 2 + (in_py_col - y1_row) ** 2
+        dist_sq = np.where(degen, degen_dist_sq, dist_sq)
+
+        min_dist = np.sqrt(np.min(dist_sq, axis=1))  # (M,)
+
+        in_gx = gx_flat[inside_idx]
+        in_gy = gy_flat[inside_idx]
+
+        # Block tracks if too close to edge
+        track_mask = min_dist < track_edge_clearance
+        if np.any(track_mask):
+            track_gx = in_gx[track_mask]
+            track_gy = in_gy[track_mask]
+            track_cells = np.column_stack([track_gx, track_gy])
+            for layer_idx in range(num_layers):
+                layer_col = np.full((track_cells.shape[0], 1), layer_idx, dtype=np.int32)
+                obstacles.add_blocked_cells_batch(np.hstack([track_cells, layer_col]))
+
+        # Block vias if too close to edge
+        via_mask = min_dist < via_edge_clearance
+        if np.any(via_mask):
+            via_gx = in_gx[via_mask]
+            via_gy = in_gy[via_mask]
+            obstacles.add_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
 
 
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,

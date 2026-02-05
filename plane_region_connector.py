@@ -10,11 +10,17 @@ from typing import List, Optional, Tuple, Dict, Set
 from collections import deque
 import math
 
+import numpy as np
+
 from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
 from geometry_utils import UnionFind
 from bresenham_utils import walk_line
 from obstacle_map import add_board_edge_obstacles
+from plane_obstacle_builder import (
+    _precompute_circle_offsets, _bresenham_centers,
+    _batch_block_circles_via, _batch_block_circles_cell
+)
 
 import sys
 import os
@@ -683,7 +689,8 @@ def _try_route_between_regions(
     min_track_width: float,
     max_iterations: int,
     coord: GridCoord,
-    verbose: bool = False
+    verbose: bool = False,
+    router: Optional[GridRouter] = None
 ) -> Tuple[Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]], float, Optional[Tuple[float, float]]]:
     """
     Try to route between two regions, attempting multiple track widths.
@@ -735,7 +742,8 @@ def _try_route_between_regions(
             net_vias=net_vias,
             track_margin=track_margin,
             max_iterations=max_iterations,
-            verbose=verbose
+            verbose=verbose,
+            router=router
         )
 
         if result is None:
@@ -748,7 +756,8 @@ def _try_route_between_regions(
                 net_vias=net_vias,
                 track_margin=track_margin,
                 max_iterations=max_iterations,
-                verbose=verbose
+                verbose=verbose,
+                router=router
             )
 
         if result is not None:
@@ -783,7 +792,8 @@ def _try_route_between_regions(
                 net_vias=net_vias,
                 track_margin=0,  # min width for open-space
                 max_iterations=max_iterations,
-                verbose=verbose
+                verbose=verbose,
+                router=router
             )
             if result:
                 track_width = min_track_width
@@ -892,6 +902,16 @@ def route_disconnected_regions(
     routes_failed = 0
     previous_routes: List[List[Tuple[float, float]]] = []
 
+    # Create a single reusable router for all MST edges
+    plane_router = GridRouter(
+        via_cost=config.via_cost * 1000,
+        h_weight=config.heuristic_weight,
+        turn_cost=config.turn_cost,
+        via_proximity_cost=0,
+        layer_costs=config.get_layer_costs(),
+        proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+    )
+
     for edge_idx, (region_i, region_j, point_i, point_j, dist) in enumerate(mst_edges):
         # Get all anchors from each region for multi-point routing
         anchors_i = region_anchors[region_i]
@@ -912,7 +932,8 @@ def route_disconnected_regions(
             min_track_width=min_track_width,
             max_iterations=max_iterations,
             coord=coord,
-            verbose=verbose
+            verbose=verbose,
+            router=plane_router
         )
 
         if result is None:
@@ -1056,15 +1077,17 @@ def build_base_obstacles(
 
     # Block other nets' vias as hard obstacles on ALL layers (vias are through-hole)
     via_radius = coord.to_grid_dist(track_via_clearance)
+    other_via_centers = []
     for via in pcb_data.vias:
         if via.net_id in exclude_net_ids:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
+        other_via_centers.append((gx, gy))
+
+    if other_via_centers:
+        via_circle_offsets = _precompute_circle_offsets(via_radius * via_radius)
         for layer_idx in range(num_layers):
-            for ex in range(-via_radius, via_radius + 1):
-                for ey in range(-via_radius, via_radius + 1):
-                    if ex * ex + ey * ey <= via_radius * via_radius:
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+            _batch_block_circles_cell(obstacles, other_via_centers, via_circle_offsets, layer_idx)
 
     # Add proximity costs around other nets' vias (on all layers)
     proximity_radius_grid = coord.to_grid_dist(proximity_radius)
@@ -1089,26 +1112,27 @@ def build_base_obstacles(
 
     # Block via placement near ALL vias (including same-net) for hole-to-hole clearance
     # Via reuse is handled separately by snapping routes to existing vias
-    for via in pcb_data.vias:
-        gx, gy = coord.to_grid(via.x, via.y)
-        for ex in range(-hole_clearance_grid, hole_clearance_grid + 1):
-            for ey in range(-hole_clearance_grid, hole_clearance_grid + 1):
-                if ex * ex + ey * ey <= hole_clearance_grid * hole_clearance_grid:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+    all_via_centers = [(coord.to_grid(via.x, via.y)) for via in pcb_data.vias]
+    if all_via_centers:
+        hole_circle_offsets = _precompute_circle_offsets(hole_clearance_grid * hole_clearance_grid)
+        _batch_block_circles_via(obstacles, all_via_centers, hole_circle_offsets)
 
     # Block via placement near ALL through-hole pad holes (including same-net)
     # Via reuse at pads is handled separately by snapping routes to pad positions
+    # Group pads by clearance radius for batch processing
+    pad_centers_by_radius: Dict[int, List[Tuple[int, int]]] = {}
     for pad_net_id, pads in pcb_data.pads_by_net.items():
         for pad in pads:
             if '*.Cu' in pad.layers and pad.drill > 0:  # Through-hole pad with drill
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                # Use pad's drill size + via drill for clearance calculation
-                # (need to account for both drill radii: pad.drill/2 + clearance + via_drill/2)
                 pad_hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + pad.drill / 2 + config.via_drill / 2))
-                for ex in range(-pad_hole_clearance_grid, pad_hole_clearance_grid + 1):
-                    for ey in range(-pad_hole_clearance_grid, pad_hole_clearance_grid + 1):
-                        if ex * ex + ey * ey <= pad_hole_clearance_grid * pad_hole_clearance_grid:
-                            obstacles.add_blocked_via(gx + ex, gy + ey)
+                if pad_hole_clearance_grid not in pad_centers_by_radius:
+                    pad_centers_by_radius[pad_hole_clearance_grid] = []
+                pad_centers_by_radius[pad_hole_clearance_grid].append((gx, gy))
+
+    for radius, centers in pad_centers_by_radius.items():
+        pad_circle_offsets = _precompute_circle_offsets(radius * radius)
+        _batch_block_circles_via(obstacles, centers, pad_circle_offsets)
 
     # Block existing segments from other nets on each layer
     # Also block vias along segments (vias span all layers, so can't place via where segment exists)
@@ -1153,10 +1177,14 @@ def build_base_obstacles(
             max_gx, _ = coord.to_grid(pad.global_x + half_w, 0)
             _, min_gy = coord.to_grid(0, pad.global_y - half_h)
             _, max_gy = coord.to_grid(0, pad.global_y + half_h)
-            for layer_idx in pad_layers_on:
-                for gx in range(min_gx, max_gx + 1):
-                    for gy in range(min_gy, max_gy + 1):
-                        obstacles.add_blocked_cell(gx, gy, layer_idx)
+            gx_range = np.arange(min_gx, max_gx + 1, dtype=np.int32)
+            gy_range = np.arange(min_gy, max_gy + 1, dtype=np.int32)
+            if gx_range.size > 0 and gy_range.size > 0:
+                gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
+                rect_cells = np.column_stack([gx_grid.ravel(), gy_grid.ravel()])
+                for layer_idx in pad_layers_on:
+                    layer_col = np.full((rect_cells.shape[0], 1), layer_idx, dtype=np.int32)
+                    obstacles.add_blocked_cells_batch(np.hstack([rect_cells, layer_col]))
             # Also block vias around pad - need more clearance for via size
             via_expansion_mm = config.via_size / 2 + track_via_clearance
             via_half_w = pad.size_x / 2 + via_expansion_mm
@@ -1165,9 +1193,12 @@ def build_base_obstacles(
             via_max_gx, _ = coord.to_grid(pad.global_x + via_half_w, 0)
             _, via_min_gy = coord.to_grid(0, pad.global_y - via_half_h)
             _, via_max_gy = coord.to_grid(0, pad.global_y + via_half_h)
-            for gx in range(via_min_gx, via_max_gx + 1):
-                for gy in range(via_min_gy, via_max_gy + 1):
-                    obstacles.add_blocked_via(gx, gy)
+            via_gx_range = np.arange(via_min_gx, via_max_gx + 1, dtype=np.int32)
+            via_gy_range = np.arange(via_min_gy, via_max_gy + 1, dtype=np.int32)
+            if via_gx_range.size > 0 and via_gy_range.size > 0:
+                via_gx_grid, via_gy_grid = np.meshgrid(via_gx_range, via_gy_range)
+                via_rect_cells = np.column_stack([via_gx_grid.ravel(), via_gy_grid.ravel()])
+                obstacles.add_blocked_vias_batch(via_rect_cells)
 
     # Block areas outside the board outline (supports non-rectangular boards)
     add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)
@@ -1212,19 +1243,15 @@ def add_route_to_obstacles(
     # Block via placement with hole-to-hole clearance (prevents new vias too close to these)
     hole_clearance_radius = coord.to_grid_dist(hole_to_hole_clearance + config.via_drill)
 
-    for vx, vy in via_positions:
-        gx, gy = coord.to_grid(vx, vy)
-        # Block track routing around vias
+    if via_positions:
+        via_grid_centers = [coord.to_grid(vx, vy) for vx, vy in via_positions]
+        # Block track routing around vias on all layers
+        via_cell_offsets = _precompute_circle_offsets(via_radius * via_radius)
         for layer_idx in range(num_layers):
-            for ex in range(-via_radius, via_radius + 1):
-                for ey in range(-via_radius, via_radius + 1):
-                    if ex * ex + ey * ey <= via_radius * via_radius:
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+            _batch_block_circles_cell(obstacles, via_grid_centers, via_cell_offsets, layer_idx)
         # Block via placement with proper hole-to-hole clearance
-        for ex in range(-hole_clearance_radius, hole_clearance_radius + 1):
-            for ey in range(-hole_clearance_radius, hole_clearance_radius + 1):
-                if ex * ex + ey * ey <= hole_clearance_radius * hole_clearance_radius:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+        hole_offsets = _precompute_circle_offsets(hole_clearance_radius * hole_clearance_radius)
+        _batch_block_circles_via(obstacles, via_grid_centers, hole_offsets)
 
 
 def route_plane_connection_wide(
@@ -1237,7 +1264,8 @@ def route_plane_connection_wide(
     net_vias: List[Tuple[float, float]],
     track_margin: int = 0,
     max_iterations: int = 200000,
-    verbose: bool = False
+    verbose: bool = False,
+    router: Optional[GridRouter] = None
 ) -> Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]]:
     """
     Route a wide trace between any source point and any target point.
@@ -1305,15 +1333,16 @@ def route_plane_connection_wide(
             obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
             targets.append((gx, gy, plane_layer_idx))
 
-    # Create router and find path
-    router = GridRouter(
-        via_cost=config.via_cost * 1000,
-        h_weight=config.heuristic_weight,
-        turn_cost=config.turn_cost,
-        via_proximity_cost=0,
-        layer_costs=config.get_layer_costs(),
-        proximity_heuristic_cost=config.get_proximity_heuristic_cost()
-    )
+    # Create router if not provided
+    if router is None:
+        router = GridRouter(
+            via_cost=config.via_cost * 1000,
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
 
     path, iterations, _ = router.route_with_frontier(
         obstacles, sources, targets, max_iterations,
@@ -1402,12 +1431,9 @@ def _block_line_vias(
 ):
     """Block via placement along a line with given expansion radius."""
     radius_sq = expansion_grid * expansion_grid
-
-    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-        for ex in range(-expansion_grid, expansion_grid + 1):
-            for ey in range(-expansion_grid, expansion_grid + 1):
-                if ex * ex + ey * ey <= radius_sq:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+    circle_offsets = _precompute_circle_offsets(radius_sq)
+    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
+    _batch_block_circles_via(obstacles, centers, circle_offsets)
 
 
 def _block_line_cells(
@@ -1419,9 +1445,6 @@ def _block_line_cells(
 ):
     """Block cells along a line with given expansion radius."""
     radius_sq = expansion_grid * expansion_grid
-
-    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-        for ex in range(-expansion_grid, expansion_grid + 1):
-            for ey in range(-expansion_grid, expansion_grid + 1):
-                if ex * ex + ey * ey <= radius_sq:
-                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+    circle_offsets = _precompute_circle_offsets(radius_sq)
+    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
+    _batch_block_circles_cell(obstacles, centers, circle_offsets, layer_idx)
