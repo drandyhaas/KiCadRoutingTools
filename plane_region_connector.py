@@ -815,7 +815,7 @@ def _try_route_between_regions(
             else:
                 break  # If this width fails, wider ones will too
 
-    if verbose or _total_route_time > 2.0:
+    if verbose:
         print(f"({_attempt_count} attempts, {_total_route_time:.1f}s: {'; '.join(_attempt_details)}) ", end="", flush=True)
 
     return result, track_width, open_space_via
