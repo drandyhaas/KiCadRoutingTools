@@ -5,8 +5,6 @@ Displays version info, author, and links.
 """
 
 import os
-import subprocess
-from datetime import datetime
 import wx
 import wx.adv
 
@@ -61,8 +59,8 @@ class AboutTab(wx.Panel):
         if os.path.exists(icon_path):
             try:
                 img = wx.Image(icon_path, wx.BITMAP_TYPE_PNG)
-                # Scale down for display
-                img = img.Scale(256, 256, wx.IMAGE_QUALITY_HIGH)
+                # Scale down for display (use NORMAL quality - HIGH is very slow)
+                img = img.Scale(256, 256, wx.IMAGE_QUALITY_NORMAL)
                 bitmap = wx.StaticBitmap(self, bitmap=wx.Bitmap(img))
                 about_sizer.Add(bitmap, 0, wx.ALIGN_CENTER | wx.ALL, 10)
             except Exception:
@@ -80,10 +78,9 @@ class AboutTab(wx.Panel):
         subtitle = wx.StaticText(self, label="Rust-accelerated A* autorouter for KiCad")
         about_sizer.Add(subtitle, 0, wx.ALIGN_CENTER | wx.BOTTOM, 15)
 
-        # Get git version info
-        version_str, commit_date = self._get_git_info()
+        # Version info
+        plugin_version, router_version = self._get_versions()
 
-        # Info grid
         info_panel = wx.Panel(self)
         info_sizer = wx.FlexGridSizer(cols=2, hgap=15, vgap=8)
 
@@ -94,8 +91,8 @@ class AboutTab(wx.Panel):
             val = wx.StaticText(info_panel, label=value)
             info_sizer.Add(val, 0, wx.ALIGN_LEFT)
 
-        add_info_row("Version:", version_str)
-        add_info_row("Release Date:", commit_date)
+        add_info_row("Plugin:", plugin_version)
+        add_info_row("Router:", router_version)
         add_info_row("Author:", "DrAndyHaas")
 
         info_panel.SetSizer(info_sizer)
@@ -172,40 +169,25 @@ class AboutTab(wx.Panel):
         if self.on_transparency_changed:
             self.on_transparency_changed(value)
 
-    def _get_git_info(self):
-        """Get version and date from git."""
-        version_str = "Unknown"
-        commit_date = "Unknown"
-
+    def _get_versions(self):
+        """Get plugin version from VERSION file and router version from rust module."""
+        # Plugin version from VERSION file
+        plugin_version = "Unknown"
+        version_file = os.path.join(ROOT_DIR, "VERSION")
         try:
-            # Get version tag/describe
-            result = subprocess.run(
-                ["git", "describe", "--tags", "--always"],
-                cwd=ROOT_DIR,
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                version_str = result.stdout.strip()
-
-            # Get commit date
-            result = subprocess.run(
-                ["git", "log", "-1", "--format=%ci"],
-                cwd=ROOT_DIR,
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                date_str = result.stdout.strip()
-                # Parse and reformat the date
-                try:
-                    dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-                    commit_date = dt.strftime("%B %d, %Y")
-                except Exception:
-                    commit_date = date_str[:10]  # Just the date part
+            with open(version_file, 'r') as f:
+                plugin_version = f.read().strip()
         except Exception:
-            pass  # Keep defaults if git fails
+            pass
 
-        return version_str, commit_date
+        # Router version from rust module
+        router_version = "Unknown"
+        try:
+            import sys
+            sys.path.insert(0, os.path.join(ROOT_DIR, 'rust_router'))
+            import grid_router
+            router_version = grid_router.__version__
+        except Exception:
+            pass
+
+        return plugin_version, router_version
