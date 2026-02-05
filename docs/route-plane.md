@@ -117,7 +117,13 @@ When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, t
 
 ### GND Return Via Placement
 
-For signal integrity on high-speed designs, signal vias should have nearby GND return vias. This feature automatically places GND vias near existing signal vias.
+When a signal transitions between layers via a via, the return current on the GND plane must also
+transition. Without a nearby GND via, the return current takes a longer path, creating a slot
+antenna that causes reflections and EMI. GND return vias provide a low-impedance return current
+path close to each signal via.
+
+**Note:** Differential pair routing (`route_diff.py`) adds its own GND return vias automatically.
+This feature is for single-ended signal vias placed by `route.py`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -131,7 +137,29 @@ The algorithm:
 3. For each remaining signal via, searches outward from the minimum viable distance (via-to-via clearance) in 24 angles (every 15°)
 4. Places the GND via at the closest valid position that respects track clearances
 
-Example:
+#### Choosing `--gnd-via-distance`
+
+The `--gnd-via-distance` parameter sets the maximum search radius. The algorithm always places
+vias as close as physically possible; this parameter controls how far away is acceptable if
+close placement is blocked. Higher-frequency signals need tighter placement.
+
+| Signal Speed | Frequency | Recommended Distance | Rationale |
+|-------------|-----------|---------------------|-----------|
+| Ultra-high | >1 GHz (DDR3/4, PCIe, USB3) | 2.0 mm | Lambda/20 ~ 7 mm at 1 GHz in FR4; tight return paths essential |
+| High | 100 MHz - 1 GHz (Ethernet, QSPI, SDIO) | 3.0 mm | Good return path coverage |
+| Medium | 10 - 100 MHz (SPI, JTAG) | 5.0 mm | Return current less localized |
+| Low | <10 MHz (I2C, UART, GPIO) | Skip | GND plane provides adequate return path |
+
+**Minimum physical limit:** Do not set `--gnd-via-distance` below 3 x (via_size + clearance),
+typically ~2.5 mm for standard 0.8 mm vias with 0.25 mm clearance. Below this, no valid
+placement positions exist.
+
+Use the `/find-high-speed-nets` Claude Code skill to analyze component datasheets and determine
+the appropriate distance for your board. The `/plan-pcb-routing` skill includes this as a
+standard step when GND planes are present.
+
+#### Example
+
 ```bash
 python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --add-gnd-vias --gnd-via-distance 2.0
 ```

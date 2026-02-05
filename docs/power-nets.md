@@ -135,3 +135,10 @@ Use these guidelines to select appropriate track widths based on expected curren
 - **Analog supplies** (VCCA, VDDA): Route with star topology from main supply, use ferrite bead isolation
 - **PLL supplies** (VDDPLL): Keep traces short to filter components, use LC filtering
 - **Analog ground** (GNDA, VSSA): Separate star-ground connection, may need isolation from digital ground
+
+### Related: GND Return Vias for Signal Integrity
+
+When using GND planes, signal vias that transition between layers need nearby GND return vias
+for proper return current paths. Use the `/find-high-speed-nets` skill to identify which signals
+need this, and `route_planes.py --add-gnd-vias` to place them. See
+[GND Return Via Placement](route-plane.md#gnd-return-via-placement) for details.

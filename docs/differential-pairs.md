@@ -274,7 +274,9 @@ By default, the router places GND vias adjacent to each differential pair signal
 - Perpendicular offset: `P/N spacing + track_width/2 + clearance + via_size/2`
 - Along-heading offset: `via_size + clearance` (ahead or behind signal vias)
 
-Use `--no-gnd-vias` to disable this feature.
+Use `--no-gnd-vias` to disable this feature. GND vias are recommended for all high-speed
+differential pairs (LVDS, USB, Ethernet, PCIe). Use the `/find-high-speed-nets` skill to
+identify which pairs on your board are high-speed if uncertain.
 
 ## Connectors
 
