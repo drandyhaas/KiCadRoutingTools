@@ -6,15 +6,56 @@ kicad_parser doesn't provide, for use by the placement tool.
 """
 
 import re
-from typing import Dict, Tuple
+from typing import Dict, Set, Tuple
 
 
-def extract_courtyard_bboxes(pcb_file: str) -> Dict[str, Tuple[float, float]]:
+def extract_locked_refs(pcb_file: str) -> Set[str]:
+    """
+    Find all footprints marked as locked in the PCB file.
+
+    Returns set of component references (e.g., {"P1", "J1"}).
+    """
+    with open(pcb_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    locked = set()
+    footprint_starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
+
+    for start in footprint_starts:
+        # Find matching end paren
+        depth = 0
+        end = start
+        for i in range(start, len(content)):
+            if content[i] == '(':
+                depth += 1
+            elif content[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        fp_text = content[start:end]
+
+        # Check for (locked yes) before the first pad
+        # It appears early in the footprint block, before properties
+        first_pad = fp_text.find('(pad ')
+        search_region = fp_text[:first_pad] if first_pad > 0 else fp_text[:500]
+        if re.search(r'\(locked\s+yes\)', search_region):
+            ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+            if ref_match:
+                locked.add(ref_match.group(1))
+
+    return locked
+
+
+def extract_courtyard_bboxes(pcb_file: str) -> Dict[str, Tuple[float, float, float, float]]:
     """
     Parse courtyard (F.CrtYd / B.CrtYd) extents from each footprint block.
 
-    Returns dict mapping component reference to (width, height) in mm,
-    computed from the courtyard fp_line/fp_rect segments (local coordinates).
+    Returns dict mapping component reference to (local_min_x, local_min_y,
+    local_max_x, local_max_y) — the courtyard bounding box in the footprint's
+    local coordinate system. These must be transformed to global coordinates
+    using the footprint's position and rotation.
     """
     with open(pcb_file, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -77,6 +118,6 @@ def extract_courtyard_bboxes(pcb_file: str) -> Dict[str, Tuple[float, float]]:
             found_crtyd = True
 
         if found_crtyd:
-            result[ref] = (max_x - min_x, max_y - min_y)
+            result[ref] = (min_x, min_y, max_x, max_y)
 
     return result

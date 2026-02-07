@@ -7,13 +7,14 @@ from typing import Tuple
 from kicad_parser import Footprint
 
 
-def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float]:
+def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, float, float]:
     """
-    Fallback: compute width/height from pad LOCAL coordinates.
+    Fallback: compute bounding box from pad LOCAL coordinates.
+    Returns (min_x, min_y, max_x, max_y) in local coordinates.
     Used when no courtyard data is available.
     """
     if not footprint.pads:
-        return (1.0, 1.0)
+        return (-0.5, -0.5, 0.5, 0.5)
 
     min_x = float('inf')
     max_x = float('-inf')
@@ -28,10 +29,17 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float]:
         min_y = min(min_y, pad.local_y - half_sy)
         max_y = max(max_y, pad.local_y + half_sy)
 
-    width = max_x - min_x
-    height = max_y - min_y
+    # Ensure minimum size
+    if max_x - min_x < 0.1:
+        mid = (min_x + max_x) / 2
+        min_x = mid - 0.05
+        max_x = mid + 0.05
+    if max_y - min_y < 0.1:
+        mid = (min_y + max_y) / 2
+        min_y = mid - 0.05
+        max_y = mid + 0.05
 
-    return (max(width, 0.1), max(height, 0.1))
+    return (min_x, min_y, max_x, max_y)
 
 
 def snap_to_grid(value: float, grid_step: float) -> float:

@@ -8,6 +8,8 @@ to update the (at X Y [rotation]) of each footprint block.
 import re
 from typing import List, Dict
 
+from kicad_writer import move_copper_text_to_silkscreen
+
 
 def write_placed_output(input_file: str, output_file: str,
                         placements: List[Dict]) -> bool:
@@ -28,6 +30,9 @@ def write_placed_output(input_file: str, output_file: str,
     """
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # Move text from copper layers to silkscreen (prevents routing interference)
+    content = move_copper_text_to_silkscreen(content)
 
     placement_by_ref = {p['reference']: p for p in placements}
     modified_count = 0

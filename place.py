@@ -39,6 +39,8 @@ Examples:
                         help=f"Grid resolution in mm (default: {defaults.GRID_STEP})")
     parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE,
                         help=f"Minimum gap between components in mm (default: {defaults.CLEARANCE})")
+    parser.add_argument("--board-edge-clearance", type=float, default=0.55,
+                        help="Clearance from board edge in mm (default: 0.55)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print detailed placement info")
 
@@ -63,6 +65,7 @@ Examples:
         pcb_file=args.input_file,
         grid_step=args.grid_step,
         clearance=args.clearance,
+        board_edge_clearance=args.board_edge_clearance,
         verbose=args.verbose,
     )
 
