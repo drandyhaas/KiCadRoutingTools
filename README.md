@@ -118,6 +118,9 @@ Other useful skills:
 **Option C: Manual Command Line (For scripting and automation)**
 
 ```bash
+# Place components evenly within board boundary (before routing)
+python place.py my_board.kicad_pcb
+
 # Route all nets
 python route.py my_board.kicad_pcb
 
@@ -414,12 +417,14 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [High-Speed Net Analysis](#6-high-speed-net-analysis) | Signal speed classification, GND return via recommendations |
+| [Placement](placement/README.md) | Component placement tool |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 
 ## Project Structure
 
 ```
 KiCadRoutingTools/
+├── place.py                  # Main CLI - component placement
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
 ├── route_planes.py           # Main CLI - power/ground plane via connections
@@ -518,6 +523,11 @@ KiCadRoutingTools/
 │   ├── about_tab.py          # About tab with version info
 │   ├── gui_utils.py          # Shared GUI utilities
 │   └── settings_persistence.py  # Save/restore dialog settings between sessions
+├── placement/               # Component placement
+│   ├── engine.py            # Core placement algorithm
+│   ├── parser.py            # Courtyard boundary extraction
+│   ├── writer.py            # Footprint position modification
+│   └── utility.py           # Shared placement utilities
 ├── install_plugin.py         # Plugin installer script
 ├── docs/                     # Documentation
 └── .claude/skills/           # Claude Code skills
