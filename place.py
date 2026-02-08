@@ -13,7 +13,7 @@ import sys
 
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
-from placement.engine import place_components_evenly
+from placement.engine import place_components_initially
 from placement.writer import write_placed_output
 
 
@@ -41,6 +41,8 @@ Examples:
                         help=f"Minimum gap between components in mm (default: {defaults.CLEARANCE})")
     parser.add_argument("--board-edge-clearance", type=float, default=0.55,
                         help="Clearance from board edge in mm (default: 0.55)")
+    parser.add_argument("--crossing-penalty", type=float, default=10.0,
+                        help="Cost in mm per airwire crossing for placement scoring (default: 10.0)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print detailed placement info")
 
@@ -60,12 +62,13 @@ Examples:
     pcb_data = parse_kicad_pcb(args.input_file)
 
     # Place components
-    placements = place_components_evenly(
+    placements = place_components_initially(
         pcb_data,
         pcb_file=args.input_file,
         grid_step=args.grid_step,
         clearance=args.clearance,
         board_edge_clearance=args.board_edge_clearance,
+        crossing_penalty=args.crossing_penalty,
         verbose=args.verbose,
     )
 

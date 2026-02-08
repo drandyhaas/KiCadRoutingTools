@@ -1920,8 +1920,21 @@ class RoutingDialog(wx.Dialog):
 
         try:
             try:
-                from route import batch_route
+                # Capture stdout during import so startup_checks messages
+                # are preserved for error reporting
+                import io
+                captured = io.StringIO()
+                old_stdout = sys.stdout
+                sys.stdout = captured
+                try:
+                    from route import batch_route
+                finally:
+                    sys.stdout = old_stdout
+                    captured_output = captured.getvalue()
+                if captured_output:
+                    self._append_log(captured_output)
             except SystemExit as e:
+                captured_output = captured.getvalue() if 'captured' in dir() else ''
                 # Check which dependencies are missing
                 missing = []
                 try:
@@ -1942,8 +1955,24 @@ class RoutingDialog(wx.Dialog):
                     msg += "Install them using KiCad's Python interpreter:\n"
                     msg += f"  {sys.executable} -m pip install " + " ".join(missing)
                     raise RuntimeError(msg)
-                else:
-                    raise RuntimeError(f"Startup check failed: {e}")
+
+                # Check if Rust router is the problem
+                try:
+                    rust_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'rust_router')
+                    if rust_dir not in sys.path:
+                        sys.path.insert(0, rust_dir)
+                    import grid_router
+                except ImportError:
+                    msg = "Rust router module not found.\n\n"
+                    msg += "Build it by running:\n"
+                    msg += "  python build_router.py\n\n"
+                    msg += "from the KiCadRoutingTools directory."
+                    raise RuntimeError(msg)
+
+                # Include any captured output in the error message
+                if captured_output.strip():
+                    raise RuntimeError(captured_output.strip())
+                raise RuntimeError(f"Startup check failed: {e}")
 
             def check_cancel():
                 return self._cancel_requested

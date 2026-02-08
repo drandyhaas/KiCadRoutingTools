@@ -33,7 +33,7 @@ Thumbs.db
 /.claude/settings.local.json
 
 # Rust build outputs
-rust_router/target/
+rust_*/target/
 *.pyd
 
 # KiCad outputs (routed files, backups, project files)
