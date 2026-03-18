@@ -118,6 +118,7 @@ class BoardInfo:
     board_bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, min_y, max_x, max_y
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
     board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
+    board_cutouts: List[List[Tuple[float, float]]] = field(default_factory=list)  # Interior cutout polygons
 
 
 @dataclass
@@ -235,13 +236,13 @@ def extract_layers(content: str) -> BoardInfo:
     # Extract board bounds from Edge.Cuts
     bounds = extract_board_bounds(content)
 
-    # Extract board outline polygon for non-rectangular boards
-    outline = extract_board_outline(content)
+    # Extract board outline polygon and cutouts for non-rectangular boards
+    outline, cutouts = extract_board_contours(content)
 
     # Extract stackup information
     stackup = extract_stackup(content)
 
-    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds, stackup=stackup, board_outline=outline)
+    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds, stackup=stackup, board_outline=outline, board_cutouts=cutouts)
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
@@ -306,6 +307,69 @@ def extract_stackup(content: str) -> List[StackupLayer]:
     return stackup
 
 
+def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
+                     end: Tuple[float, float], num_segments: int = 16
+                     ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Convert a 3-point arc to a polyline of straight segments.
+
+    Given start, mid (on arc), and end points, computes the circular arc
+    and returns it as a list of (start, end) line segment tuples.
+    """
+    ax, ay = start
+    bx, by = mid
+    cx, cy = end
+
+    # Find circle center from 3 points using perpendicular bisector intersection
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-10:
+        # Degenerate (collinear points) - just return a straight line
+        return [(start, end)]
+
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+    radius = math.hypot(ax - ux, ay - uy)
+
+    # Compute angles
+    angle_start = math.atan2(ay - uy, ax - ux)
+    angle_mid = math.atan2(by - uy, bx - ux)
+    angle_end = math.atan2(cy - uy, cx - ux)
+
+    # Determine arc direction: going from start to end, mid must be on the arc
+    # Normalize angles relative to start
+    def normalize(a, ref):
+        a = a - ref
+        while a < 0:
+            a += 2 * math.pi
+        while a >= 2 * math.pi:
+            a -= 2 * math.pi
+        return a
+
+    mid_ccw = normalize(angle_mid, angle_start)
+    end_ccw = normalize(angle_end, angle_start)
+
+    # If going CCW from start, mid should come before end
+    if mid_ccw <= end_ccw:
+        # CCW direction, sweep = end_ccw
+        sweep = end_ccw
+    else:
+        # CW direction, sweep is negative
+        sweep = end_ccw - 2 * math.pi
+
+    # Generate points along the arc, using exact start/end to preserve chaining
+    points = [start]
+    for i in range(1, num_segments):
+        t = i / num_segments
+        angle = angle_start + t * sweep
+        points.append((ux + radius * math.cos(angle), uy + radius * math.sin(angle)))
+    points.append(end)
+
+    # Build segments
+    segments = []
+    for i in range(len(points) - 1):
+        segments.append((points[i], points[i + 1]))
+    return segments
+
+
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
     """Extract board outline bounds from Edge.Cuts layer."""
     min_x = min_y = float('inf')
@@ -332,92 +396,230 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
         max_y = max(max_y, y1, y2)
         found = True
 
+    # Look for gr_arc on Edge.Cuts (multi-line format)
+    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    for m in re.finditer(arc_pattern, content, re.DOTALL):
+        sx, sy = float(m.group(1)), float(m.group(2))
+        mx, my = float(m.group(3)), float(m.group(4))
+        ex, ey = float(m.group(5)), float(m.group(6))
+        # Use linearized arc points for accurate bounds
+        for seg in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
+            for px, py in seg:
+                min_x = min(min_x, px)
+                max_x = max(max_x, px)
+                min_y = min(min_y, py)
+                max_y = max(max_y, py)
+        found = True
+
     if found:
         return (min_x, min_y, max_x, max_y)
     return None
 
 
-def extract_board_outline(content: str) -> List[Tuple[float, float]]:
-    """Extract board outline polygon from Edge.Cuts layer.
-
-    Parses gr_line segments and assembles them into a closed polygon.
-    Returns an empty list if no outline is found or if it's a simple rectangle.
-    """
-    # Collect all line segments as (start, end) tuples
+def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Parse all gr_line, gr_arc, and gr_rect segments on Edge.Cuts from file content."""
     segments = []
 
-    # Look for gr_line on Edge.Cuts (multi-line format)
+    # gr_line
     line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(line_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         segments.append(((x1, y1), (x2, y2)))
 
+    # gr_arc - approximate as polyline
+    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    for m in re.finditer(arc_pattern, content, re.DOTALL):
+        sx, sy = float(m.group(1)), float(m.group(2))
+        mx, my = float(m.group(3)), float(m.group(4))
+        ex, ey = float(m.group(5)), float(m.group(6))
+        segments.extend(_arc_to_segments((sx, sy), (mx, my), (ex, ey)))
+
+    # gr_rect - expand to 4 line segments
+    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    for m in re.finditer(rect_pattern, content, re.DOTALL):
+        x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+        segments.append(((x1, y1), (x2, y1)))
+        segments.append(((x2, y1), (x2, y2)))
+        segments.append(((x2, y2), (x1, y2)))
+        segments.append(((x1, y2), (x1, y1)))
+
+    return segments
+
+
+def _chain_segments_into_contours(segments: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+                                   tol: float = 0.01
+                                   ) -> List[List[Tuple[float, float]]]:
+    """Chain line segments into closed polygon contours.
+
+    Groups segments by connectivity (shared endpoints), chains each group
+    into a closed polygon. Returns list of polygons (each a list of vertices).
+    """
+    if not segments:
+        return []
+
+    def approx_equal(p1, p2):
+        return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
+
+    # Build connected components using union-find
+    parent = list(range(len(segments)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        a, b = find(a), find(b)
+        if a != b:
+            parent[a] = b
+
+    # Build spatial index: bucket endpoints for fast lookup
+    bucket_size = tol * 2
+    from collections import defaultdict
+    endpoint_buckets = defaultdict(list)
+    for i, seg in enumerate(segments):
+        for pt in [seg[0], seg[1]]:
+            bx = int(pt[0] / bucket_size)
+            by = int(pt[1] / bucket_size)
+            endpoint_buckets[(bx, by)].append(i)
+
+    # Union segments that share endpoints
+    for i, seg in enumerate(segments):
+        for pt in [seg[0], seg[1]]:
+            bx = int(pt[0] / bucket_size)
+            by = int(pt[1] / bucket_size)
+            # Check neighboring buckets
+            for dbx in [-1, 0, 1]:
+                for dby in [-1, 0, 1]:
+                    for j in endpoint_buckets.get((bx + dbx, by + dby), []):
+                        if j <= i:
+                            continue
+                        seg_j = segments[j]
+                        if (approx_equal(pt, seg_j[0]) or approx_equal(pt, seg_j[1])):
+                            union(i, j)
+
+    # Group segments by component
+    groups = defaultdict(list)
+    for i in range(len(segments)):
+        groups[find(i)].append(i)
+
+    # Chain each component into a polygon
+    contours = []
+    for group_indices in groups.values():
+        if len(group_indices) < 3:
+            continue
+
+        group_segs = [segments[idx] for idx in group_indices]
+
+        # Build spatial index for this group's segments
+        seg_buckets = defaultdict(list)
+        for i, seg in enumerate(group_segs):
+            for pt in [seg[0], seg[1]]:
+                bx = int(pt[0] / bucket_size)
+                by = int(pt[1] / bucket_size)
+                seg_buckets[(bx, by)].append(i)
+
+        polygon = [group_segs[0][0], group_segs[0][1]]
+        used = {0}
+
+        max_iterations = len(group_segs) * 2
+        for _ in range(max_iterations):
+            if len(used) >= len(group_segs):
+                break
+            current_end = polygon[-1]
+            bx = int(current_end[0] / bucket_size)
+            by = int(current_end[1] / bucket_size)
+            found_next = False
+
+            # Search nearby buckets for matching endpoint
+            for dbx in [-1, 0, 1]:
+                if found_next:
+                    break
+                for dby in [-1, 0, 1]:
+                    if found_next:
+                        break
+                    for i in seg_buckets.get((bx + dbx, by + dby), []):
+                        if i in used:
+                            continue
+                        seg = group_segs[i]
+                        if approx_equal(seg[0], current_end):
+                            polygon.append(seg[1])
+                            used.add(i)
+                            found_next = True
+                            break
+                        elif approx_equal(seg[1], current_end):
+                            polygon.append(seg[0])
+                            used.add(i)
+                            found_next = True
+                            break
+
+            if not found_next:
+                break
+
+        # Remove duplicate closing point
+        if len(polygon) > 1 and approx_equal(polygon[0], polygon[-1]):
+            polygon = polygon[:-1]
+
+        if len(used) == len(group_segs) and len(polygon) >= 3:
+            contours.append(polygon)
+
+    return contours
+
+
+def extract_board_outline(content: str) -> List[Tuple[float, float]]:
+    """Extract board outline polygon from Edge.Cuts layer.
+
+    Parses gr_line, gr_arc, and gr_rect segments and assembles them into
+    closed polygons. Returns the largest contour as the board outline.
+    Returns an empty list if no outline is found or if it's a simple rectangle.
+    """
+    outline, _ = extract_board_contours(content)
+    return outline
+
+
+def extract_board_contours(content: str) -> Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]:
+    """Extract board outline and cutout polygons from Edge.Cuts layer.
+
+    Returns:
+        (outline, cutouts) where outline is the outer boundary polygon vertices
+        and cutouts is a list of interior cutout polygons.
+        outline is empty if no outline found or if it's a simple axis-aligned rectangle.
+    """
+    segments = _collect_edge_cuts_segments(content)
+
     if len(segments) < 3:
-        return []  # Need at least 3 segments for a polygon
+        return [], []
 
     # Check if this is a simple 4-segment rectangle (no need for polygon handling)
     if len(segments) == 4:
-        # Get all unique vertices
         vertices = set()
         for seg in segments:
             vertices.add((round(seg[0][0], 3), round(seg[0][1], 3)))
             vertices.add((round(seg[1][0], 3), round(seg[1][1], 3)))
         if len(vertices) == 4:
-            # 4 segments with 4 vertices - likely a simple rectangle
-            xs = [v[0] for v in vertices]
-            ys = [v[1] for v in vertices]
-            # Check if all edges are axis-aligned
             all_axis_aligned = all(
                 abs(s[0][0] - s[1][0]) < 0.001 or abs(s[0][1] - s[1][1]) < 0.001
                 for s in segments
             )
             if all_axis_aligned:
-                return []  # Simple rectangle, use bounding box
+                return [], []  # Simple rectangle, use bounding box
 
-    # Build polygon by chaining segments
-    # Start with first segment
-    polygon = [segments[0][0], segments[0][1]]
-    used = {0}
+    contours = _chain_segments_into_contours(segments)
+    if not contours:
+        return [], []
 
-    # Round for comparison
-    def approx_equal(p1, p2, tol=0.01):
-        return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
+    # Find the largest contour by bounding box area (outer boundary)
+    def contour_bbox_area(contour):
+        xs = [p[0] for p in contour]
+        ys = [p[1] for p in contour]
+        return (max(xs) - min(xs)) * (max(ys) - min(ys))
 
-    # Chain remaining segments
-    max_iterations = len(segments) * 2
-    iteration = 0
-    while len(used) < len(segments) and iteration < max_iterations:
-        iteration += 1
-        current_end = polygon[-1]
-        found_next = False
+    contours.sort(key=contour_bbox_area, reverse=True)
+    outline = contours[0]
+    cutouts = contours[1:]
 
-        for i, seg in enumerate(segments):
-            if i in used:
-                continue
-
-            if approx_equal(seg[0], current_end):
-                polygon.append(seg[1])
-                used.add(i)
-                found_next = True
-                break
-            elif approx_equal(seg[1], current_end):
-                polygon.append(seg[0])
-                used.add(i)
-                found_next = True
-                break
-
-        if not found_next:
-            break
-
-    # Remove duplicate last point if polygon is closed
-    if len(polygon) > 1 and approx_equal(polygon[0], polygon[-1]):
-        polygon = polygon[:-1]
-
-    # Only return polygon if we used all segments (complete outline)
-    if len(used) == len(segments) and len(polygon) >= 3:
-        return polygon
-
-    return []  # Incomplete outline, fall back to bounding box
+    return outline, cutouts
 
 
 def extract_nets(content: str) -> Dict[int, Net]:
@@ -930,8 +1132,8 @@ def build_pcb_data_from_board(board) -> PCBData:
         except Exception:
             pass
 
-    # Board outline from Edge.Cuts drawings
-    board_outline = _extract_board_outline_from_pcbnew(board, to_mm)
+    # Board outline and cutouts from Edge.Cuts drawings
+    board_outline, board_cutouts = _extract_board_contours_from_pcbnew(board, to_mm)
 
     # Stackup
     stackup = _extract_stackup_from_pcbnew(board, to_mm)
@@ -941,7 +1143,8 @@ def build_pcb_data_from_board(board) -> PCBData:
         copper_layers=copper_layers,
         board_bounds=board_bounds,
         stackup=stackup,
-        board_outline=board_outline
+        board_outline=board_outline,
+        board_cutouts=board_cutouts
     )
 
     # --- Extract nets ---
@@ -1177,11 +1380,21 @@ def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
 
 def _extract_board_outline_from_pcbnew(board, to_mm):
     """Extract board outline polygon from Edge.Cuts drawings via pcbnew."""
+    outline, _ = _extract_board_contours_from_pcbnew(board, to_mm)
+    return outline
+
+
+def _extract_board_contours_from_pcbnew(board, to_mm):
+    """Extract board outline and cutout polygons from Edge.Cuts drawings via pcbnew.
+
+    Returns (outline, cutouts) where outline is the outer boundary polygon
+    and cutouts is a list of interior cutout polygons.
+    """
     import pcbnew
 
     edge_cuts_id = getattr(pcbnew, 'Edge_Cuts', None)
     if edge_cuts_id is None:
-        return []
+        return [], []
 
     segments = []
     for drawing in board.GetDrawings():
@@ -1208,11 +1421,20 @@ def _extract_board_outline_from_pcbnew(board, to_mm):
                     segments.append(((x2, y1), (x2, y2)))
                     segments.append(((x2, y2), (x1, y2)))
                     segments.append(((x1, y2), (x1, y1)))
+                elif shape_type == getattr(pcbnew, 'SHAPE_T_ARC', getattr(pcbnew, 'S_ARC', -1)):
+                    start = drawing.GetStart()
+                    mid = drawing.GetArcMid()
+                    end = drawing.GetEnd()
+                    segments.extend(_arc_to_segments(
+                        (to_mm(start.x), to_mm(start.y)),
+                        (to_mm(mid.x), to_mm(mid.y)),
+                        (to_mm(end.x), to_mm(end.y))
+                    ))
             except Exception:
                 continue
 
     if len(segments) < 3:
-        return []
+        return [], []
 
     # Check if this is a simple 4-segment rectangle
     if len(segments) == 4:
@@ -1226,44 +1448,19 @@ def _extract_board_outline_from_pcbnew(board, to_mm):
                 for s in segments
             )
             if all_axis_aligned:
-                return []
+                return [], []
 
-    # Build polygon by chaining segments
-    polygon = [segments[0][0], segments[0][1]]
-    used = {0}
+    contours = _chain_segments_into_contours(segments)
+    if not contours:
+        return [], []
 
-    def approx_equal(p1, p2, tol=0.01):
-        return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
+    def contour_bbox_area(contour):
+        xs = [p[0] for p in contour]
+        ys = [p[1] for p in contour]
+        return (max(xs) - min(xs)) * (max(ys) - min(ys))
 
-    max_iterations = len(segments) * 2
-    iteration = 0
-    while len(used) < len(segments) and iteration < max_iterations:
-        iteration += 1
-        current_end = polygon[-1]
-        found_next = False
-        for i, seg in enumerate(segments):
-            if i in used:
-                continue
-            if approx_equal(seg[0], current_end):
-                polygon.append(seg[1])
-                used.add(i)
-                found_next = True
-                break
-            elif approx_equal(seg[1], current_end):
-                polygon.append(seg[0])
-                used.add(i)
-                found_next = True
-                break
-        if not found_next:
-            break
-
-    if len(polygon) > 1 and approx_equal(polygon[0], polygon[-1]):
-        polygon = polygon[:-1]
-
-    if len(used) == len(segments) and len(polygon) >= 3:
-        return polygon
-
-    return []
+    contours.sort(key=contour_bbox_area, reverse=True)
+    return contours[0], contours[1:]
 
 
 def _extract_stackup_from_pcbnew(board, to_mm):
