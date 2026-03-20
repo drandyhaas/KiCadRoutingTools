@@ -377,6 +377,24 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                    gy < gmin_y + via_expand or gy > gmax_y - via_expand:
                     obstacles.add_blocked_via(gx, gy)
 
+    # Block vias inside board cutouts
+    for cutout in pcb_data.board_info.board_cutouts:
+        if len(cutout) < 3:
+            continue
+        cut_xs = [p[0] for p in cutout]
+        cut_ys = [p[1] for p in cutout]
+        cg_min_x, cg_min_y = coord.to_grid(min(cut_xs) - via_edge_clearance, min(cut_ys) - via_edge_clearance)
+        cg_max_x, cg_max_y = coord.to_grid(max(cut_xs) + via_edge_clearance, max(cut_ys) + via_edge_clearance)
+        for gx in range(cg_min_x, cg_max_x + 1):
+            for gy in range(cg_min_y, cg_max_y + 1):
+                x, y = coord.to_float(gx, gy)
+                if point_in_polygon(x, y, cutout):
+                    obstacles.add_blocked_via(gx, gy)
+                else:
+                    edge_dist = point_to_polygon_edge_distance(x, y, cutout)
+                    if edge_dist < via_edge_clearance:
+                        obstacles.add_blocked_via(gx, gy)
+
 
 def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                      config: GridRouteConfig, layer_idx: int):
@@ -439,6 +457,24 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
                 if gx < gmin_x + track_expand or gx > gmax_x - track_expand or \
                    gy < gmin_y + track_expand or gy > gmax_y - track_expand:
                     obstacles.add_blocked_cell(gx, gy, layer_idx)
+
+    # Block tracks inside board cutouts
+    for cutout in pcb_data.board_info.board_cutouts:
+        if len(cutout) < 3:
+            continue
+        cut_xs = [p[0] for p in cutout]
+        cut_ys = [p[1] for p in cutout]
+        cg_min_x, cg_min_y = coord.to_grid(min(cut_xs) - track_edge_clearance, min(cut_ys) - track_edge_clearance)
+        cg_max_x, cg_max_y = coord.to_grid(max(cut_xs) + track_edge_clearance, max(cut_ys) + track_edge_clearance)
+        for gx in range(cg_min_x, cg_max_x + 1):
+            for gy in range(cg_min_y, cg_max_y + 1):
+                x, y = coord.to_float(gx, gy)
+                if point_in_polygon(x, y, cutout):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+                else:
+                    edge_dist = point_to_polygon_edge_distance(x, y, cutout)
+                    if edge_dist < track_edge_clearance:
+                        obstacles.add_blocked_cell(gx, gy, layer_idx)
 
 
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
