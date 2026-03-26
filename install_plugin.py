@@ -26,7 +26,7 @@ from startup_checks import get_cargo_version
 
 PLUGIN_NAME = "KiCadRoutingTools"
 PLUGIN_DISPLAY_NAME = "KiCad Routing Tools"
-KICAD_VERSIONS = ["9.0", "9.99"]  # 9.0 = stable, 9.99 = nightly
+KICAD_VERSIONS = ["10.0", "9.99", "9.0"]  # Checked in order; 9.99 = nightly
 
 
 def get_kicad_python() -> Path | None:
@@ -39,10 +39,12 @@ def get_kicad_python() -> Path | None:
     system = platform.system()
 
     if system == "Windows":
-        # Check common KiCad installation paths
+        # Check common KiCad installation paths (newest version first)
         candidates = [
-            Path(r"C:\Program Files\KiCad\9.0\bin\python.exe"),
+            Path(r"C:\Program Files\KiCad\10.0\bin\python.exe"),
+            Path(r"C:\Program Files (x86)\KiCad\10.0\bin\python.exe"),
             Path(r"C:\Program Files\KiCad\9.99\bin\python.exe"),
+            Path(r"C:\Program Files\KiCad\9.0\bin\python.exe"),
             Path(r"C:\Program Files (x86)\KiCad\9.0\bin\python.exe"),
         ]
         for candidate in candidates:
@@ -97,8 +99,9 @@ def get_kicad_plugin_dirs() -> list:
 
     for version in KICAD_VERSIONS:
         version_dir = base_dir / version
-        if version == "9.0" or version_dir.exists():
-            # Always include 9.0, include others only if they exist
+        # Check if this KiCad version is installed on the system
+        install_dir = Path(rf"C:\Program Files\KiCad\{version}") if platform.system() == "Windows" else version_dir
+        if install_dir.exists() or version_dir.exists():
             # Use 3rdparty/plugins for plugins
             plugin_dir = version_dir / "3rdparty" / "plugins"
             plugin_dirs.append((version, plugin_dir))
