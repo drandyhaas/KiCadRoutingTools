@@ -33,7 +33,7 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
         content = f.read()
 
     zones = []
-    # Pattern to match zone blocks and extract net_id, net_name, and layer
+    # KiCad 9: (zone (net <id>) (net_name "name") (layer "layer"))
     zone_pattern = r'\(zone\s+\(net\s+(\d+)\)\s+\(net_name\s+"([^"]+)"\)\s+\(layer\s+"([^"]+)"\)'
 
     for match in re.finditer(zone_pattern, content):
@@ -42,6 +42,16 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
             net_name=match.group(2),
             layer=match.group(3)
         ))
+
+    if not zones:
+        # KiCad 10: (zone (net "name") (layer "layer")) - no numeric ID, no net_name line
+        zone_pattern_v10 = r'\(zone\s+\(net\s+"([^"]+)"\)\s+\(layer\s+"([^"]+)"\)'
+        for match in re.finditer(zone_pattern_v10, content):
+            zones.append(ZoneInfo(
+                net_id=0,  # No numeric ID in KiCad 10
+                net_name=match.group(1),
+                layer=match.group(2)
+            ))
 
     return zones
 
@@ -103,21 +113,24 @@ def resolve_net_id(pcb_data: PCBData, net_name: str) -> Optional[int]:
     return None
 
 
-def filter_nets_from_content(content: str, net_ids_to_exclude: List[int]) -> str:
+def filter_nets_from_content(content: str, net_ids_to_exclude: List[int],
+                             net_names_to_exclude: List[str] = None) -> str:
     """
     Filter out segments and vias for specific net IDs from PCB file content.
 
     Args:
         content: Raw PCB file content
         net_ids_to_exclude: List of net IDs to remove
+        net_names_to_exclude: For KiCad 10, list of net names to remove
 
     Returns:
         Filtered content with those nets' segments and vias removed
     """
-    if not net_ids_to_exclude:
+    if not net_ids_to_exclude and not net_names_to_exclude:
         return content
 
-    net_id_set = set(net_ids_to_exclude)
+    net_id_set = set(net_ids_to_exclude) if net_ids_to_exclude else set()
+    net_name_set = set(net_names_to_exclude) if net_names_to_exclude else set()
     lines = content.split('\n')
     result_lines = []
 
@@ -139,11 +152,18 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int]) -> str
 
             # Check if any line contains net ID to exclude
             element_text = '\n'.join(element_lines)
+            # Try KiCad 9 format: (net <id>)
             net_match = re.search(r'\(net\s+(\d+)\)', element_text)
             if net_match:
                 element_net_id = int(net_match.group(1))
                 if element_net_id in net_id_set:
                     # Skip this element entirely
+                    i += 1
+                    continue
+            elif net_name_set:
+                # KiCad 10: (net "name")
+                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', element_text)
+                if net_match_v10 and net_match_v10.group(1) in net_name_set:
                     i += 1
                     continue
 
@@ -157,22 +177,25 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int]) -> str
     return '\n'.join(result_lines)
 
 
-def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str]]) -> str:
+def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str]],
+                              zone_names_to_remove: List[Tuple[str, str]] = None) -> str:
     """
     Filter out zones for specific (net_id, layer) pairs from PCB file content.
 
     Args:
         content: Raw PCB file content
         zones_to_remove: List of (net_id, layer) tuples to remove
+        zone_names_to_remove: For KiCad 10, list of (net_name, layer) tuples to remove
 
     Returns:
         Filtered content with those zones removed
     """
-    if not zones_to_remove:
+    if not zones_to_remove and not zone_names_to_remove:
         return content
 
-    # Build set for fast lookup
-    remove_set = set(zones_to_remove)
+    # Build sets for fast lookup
+    remove_set = set(zones_to_remove) if zones_to_remove else set()
+    remove_name_set = set(zone_names_to_remove) if zone_names_to_remove else set()
     lines = content.split('\n')
     result_lines = []
 
@@ -193,8 +216,9 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
 
             # Extract net_id and layer from the zone
             element_text = '\n'.join(element_lines)
-            net_match = re.search(r'\(net\s+(\d+)\)', element_text)
             layer_match = re.search(r'\(layer\s+"([^"]+)"\)', element_text)
+            # Try KiCad 9: (net <id>)
+            net_match = re.search(r'\(net\s+(\d+)\)', element_text)
 
             if net_match and layer_match:
                 zone_net_id = int(net_match.group(1))
@@ -203,6 +227,15 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
                     # Skip this zone entirely
                     i += 1
                     continue
+            elif layer_match and remove_name_set:
+                # KiCad 10: (net "name")
+                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', element_text)
+                if net_match_v10:
+                    zone_net_name = net_match_v10.group(1)
+                    zone_layer = layer_match.group(1)
+                    if (zone_net_name, zone_layer) in remove_name_set:
+                        i += 1
+                        continue
 
             # Keep this zone
             result_lines.extend(element_lines)
@@ -222,7 +255,8 @@ def write_plane_output(
     new_segments: List[Dict],
     exclude_net_ids: List[int] = None,
     zones_to_replace: List[Tuple[int, str]] = None,
-    add_teardrops: bool = False
+    add_teardrops: bool = False,
+    net_id_to_name: Dict[int, str] = None
 ) -> bool:
     """Write the complete output file with zone (optional), vias, and traces.
 
@@ -273,16 +307,18 @@ def write_plane_output(
 
     # Add vias
     for via in new_vias:
+        via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
         elements.append(generate_via_sexpr(
             via['x'], via['y'], via['size'], via['drill'],
-            via['layers'], via['net_id']
+            via['layers'], via['net_id'], net_name=via_net_name
         ))
 
     # Add segments
     for seg in new_segments:
+        seg_net_name = net_id_to_name.get(seg['net_id']) if net_id_to_name else None
         elements.append(generate_segment_sexpr(
             seg['start'], seg['end'],
-            seg['width'], seg['layer'], seg['net_id']
+            seg['width'], seg['layer'], seg['net_id'], net_name=seg_net_name
         ))
 
     if not elements:

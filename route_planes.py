@@ -21,7 +21,7 @@ run_all_checks()
 # These imports are guaranteed to work after startup_checks passes
 import numpy as np
 
-from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment
+from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION
 from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from route import batch_route
@@ -846,7 +846,8 @@ def _generate_multinet_layer_zones(
                 polygon_points=zone_polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True
+                direct_connect=True,
+                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
@@ -1020,7 +1021,8 @@ def _generate_multinet_layer_zones(
             polygon_points=zone_polygon,
             clearance=zone_clearance,
             min_thickness=min_thickness,
-            direct_connect=True
+            direct_connect=True,
+            use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
         )
         zone_sexprs.append(zone_sexpr)
         zone_data_list.append({
@@ -1049,7 +1051,8 @@ def _generate_multinet_layer_zones(
                 polygon_points=polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True
+                direct_connect=True,
+                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
@@ -1113,9 +1116,10 @@ def _write_output_and_reroute(
     if all_debug_lines:
         print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
 
+    kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
                               exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace,
-                              add_teardrops=add_teardrops):
+                              add_teardrops=add_teardrops, net_id_to_name=kicad_v10_names):
         print("Error writing output file")
         return False
 
@@ -1794,7 +1798,8 @@ def create_plane(
                 polygon_points=zone_polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True
+                direct_connect=True,
+                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
             )
             all_zone_sexprs.append(zone_sexpr)
             all_zone_data.append({

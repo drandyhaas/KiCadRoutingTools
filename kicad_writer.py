@@ -76,14 +76,20 @@ def move_copper_text_to_silkscreen(content: str) -> str:
 
 
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
-                           width: float, layer: str, net_id: int) -> str:
-    """Generate KiCad S-expression for a track segment."""
+                           width: float, layer: str, net_id: int,
+                           net_name: str = None) -> str:
+    """Generate KiCad S-expression for a track segment.
+
+    Args:
+        net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
+    """
+    net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
     return f'''	(segment
 		(start {start[0]:.6f} {start[1]:.6f})
 		(end {end[0]:.6f} {end[1]:.6f})
 		(width {width})
 		(layer "{layer}")
-		(net {net_id})
+		{net_str}
 		(uuid "{uuid.uuid4()}")
 	)'''
 
@@ -104,20 +110,28 @@ def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 
 
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
-                       layers: List[str], net_id: int, free: bool = False) -> str:
+                       layers: List[str], net_id: int, free: bool = False,
+                       net_name: str = None) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
         free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
+        net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
+    net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
+    # KiCad 10 adds structured tenting/covering/plugging fields after layers
+    if net_name is not None:
+        tenting_str = "\n\t\t(tenting (front yes) (back yes))"
+    else:
+        tenting_str = ""
     return f'''	(via
 		(at {x:.6f} {y:.6f})
 		(size {size})
 		(drill {drill})
-		(layers "{layers_str}"){free_str}
-		(net {net_id})
+		(layers "{layers_str}"){tenting_str}{free_str}
+		{net_str}
 		(uuid "{uuid.uuid4()}")
 	)'''
 
@@ -147,7 +161,8 @@ def generate_zone_sexpr(
     min_thickness: float = 0.1,
     thermal_gap: float = 0.2,
     thermal_bridge_width: float = 0.2,
-    direct_connect: bool = True
+    direct_connect: bool = True,
+    use_net_name: bool = False
 ) -> str:
     """Generate KiCad S-expression for a filled copper zone.
 
@@ -161,6 +176,7 @@ def generate_zone_sexpr(
         thermal_gap: Gap for thermal relief spokes
         thermal_bridge_width: Width of thermal bridges
         direct_connect: If True, use solid/direct pad connections; if False, use thermal relief
+        use_net_name: If True, output KiCad 10 format (net "name") instead of (net id)
 
     Returns:
         S-expression string for the zone
@@ -181,19 +197,35 @@ def generate_zone_sexpr(
 		(clearance {clearance})
 	)'''
 
+    # KiCad 10: (net "name"), no (net_name ...) line; KiCad 9: (net id) + (net_name "name")
+    if use_net_name:
+        net_lines = f'(net "{net_name}")'
+    else:
+        net_lines = f'(net {net_id})\n\t\t(net_name "{net_name}")'
+
+    # KiCad 10 removes (filled_areas_thickness no) and adds (island_removal_mode 0) in fill
+    if use_net_name:
+        fill_block = f'''(fill yes
+			(thermal_gap {thermal_gap})
+			(thermal_bridge_width {thermal_bridge_width})
+			(island_removal_mode 0)
+		)'''
+        extra_zone_props = ''
+    else:
+        fill_block = f'''(fill yes
+			(thermal_gap {thermal_gap})
+			(thermal_bridge_width {thermal_bridge_width})
+		)'''
+        extra_zone_props = '\n\t\t(filled_areas_thickness no)'
+
     return f'''	(zone
-		(net {net_id})
-		(net_name "{net_name}")
+		{net_lines}
 		(layer "{layer}")
 		(uuid "{uuid.uuid4()}")
 		(hatch edge 0.5)
 		{connect_pads_str}
-		(min_thickness {min_thickness})
-		(filled_areas_thickness no)
-		(fill yes
-			(thermal_gap {thermal_gap})
-			(thermal_bridge_width {thermal_bridge_width})
-		)
+		(min_thickness {min_thickness}){extra_zone_props}
+		{fill_block}
 		(polygon
 			(pts
 				{pts_str}
@@ -202,7 +234,8 @@ def generate_zone_sexpr(
 	)'''
 
 
-def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict]) -> bool:
+def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
+                      net_id_to_name: Dict[int, str] = None) -> bool:
     """
     Add track segments to a PCB file.
 
@@ -210,6 +243,7 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict]) -> 
         input_path: Path to original .kicad_pcb file
         output_path: Path for output file
         tracks: List of track dicts with keys: start, end, width, layer, net_id
+        net_id_to_name: For KiCad 10, mapping of synthetic net IDs to net names
 
     Returns:
         True if successful
@@ -223,12 +257,14 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict]) -> 
     # Generate segment S-expressions
     segments = []
     for track in tracks:
+        track_net_name = net_id_to_name.get(track['net_id']) if net_id_to_name else None
         seg = generate_segment_sexpr(
             track['start'],
             track['end'],
             track['width'],
             track['layer'],
-            track['net_id']
+            track['net_id'],
+            net_name=track_net_name
         )
         segments.append(seg)
 
@@ -259,7 +295,8 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict]) -> 
 
 def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                                tracks: List[Dict], vias: List[Dict] = None,
-                               remove_vias: List[Dict] = None) -> bool:
+                               remove_vias: List[Dict] = None,
+                               net_id_to_name: Dict[int, str] = None) -> bool:
     """
     Add track segments and vias to a PCB file, optionally removing existing vias.
 
@@ -320,18 +357,21 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Generate segment S-expressions
     for track in tracks:
+        track_net_name = net_id_to_name.get(track['net_id']) if net_id_to_name else None
         seg = generate_segment_sexpr(
             track['start'],
             track['end'],
             track['width'],
             track['layer'],
-            track['net_id']
+            track['net_id'],
+            net_name=track_net_name
         )
         elements.append(seg)
 
     # Generate via S-expressions
     if vias:
         for via in vias:
+            via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
             v = generate_via_sexpr(
                 via['x'],
                 via['y'],
@@ -339,7 +379,8 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                 via['drill'],
                 via['layers'],
                 via['net_id'],
-                via.get('free', False)
+                via.get('free', False),
+                net_name=via_net_name
             )
             elements.append(v)
 
@@ -414,14 +455,14 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
 
     count = 0
 
-    # Pattern to match segment blocks
+    # Pattern to match segment blocks - handle both KiCad 9 (net <id>) and KiCad 10 (net "name")
     segment_pattern = re.compile(
         r'(\(segment\s*\n?\s*'
         r'\(start\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
         r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
         r'\(width\s+[\d.]+\)\s*\n?\s*'
         r'\(layer\s+")([^"]+)("\)\s*\n?\s*'
-        r'\(net\s+(\d+)\))',
+        r'\(net\s+(?:(\d+)|"[^"]*")\))',
         re.MULTILINE
     )
 
@@ -433,7 +474,7 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         end_x = float(match.group(4))
         end_y = float(match.group(5))
         layer = match.group(6)
-        net_id = int(match.group(8))
+        net_id = int(match.group(8)) if match.group(8) else 0
 
         start_key = coord_key(start_x, start_y)
         end_key = coord_key(end_x, end_y)
@@ -468,7 +509,9 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
 
 def swap_segment_nets_at_positions(content: str, positions: set,
                                    old_net_id: int, new_net_id: int,
-                                   layer: str = None) -> Tuple[str, int]:
+                                   layer: str = None,
+                                   old_net_name: str = None,
+                                   new_net_name: str = None) -> Tuple[str, int]:
     """
     Swap net IDs of segments that have endpoints at the given positions.
 
@@ -480,11 +523,19 @@ def swap_segment_nets_at_positions(content: str, positions: set,
         layer: Optional layer name to filter segments. When specified, only segments
                on this layer are swapped. This prevents incorrectly swapping
                stubs that share XY coordinates but are on different layers.
+        old_net_name: For KiCad 10, the net name to match/replace
+        new_net_name: For KiCad 10, the replacement net name
 
     Returns (modified_content, count_of_swapped_segments).
     """
-    # Pattern now captures layer as well
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
+    use_names = old_net_name is not None and new_net_name is not None
+
+    if use_names:
+        # KiCad 10: match (net "name")
+        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+"([^"]*)"\)'
+    else:
+        # KiCad 9: match (net <id>)
+        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
 
     count = 0
 
@@ -493,17 +544,25 @@ def swap_segment_nets_at_positions(content: str, positions: set,
         start_x, start_y = float(match.group(1)), float(match.group(2))
         end_x, end_y = float(match.group(3)), float(match.group(4))
         seg_layer = match.group(5)
-        seg_net_id = int(match.group(6))
 
         start_key = pos_key(start_x, start_y)
         end_key = pos_key(end_x, end_y)
 
-        # Check if this segment has endpoints in our position set and correct net ID
-        # Also filter by layer if specified
-        if seg_net_id == old_net_id and (start_key in positions or end_key in positions):
+        # Check if this segment has endpoints in our position set and correct net
+        if use_names:
+            seg_net_name = match.group(6)
+            matches_net = seg_net_name == old_net_name
+        else:
+            seg_net_id = int(match.group(6))
+            matches_net = seg_net_id == old_net_id
+
+        if matches_net and (start_key in positions or end_key in positions):
             if layer is None or seg_layer == layer:
                 count += 1
-                return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
+                if use_names:
+                    return match.group(0).replace(f'(net "{old_net_name}")', f'(net "{new_net_name}")')
+                else:
+                    return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)
 
     result = re.sub(segment_pattern, replace_net, content, flags=re.DOTALL)
@@ -512,7 +571,9 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
 def swap_via_nets_at_positions(content: str, positions: set,
                                old_net_id: int, new_net_id: int,
-                               tolerance: float = 0.02) -> Tuple[str, int]:
+                               tolerance: float = 0.02,
+                               old_net_name: str = None,
+                               new_net_name: str = None) -> Tuple[str, int]:
     """
     Swap net IDs of vias that are at the given positions.
 
@@ -520,9 +581,18 @@ def swap_via_nets_at_positions(content: str, positions: set,
     between vias and segment endpoints (e.g., original vias may be slightly
     off-grid from routed segments).
 
+    Args:
+        old_net_name: For KiCad 10, the net name to match/replace
+        new_net_name: For KiCad 10, the replacement net name
+
     Returns (modified_content, count_of_swapped_vias).
     """
-    via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+(\d+)\)'
+    use_names = old_net_name is not None and new_net_name is not None
+
+    if use_names:
+        via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+"([^"]*)"\)'
+    else:
+        via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+(\d+)\)'
 
     count = 0
 
@@ -536,12 +606,20 @@ def swap_via_nets_at_positions(content: str, positions: set,
     def replace_net(match):
         nonlocal count
         via_x, via_y = float(match.group(1)), float(match.group(2))
-        via_net_id = int(match.group(3))
 
-        # Check if this via is near one of our positions and has the correct net ID
-        if via_net_id == old_net_id and is_near_any_position(via_x, via_y, positions, tolerance):
+        if use_names:
+            via_net_name = match.group(3)
+            matches_net = via_net_name == old_net_name
+        else:
+            via_net_id = int(match.group(3))
+            matches_net = via_net_id == old_net_id
+
+        if matches_net and is_near_any_position(via_x, via_y, positions, tolerance):
             count += 1
-            return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
+            if use_names:
+                return match.group(0).replace(f'(net "{old_net_name}")', f'(net "{new_net_name}")')
+            else:
+                return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)
 
     result = re.sub(via_pattern, replace_net, content, flags=re.DOTALL)
@@ -687,8 +765,11 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
 
                 pad_text = fp_text[pad_start_rel:pad_end_rel]
 
-                # Find the (net id "name") in this pad
+                # Find the (net id "name") or (net "name") in this pad
                 net_match = re.search(r'\(net\s+\d+\s+"[^"]*"\)', pad_text)
+                if not net_match:
+                    # KiCad 10: (net "name") with no numeric ID
+                    net_match = re.search(r'\(net\s+"[^"]*"\)', pad_text)
                 if net_match:
                     # Convert to absolute positions in content
                     abs_start = fp_start + pad_start_rel + net_match.start()

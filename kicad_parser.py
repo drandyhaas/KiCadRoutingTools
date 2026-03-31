@@ -14,6 +14,22 @@ from pathlib import Path
 # All position-based lookups must use this to ensure consistency
 POSITION_DECIMALS = 3
 
+# KiCad 10 removed numeric net IDs from the file format.
+# Files with version >= this threshold use name-only nets: (net "name") instead of (net 29 "name").
+# KiCad 9 uses version 20241229; KiCad 10 uses version 20260206.
+KICAD_10_MIN_VERSION = 20250000
+
+
+def detect_kicad_version(content: str) -> int:
+    """Extract version number from (version YYYYMMDD) header."""
+    m = re.search(r'\(version\s+(\d+)\)', content)
+    return int(m.group(1)) if m else 0
+
+
+def is_kicad_10(content: str) -> bool:
+    """Check if file content is KiCad 10+ format (name-only nets)."""
+    return detect_kicad_version(content) >= KICAD_10_MIN_VERSION
+
 
 @dataclass
 class Pad:
@@ -131,6 +147,8 @@ class PCBData:
     segments: List[Segment]
     pads_by_net: Dict[int, List[Pad]]
     zones: List[Zone] = field(default_factory=list)
+    kicad_version: int = 0  # File format version (e.g., 20241229 for KiCad 9)
+    net_id_to_name: Dict[int, str] = field(default_factory=dict)  # Synthetic ID -> net name (for KiCad 10 output)
 
     def get_via_barrel_length(self, layer1: str, layer2: str) -> float:
         """Calculate the via barrel length between two copper layers.
@@ -622,20 +640,42 @@ def extract_board_contours(content: str) -> Tuple[List[Tuple[float, float]], Lis
     return outline, cutouts
 
 
-def extract_nets(content: str) -> Dict[int, Net]:
-    """Extract all net definitions."""
+def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], Dict[str, int]]:
+    """Extract all net definitions.
+
+    Returns:
+        Tuple of (nets dict keyed by net_id, name_to_id mapping).
+        For KiCad 9, net_id comes from the file. For KiCad 10, synthetic IDs are assigned.
+    """
     nets = {}
-    net_pattern = r'\(net\s+(\d+)\s+"([^"]*)"\)'
+    name_to_id: Dict[str, int] = {}
 
-    for m in re.finditer(net_pattern, content):
-        net_id = int(m.group(1))
-        net_name = m.group(2)
-        nets[net_id] = Net(net_id=net_id, name=net_name)
+    if kicad_version >= KICAD_10_MIN_VERSION:
+        # KiCad 10 removes the top-level net table entirely.
+        # Discover all net names from their usage in pads, segments, vias, and zones.
+        # Match (net "name") anywhere in the file — deduplicate to build the net list.
+        net_pattern = r'\(net\s+"([^"]*)"\)'
+        synthetic_id = 1
+        for m in re.finditer(net_pattern, content):
+            net_name = m.group(1)
+            if net_name in name_to_id:
+                continue  # Already seen
+            nets[synthetic_id] = Net(net_id=synthetic_id, name=net_name)
+            name_to_id[net_name] = synthetic_id
+            synthetic_id += 1
+    else:
+        # KiCad 9: nets are (net <id> "name")
+        net_pattern = r'\(net\s+(\d+)\s+"([^"]*)"\)'
+        for m in re.finditer(net_pattern, content):
+            net_id = int(m.group(1))
+            net_name = m.group(2)
+            nets[net_id] = Net(net_id=net_id, name=net_name)
+            name_to_id[net_name] = net_id
 
-    return nets
+    return nets, name_to_id
 
 
-def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dict[str, Footprint], Dict[int, List[Pad]]]:
+def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: Dict[str, int] = None) -> Tuple[Dict[str, Footprint], Dict[int, List[Pad]]]:
     """Extract footprints and their pads with global coordinates."""
     footprints = {}
     pads_by_net: Dict[int, List[Pad]] = {}
@@ -756,14 +796,20 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
             if layers_section:
                 pad_layers = re.findall(r'"([^"]+)"', layers_section.group(1))
 
-            # Extract net
+            # Extract net - try KiCad 9 format first, then KiCad 10
             net_match = re.search(r'\(net\s+(\d+)\s+"([^"]*)"\)', pad_text)
             if net_match:
                 net_id = int(net_match.group(1))
                 net_name = net_match.group(2)
             else:
-                net_id = 0
-                net_name = ""
+                # KiCad 10: (net "name") with no numeric ID
+                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', pad_text)
+                if net_match_v10 and name_to_id:
+                    net_name = net_match_v10.group(1)
+                    net_id = name_to_id.get(net_name, 0)
+                else:
+                    net_id = 0
+                    net_name = ""
 
             # Extract pinfunction
             pinfunc_match = re.search(r'\(pinfunction\s+"([^"]*)"\)', pad_text)
@@ -820,11 +866,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net]) -> Tuple[Dic
     return footprints, pads_by_net
 
 
-def extract_vias(content: str) -> List[Via]:
+def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     """Extract all vias from PCB file."""
     vias = []
 
-    # Find via blocks - (free yes) is optional between layers and net
+    # Try KiCad 9 format first: (net <id>)
+    # Strict field ordering: at → size → drill → layers → (free?) → net → uuid
     via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
@@ -841,14 +888,40 @@ def extract_vias(content: str) -> List[Via]:
         )
         vias.append(via)
 
+    if not vias and name_to_id:
+        # KiCad 10 format: (net "name")
+        # Use flexible matching between layers and net to handle new v10 fields
+        # (tenting, covering, plugging, capping, filling) that appear after layers.
+        via_pattern_v10 = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        for m in re.finditer(via_pattern_v10, content, re.DOTALL):
+            net_name = m.group(7)
+            via = Via(
+                x=float(m.group(1)),
+                y=float(m.group(2)),
+                size=float(m.group(3)),
+                drill=float(m.group(4)),
+                layers=[m.group(5), m.group(6)],
+                net_id=name_to_id.get(net_name, 0),
+                uuid=m.group(8),
+                free=False  # Parse free from content if present
+            )
+            vias.append(via)
+        # Check for free flag in matched vias
+        if vias:
+            free_pattern = r'\(via\s+\(at\s+[\d.-]+\s+[\d.-]+\).*?\(free\s+yes\).*?\(uuid\s+"([^"]+)"\)'
+            free_uuids = {m.group(1) for m in re.finditer(free_pattern, content, re.DOTALL)}
+            for via in vias:
+                if via.uuid in free_uuids:
+                    via.free = True
+
     return vias
 
 
-def extract_segments(content: str) -> List[Segment]:
+def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Segment]:
     """Extract all track segments from PCB file."""
     segments = []
 
-    # Find segment blocks
+    # Try KiCad 9 format first: (net <id>)
     segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(segment_pattern, content, re.DOTALL):
@@ -869,10 +942,31 @@ def extract_segments(content: str) -> List[Segment]:
         )
         segments.append(segment)
 
+    if not segments and name_to_id:
+        # KiCad 10 format: (net "name")
+        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
+            net_name = m.group(7)
+            segment = Segment(
+                start_x=float(m.group(1)),
+                start_y=float(m.group(2)),
+                end_x=float(m.group(3)),
+                end_y=float(m.group(4)),
+                width=float(m.group(5)),
+                layer=m.group(6),
+                net_id=name_to_id.get(net_name, 0),
+                uuid=m.group(8),
+                start_x_str=m.group(1),
+                start_y_str=m.group(2),
+                end_x_str=m.group(3),
+                end_y_str=m.group(4)
+            )
+            segments.append(segment)
+
     return segments
 
 
-def extract_zones(content: str) -> List[Zone]:
+def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]:
     """Extract all filled zones from PCB file.
 
     Parses zone definitions including their net assignment, layer, and polygon outline.
@@ -906,15 +1000,29 @@ def extract_zones(content: str) -> List[Zone]:
 
         zone_content = content[start_match.end():zone_end]
 
-        # Extract net id
+        # Extract net id - try KiCad 9 format first, then KiCad 10
         net_match = re.search(r'\(net\s+(\d+)\)', zone_content)
-        if not net_match:
+        if net_match:
+            net_id = int(net_match.group(1))
+        elif name_to_id:
+            # KiCad 10: (net "name") - first net reference in zone
+            net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', zone_content)
+            if not net_match_v10:
+                continue
+            net_name_v10 = net_match_v10.group(1)
+            net_id = name_to_id.get(net_name_v10, 0)
+        else:
             continue
-        net_id = int(net_match.group(1))
 
         # Extract net name
         net_name_match = re.search(r'\(net_name\s+"([^"]*)"\)', zone_content)
-        net_name = net_name_match.group(1) if net_name_match else ""
+        if net_name_match:
+            net_name = net_name_match.group(1)
+        elif net_match is None and name_to_id:
+            # KiCad 10: net name was already captured above
+            net_name = net_name_v10
+        else:
+            net_name = ""
 
         # Extract layer
         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_content)
@@ -977,13 +1085,18 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 
+    kicad_version = detect_kicad_version(content)
+
     # Extract components in order
     board_info = extract_layers(content)
-    nets = extract_nets(content)
-    footprints, pads_by_net = extract_footprints_and_pads(content, nets)
-    vias = extract_vias(content)
-    segments = extract_segments(content)
-    zones = extract_zones(content)
+    nets, name_to_id = extract_nets(content, kicad_version)
+    footprints, pads_by_net = extract_footprints_and_pads(content, nets, name_to_id)
+    vias = extract_vias(content, name_to_id)
+    segments = extract_segments(content, name_to_id)
+    zones = extract_zones(content, name_to_id)
+
+    # Build net_id_to_name mapping for writer output
+    net_id_to_name = {net_id: net.name for net_id, net in nets.items()}
 
     return PCBData(
         board_info=board_info,
@@ -992,7 +1105,9 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
         vias=vias,
         segments=segments,
         pads_by_net=pads_by_net,
-        zones=zones
+        zones=zones,
+        kicad_version=kicad_version,
+        net_id_to_name=net_id_to_name
     )
 
 

@@ -383,7 +383,7 @@ Examples:
         print(f"Installation complete! ({installed_count} version(s))")
         print()
         print("To use the plugin:")
-        print("  1. Open KiCad 9.0 or later")
+        print("  1. Open KiCad (9.0 or later)")
         print("  2. Open a PCB in Pcbnew")
         print("  3. Go to Tools -> External Plugins -> KiCadRoutingTools")
         print()

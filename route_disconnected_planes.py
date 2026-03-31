@@ -24,7 +24,7 @@ from typing import List, Tuple, Dict, Optional
 from startup_checks import run_all_checks
 run_all_checks()
 
-from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via
+from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION
 from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
@@ -346,7 +346,8 @@ def route_planes(
         print("\nDry run - no output file written")
     elif total_routes > 0:
         print(f"\nWriting output to {output_file}...")
-        _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines)
+        _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines,
+                      net_id_to_name=pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None)
         print(f"Output written to {output_file}")
         print("Note: Open in KiCad and press 'B' to refill zones")
     else:
@@ -361,7 +362,8 @@ def route_planes(
     return (total_routes, total_regions)
 
 
-def _write_output(input_file: str, output_file: str, segments: List[Dict], vias: List[Dict] = None, debug_lines: List[str] = None):
+def _write_output(input_file: str, output_file: str, segments: List[Dict], vias: List[Dict] = None,
+                  debug_lines: List[str] = None, net_id_to_name: Dict = None):
     """Write the output PCB file with new segments, vias, and optional debug lines."""
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -369,12 +371,14 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
     # Generate segment S-expressions
     segment_sexprs = []
     for seg in segments:
+        seg_net_name = net_id_to_name.get(seg['net_id']) if net_id_to_name else None
         sexpr = generate_segment_sexpr(
             start=seg['start'],
             end=seg['end'],
             width=seg['width'],
             layer=seg['layer'],
-            net_id=seg['net_id']
+            net_id=seg['net_id'],
+            net_name=seg_net_name
         )
         segment_sexprs.append(sexpr)
 
@@ -382,13 +386,15 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
     via_sexprs = []
     if vias:
         for via in vias:
+            via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
             sexpr = generate_via_sexpr(
                 x=via['x'],
                 y=via['y'],
                 size=via['size'],
                 drill=via['drill'],
                 layers=['F.Cu', 'B.Cu'],  # Through-hole vias
-                net_id=via['net_id']
+                net_id=via['net_id'],
+                net_name=via_net_name
             )
             via_sexprs.append(sexpr)
 

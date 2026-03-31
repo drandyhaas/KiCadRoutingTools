@@ -10,6 +10,7 @@ This module handles writing the routed PCB output file, including:
 """
 
 from typing import List, Dict, Optional
+from kicad_parser import is_kicad_10, KICAD_10_MIN_VERSION
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
@@ -78,10 +79,14 @@ def write_routed_output(
         else:
             print("  All pads already have teardrop settings")
 
+    # Determine if this is a KiCad 10 file and get net name mapping
+    net_id_to_name = getattr(pcb_data, 'net_id_to_name', {}) if pcb_data else {}
+    kicad_v10 = is_kicad_10(content)
+
     # Apply target swaps FIRST - layer modifications were recorded with post-swap net IDs,
     # so we need to swap the file content to match before applying layer modifications
-    content = _apply_diff_pair_target_swaps(content, target_swap_info)
-    content = _apply_single_ended_target_swaps(content, single_ended_target_swap_info)
+    content = _apply_diff_pair_target_swaps(content, target_swap_info, net_id_to_name if kicad_v10 else None)
+    content = _apply_single_ended_target_swaps(content, single_ended_target_swap_info, net_id_to_name if kicad_v10 else None)
 
     # Apply segment layer modifications from stub layer switching AFTER target swaps
     # (layer mods were recorded with post-swap net IDs, so file must be swapped first)
@@ -90,10 +95,10 @@ def write_routed_output(
         print(f"Applied {mod_count} segment layer modifications (layer switching)")
 
     # Apply pad and stub net swaps for polarity fixes
-    content = _apply_polarity_swaps(content, pad_swaps, pcb_data)
+    content = _apply_polarity_swaps(content, pad_swaps, pcb_data, net_id_to_name if kicad_v10 else None)
 
     # Generate routing text (new segments and vias)
-    routing_text = _generate_routing_text(results, all_swap_vias)
+    routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None)
 
     # Add debug paths if enabled
     if debug_lines:
@@ -112,10 +117,14 @@ def write_routed_output(
     return True
 
 
-def _apply_diff_pair_target_swaps(content: str, target_swap_info: List[Dict]) -> str:
+def _apply_diff_pair_target_swaps(content: str, target_swap_info: List[Dict],
+                                  net_id_to_name: Dict = None) -> str:
     """Apply diff pair target swaps to file content."""
     if not target_swap_info:
         return content
+
+    def _net_name(net_id):
+        return net_id_to_name.get(net_id) if net_id_to_name else None
 
     print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
     for swap in target_swap_info:
@@ -125,25 +134,33 @@ def _apply_diff_pair_target_swaps(content: str, target_swap_info: List[Dict]) ->
 
         # Swap segments at p1's target: p1 net -> p2 net
         content, p1_p_seg = swap_segment_nets_at_positions(
-            content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'], layer=p1_layer)
+            content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'], layer=p1_layer,
+            old_net_name=_net_name(swap['p1_p_net_id']), new_net_name=_net_name(swap['p2_p_net_id']))
         content, p1_n_seg = swap_segment_nets_at_positions(
-            content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'], layer=p1_layer)
+            content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'], layer=p1_layer,
+            old_net_name=_net_name(swap['p1_n_net_id']), new_net_name=_net_name(swap['p2_n_net_id']))
         # Swap segments at p2's target: p2 net -> p1 net
         content, p2_p_seg = swap_segment_nets_at_positions(
-            content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'], layer=p2_layer)
+            content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'], layer=p2_layer,
+            old_net_name=_net_name(swap['p2_p_net_id']), new_net_name=_net_name(swap['p1_p_net_id']))
         content, p2_n_seg = swap_segment_nets_at_positions(
-            content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'], layer=p2_layer)
+            content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'], layer=p2_layer,
+            old_net_name=_net_name(swap['p2_n_net_id']), new_net_name=_net_name(swap['p1_n_net_id']))
 
         # Swap vias at p1's target
         content, p1_p_via = swap_via_nets_at_positions(
-            content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'])
+            content, swap['p1_p_positions'], swap['p1_p_net_id'], swap['p2_p_net_id'],
+            old_net_name=_net_name(swap['p1_p_net_id']), new_net_name=_net_name(swap['p2_p_net_id']))
         content, p1_n_via = swap_via_nets_at_positions(
-            content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'])
+            content, swap['p1_n_positions'], swap['p1_n_net_id'], swap['p2_n_net_id'],
+            old_net_name=_net_name(swap['p1_n_net_id']), new_net_name=_net_name(swap['p2_n_net_id']))
         # Swap vias at p2's target
         content, p2_p_via = swap_via_nets_at_positions(
-            content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'])
+            content, swap['p2_p_positions'], swap['p2_p_net_id'], swap['p1_p_net_id'],
+            old_net_name=_net_name(swap['p2_p_net_id']), new_net_name=_net_name(swap['p1_p_net_id']))
         content, p2_n_via = swap_via_nets_at_positions(
-            content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'])
+            content, swap['p2_n_positions'], swap['p2_n_net_id'], swap['p1_n_net_id'],
+            old_net_name=_net_name(swap['p2_n_net_id']), new_net_name=_net_name(swap['p1_n_net_id']))
 
         # Swap pads if they exist
         if swap['p1_p_pad'] and swap['p2_p_pad']:
@@ -164,26 +181,34 @@ def _apply_diff_pair_target_swaps(content: str, target_swap_info: List[Dict]) ->
     return content
 
 
-def _apply_single_ended_target_swaps(content: str, single_ended_target_swap_info: List[Dict]) -> str:
+def _apply_single_ended_target_swaps(content: str, single_ended_target_swap_info: List[Dict],
+                                     net_id_to_name: Dict = None) -> str:
     """Apply single-ended target swaps to file content."""
     if not single_ended_target_swap_info:
         return content
+
+    def _net_name(net_id):
+        return net_id_to_name.get(net_id) if net_id_to_name else None
 
     print(f"Applying {len(single_ended_target_swap_info)} single-ended target swap(s) to output file...")
     for swap in single_ended_target_swap_info:
         # Swap segments at n1's target: n1 net -> n2 net
         content, n1_seg = swap_segment_nets_at_positions(
-            content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'])
+            content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'],
+            old_net_name=_net_name(swap['n1_net_id']), new_net_name=_net_name(swap['n2_net_id']))
         # Swap segments at n2's target: n2 net -> n1 net
         content, n2_seg = swap_segment_nets_at_positions(
-            content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'])
+            content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'],
+            old_net_name=_net_name(swap['n2_net_id']), new_net_name=_net_name(swap['n1_net_id']))
 
         # Swap vias at n1's target
         content, n1_via = swap_via_nets_at_positions(
-            content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'])
+            content, swap['n1_positions'], swap['n1_net_id'], swap['n2_net_id'],
+            old_net_name=_net_name(swap['n1_net_id']), new_net_name=_net_name(swap['n2_net_id']))
         # Swap vias at n2's target
         content, n2_via = swap_via_nets_at_positions(
-            content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'])
+            content, swap['n2_positions'], swap['n2_net_id'], swap['n1_net_id'],
+            old_net_name=_net_name(swap['n2_net_id']), new_net_name=_net_name(swap['n1_net_id']))
 
         # Swap pads if they exist
         if swap['n1_pad'] and swap['n2_pad']:
@@ -197,10 +222,14 @@ def _apply_single_ended_target_swaps(content: str, single_ended_target_swap_info
     return content
 
 
-def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data) -> str:
+def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
+                          net_id_to_name: Dict = None) -> str:
     """Apply polarity fix pad and stub swaps to file content."""
     if not pad_swaps:
         return content
+
+    def _net_name(net_id):
+        return net_id_to_name.get(net_id) if net_id_to_name else None
 
     print(f"Applying {len(pad_swaps)} polarity fix(es) (swapping target pads and stubs)...")
     for swap in pad_swaps:
@@ -224,32 +253,45 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data) -> str:
             n_positions = find_connected_segment_positions(pcb_data, pad_n.global_x, pad_n.global_y, n_net_id)
 
         # Swap entire stub chains - all segments connected to each pad
-        content, p_seg_count = swap_segment_nets_at_positions(content, p_positions, p_net_id, n_net_id)
-        content, n_seg_count = swap_segment_nets_at_positions(content, n_positions, n_net_id, p_net_id)
+        content, p_seg_count = swap_segment_nets_at_positions(
+            content, p_positions, p_net_id, n_net_id,
+            old_net_name=_net_name(p_net_id), new_net_name=_net_name(n_net_id))
+        content, n_seg_count = swap_segment_nets_at_positions(
+            content, n_positions, n_net_id, p_net_id,
+            old_net_name=_net_name(n_net_id), new_net_name=_net_name(p_net_id))
 
         # Also swap vias at the same positions
-        content, p_via_count = swap_via_nets_at_positions(content, p_positions, p_net_id, n_net_id)
-        content, n_via_count = swap_via_nets_at_positions(content, n_positions, n_net_id, p_net_id)
+        content, p_via_count = swap_via_nets_at_positions(
+            content, p_positions, p_net_id, n_net_id,
+            old_net_name=_net_name(p_net_id), new_net_name=_net_name(n_net_id))
+        content, n_via_count = swap_via_nets_at_positions(
+            content, n_positions, n_net_id, p_net_id,
+            old_net_name=_net_name(n_net_id), new_net_name=_net_name(p_net_id))
         print(f"  Stubs: swapped {p_seg_count}+{n_seg_count} segments, {p_via_count}+{n_via_count} vias")
 
     return content
 
 
-def _generate_routing_text(results: List[Dict], all_swap_vias: List) -> str:
+def _generate_routing_text(results: List[Dict], all_swap_vias: List,
+                           net_id_to_name: Dict = None) -> str:
     """Generate routing text for new segments and vias."""
     routing_text = ""
+
+    def _net_name(net_id):
+        return net_id_to_name.get(net_id) if net_id_to_name else None
 
     # Add segments and vias from routing results
     for result in results:
         for seg in result['new_segments']:
             routing_text += generate_segment_sexpr(
                 (seg.start_x, seg.start_y), (seg.end_x, seg.end_y),
-                seg.width, seg.layer, seg.net_id
+                seg.width, seg.layer, seg.net_id, net_name=_net_name(seg.net_id)
             ) + "\n"
         for via in result['new_vias']:
             routing_text += generate_via_sexpr(
                 via.x, via.y, via.size, via.drill,
-                via.layers, via.net_id, getattr(via, 'free', False)
+                via.layers, via.net_id, getattr(via, 'free', False),
+                net_name=_net_name(via.net_id)
             ) + "\n"
 
     # Add vias from stub layer swapping
@@ -258,7 +300,8 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List) -> str:
         for via in all_swap_vias:
             routing_text += generate_via_sexpr(
                 via.x, via.y, via.size, via.drill,
-                via.layers, via.net_id, getattr(via, 'free', False)
+                via.layers, via.net_id, getattr(via, 'free', False),
+                net_name=_net_name(via.net_id)
             ) + "\n"
 
     return routing_text

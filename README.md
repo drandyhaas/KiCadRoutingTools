@@ -4,7 +4,7 @@
 
 # KiCad Routing Tools
 
-A fast Rust-accelerated A* autorouter for KiCad PCB files. Available as both a **KiCad Plugin** with full GUI and a **Command-Line Interface** for scripting and automation.
+A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiCad 9 and KiCad 10**. Available as both a **KiCad Plugin** with full GUI and a **Command-Line Interface** for scripting and automation.
 
 <p align="center">
   <img src="docs/routed_all.png" alt="Routed PCB example" width="600">
@@ -133,7 +133,7 @@ python route_planes.py my_board.kicad_pcb --nets GND --plane-layers B.Cu
 
 ## KiCad Plugin
 
-The plugin provides a full graphical interface for all routing features, running directly within KiCad 9+.
+The plugin provides a full graphical interface for all routing features, running directly within KiCad 9 or 10.
 
 <p align="center">
   <img src="kicad_routing_plugin/gui.png" alt="KiCad Plugin GUI" width="600">
@@ -152,14 +152,14 @@ python install_plugin.py --symlink
 python install_plugin.py --uninstall
 ```
 
-The installer automatically detects your KiCad installation directory:
-- **macOS**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
-- **Linux**: `~/.local/share/kicad/9.0/3rdparty/plugins/`
-- **Windows**: `~/Documents/KiCad/9.0/3rdparty/plugins/`
+The installer automatically detects your KiCad installation directory (supports KiCad 9.0 and 10.0):
+- **macOS**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
+- **Linux**: `~/.local/share/kicad/<version>/3rdparty/plugins/`
+- **Windows**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
 
 ### Usage
 
-1. Open KiCad 9.0 or later
+1. Open KiCad (9.0 or later)
 2. Open a PCB in Pcbnew
 3. Go to **Tools → External Plugins → KiCadRoutingTools**
 4. Configure routing parameters and select nets to route
