@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Build script for the Rust grid router module."""
 
+import sys
+if sys.version_info[0] < 3:
+    print("ERROR: Python 3 is required. You are running Python %d.%d." % sys.version_info[:2])
+    print("Try:  python3 build_router.py")
+    sys.exit(1)
+
 import argparse
 import subprocess
 import shutil
-import sys
 import os
 
 
@@ -15,7 +20,7 @@ def clean(script_dir, rust_dir):
     # Remove target directory (all Rust build outputs)
     target_dir = os.path.join(rust_dir, 'target')
     if os.path.exists(target_dir):
-        print(f"Removing {target_dir}")
+        print("Removing %s" % target_dir)
         shutil.rmtree(target_dir)
 
     # Remove compiled library files in rust_router directory
@@ -26,7 +31,7 @@ def clean(script_dir, rust_dir):
     ]
     for lib_file in lib_files:
         if os.path.exists(lib_file):
-            print(f"Removing {lib_file}")
+            print("Removing %s" % lib_file)
             os.remove(lib_file)
 
     # Remove stale copies in parent directory
@@ -37,7 +42,7 @@ def clean(script_dir, rust_dir):
     ]
     for stale in stale_files:
         if os.path.exists(stale):
-            print(f"Removing stale module: {stale}")
+            print("Removing stale module: %s" % stale)
             os.remove(stale)
 
     print("Clean complete.")
@@ -99,7 +104,7 @@ def build(script_dir, rust_dir):
         dst = os.path.join(rust_dir, 'grid_router.so')
 
     # Copy to destination
-    print(f"Copying {src} -> {dst}")
+    print("Copying %s -> %s" % (src, dst))
     shutil.copy2(src, dst)
 
     # Verify version
@@ -110,7 +115,7 @@ def build(script_dir, rust_dir):
         del sys.modules['grid_router']
 
     import grid_router
-    print(f"Successfully built grid_router v{grid_router.__version__}")
+    print("Successfully built grid_router v%s" % grid_router.__version__)
 
     # Remove any stale copies in the parent directory
     stale_files = [
@@ -120,7 +125,7 @@ def build(script_dir, rust_dir):
     ]
     for stale in stale_files:
         if os.path.exists(stale):
-            print(f"Removing stale module: {stale}")
+            print("Removing stale module: %s" % stale)
             os.remove(stale)
 
 
