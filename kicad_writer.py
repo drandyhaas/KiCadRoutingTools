@@ -77,18 +77,20 @@ def move_copper_text_to_silkscreen(content: str) -> str:
 
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
                            width: float, layer: str, net_id: int,
-                           net_name: str = None) -> str:
+                           net_name: str = None, locked: bool = False) -> str:
     """Generate KiCad S-expression for a track segment.
 
     Args:
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
+        locked: If True, emit (locked yes) so KiCad preserves the segment as locked.
     """
     net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
+    locked_str = "\n\t\t(locked yes)" if locked else ""
     return f'''	(segment
 		(start {start[0]:.6f} {start[1]:.6f})
 		(end {end[0]:.6f} {end[1]:.6f})
 		(width {width})
-		(layer "{layer}")
+		(layer "{layer}"){locked_str}
 		{net_str}
 		(uuid "{uuid.uuid4()}")
 	)'''
@@ -111,15 +113,17 @@ def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
-                       net_name: str = None) -> str:
+                       net_name: str = None, locked: bool = False) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
         free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
+        locked: If True, adds (locked yes) so KiCad preserves the via as locked.
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
+    locked_str = "\n\t\t(locked yes)" if locked else ""
     net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
     if net_name is not None:
@@ -130,7 +134,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
 		(at {x:.6f} {y:.6f})
 		(size {size})
 		(drill {drill})
-		(layers "{layers_str}"){tenting_str}{free_str}
+		(layers "{layers_str}"){tenting_str}{locked_str}{free_str}
 		{net_str}
 		(uuid "{uuid.uuid4()}")
 	)'''

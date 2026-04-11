@@ -64,6 +64,7 @@ class Via:
     net_id: int
     uuid: str = ""
     free: bool = False  # If True, KiCad won't auto-assign net based on overlapping tracks
+    locked: bool = False  # If True, KiCad marks the via as locked (user must unlock to edit/route over)
 
 
 @dataclass
@@ -77,6 +78,7 @@ class Segment:
     layer: str
     net_id: int
     uuid: str = ""
+    locked: bool = False  # If True, KiCad marks the segment as locked (user must unlock to edit)
     # Original string representations for exact file matching
     start_x_str: str = ""
     start_y_str: str = ""
@@ -871,20 +873,22 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     vias = []
 
     # Try KiCad 9 format first: (net <id>)
-    # Strict field ordering: at → size → drill → layers → (free?) → net → uuid
-    via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # Strict field ordering: at → size → drill → layers → (locked?) → (free?) → net → uuid
+    via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(locked\s+(yes|no)\)\s+)?(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
-        free_value = m.group(7)  # "yes", "no", or None
+        locked_value = m.group(7)  # "yes", "no", or None
+        free_value = m.group(8)  # "yes", "no", or None
         via = Via(
             x=float(m.group(1)),
             y=float(m.group(2)),
             size=float(m.group(3)),
             drill=float(m.group(4)),
             layers=[m.group(5), m.group(6)],
-            net_id=int(m.group(8)),
-            uuid=m.group(9),
-            free=(free_value == "yes")
+            net_id=int(m.group(9)),
+            uuid=m.group(10),
+            free=(free_value == "yes"),
+            locked=(locked_value == "yes")
         )
         vias.append(via)
 
@@ -913,6 +917,12 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             for via in vias:
                 if via.uuid in free_uuids:
                     via.free = True
+            # Check for locked flag (same proximity-based scan strategy)
+            locked_pattern = r'\(via\s+\(at\s+[\d.-]+\s+[\d.-]+\).*?\(locked\s+yes\).*?\(uuid\s+"([^"]+)"\)'
+            locked_uuids = {m.group(1) for m in re.finditer(locked_pattern, content, re.DOTALL)}
+            for via in vias:
+                if via.uuid in locked_uuids:
+                    via.locked = True
 
     return vias
 
@@ -922,9 +932,10 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     segments = []
 
     # Try KiCad 9 format first: (net <id>)
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(segment_pattern, content, re.DOTALL):
+        locked_value = m.group(7)  # "yes", "no", or None
         segment = Segment(
             start_x=float(m.group(1)),
             start_y=float(m.group(2)),
@@ -932,8 +943,9 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             end_y=float(m.group(4)),
             width=float(m.group(5)),
             layer=m.group(6),
-            net_id=int(m.group(7)),
-            uuid=m.group(8),
+            net_id=int(m.group(8)),
+            uuid=m.group(9),
+            locked=(locked_value == "yes"),
             # Store original strings for exact file matching
             start_x_str=m.group(1),
             start_y_str=m.group(2),
@@ -944,9 +956,10 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
 
     if not segments and name_to_id:
         # KiCad 10 format: (net "name")
-        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+(yes|no)\)\s+)?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
-            net_name = m.group(7)
+            locked_value = m.group(7)  # "yes", "no", or None
+            net_name = m.group(8)
             segment = Segment(
                 start_x=float(m.group(1)),
                 start_y=float(m.group(2)),
@@ -955,7 +968,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 width=float(m.group(5)),
                 layer=m.group(6),
                 net_id=name_to_id.get(net_name, 0),
-                uuid=m.group(8),
+                uuid=m.group(9),
+                locked=(locked_value == "yes"),
                 start_x_str=m.group(1),
                 start_y_str=m.group(2),
                 end_x_str=m.group(3),
