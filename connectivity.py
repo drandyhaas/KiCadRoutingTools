@@ -6,6 +6,7 @@ and tracking segment connectivity.
 """
 
 import math
+from types import SimpleNamespace
 from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import PCBData, Segment, Via, Pad, Zone
@@ -880,7 +881,7 @@ def get_multipoint_net_pads(
                             layer_idx,
                             x,
                             y,
-                            {'x': x, 'y': y, 'layer': layer, 'layers': [layer]}  # dict with layers attr for compatibility
+                            SimpleNamespace(x=x, y=y, global_x=x, global_y=y, layer=layer, layers=[layer])
                         ))
             return endpoint_info if len(endpoint_info) >= 3 else None
 
@@ -924,7 +925,7 @@ def get_multipoint_net_pads(
                             layer_idx,
                             x,
                             y,
-                            {'x': x, 'y': y, 'layer': layer, 'layers': [layer]}
+                            SimpleNamespace(x=x, y=y, global_x=x, global_y=y, layer=layer, layers=[layer])
                         ))
 
             # Add unconnected pads
