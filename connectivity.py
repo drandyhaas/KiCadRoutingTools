@@ -15,6 +15,34 @@ from geometry_utils import UnionFind
 from routing_constants import BGA_DEFAULT_EDGE_TOLERANCE, BGA_EDGE_DETECTION_TOLERANCE
 
 
+class _EndpointStub:
+    """Lightweight stand-in for a Pad object at a stub free-end position.
+
+    Used by check_multipoint_net when a stub endpoint (not an actual pad)
+    needs to participate in zone-connectivity checks that access .layers etc.
+    """
+    __slots__ = ('x', 'y', 'global_x', 'global_y', 'layer', 'layers',
+                 'drill', 'size_x', 'size_y', 'pad_number', 'net_id')
+
+    def __init__(self, x: float, y: float, layer: str):
+        self.x = x
+        self.y = y
+        self.global_x = x
+        self.global_y = y
+        self.layer = layer
+        self.layers = [layer]
+        self.drill = 0
+        self.size_x = 0
+        self.size_y = 0
+        self.pad_number = ''
+        self.net_id = 0
+
+
+def _make_endpoint_stub(x: float, y: float, layer: str) -> '_EndpointStub':
+    """Create a pad-like object for a stub free-end position."""
+    return _EndpointStub(x, y, layer)
+
+
 def _get_pad_coords(p) -> Tuple[float, float]:
     """Get x, y coordinates from Pad object or dict."""
     if hasattr(p, 'global_x'):
@@ -880,7 +908,7 @@ def get_multipoint_net_pads(
                             layer_idx,
                             x,
                             y,
-                            {'x': x, 'y': y, 'layer': layer, 'layers': [layer]}  # dict with layers attr for compatibility
+                            _make_endpoint_stub(x, y, layer)
                         ))
             return endpoint_info if len(endpoint_info) >= 3 else None
 
@@ -924,7 +952,7 @@ def get_multipoint_net_pads(
                             layer_idx,
                             x,
                             y,
-                            {'x': x, 'y': y, 'layer': layer, 'layers': [layer]}
+                            _make_endpoint_stub(x, y, layer)
                         ))
 
             # Add unconnected pads
