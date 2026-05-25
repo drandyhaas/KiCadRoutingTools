@@ -1208,6 +1208,7 @@ def create_plane(
     pcb_data: Optional[PCBData] = None,
     return_results: bool = False,
     same_net_pad_clearance: float = defaults.SAME_NET_PAD_CLEARANCE,
+    skip_existing_zones: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1230,6 +1231,11 @@ def create_plane(
         same_net_pad_clearance: Edge-to-edge clearance (mm) between stitching vias and
             same-net pads. -1 (default) allows via-in-pad placement. Any value >= 0
             forces vias to be placed outside same-net pads with that much clearance.
+        skip_existing_zones: When True, if a zone already exists on the target layer
+            for the same net (in either the input file or the provided pcb_data), do
+            not create another one - just place stitching vias to the existing zone.
+            When False (CLI default), an existing zone on the target layer for the
+            same net is replaced.
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -1260,16 +1266,51 @@ def create_plane(
     # Each entry is (net_id, net_name, plane_layer, pad_info)
     failed_pad_infos: List[Tuple[int, str, str, Dict]] = []
 
-    # Step 2: Check for existing zones on each target layer
-    existing_zones = extract_zones(input_file)
+    # Step 2: Check for existing zones on each target layer.
+    # Combine zones from the input file with zones already present in the
+    # provided pcb_data (the live pcbnew board state when invoked from the
+    # GUI). This way zones that exist on the live board but haven't been
+    # saved to disk are also detected.
+    try:
+        existing_zones = list(extract_zones(input_file))
+    except (FileNotFoundError, OSError):
+        existing_zones = []
+    seen_keys = {(z.net_name, z.layer) for z in existing_zones}
+    for z in (getattr(pcb_data, 'zones', None) or []):
+        key = (z.net_name, z.layer)
+        if key in seen_keys:
+            continue
+        existing_zones.append(ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer))
+        seen_keys.add(key)
+
     should_create_zones = []  # Per-net flag for whether to create zone
     zones_to_replace = []  # List of (net_id, layer) tuples for zones to replace
     for i, (net_name, plane_layer, net_id) in enumerate(zip(net_names, plane_layers, net_ids)):
+        if skip_existing_zones:
+            # GUI path: never error on existing zones of other nets - in KiCad,
+            # zones with different nets may coexist on a layer. Only check for a
+            # same-net existing zone and skip in that case.
+            same_net_zone = next((z for z in existing_zones
+                                  if z.layer == plane_layer
+                                  and (z.net_name == net_name or
+                                       (z.net_id and z.net_id == net_id))),
+                                 None)
+            if same_net_zone:
+                print(f"Note: zone for '{net_name}' already exists on {plane_layer} - "
+                      f"keeping it and only placing stitching vias")
+                should_create_zones.append(False)
+            else:
+                should_create_zones.append(True)
+            continue
+
+        # CLI / strict path
         should_create, should_continue, zone_to_replace = check_existing_zones(
             existing_zones, plane_layer, net_name, net_id, verbose
         )
         if not should_continue:
             print(f"Error: Zone conflict for net '{net_name}' on layer {plane_layer}")
+            if return_results:
+                return (0, 0, 0, [], [], [])
             return (0, 0, 0)
         should_create_zones.append(should_create)
         if zone_to_replace:
@@ -1277,8 +1318,12 @@ def create_plane(
 
     # Step 3: Get board bounds for zone polygon
     board_bounds = pcb_data.board_info.board_bounds
-    if not board_bounds:
-        print("Error: Could not determine board bounds")
+    if not board_bounds or (board_bounds[2] - board_bounds[0]) <= 0 or (board_bounds[3] - board_bounds[1]) <= 0:
+        print("Error: Could not determine board bounds "
+              "(no Edge.Cuts drawings found, or they have zero extent). "
+              "Add an Edge.Cuts outline to the board before creating planes.")
+        if return_results:
+            return (0, 0, 0, [], [], [])
         return (0, 0, 0)
 
     min_x, min_y, max_x, max_y = board_bounds
@@ -1373,12 +1418,15 @@ def create_plane(
 
         pads_through_hole = sum(1 for p in target_pads if p['type'] == 'through_hole')
         pads_direct = sum(1 for p in target_pads if p['type'] == 'direct')
+        pads_already_connected = sum(1 for p in target_pads if p['type'] == 'already_connected')
         pads_need_via = sum(1 for p in target_pads if p['type'] == 'via_needed')
         total_pads_needing_vias += pads_need_via
 
         print(f"\nPad analysis for net '{net_name}':")
         print(f"  Through-hole pads (no via needed): {pads_through_hole}")
         print(f"  SMD pads on {plane_layer} (no via needed): {pads_direct}")
+        if pads_already_connected:
+            print(f"  SMD pads already routed to plane (no via needed): {pads_already_connected}")
         print(f"  SMD pads on other layers (via needed): {pads_need_via}")
 
         # Step 6: Collect existing vias on target net (for reuse)

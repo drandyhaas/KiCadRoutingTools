@@ -694,6 +694,7 @@ class PlanesTab(wx.Panel):
                 return_results=True,
                 layer_nets=layer_nets,
                 same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
+                skip_existing_zones=True,
             )
 
             total_vias = vias
@@ -947,10 +948,50 @@ class PlanesTab(wx.Panel):
 
         # Add zones from create_plane results
         zones_added = 0
+        zones_skipped = 0
+        new_zone_objs = []  # Track newly added zones so we can fill them below.
         if hasattr(self, '_new_zones') and self._new_zones:
+            # Snapshot which (net_name, layer) pairs already have a zone on
+            # the live board so we never add a duplicate.
+            existing_zone_keys = set()
+            try:
+                for existing_zone in board.Zones():
+                    try:
+                        existing_net = existing_zone.GetNet().GetNetname()
+                    except Exception:
+                        existing_net = ''
+                    try:
+                        existing_layer = board.GetLayerName(existing_zone.GetLayer())
+                    except Exception:
+                        existing_layer = ''
+                    existing_zone_keys.add((existing_net, existing_layer))
+            except Exception:
+                pass
+
             for zone_data in self._new_zones:
+                key = (zone_data.get('net_name', ''), zone_data.get('layer', ''))
+                if key in existing_zone_keys:
+                    print(f"Skipping new zone for '{key[0]}' on {key[1]} "
+                          f"(zone already exists on board)")
+                    zones_skipped += 1
+                    continue
                 zone = pcbnew.ZONE(board)
-                zone.SetNetCode(zone_data['net_id'])
+                # Prefer looking up the net by name on the live board - net_id
+                # values can drift between the parser and pcbnew (different
+                # ordering for KiCad 10, or stale disk state vs. live board).
+                # Fall back to SetNetCode if the name isn't found.
+                net_assigned = False
+                net_name = zone_data.get('net_name')
+                if net_name:
+                    try:
+                        net_item = board.FindNet(net_name)
+                    except Exception:
+                        net_item = None
+                    if net_item:
+                        zone.SetNet(net_item)
+                        net_assigned = True
+                if not net_assigned:
+                    zone.SetNetCode(zone_data['net_id'])
                 zone.SetLayer(get_layer_id(zone_data['layer']))
 
                 # Set zone outline from polygon points
@@ -962,18 +1003,36 @@ class PlanesTab(wx.Panel):
                 # Set zone properties
                 zone.SetLocalClearance(pcbnew.FromMM(zone_data.get('clearance', 0.2)))
                 zone.SetMinThickness(pcbnew.FromMM(zone_data.get('min_thickness', 0.1)))
-                zone.SetIsFilled(False)  # Will be filled by DRC/zone fill
                 zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)  # Direct connect
+                # Hatch the outline so the zone is visible immediately;
+                # the actual copper fill is computed below via ZONE_FILLER.
+                try:
+                    zone.HatchBorder()
+                except Exception:
+                    pass
 
                 board.Add(zone)
+                new_zone_objs.append(zone)
                 zones_added += 1
             self._new_zones = []
 
         if vias_added > 0 or tracks_added > 0 or zones_added > 0:
             print(f"Added to board: {zones_added} zones, {vias_added} vias, {tracks_added} tracks")
 
-        # Build connectivity and refresh
+        # Build connectivity before filling so nets are resolved properly.
         board.BuildConnectivity()
+
+        # Fill any newly-added zones so they appear as solid copper without
+        # the user needing to run "Fill All Zones" (B) manually.
+        if new_zone_objs:
+            try:
+                filler = pcbnew.ZONE_FILLER(board)
+                filler.Fill(new_zone_objs)
+                print(f"Filled {len(new_zone_objs)} new zone(s)")
+            except Exception as e:
+                print(f"Warning: could not auto-fill new zones ({e}). "
+                      "Press B in pcbnew to fill manually.")
+
         pcbnew.Refresh()
 
         # Sync pcb_data

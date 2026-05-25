@@ -110,6 +110,93 @@ def block_circle(obstacles: GridObstacleMap, cx: int, cy: int, radius_sq: float,
                     obstacles.add_blocked_cell(cx + ex, cy + ey, layer_idx)
 
 
+def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
+                            pcb_data: PCBData, tolerance: float = 0.01) -> bool:
+    """Return True if the SMD `pad` already has an electrical path to
+    `target_layer` through existing same-net tracks, vias, and pads.
+
+    Used by identify_target_pads to skip placing a stitching via for pads
+    that the plane zone will already pick up via existing copper. The
+    walk is over (position, layer) states:
+      - Same-net segment endpoints connect their two states.
+      - Same-net via positions connect all layers in the via's span.
+      - Same-net through-hole pad positions connect all copper layers.
+    """
+    pad_layer = None
+    for layer in pad.layers:
+        if layer.endswith('.Cu') and not layer.startswith('*'):
+            pad_layer = layer
+            break
+    if pad_layer is None:
+        return False
+    if pad_layer == target_layer:
+        return True
+
+    inv_tol = 1.0 / tolerance
+    def pkey(x: float, y: float):
+        return (round(x * inv_tol), round(y * inv_tol))
+
+    if pcb_data.board_info and getattr(pcb_data.board_info, 'copper_layers', None):
+        all_cu = [l for l in pcb_data.board_info.copper_layers if l.endswith('.Cu')]
+    else:
+        all_cu = ['F.Cu', 'B.Cu']
+
+    # Segment adjacency keyed by (pos_key, layer).
+    seg_adj: Dict[Tuple, set] = {}
+    for s in pcb_data.segments:
+        if s.net_id != net_id:
+            continue
+        k1 = (pkey(s.start_x, s.start_y), s.layer)
+        k2 = (pkey(s.end_x, s.end_y), s.layer)
+        seg_adj.setdefault(k1, set()).add(k2)
+        seg_adj.setdefault(k2, set()).add(k1)
+
+    # Via vertical jumps keyed by pos_key -> set of layers.
+    via_at: Dict[Tuple, set] = {}
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
+            continue
+        k = pkey(v.x, v.y)
+        layers = v.layers if v.layers else all_cu
+        via_at.setdefault(k, set()).update(layers)
+
+    # Pads at each position - through-hole pads bridge all copper layers.
+    pad_at: Dict[Tuple, set] = {}
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        k = pkey(p.global_x, p.global_y)
+        if p.drill > 0:
+            pad_at.setdefault(k, set()).update(all_cu)
+        else:
+            for pl in p.layers:
+                if pl == '*.Cu':
+                    pad_at.setdefault(k, set()).update(all_cu)
+                elif pl.endswith('.Cu') and not pl.startswith('*'):
+                    pad_at.setdefault(k, set()).add(pl)
+
+    start = (pkey(pad.global_x, pad.global_y), pad_layer)
+    visited = {start}
+    queue = [start]
+    while queue:
+        pos, layer = queue.pop(0)
+        if layer == target_layer:
+            return True
+        for nxt in seg_adj.get((pos, layer), ()):
+            if nxt not in visited:
+                visited.add(nxt)
+                queue.append(nxt)
+        for other_layer in via_at.get(pos, ()):
+            nxt = (pos, other_layer)
+            if nxt not in visited:
+                visited.add(nxt)
+                queue.append(nxt)
+        for other_layer in pad_at.get(pos, ()):
+            nxt = (pos, other_layer)
+            if nxt not in visited:
+                visited.add(nxt)
+                queue.append(nxt)
+    return False
+
+
 def identify_target_pads(
     pcb_data: PCBData,
     net_id: int,
@@ -121,7 +208,9 @@ def identify_target_pads(
     Returns list of dicts with pad info and connection type:
     - "through_hole": Through-hole pad - can connect on any layer, no via needed
     - "direct": SMD pad on plane layer - zone connects directly, no via needed
-    - "via_needed": SMD pad on opposite layer - needs via + trace
+    - "already_connected": SMD pad on another layer but already reaches the
+       plane layer via existing tracks/vias/pads on the same net - no via needed
+    - "via_needed": SMD pad on opposite layer with no existing path - needs via + trace
     """
     target_pads = []
     pads = pcb_data.pads_by_net.get(net_id, [])
@@ -153,13 +242,25 @@ def identify_target_pads(
                     pad_layer = layer
                     break
 
-            target_pads.append({
-                'pad': pad,
-                'type': 'via_needed',
-                'needs_via': True,
-                'needs_trace': True,  # May need trace if via can't be at pad center
-                'pad_layer': pad_layer
-            })
+            # Skip placing a stitching via if the pad already has an
+            # electrical path to the plane layer through existing same-net
+            # tracks, vias, and through-hole pads.
+            if _smd_pad_reaches_layer(pad, plane_layer, net_id, pcb_data):
+                target_pads.append({
+                    'pad': pad,
+                    'type': 'already_connected',
+                    'needs_via': False,
+                    'needs_trace': False,
+                    'pad_layer': pad_layer,
+                })
+            else:
+                target_pads.append({
+                    'pad': pad,
+                    'type': 'via_needed',
+                    'needs_via': True,
+                    'needs_trace': True,  # May need trace if via can't be at pad center
+                    'pad_layer': pad_layer
+                })
 
     return target_pads
 

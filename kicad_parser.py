@@ -1207,7 +1207,11 @@ def build_pcb_data_from_board(board) -> PCBData:
             layers_dict[lid] = lname
             copper_layers.append(lname)
 
-    # Board bounds from Edge.Cuts drawing coordinates (not bounding box which includes line width)
+    # Board bounds from Edge.Cuts drawings. We use each drawing's bounding
+    # box rather than GetStart()/GetEnd() because the latter only describes
+    # the shape's anchor points for non-line shapes (polygons, circles, arcs
+    # can have start==end==(0,0) with the geometry stored separately), which
+    # produced a degenerate (0,0,0,0) board_bounds.
     board_bounds = None
     try:
         edge_cuts_id = getattr(pcbnew, 'Edge_Cuts', None)
@@ -1219,24 +1223,29 @@ def build_pcb_data_from_board(board) -> PCBData:
                 if drawing.GetLayer() != edge_cuts_id:
                     continue
                 class_name = drawing.GetClass()
-                if class_name in ("PCB_SHAPE", "DRAWSEGMENT"):
-                    try:
-                        start = drawing.GetStart()
-                        end = drawing.GetEnd()
-                        sx, sy = to_mm(start.x), to_mm(start.y)
-                        ex, ey = to_mm(end.x), to_mm(end.y)
-                        bmin_x = min(bmin_x, sx, ex)
-                        bmin_y = min(bmin_y, sy, ey)
-                        bmax_x = max(bmax_x, sx, ex)
-                        bmax_y = max(bmax_y, sy, ey)
-                        found_edge = True
-                    except Exception:
+                if class_name not in ("PCB_SHAPE", "DRAWSEGMENT"):
+                    continue
+                try:
+                    bbox = drawing.GetBoundingBox()
+                    w, h = bbox.GetWidth(), bbox.GetHeight()
+                    if w <= 0 and h <= 0:
                         continue
-            if found_edge:
+                    x0, y0 = to_mm(bbox.GetX()), to_mm(bbox.GetY())
+                    x1, y1 = to_mm(bbox.GetX() + w), to_mm(bbox.GetY() + h)
+                    bmin_x = min(bmin_x, x0, x1)
+                    bmin_y = min(bmin_y, y0, y1)
+                    bmax_x = max(bmax_x, x0, x1)
+                    bmax_y = max(bmax_y, y0, y1)
+                    found_edge = True
+                except Exception:
+                    continue
+            if found_edge and bmax_x > bmin_x and bmax_y > bmin_y:
                 board_bounds = (bmin_x, bmin_y, bmax_x, bmax_y)
     except Exception:
         pass
-    # Fallback to bounding box if no Edge.Cuts drawings found
+    # Fallback to the whole-board edges bounding box (also handles boards
+    # whose Edge.Cuts items are stored inside footprints rather than as
+    # top-level drawings).
     if board_bounds is None:
         try:
             bbox = board.GetBoardEdgesBoundingBox()

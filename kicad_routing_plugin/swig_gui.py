@@ -161,6 +161,10 @@ class RoutingDialog(wx.Dialog):
         self._saved_settings = saved_settings  # Settings to restore after init
         self._last_notebook = None  # Track netclass notebook for cleanup
         self._initial_load = True  # Skip board sync on first refresh (data is already current)
+        # Per-session "no" responses to the "make a plane first?" suggestion
+        # in _on_route, keyed by (net_name, layer) so a user who declines for
+        # GND isn't asked again, but is still asked about VCC.
+        self._plane_prompt_dismissed = set()
 
         self._create_ui()
         self._load_nets_immediate()  # Load net names only (fast)
@@ -1886,10 +1890,100 @@ class RoutingDialog(wx.Dialog):
 
         return groups
 
+    def _maybe_offer_planes_for_power_nets(self, selected_nets):
+        """If GND and/or VCC is selected without an existing zone, ask the user
+        whether they want to create a plane first.
+
+        Returns True if the user accepted and was navigated to the Planes tab
+        (so the caller should abort routing); False otherwise.
+        """
+        # Suggested net -> layer mappings to offer.
+        suggestions = [('GND', 'B.Cu'), ('VCC', 'F.Cu')]
+
+        def normalize(name):
+            return name.lstrip('/').upper() if name else ''
+
+        # Map normalized -> actual selected name (so we add the assignment using
+        # the exact net name as it appears in the PCB).
+        selected_by_norm = {normalize(n): n for n in selected_nets}
+
+        # Existing zones in the loaded PCB - skip suggesting these.
+        existing_zone_keys = set()
+        for z in getattr(self.pcb_data, 'zones', []) or []:
+            existing_zone_keys.add((normalize(z.net_name), z.layer))
+
+        to_offer = []  # list of (actual_net_name, layer)
+        for net_norm, layer in suggestions:
+            if net_norm not in selected_by_norm:
+                continue
+            actual = selected_by_norm[net_norm]
+            if (net_norm, layer) in existing_zone_keys:
+                continue
+            if (actual, layer) in self._plane_prompt_dismissed:
+                continue
+            to_offer.append((actual, layer))
+
+        if not to_offer:
+            return False
+
+        # Build the dialog message.
+        bullets = "\n".join(f"  • {net} → {layer}" for net, layer in to_offer)
+        msg = (
+            "Before routing, would you like to create power/ground plane(s) "
+            "for the selected net(s)?\n\n"
+            f"{bullets}\n\n"
+            "Choosing Yes opens the Planes tab with the assignment(s) pre-filled. "
+            "You can then click 'Create Planes' there before coming back to route."
+        )
+        answer = wx.MessageBox(
+            msg,
+            "Create plane first?",
+            wx.YES_NO | wx.ICON_QUESTION,
+            parent=self,
+        )
+        if answer != wx.YES:
+            # Remember the dismissal so we don't pester them again this session.
+            for entry in to_offer:
+                self._plane_prompt_dismissed.add(entry)
+            return False
+
+        # Switch to Planes tab, ensure Create mode, and append the assignments.
+        planes_idx = None
+        for i in range(self.notebook.GetPageCount()):
+            if self.notebook.GetPageText(i) == "Planes":
+                planes_idx = i
+                break
+        if planes_idx is None:
+            wx.MessageBox(
+                "Couldn't find the Planes tab.", "Error",
+                wx.OK | wx.ICON_ERROR, parent=self,
+            )
+            return False
+
+        self.planes_tab.mode_selector.SetSelection(0)  # Create Planes
+        self.planes_tab._on_mode_changed(None)  # show create options panel
+
+        existing = self.planes_tab.assignment_panel.get_assignments()
+        existing_keys = {(tuple(nets), tuple(layers)) for nets, layers in existing}
+        for net, layer in to_offer:
+            key = ((net,), (layer,))
+            if key not in existing_keys:
+                existing.append(([net], [layer]))
+        self.planes_tab.assignment_panel.set_assignments(existing)
+
+        self.notebook.SetSelection(planes_idx)
+        return True
+
     def _on_route(self, event):
         """Handle route button click."""
         selected_nets, selected_layers = self._validate_routing_inputs()
         if selected_nets is None:
+            return
+
+        # If the user selected GND and/or VCC and there's no zone for them yet,
+        # offer to create planes first. If they accept, jump to the Planes tab
+        # with the assignment(s) pre-added and don't start routing.
+        if self._maybe_offer_planes_for_power_nets(selected_nets):
             return
 
         # Disable UI during routing
