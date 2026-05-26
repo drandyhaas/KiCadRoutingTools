@@ -82,7 +82,27 @@ def get_kicad_base_dir() -> Path:
     elif system == "Darwin":  # macOS
         return Path.home() / "Documents" / "KiCad"
     elif system == "Windows":
-        return Path.home() / "Documents" / "KiCad"
+        # On modern Windows, Documents is usually redirected into OneDrive.
+        # Try the env vars OneDrive sets, then ~/OneDrive/Documents, then
+        # plain ~/Documents. Return the first that exists; if none do, fall
+        # back to the OneDrive path so a fresh install lands somewhere KiCad
+        # will pick up (KiCad itself follows the same redirection).
+        onedrive = (
+            os.environ.get("OneDrive")
+            or os.environ.get("OneDriveConsumer")
+            or os.environ.get("OneDriveCommercial")
+        )
+        candidates = []
+        if onedrive:
+            candidates.append(Path(onedrive) / "Documents" / "KiCad")
+        candidates.extend([
+            Path.home() / "OneDrive" / "Documents" / "KiCad",
+            Path.home() / "Documents" / "KiCad",
+        ])
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
     else:
         raise RuntimeError(f"Unsupported operating system: {system}")
 
