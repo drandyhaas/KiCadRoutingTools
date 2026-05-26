@@ -21,7 +21,7 @@ The release pipeline is mostly automated by `.github/workflows/release.yml`. A m
 | `update_metadata.py` | Patches `metadata.json` with sha256 / sizes from `package_pcm.py`'s sidecar. |
 | `.github/workflows/release.yml` | CI: builds Rust binaries, runs `package_pcm.py`, publishes GitHub Release. |
 | `__init__.py` (root) | `_resolve_rust_binary()` picks the right platform binary at plugin startup. |
-| `kicad_routing_plugin/deps_check.py` | First-launch wx dialog that pip-installs `scipy` + `shapely` into KiCad's Python. |
+| `kicad_routing_plugin/deps_check.py` | First-launch wx dialog that pip-installs missing Python deps (read from `requirements.txt`) into KiCad's Python. |
 
 ---
 
@@ -32,6 +32,22 @@ The release pipeline is mostly automated by `.github/workflows/release.yml`. A m
 - Git tag must be `v<VERSION>`, e.g. `v0.15.5`.
 
 ---
+
+## Adding a Python dependency
+
+`requirements.txt` at the repo root is the **single source of truth** for the plugin's Python dependencies. It's consumed by three things:
+
+1. `install_plugin.py` — pip-installs everything into KiCad's Python during manual install.
+2. `kicad_routing_plugin/deps_check.py` — parses it at plugin startup, checks each package is importable, and offers a wx pip-install dialog for anything missing (the PCM install path skips pip otherwise).
+3. CLI scripts (`startup_checks.py`) — fails loudly if a required package isn't importable when running from the terminal.
+
+To add a dependency:
+
+1. Append it to `requirements.txt` (with a version specifier, e.g. `mypkg>=1.2`).
+2. (Optional) Add a more thorough import test to the `IMPORT_TESTS` dict in `kicad_routing_plugin/deps_check.py` — by default a plain `import <pkgname>` is used, which is fine for most packages but doesn't catch broken installs of compiled extensions. The existing entries (`scipy`, `shapely`) import specific submodules the plugin actually uses.
+3. (Optional) Add it to `startup_checks.check_python_dependencies()` if you also want the CLI scripts to fail with a clearer message.
+
+You do **not** need to update `metadata.json` — Python deps live entirely outside the PCM manifest.
 
 ## Cutting a release
 
