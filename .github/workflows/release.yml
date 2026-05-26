@@ -28,25 +28,31 @@ jobs:
             target_name: linux-x86_64
             artifact_src: rust_router/target/release/libgrid_router.so
             artifact_dst: grid_router-linux-x86_64.so
+            cargo_target: ''
             extra_rustflags: ''
           - os: macos-14
             target_name: macos-arm64
             artifact_src: rust_router/target/release/libgrid_router.dylib
             artifact_dst: grid_router-macos-arm64.so
+            cargo_target: ''
             # pyo3's extension-module needs these on macOS so Python symbols
             # resolve at load time inside the interpreter instead of at link
             # time. Locally pyo3-build-config sets this for you; in CI it
             # doesn't always, so set it explicitly.
             extra_rustflags: '-C link-arg=-undefined -C link-arg=dynamic_lookup'
-          - os: macos-13
+          # Cross-compile x86_64 macOS from the arm64 runner — macos-13
+          # runners are scarce and queue for 30+ min in the free tier.
+          - os: macos-14
             target_name: macos-x86_64
-            artifact_src: rust_router/target/release/libgrid_router.dylib
+            artifact_src: rust_router/target/x86_64-apple-darwin/release/libgrid_router.dylib
             artifact_dst: grid_router-macos-x86_64.so
+            cargo_target: 'x86_64-apple-darwin'
             extra_rustflags: '-C link-arg=-undefined -C link-arg=dynamic_lookup'
           - os: windows-latest
             target_name: windows-x86_64
             artifact_src: rust_router/target/release/grid_router.dll
             artifact_dst: grid_router-windows-x86_64.pyd
+            cargo_target: ''
             extra_rustflags: ''
     runs-on: ${{ matrix.os }}
     steps:
@@ -54,6 +60,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.cargo_target }}
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
@@ -62,14 +70,21 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rust_router/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust_router/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target_name }}-cargo-${{ hashFiles('rust_router/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ matrix.target_name }}-cargo-
 
       - name: Build release binary
+        shell: bash
         env:
           RUSTFLAGS: ${{ matrix.extra_rustflags }}
-        run: cargo build --release --manifest-path rust_router/Cargo.toml
+          CARGO_TARGET: ${{ matrix.cargo_target }}
+        run: |
+          if [ -n "$CARGO_TARGET" ]; then
+            cargo build --release --target "$CARGO_TARGET" --manifest-path rust_router/Cargo.toml
+          else
+            cargo build --release --manifest-path rust_router/Cargo.toml
+          fi
 
       - name: Stage artifact
         shell: bash
