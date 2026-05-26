@@ -27,14 +27,21 @@ jobs:
             target_name: linux-x86_64
             artifact_src: rust_router/target/release/libgrid_router.so
             artifact_dst: grid_router-linux-x86_64.so
+            extra_rustflags: ''
           - os: macos-14
             target_name: macos-arm64
             artifact_src: rust_router/target/release/libgrid_router.dylib
             artifact_dst: grid_router-macos-arm64.so
+            # pyo3's extension-module needs these on macOS so Python symbols
+            # resolve at load time inside the interpreter instead of at link
+            # time. Locally pyo3-build-config sets this for you; in CI it
+            # doesn't always, so set it explicitly.
+            extra_rustflags: '-C link-arg=-undefined -C link-arg=dynamic_lookup'
           - os: windows-latest
             target_name: windows-x86_64
             artifact_src: rust_router/target/release/grid_router.dll
             artifact_dst: grid_router-windows-x86_64.pyd
+            extra_rustflags: ''
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +61,8 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ matrix.extra_rustflags }}
         run: cargo build --release --manifest-path rust_router/Cargo.toml
 
       - name: Stage artifact
