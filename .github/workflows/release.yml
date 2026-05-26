@@ -1,8 +1,9 @@
 name: Build and Release Rust Router
 
-# Builds prebuilt grid_router binaries for Linux x86_64, macOS arm64, and
-# Windows x86_64 whenever a version tag (vX.Y.Z) is pushed, then attaches them
-# to a GitHub Release so users can install without a Rust toolchain.
+# Builds prebuilt grid_router binaries for Linux x86_64, macOS arm64+x86_64,
+# and Windows x86_64 whenever a version tag (vX.Y.Z) is pushed, packages
+# them into KiCad PCM (Plugin and Content Manager) zips, and attaches
+# everything to a GitHub Release.
 #
 # The Rust crate uses pyo3 abi3-py39, so one binary per platform works for
 # every Python 3.9+ interpreter.
@@ -36,6 +37,11 @@ jobs:
             # resolve at load time inside the interpreter instead of at link
             # time. Locally pyo3-build-config sets this for you; in CI it
             # doesn't always, so set it explicitly.
+            extra_rustflags: '-C link-arg=-undefined -C link-arg=dynamic_lookup'
+          - os: macos-13
+            target_name: macos-x86_64
+            artifact_src: rust_router/target/release/libgrid_router.dylib
+            artifact_dst: grid_router-macos-x86_64.so
             extra_rustflags: '-C link-arg=-undefined -C link-arg=dynamic_lookup'
           - os: windows-latest
             target_name: windows-x86_64
@@ -76,9 +82,53 @@ jobs:
           path: ${{ matrix.artifact_dst }}
           if-no-files-found: error
 
+  package:
+    name: Build PCM zips
+    needs: build
+    runs-on: ubuntu-latest
+    # We always package (even on manual workflow_dispatch) so PRs/branches
+    # can produce a downloadable zip for inspection. metadata.json is only
+    # committed/PR'd on tag pushes (see the release job below).
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List downloaded binaries
+        run: ls -la artifacts
+
+      - name: Build PCM zip for each platform
+        run: |
+          python3 package_pcm.py --platform linux   --binary-dir artifacts
+          python3 package_pcm.py --platform macos   --binary-dir artifacts
+          python3 package_pcm.py --platform windows --binary-dir artifacts
+
+      - name: Patch metadata.json with sha256 / sizes
+        run: |
+          python3 update_metadata.py \
+            --sidecars 'dist/*.meta.json' \
+            --repo '${{ github.repository }}'
+
+      - name: List PCM artifacts
+        run: ls -la dist
+
+      - name: Upload PCM zips + metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcm-package
+          path: |
+            dist/*.zip
+            dist/*.meta.json
+            metadata.json
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, package]
     runs-on: ubuntu-latest
     # Only publish a Release when a tag was pushed; manual runs just produce
     # downloadable workflow artifacts.
@@ -96,6 +146,12 @@ jobs:
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          # Attach: raw binaries, PCM zips, and the patched metadata.json
+          # (so a maintainer can grab the exact metadata.json that matches
+          # the published zips for submission to gitlab.com/kicad/addons).
+          files: |
+            artifacts/grid_router-*
+            artifacts/KiCadRoutingTools-*.zip
+            artifacts/metadata.json
           generate_release_notes: true
           fail_on_unmatched_files: true

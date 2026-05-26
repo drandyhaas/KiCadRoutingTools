@@ -76,10 +76,11 @@ By default this downloads a prebuilt binary for your OS from the project's
 
 - Linux x86_64
 - macOS arm64 (Apple Silicon)
+- macOS x86_64 (Intel)
 - Windows x86_64
 
-If a prebuilt isn't available for your platform (e.g. Intel Mac, Linux arm64)
-or the download fails, the script falls back to building locally with cargo.
+If a prebuilt isn't available for your platform (e.g. Linux arm64) or the
+download fails, the script falls back to building locally with cargo.
 
 #### Building from source (optional)
 
@@ -159,6 +160,12 @@ The plugin provides a full graphical interface for all routing features, running
 
 ### Installation
 
+Two ways to install:
+
+**A. KiCad Plugin and Content Manager (PCM)** — the recommended path for end users. Open the PCM from the KiCad main window, find *KiCad Routing Tools*, and click Install. (The package is in the process of being added to the official repository; once accepted, this will be available out-of-the-box.) On first launch, the plugin offers a one-click install for `scipy` and `shapely` into KiCad's Python.
+
+**B. Manual install from source** — for development or for using the CLI tools as well:
+
 ```bash
 # Install the plugin (copies to KiCad plugins directory)
 python install_plugin.py
@@ -174,6 +181,21 @@ The installer automatically detects your KiCad installation directory (supports 
 - **macOS**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
 - **Linux**: `~/.local/share/kicad/<version>/3rdparty/plugins/`
 - **Windows**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
+
+### Building a PCM Package (maintainers)
+
+The release workflow at `.github/workflows/release.yml` builds platform-specific PCM zips and patches `metadata.json` automatically when a `vX.Y.Z` tag is pushed:
+
+1. Bump `VERSION` and the matching version entries in `metadata.json`.
+2. `git tag v0.15.4 && git push --tags`.
+3. CI builds the Rust binary for each platform, runs `package_pcm.py` to produce one `KiCadRoutingTools-<ver>-<platform>.zip` per platform, patches `metadata.json` with sha256/size values, and attaches everything to the GitHub Release.
+4. Download the patched `metadata.json` from the Release page and submit it as a merge request to <https://gitlab.com/kicad/addons/repository> at `packages/com.github.drandyhaas.kicadroutingtools.json`. See the [KiCad addon submission docs](https://dev-docs.kicad.org/en/addons/#_submitting_your_package) for the merge-request workflow.
+
+To build a zip locally for testing:
+
+```bash
+python package_pcm.py --platform macos --binary-dir ./path/to/release/artifacts
+```
 
 ### Usage
 

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "KiCad Routing Tools",
+  "description": "Fast Rust-accelerated A* autorouter for KiCad PCBs.",
+  "description_full": "KiCad Routing Tools is a fast, grid-based A* autorouter for KiCad PCB files, accelerated with a native Rust core (~10x faster than pure Python).\n\nFeatures:\n- Octilinear routing on multiple copper layers with automatic via insertion\n- Differential pair routing with pose-based A* and orientation-aware setbacks\n- Rip-up and reroute with blocking analysis when routes fail\n- BGA / QFN fanout, GND-via placement for return paths, polarity swap detection\n- Net ordering strategies (MPS, inside-out, original) with crossing-conflict layer swaps\n- Board-edge and BGA exclusion-zone clearance, plus stub / BGA / track proximity penalties\n- Plane routing and disconnected-plane stitching\n- Schematic synchronization when target pads are swapped\n\nIntegrates with the KiCad PCB Editor as an Action Plugin (Tools > External Plugins). Also usable from the command line for scripting and CI.\n\nPrebuilt Rust binaries are bundled for Linux x86_64, macOS (Apple Silicon arm64 and Intel x86_64), and Windows x86_64; the macOS package contains both arm64 and x86_64 binaries and selects the right one at startup.\n\nFirst launch will offer to install scipy and shapely into KiCad's Python (KiCad bundles numpy + wxPython but not these two).",
+  "identifier": "com.github.drandyhaas.kicadroutingtools",
+  "type": "plugin",
+  "author": {
+    "name": "Andy Haas",
+    "contact": {
+      "github": "https://github.com/drandyhaas"
+    }
+  },
+  "license": "MIT",
+  "resources": {
+    "homepage": "https://github.com/drandyhaas/KiCadRoutingTools",
+    "repository": "https://github.com/drandyhaas/KiCadRoutingTools",
+    "bugtracker": "https://github.com/drandyhaas/KiCadRoutingTools/issues"
+  },
+  "tags": ["routing", "autorouter", "differential-pair", "fanout"],
+  "versions": [
+    {
+      "version": "0.15.4",
+      "status": "testing",
+      "kicad_version": "9.0",
+      "runtime": "swig",
+      "platforms": ["linux"],
+      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.15.4/KiCadRoutingTools-0.15.4-linux.zip",
+      "download_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "download_size": 0,
+      "install_size": 0
+    },
+    {
+      "version": "0.15.4",
+      "status": "testing",
+      "kicad_version": "9.0",
+      "runtime": "swig",
+      "platforms": ["macos"],
+      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.15.4/KiCadRoutingTools-0.15.4-macos.zip",
+      "download_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "download_size": 0,
+      "install_size": 0
+    },
+    {
+      "version": "0.15.4",
+      "status": "testing",
+      "kicad_version": "9.0",
+      "runtime": "swig",
+      "platforms": ["windows"],
+      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.15.4/KiCadRoutingTools-0.15.4-windows.zip",
+      "download_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "download_size": 0,
+      "install_size": 0
+    }
+  ]
+}

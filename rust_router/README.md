@@ -28,8 +28,8 @@ Most users do **not** need to build this themselves. From the project root:
 python build_router.py
 ```
 
-This downloads a prebuilt binary for your OS (Linux x86_64, macOS arm64, or
-Windows x86_64) from the project's
+This downloads a prebuilt binary for your OS (Linux x86_64, macOS arm64
++ x86_64, or Windows x86_64) from the project's
 [GitHub Releases](https://github.com/drandyhaas/KiCadRoutingTools/releases)
 and drops it into `rust_router/`. Prebuilts use PyO3's `abi3-py39`, so one
 binary works for any Python 3.9+ interpreter.

@@ -111,10 +111,11 @@ def detect_platform_asset():
         return 'grid_router-windows-x86_64.pyd', 'grid_router.pyd'
 
     if sys.platform == 'darwin':
-        # We only ship arm64 macOS builds. Intel Mac users should --from-source.
-        if machine != 'arm64':
-            return None, None
-        return 'grid_router-macos-arm64.so', 'grid_router.so'
+        if machine == 'arm64':
+            return 'grid_router-macos-arm64.so', 'grid_router.so'
+        if machine in ('x86_64', 'amd64'):
+            return 'grid_router-macos-x86_64.so', 'grid_router.so'
+        return None, None
 
     if sys.platform.startswith('linux'):
         if machine not in ('x86_64', 'amd64'):

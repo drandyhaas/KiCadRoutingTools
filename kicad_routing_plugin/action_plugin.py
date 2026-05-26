@@ -53,6 +53,13 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
 
     def _run_plugin(self):
         """Main plugin logic."""
+        # Ensure scipy/shapely are available (KiCad doesn't bundle them, and
+        # PCM-installed plugins can't pip-install during install).
+        from .deps_check import ensure_dependencies
+        parent_for_deps = wx.GetTopLevelWindows()[0] if wx.GetTopLevelWindows() else None
+        if not ensure_dependencies(parent_for_deps):
+            return
+
         board = pcbnew.GetBoard()
         if board is None:
             wx.MessageBox(
