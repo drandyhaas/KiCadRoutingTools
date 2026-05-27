@@ -50,6 +50,43 @@ if _PLUGIN_DIR not in sys.path:
 
 
 _LOG_PATH = os.path.expanduser("~/.kicad_routing_tools.log")
+# Tracks which KiCad PID owns the on-disk log + settings. When KiCad is
+# restarted (or the user is launching the plugin for the first time after
+# a reboot) we wipe both files so nothing persists across sessions — that
+# matches the SWIG plugin's behaviour, where settings lived only as
+# class-level attributes that died with KiCad's process.
+_SESSION_STAMP_PATH = os.path.expanduser("~/.kicad_routing_tools.session")
+
+
+def _reset_session_state_if_new_kicad() -> None:
+    """Clear log + settings if KiCad's PID changed since the previous run."""
+    current = str(os.getppid())
+    previous = None
+    try:
+        with open(_SESSION_STAMP_PATH, "r", encoding="utf-8") as f:
+            previous = f.read().strip()
+    except FileNotFoundError:
+        previous = None
+    except Exception:
+        previous = None
+
+    if previous != current:
+        # New KiCad session — wipe any state lingering from a prior session.
+        # Absolute import (ipc_entry runs as a top-level script).
+        import ipc_settings_store
+        for path in (_LOG_PATH, ipc_settings_store.path()):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+    try:
+        with open(_SESSION_STAMP_PATH, "w", encoding="utf-8") as f:
+            f.write(current)
+    except Exception:
+        pass
 
 
 def _log(msg: str) -> None:
@@ -120,9 +157,15 @@ def _activate_macos_app() -> None:
 
 
 def main() -> int:
+    # Wipe log + settings if KiCad's PID changed since the previous run, so
+    # nothing persists across KiCad sessions (matches the old SWIG plugin's
+    # behaviour where state lived only as class attributes on the
+    # ActionPlugin subclass and died with KiCad's process).
+    _reset_session_state_if_new_kicad()
+
     _tee_stdout_stderr_to_log()
     _log("=" * 60)
-    _log(f"ipc_entry start, pid={os.getpid()}, cwd={os.getcwd()}")
+    _log(f"ipc_entry start, pid={os.getpid()}, cwd={os.getcwd()}, ppid={os.getppid()}")
     _log(f"sys.executable={sys.executable}")
     _log(f"sys.path[0:3]={sys.path[0:3]}")
     _log(f"KICAD_API_SOCKET={os.environ.get('KICAD_API_SOCKET', '<unset>')}")

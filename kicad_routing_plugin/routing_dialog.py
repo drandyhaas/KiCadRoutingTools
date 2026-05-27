@@ -232,7 +232,10 @@ class RoutingDialog(wx.Dialog):
         # would outlive KiCad with every IPC call silently failing.
         self._ipc_heartbeat_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._on_ipc_heartbeat, self._ipc_heartbeat_timer)
-        self._ipc_heartbeat_timer.Start(3000)  # ms; balance of responsiveness vs IPC load
+        # 1.5s heartbeat — fast enough that KiCad doesn't wait long for our
+        # socket to close during its own shutdown, slow enough that the ping
+        # load is negligible.
+        self._ipc_heartbeat_timer.Start(1500)
 
     def _on_ipc_heartbeat(self, event):
         """Periodic check that KiCad is still reachable over IPC."""
@@ -272,10 +275,22 @@ class RoutingDialog(wx.Dialog):
                 print(f"Heartbeat: settings saved to {ipc_settings_store.path()}")
         except Exception as e:
             print(f"Heartbeat: settings save failed: {e}")
-        # _exit (not sys.exit) because we want NO cleanup — no atexit hooks,
-        # no thread joins, no kipy close() that could re-enter the wedged
-        # socket. The OS closes the socket as part of process teardown,
-        # which is what KiCad needs to see to finish its own shutdown.
+
+        # Try a clean kipy close first — KiCad's API server may handle
+        # "client said goodbye" much faster than "client's socket died
+        # unexpectedly". close_connection has its own 1-second timeout so
+        # this can't hang us. If the close attempt wedges, we still
+        # os._exit below.
+        try:
+            from kicad_ipc_adapter import close_connection
+            close_connection(timeout=1.0)
+            print("Heartbeat: kipy connection closed")
+        except Exception as e:
+            print(f"Heartbeat: kipy close failed (continuing to force-exit): {e}")
+
+        # _exit (not sys.exit) because we want NO further cleanup — no
+        # atexit hooks, no wx tear-down. The OS drops anything still open
+        # as part of process teardown.
         try:
             import sys as _sys
             _sys.stdout.flush(); _sys.stderr.flush()
@@ -1110,7 +1125,12 @@ class RoutingDialog(wx.Dialog):
             on_planes_complete=self._on_tab_operation_complete,
             get_connectivity_check=self._get_connectivity_check_fn,
             append_log=self._append_log,
-            sync_pcb_data_callback=self._sync_pcb_data_from_board
+            # refresh_from_board does sync + connectivity recheck + panel
+            # refresh, which is what the Planes tab needs after apply so
+            # that "hide connected" picks up newly-zoned nets like GND.
+            # _sync_pcb_data_from_board alone clears the cache but never
+            # re-runs the check or refreshes panels.
+            sync_pcb_data_callback=self.refresh_from_board,
         )
 
     def _create_differential_tab(self):

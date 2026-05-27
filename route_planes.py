@@ -1323,7 +1323,7 @@ def create_plane(
               "(no Edge.Cuts drawings found, or they have zero extent). "
               "Add an Edge.Cuts outline to the board before creating planes.")
         if return_results:
-            return (0, 0, 0, [], [], [])
+            return (0, 0, 0, [], [], [], 0)
         return (0, 0, 0)
 
     min_x, min_y, max_x, max_y = board_bounds

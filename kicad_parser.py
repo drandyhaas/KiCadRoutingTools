@@ -1258,7 +1258,8 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
 
         for pad in _fp_pads(fp):
             pad_obj = _build_pad_from_kipy(pad, reference, fp_x, fp_y, fp_rotation,
-                                            get_layer_name, resolve_net)
+                                            get_layer_name, resolve_net,
+                                            copper_layers)
             if pad_obj is None:
                 continue
             footprint.pads.append(pad_obj)
@@ -1313,7 +1314,7 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
             continue
 
     # --- Zones ---
-    zones = _extract_zones_kipy(board, get_layer_name)
+    zones = _extract_zones_kipy(board, get_layer_name, resolve_net)
 
     # IPC plugins only run on KiCad 10+, so unconditionally flag this as
     # K10-format data. route_planes / output_writer / route_disconnected_planes
@@ -1366,12 +1367,33 @@ def _net_code(net) -> int:
 
 
 def _fp_reference(fp) -> str:
-    for attr in ("reference", "reference_field"):
-        v = getattr(fp, attr, None)
-        if isinstance(v, str):
-            return v
-        if v is not None and hasattr(v, "text"):
-            return str(v.text)
+    """Extract the footprint's reference designator (e.g. 'U1', 'C2').
+
+    kipy chains the reference through three wrappers:
+        fp.reference_field            -> Field
+        Field.text                    -> BoardText
+        BoardText.value               -> str
+    Older releases sometimes flatten this. Probe defensively, returning
+    the first plain string we find by descending into .value / .text.
+    """
+    candidates = (
+        getattr(fp, "reference", None),
+        getattr(fp, "reference_field", None),
+    )
+    for v in candidates:
+        for _ in range(4):  # cap recursion depth
+            if v is None:
+                break
+            if isinstance(v, str):
+                return v
+            # Prefer .value (BoardText / Field text); fall back to .text
+            # (Field wrapping a BoardText).
+            nxt = getattr(v, "value", None)
+            if nxt is None:
+                nxt = getattr(v, "text", None)
+            if nxt is v:  # avoid infinite loop if a wrapper is self-referential
+                break
+            v = nxt
     return ""
 
 
@@ -1417,12 +1439,26 @@ def _fp_orientation_deg(fp) -> float:
 
 
 def _fp_value(fp) -> str:
-    for src in (getattr(fp, "value_field", None), fp):
-        if src is None:
-            continue
-        v = getattr(src, "value", None) or getattr(src, "text", None)
-        if isinstance(v, str):
-            return v
+    """Extract the footprint's value field (e.g. '10k', '0.1uF').
+
+    Same Field → BoardText → value chain as _fp_reference.
+    """
+    candidates = (
+        getattr(fp, "value", None),
+        getattr(fp, "value_field", None),
+    )
+    for v in candidates:
+        for _ in range(4):
+            if v is None:
+                break
+            if isinstance(v, str):
+                return v
+            nxt = getattr(v, "value", None)
+            if nxt is None:
+                nxt = getattr(v, "text", None)
+            if nxt is v:
+                break
+            v = nxt
     return ""
 
 
@@ -1459,8 +1495,14 @@ def _fp_pads(fp):
 
 def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
                          fp_rotation: float, get_layer_name,
-                         resolve_net) -> Optional[Pad]:
-    """Translate a kipy pad into the project's Pad dataclass."""
+                         resolve_net,
+                         board_copper_layer_names: List[str]) -> Optional[Pad]:
+    """Translate a kipy pad into the project's Pad dataclass.
+
+    board_copper_layer_names is the list of enabled copper layer names on
+    the board (e.g. ['F.Cu', 'In1.Cu', 'B.Cu']); through-hole pads
+    advertise themselves on every one of these layers.
+    """
     try:
         pad_num = str(getattr(pad, "number", "") or "")
 
@@ -1474,17 +1516,38 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
             local_x, local_y = _global_to_local(fp_x, fp_y, fp_rotation,
                                                 global_x, global_y)
 
-        # Padstack: size + shape + layers + drill all live here
+        # kipy's Padstack stores size + shape per-copper-layer on a
+        # PadStackLayer (not directly on the padstack). For most pads the
+        # F.Cu / B.Cu / inner-Cu copies are identical; we read from the
+        # first copper layer.
         padstack = getattr(pad, "padstack", None) or pad
+        copper_layers = []
+        try:
+            copper_layers = list(getattr(padstack, "copper_layers", None) or [])
+        except Exception:
+            copper_layers = []
+        primary_layer = copper_layers[0] if copper_layers else None
 
-        size = getattr(padstack, "size", None)
-        if size is not None:
-            size_x, size_y = _vec_to_xy_mm(size)
+        if primary_layer is not None:
+            size_vec = getattr(primary_layer, "size", None)
+            if size_vec is not None:
+                size_x, size_y = _vec_to_xy_mm(size_vec)
+            else:
+                size_x = size_y = 0.0
+            shape_attr = getattr(primary_layer, "shape", None)
+            roundrect_rratio = float(getattr(primary_layer, "corner_rounding_ratio", 0.0) or 0.0)
         else:
-            size_x = _nm_to_mm(getattr(padstack, "size_x", 0))
-            size_y = _nm_to_mm(getattr(padstack, "size_y", 0))
+            # Defensive fallback: older kipy releases or unusual pads where
+            # the padstack exposed size directly.
+            size = getattr(padstack, "size", None)
+            if size is not None:
+                size_x, size_y = _vec_to_xy_mm(size)
+            else:
+                size_x = _nm_to_mm(getattr(padstack, "size_x", 0))
+                size_y = _nm_to_mm(getattr(padstack, "size_y", 0))
+            shape_attr = getattr(padstack, "shape", None)
+            roundrect_rratio = float(getattr(padstack, "corner_radius_ratio", 0.0) or 0.0)
 
-        shape_attr = getattr(padstack, "shape", None)
         if shape_attr is None:
             shape = "rect"
         else:
@@ -1494,13 +1557,26 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
             else:
                 shape = _pad_shape_label(str(shape_attr).lower())
 
-        pad_layers = _pad_layer_names(pad, padstack, get_layer_name)
+        pad_layers = _pad_layer_names(pad, padstack, get_layer_name,
+                                       copper_layers, board_copper_layer_names)
 
         net = getattr(pad, "net", None)
         net_id, net_name = resolve_net(net)
 
+        # kipy's pad rotation lives on padstack.angle (an Angle wrapper);
+        # older releases sometimes exposed it as pad.orientation.
         pad_rotation = 0.0
-        rot_obj = getattr(pad, "orientation", None) or getattr(padstack, "orientation", None)
+        rot_obj = None
+        for src in (padstack, pad):
+            if src is None:
+                continue
+            for attr in ("angle", "orientation"):
+                candidate = getattr(src, attr, None)
+                if candidate is not None:
+                    rot_obj = candidate
+                    break
+            if rot_obj is not None:
+                break
         if rot_obj is not None:
             for attr in ("degrees", "as_degrees", "deg"):
                 v = getattr(rot_obj, attr, None)
@@ -1520,23 +1596,29 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
                     pad_rotation = 0.0
 
         total_rotation = (pad_rotation + fp_rotation) % 360
+        # Padstack size is in pad-local coordinates; swap when the pad is
+        # rotated near 90° so size_x/y match the pad's footprint on the board.
         if 45 < (pad_rotation % 180) < 135:
             size_x, size_y = size_y, size_x
 
         pinfunction = getattr(pad, "pin_function", "") or ""
         pintype = getattr(pad, "pin_type", "") or ""
 
+        # kipy Padstack: drill = DrillProperties { diameter: Vector2 }.
+        # `diameter.x` (== .y for round drills) is the bit diameter.
         drill = 0.0
-        drill_obj = getattr(padstack, "drill_diameter", None) or getattr(padstack, "drill", None)
+        drill_obj = getattr(padstack, "drill", None) or getattr(padstack, "drill_diameter", None)
         if drill_obj is not None:
-            if hasattr(drill_obj, "x_mm"):
-                drill = float(drill_obj.x_mm)
-            elif hasattr(drill_obj, "x"):
-                drill = _nm_to_mm(drill_obj.x)
+            diameter = getattr(drill_obj, "diameter", None) or drill_obj
+            if hasattr(diameter, "x_mm"):
+                drill = float(diameter.x_mm)
+            elif hasattr(diameter, "x"):
+                drill = _nm_to_mm(diameter.x)
             else:
-                drill = _nm_to_mm(drill_obj)
-
-        roundrect_rratio = float(getattr(padstack, "corner_radius_ratio", 0.0) or 0.0)
+                try:
+                    drill = _nm_to_mm(diameter)
+                except Exception:
+                    drill = 0.0
 
         return Pad(
             component_ref=reference,
@@ -1575,32 +1657,62 @@ def _pad_shape_label(raw: str) -> str:
     return "rect"
 
 
-def _pad_layer_names(pad, padstack, get_layer_name) -> List[str]:
-    """Best-effort recovery of the layer-name list for a kipy pad.
+def _pad_layer_names(pad, padstack, get_layer_name, copper_layers,
+                     all_copper_layer_names) -> List[str]:
+    """Recover the layer-name list for a kipy pad.
 
-    kipy doesn't (yet?) expose the wildcard *.Cu / *.Mask / *.Paste forms the
-    file format uses, so we emit the explicit set we know about.
+    kipy doesn't expose the wildcard *.Cu / *.Mask / *.Paste forms that the
+    .kicad_pcb file format uses. We seed from `padstack.copper_layers[*]`
+    (the explicit per-layer entries), then expand for through-hole pads
+    where the copper must span every copper layer in the stackup — kipy
+    sometimes only stores the F.Cu PadStackLayer for a simple THT pad
+    even though the pad punctures every copper layer.
     """
-    layers = []
-    # Try .layers on padstack or pad
-    raw_layers = getattr(padstack, "layers", None) or getattr(pad, "layers", None)
-    if raw_layers:
-        for bl in raw_layers:
-            name = get_layer_name(bl)
-            if name and name not in layers:
-                layers.append(name)
-    # Drill > 0 → through-hole → all copper + both masks/pastes
-    drill_attr = getattr(padstack, "drill_diameter", None) or getattr(padstack, "drill", None)
-    is_th = False
-    if drill_attr is not None:
+    layers: List[str] = []
+    for cl in (copper_layers or []):
+        bl = getattr(cl, "layer", None)
+        if bl is None:
+            continue
+        name = get_layer_name(bl)
+        if name and name not in layers:
+            layers.append(name)
+
+    # Through-hole detection by drill > 0.
+    drill_obj = getattr(padstack, "drill", None) or getattr(padstack, "drill_diameter", None)
+    drill_mm = 0.0
+    if drill_obj is not None:
+        diameter = getattr(drill_obj, "diameter", None) or drill_obj
         try:
-            is_th = float(getattr(drill_attr, "x_mm", drill_attr) or 0) > 0
+            if hasattr(diameter, "x_mm"):
+                drill_mm = float(diameter.x_mm)
+            elif hasattr(diameter, "x"):
+                drill_mm = _nm_to_mm(diameter.x)
         except Exception:
-            is_th = False
-    if is_th and not layers:
-        layers = ["*.Cu", "*.Mask"]
+            drill_mm = 0.0
+
+    if drill_mm > 0:
+        # THT: pad copper exists on every copper layer in the stackup,
+        # plus masks on both sides. (No paste — through-hole pads aren't
+        # soldered with paste/reflow.)
+        for cu_name in (all_copper_layer_names or []):
+            if cu_name not in layers:
+                layers.append(cu_name)
+        for extra in ("F.Mask", "B.Mask"):
+            if extra not in layers:
+                layers.append(extra)
+    else:
+        # SMD: mask + paste on the same side as the (single) copper layer.
+        if "F.Cu" in layers:
+            for extra in ("F.Mask", "F.Paste"):
+                if extra not in layers:
+                    layers.append(extra)
+        elif "B.Cu" in layers:
+            for extra in ("B.Mask", "B.Paste"):
+                if extra not in layers:
+                    layers.append(extra)
+
     if not layers:
-        # SMD fallback: assume F.Cu / F.Mask / F.Paste on the footprint's layer
+        # Defensive last resort if we couldn't read copper_layers at all.
         layers = ["F.Cu", "F.Mask", "F.Paste"]
     return layers
 
@@ -1613,7 +1725,14 @@ def _compute_edge_cuts_bbox_kipy(drawings, edge_cuts_bl) -> Optional[Tuple[float
     bmax_x = bmax_y = float("-inf")
     found = False
     for d in drawings:
-        if getattr(d, "layer", None) != edge_cuts_bl:
+        layer = getattr(d, "layer", None)
+        # Compare both as enum and as int value — kipy may return either
+        # depending on whether `.layer` is the proto field or a wrapper.
+        if not (layer == edge_cuts_bl
+                or (hasattr(layer, "value") and hasattr(edge_cuts_bl, "value")
+                    and layer.value == edge_cuts_bl.value)
+                or (isinstance(layer, int) and hasattr(edge_cuts_bl, "value")
+                    and layer == edge_cuts_bl.value)):
             continue
         for x, y in _shape_extreme_points_kipy(d):
             bmin_x = min(bmin_x, x); bmax_x = max(bmax_x, x)
@@ -1625,38 +1744,87 @@ def _compute_edge_cuts_bbox_kipy(drawings, edge_cuts_bl) -> Optional[Tuple[float
 
 
 def _shape_extreme_points_kipy(shape) -> List[Tuple[float, float]]:
-    """Yield a handful of representative points from a kipy shape for bbox use."""
-    pts = []
+    """Yield (x_mm, y_mm) for every vertex on a kipy graphic shape.
+
+    Handles BoardShape segment/arc/rect/circle (start/end/center/mid)
+    plus BoardPolygon (.polygons[*].outline as a PolyLine of nodes).
+    """
+    pts: List[Tuple[float, float]] = []
     for attr in ("start", "end", "center", "mid", "midpoint"):
         v = getattr(shape, attr, None)
-        if v is not None:
+        if v is not None and (hasattr(v, "x_mm") or hasattr(v, "x")):
             try:
                 pts.append(_vec_to_xy_mm(v))
             except Exception:
                 continue
-    poly = getattr(shape, "polygon", None) or getattr(shape, "points", None)
-    if poly is not None:
+    # BoardPolygon: kipy stores closed polygons as a sequence of
+    # PolygonWithHoles, each with a PolyLine outline of PolyLineNodes.
+    polys = getattr(shape, "polygons", None)
+    if polys is not None:
         try:
-            for p in poly:
-                pts.append(_vec_to_xy_mm(p))
-        except Exception:
-            pass
+            for pwh in polys:
+                pts.extend(_polyline_points_mm(getattr(pwh, "outline", None)))
+        except Exception as e:
+            print(f"_shape_extreme_points: BoardPolygon walk failed: {e}")
     return pts
+
+
+def _polyline_points_mm(polyline) -> List[Tuple[float, float]]:
+    """Extract (x_mm, y_mm) from every node of a kipy PolyLine.
+
+    PolyLineNode wraps a Vector2 — either exposed as .point or directly as
+    .x/.y (nm) or .x_mm/.y_mm. Probe defensively across kipy versions.
+    """
+    out: List[Tuple[float, float]] = []
+    if polyline is None:
+        return out
+    try:
+        nodes = list(polyline)
+    except TypeError:
+        nodes = list(getattr(polyline, "nodes", None) or [])
+    for node in nodes:
+        candidate = getattr(node, "point", node)
+        if hasattr(candidate, "x_mm") and hasattr(candidate, "y_mm"):
+            try:
+                out.append((float(candidate.x_mm), float(candidate.y_mm)))
+                continue
+            except Exception:
+                pass
+        if hasattr(candidate, "x") and hasattr(candidate, "y"):
+            try:
+                out.append((_nm_to_mm(candidate.x), _nm_to_mm(candidate.y)))
+            except Exception:
+                continue
+    return out
 
 
 def _extract_board_contours_kipy(drawings, edge_cuts_bl):
     """Chain Edge.Cuts shapes into (outline, [cutouts]) polygons.
 
-    Re-uses _chain_segments_into_contours; we just need to break each kipy
-    shape into the (start, end) tuples it expects.
+    Handles both `BoardShape` (segment/rect/arc/circle, fed through the
+    segment chainer) and `BoardPolygon` (already a closed loop of points;
+    used as a contour directly).
     """
     if not drawings or edge_cuts_bl is None:
         return [], []
 
     segments = []
+    closed_contours: List[List[Tuple[float, float]]] = []
     for d in drawings:
         if getattr(d, "layer", None) != edge_cuts_bl:
             continue
+        # BoardPolygon — the outline is already a closed loop.
+        polys = getattr(d, "polygons", None)
+        if polys is not None:
+            try:
+                for pwh in polys:
+                    pts = _polyline_points_mm(getattr(pwh, "outline", None))
+                    if len(pts) >= 3:
+                        closed_contours.append(pts)
+            except Exception:
+                pass
+            continue
+
         try:
             start = getattr(d, "start", None)
             end = getattr(d, "end", None)
@@ -1680,25 +1848,23 @@ def _extract_board_contours_kipy(drawings, edge_cuts_bl):
                         _vec_to_xy_mm(mid),
                         _vec_to_xy_mm(end),
                     ))
-            elif "polygon" in type_name:
-                poly = getattr(d, "polygon", None) or getattr(d, "points", None)
-                if poly:
-                    pts = [_vec_to_xy_mm(p) for p in poly]
-                    for i in range(len(pts)):
-                        segments.append((pts[i], pts[(i + 1) % len(pts)]))
         except Exception:
             continue
 
-    if len(segments) < 3:
-        return [], []
+    # Fold any BoardShape segments through the chainer (matches the SWIG-
+    # era path where each drawing was a separate segment item).
+    if len(segments) >= 3:
+        chained = _chain_segments_into_contours(segments)
+        if chained:
+            closed_contours.extend(chained)
 
-    contours = _chain_segments_into_contours(segments)
-    if not contours:
+    if not closed_contours:
         return [], []
-    contours.sort(key=lambda c: (max(p[0] for p in c) - min(p[0] for p in c)) *
-                                (max(p[1] for p in c) - min(p[1] for p in c)),
-                  reverse=True)
-    return contours[0], contours[1:]
+    closed_contours.sort(
+        key=lambda c: (max(p[0] for p in c) - min(p[0] for p in c)) *
+                      (max(p[1] for p in c) - min(p[1] for p in c)),
+        reverse=True)
+    return closed_contours[0], closed_contours[1:]
 
 
 def _extract_stackup_kipy(board) -> List[StackupLayer]:
@@ -1754,8 +1920,14 @@ def _extract_stackup_kipy(board) -> List[StackupLayer]:
     return stackup
 
 
-def _extract_zones_kipy(board, get_layer_name) -> List[Zone]:
-    """Read filled zones via kipy."""
+def _extract_zones_kipy(board, get_layer_name, resolve_net=None) -> List[Zone]:
+    """Read filled zones via kipy.
+
+    `resolve_net` (when supplied) is the name→synthetic-id resolver from
+    build_pcb_data_from_board. Without it, zone net_ids fall back to
+    kipy's deprecated `.code`, which gives mismatched ids vs the rest of
+    PCBData and breaks the "is this net connected?" check.
+    """
     zones: List[Zone] = []
     try:
         zone_iter = board.get_zones()
@@ -1767,32 +1939,50 @@ def _extract_zones_kipy(board, get_layer_name) -> List[Zone]:
     for z in zone_iter:
         try:
             net = getattr(z, "net", None)
-            net_id = _net_code(net)
-            net_name = getattr(net, "name", "") if net is not None else ""
-            layer = get_layer_name(getattr(z, "layer", None))
-            polygon = []
-            outline = getattr(z, "outline", None) or getattr(z, "polygon", None)
-            if outline is not None:
-                try:
-                    for p in outline:
-                        polygon.append(_vec_to_xy_mm(p))
-                except TypeError:
-                    contour = getattr(outline, "contour", None) or getattr(outline, "points", None)
-                    if contour:
-                        for p in contour:
-                            polygon.append(_vec_to_xy_mm(p))
+            if resolve_net is not None:
+                net_id, net_name = resolve_net(net)
+            else:
+                net_id = _net_code(net)
+                net_name = getattr(net, "name", "") if net is not None else ""
+            # kipy zones can span multiple layers; emit one Zone entry per
+            # layer so callers that filter by single layer match cleanly.
+            layers = getattr(z, "layers", None)
+            if layers is None:
+                layers = [getattr(z, "layer", None)]
+            polygon = _extract_zone_polygon_mm(z)
             if not polygon:
                 continue
-            zones.append(Zone(
-                net_id=net_id,
-                net_name=net_name,
-                layer=layer,
-                polygon=polygon,
-            ))
+            for bl in layers:
+                zones.append(Zone(
+                    net_id=net_id,
+                    net_name=net_name,
+                    layer=get_layer_name(bl),
+                    polygon=polygon,
+                ))
         except Exception:
             continue
 
     return zones
+
+
+def _extract_zone_polygon_mm(zone) -> List[Tuple[float, float]]:
+    """Pull a zone's outer outline into a list of (x_mm, y_mm) points.
+
+    kipy zone.outline is a PolygonWithHoles whose .outline is a PolyLine.
+    Older releases may expose direct iteration; probe both.
+    """
+    outline = getattr(zone, "outline", None)
+    if outline is None:
+        return []
+    # PolygonWithHoles.outline → PolyLine
+    pwh_outline = getattr(outline, "outline", None)
+    if pwh_outline is not None:
+        return _polyline_points_mm(pwh_outline)
+    # Older / different shape: outline IS a polyline / iterable
+    try:
+        return _polyline_points_mm(outline)
+    except Exception:
+        return []
 
 
 def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
