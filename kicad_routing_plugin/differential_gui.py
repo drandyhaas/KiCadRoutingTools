@@ -780,7 +780,7 @@ class DifferentialTab(wx.Panel):
             # Try to get net class from first selected pair, fall back to Default
             class_name = self._get_selected_pair_netclass() or 'Default'
             from .routing_dialog import _get_netclass_parameters
-            params = _get_netclass_parameters(class_name)
+            params = _get_netclass_parameters(class_name, self.pcb_data)
             if params:
                 # Update diff pair width and gap from net class
                 if 'diff_pair_width' in params and params['diff_pair_width'] > 0:

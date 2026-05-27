@@ -17,72 +17,25 @@ if ROOT_DIR not in sys.path:
 import routing_defaults as defaults
 
 
-def _get_net_classes_from_board():
-    """Read net-class mapping from the live KiCad board via IPC.
+def _get_net_classes_from_board(pcb_data):
+    """Read net-class mapping from PCBData (populated from the .kicad_pro).
 
-    Called from both the main thread (initial dialog population) and the
-    routing worker thread (clearance lookup mid-run). Holds the IPC lock
-    across all kipy calls so concurrent commits don't corrupt the shared
-    NNG socket.
+    kipy doesn't expose per-net-class settings or net→class membership —
+    that info lives in the sibling .kicad_pro JSON, which
+    build_pcb_data_from_board reads into pcb_data.net_to_class and
+    pcb_data.netclass_params. Here we just slice that view out.
 
     Returns:
         tuple: (net_to_class dict mapping net_name -> class_name,
                 list of class names sorted with 'Default' first)
     """
-    try:
-        from kicad_ipc_adapter import get_board, ipc_lock
-        board = get_board()
-        if board is None:
-            return {}, ['Default']
-
-        net_to_class = {}
-        netclass_names = set()
-        with ipc_lock():
-            try:
-                dr = board.get_design_rules()
-            except Exception:
-                dr = None
-
-            if dr is not None:
-                classes_iter = None
-                for attr in ("net_classes", "netclasses", "classes"):
-                    v = getattr(dr, attr, None)
-                    if v is not None:
-                        try:
-                            classes_iter = list(v)
-                            break
-                        except TypeError:
-                            classes_iter = list(v.values()) if hasattr(v, "values") else []
-                            if classes_iter:
-                                break
-                for c in classes_iter or []:
-                    name = getattr(c, "name", "") or ""
-                    if name:
-                        netclass_names.add(name)
-
-            netclass_names.add('Default')
-
-            # Map each net to its effective class. kipy exposes either a
-            # per-net `class_name` attribute or a separate mapping accessor.
-            for n in board.get_nets():
-                net_name = getattr(n, "name", "") or ""
-                if not net_name or net_name.lower().startswith('unconnected-'):
-                    continue
-                class_name = (getattr(n, "class_name", None)
-                              or getattr(n, "netclass_name", None)
-                              or 'Default')
-                if isinstance(class_name, str) and ',' in class_name:
-                    parts = [p.strip() for p in class_name.split(',')]
-                    non_default = [p for p in parts if p != 'Default']
-                    class_name = non_default[0] if non_default else 'Default'
-                net_to_class[net_name] = class_name or 'Default'
-
-        sorted_classes = ['Default'] if 'Default' in netclass_names else []
-        sorted_classes.extend(sorted(c for c in netclass_names if c != 'Default'))
-
-        return net_to_class, sorted_classes
-    except Exception:
-        return {}, ['Default']
+    net_to_class = dict(pcb_data.net_to_class) if pcb_data is not None else {}
+    netclass_names = set(net_to_class.values())
+    if pcb_data is not None:
+        netclass_names.update(pcb_data.netclass_params.keys())
+    netclass_names.add('Default')
+    sorted_classes = ['Default'] + sorted(c for c in netclass_names if c != 'Default')
+    return net_to_class, sorted_classes
 
 
 class NetSelectionPanel(wx.Panel):
@@ -574,7 +527,7 @@ class NetSelectionPanel(wx.Panel):
             bool: True if tabs were created, False if only Default class exists
         """
         # Fetch net classes from pcbnew
-        self._net_to_class, self._netclass_names = _get_net_classes_from_board()
+        self._net_to_class, self._netclass_names = _get_net_classes_from_board(self.pcb_data)
 
         # If we only have Default or couldn't get classes, don't switch
         if len(self._netclass_names) <= 1:

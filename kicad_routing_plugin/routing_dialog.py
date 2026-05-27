@@ -39,80 +39,37 @@ def _ipc_board():
         return None
 
 
-def _get_netclass_parameters(class_name):
-    """Get routing parameters for a specific net class via kipy design rules.
+def _get_netclass_parameters(class_name, pcb_data=None):
+    """Get routing parameters for a specific net class.
 
-    Args:
-        class_name: Name of the net class (e.g., 'Default', 'Wide')
+    Reads from `pcb_data.netclass_params` which is populated from the
+    sibling .kicad_pro JSON during `build_pcb_data_from_board` — kipy's
+    `BoardDesignRules` only exposes board-wide minimums + predefined
+    sizes, not per-class values.
 
     Returns:
         dict with keys: track_width, clearance, via_size, via_drill,
-        diff_pair_width, diff_pair_gap (all in mm)
-        Returns None if net class not found or error occurs.
+        (optionally) diff_pair_width, diff_pair_gap (all in mm).
+        Returns None if no per-class info is available.
     """
-    board = _ipc_board()
-    if board is None:
+    if pcb_data is None or not pcb_data.netclass_params:
         return None
-    try:
-        from kicad_ipc_adapter import ipc_lock
-        with ipc_lock():
-            dr = board.get_design_rules()
-    except Exception:
+    params = pcb_data.netclass_params.get(class_name)
+    if params is None:
+        params = pcb_data.netclass_params.get("Default")
+    if not params:
         return None
-
-    # kipy exposes a list of netclass-like objects on the design rules; the
-    # exact attribute name varies by version, so probe a few candidates.
-    netclasses = []
-    for attr in ("net_classes", "netclasses", "classes"):
-        v = getattr(dr, attr, None)
-        if v is not None:
-            try:
-                netclasses = list(v)
-                break
-            except TypeError:
-                netclasses = list(v.values()) if hasattr(v, "values") else []
-                if netclasses:
-                    break
-
-    nc = None
-    default_nc = None
-    for c in netclasses:
-        name = getattr(c, "name", "") or ""
-        if name == class_name:
-            nc = c
-            break
-        if name in ("Default", "default") and default_nc is None:
-            default_nc = c
-    if nc is None:
-        nc = default_nc
-    if nc is None:
-        return None
-
-    def _mm(attr):
-        v = getattr(nc, attr, None)
-        if v is None:
-            return None
-        if hasattr(v, "x_mm"):
-            return float(v.x_mm)
-        try:
-            iv = int(v)
-            return iv * 1e-6 if abs(iv) > 1000 else float(iv)
-        except (TypeError, ValueError):
-            return None
-
-    result = {
-        "track_width": _mm("track_width") or _mm("trace_width") or 0.25,
-        "clearance": _mm("clearance") or 0.2,
-        "via_size": _mm("via_diameter") or _mm("via_size") or 0.6,
-        "via_drill": _mm("via_drill") or _mm("via_hole") or 0.3,
+    # Merge against safe fallbacks so callers always see the canonical keys.
+    out = {
+        "track_width": params.get("track_width", 0.25),
+        "clearance": params.get("clearance", 0.2),
+        "via_size": params.get("via_size", 0.6),
+        "via_drill": params.get("via_drill", 0.3),
     }
-    dpw = _mm("diff_pair_width")
-    dpg = _mm("diff_pair_gap")
-    if dpw is not None:
-        result["diff_pair_width"] = dpw
-    if dpg is not None:
-        result["diff_pair_gap"] = dpg
-    return result
+    for opt in ("diff_pair_width", "diff_pair_gap"):
+        if opt in params:
+            out[opt] = params[opt]
+    return out
 
 
 def _get_board_minimum_constraints():
@@ -1986,8 +1943,8 @@ class RoutingDialog(wx.Dialog):
         return 'Default'
 
     def _get_netclass_params(self, class_name):
-        """Get parameters for a net class."""
-        return _get_netclass_parameters(class_name)
+        """Get parameters for a net class (from the project's .kicad_pro)."""
+        return _get_netclass_parameters(class_name, self.pcb_data)
 
     def _group_nets_by_class(self, net_names):
         """Group net names by their net class.
@@ -2003,9 +1960,9 @@ class RoutingDialog(wx.Dialog):
             self.net_panel._net_to_class):
             net_to_class = self.net_panel._net_to_class
         else:
-            # Build mapping from pcbnew
+            # Build mapping from pcb_data (sourced from .kicad_pro)
             from .fanout_gui import _get_net_classes_from_board
-            net_to_class, _ = _get_net_classes_from_board()
+            net_to_class, _ = _get_net_classes_from_board(self.pcb_data)
 
         # Group nets by class
         groups = {}
@@ -2181,7 +2138,7 @@ class RoutingDialog(wx.Dialog):
             net_name_to_id = {net.name: net.net_id for net in self.pcb_data.nets.values()}
             try:
                 from .fanout_gui import _get_net_classes_from_board
-                all_net_to_class, all_class_names = _get_net_classes_from_board()
+                all_net_to_class, all_class_names = _get_net_classes_from_board(self.pcb_data)
                 # Cache class clearances
                 class_clearance_cache = {}
                 for cname in all_class_names:

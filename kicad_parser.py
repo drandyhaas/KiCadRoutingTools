@@ -149,6 +149,12 @@ class PCBData:
     zones: List[Zone] = field(default_factory=list)
     kicad_version: int = 0  # File format version (e.g., 20241229 for KiCad 9)
     net_id_to_name: Dict[int, str] = field(default_factory=dict)  # Synthetic ID -> net name (for KiCad 10 output)
+    # Net class data read from the sibling .kicad_pro file. kipy's
+    # BoardDesignRules only exposes board-wide minimums and predefined
+    # sizes — per-class settings (track width, clearance, via diameter,
+    # diff-pair width/gap) live in the project JSON.
+    netclass_params: Dict[str, Dict[str, float]] = field(default_factory=dict)  # class_name -> {param: mm}
+    net_to_class: Dict[str, str] = field(default_factory=dict)  # net_name -> class_name
 
     def get_via_barrel_length(self, layer1: str, layer2: str) -> float:
         """Calculate the via barrel length between two copper layers.
@@ -1111,6 +1117,114 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
     )
 
 
+def read_netclasses_from_kicad_pro(board_filename: str) -> Tuple[Dict[str, Dict[str, float]], List[Tuple[str, str]], Dict[str, str]]:
+    """Parse net-class definitions out of the .kicad_pro project JSON.
+
+    kipy.BoardDesignRules exposes board-wide minimums and predefined sizes
+    but NOT per-net-class settings (track width, clearance, via diameter,
+    etc.) — those live in the sibling .kicad_pro file under
+    `net_settings`. This helper reads them so the routing dialog's
+    "use net class definitions" flow can pull real values.
+
+    Args:
+        board_filename: Absolute path to a .kicad_pcb file (or its
+            project's .kicad_pro). If neither is reachable, returns empty
+            mappings so callers can degrade gracefully.
+
+    Returns:
+        (classes_by_name, patterns, explicit_assignments) where
+          - classes_by_name: dict of class_name -> {track_width, clearance,
+                                                     via_size, via_drill,
+                                                     diff_pair_width,
+                                                     diff_pair_gap, ...}
+            (values in mm)
+          - patterns: list of (glob_pattern, class_name) for
+            netclass_patterns assignments (order matters; first match wins)
+          - explicit_assignments: dict net_name -> class_name for any
+            explicit netclass_assignments entries
+    """
+    if not board_filename:
+        return {}, [], {}
+    # .kicad_pcb → .kicad_pro alongside it.
+    pcb_path = Path(board_filename)
+    if pcb_path.suffix == ".kicad_pro":
+        pro_path = pcb_path
+    else:
+        pro_path = pcb_path.with_suffix(".kicad_pro")
+    if not pro_path.is_file():
+        return {}, [], {}
+
+    try:
+        with open(pro_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"read_netclasses_from_kicad_pro: failed to read {pro_path}: {e}")
+        return {}, [], {}
+
+    net_settings = (data.get("net_settings") or {})
+    raw_classes = net_settings.get("classes") or []
+    classes_by_name: Dict[str, Dict[str, float]] = {}
+    for c in raw_classes:
+        name = c.get("name") or ""
+        if not name:
+            continue
+        # All numeric fields the routing code consumes. Keep keys aligned
+        # with what _get_netclass_parameters previously returned.
+        params: Dict[str, float] = {}
+        for src_key, dst_key in (
+            ("track_width", "track_width"),
+            ("clearance", "clearance"),
+            ("via_diameter", "via_size"),
+            ("via_drill", "via_drill"),
+            ("diff_pair_width", "diff_pair_width"),
+            ("diff_pair_gap", "diff_pair_gap"),
+            ("microvia_diameter", "microvia_size"),
+            ("microvia_drill", "microvia_drill"),
+        ):
+            v = c.get(src_key)
+            if isinstance(v, (int, float)):
+                params[dst_key] = float(v)
+        classes_by_name[name] = params
+
+    patterns: List[Tuple[str, str]] = []
+    for entry in (net_settings.get("netclass_patterns") or []):
+        pat = entry.get("pattern") or ""
+        cls = entry.get("netclass") or ""
+        if pat and cls:
+            patterns.append((pat, cls))
+
+    explicit: Dict[str, str] = {}
+    raw_assigns = net_settings.get("netclass_assignments")
+    if isinstance(raw_assigns, dict):
+        for net_name, cls in raw_assigns.items():
+            if isinstance(net_name, str) and isinstance(cls, str):
+                explicit[net_name] = cls
+
+    return classes_by_name, patterns, explicit
+
+
+def _resolve_net_to_class(net_name: str, patterns: List[Tuple[str, str]],
+                         explicit: Dict[str, str]) -> str:
+    """Match a net to its class using KiCad's lookup order.
+
+    1. explicit assignment in `netclass_assignments`
+    2. first matching glob in `netclass_patterns`
+    3. fallback 'Default'
+    """
+    if not net_name:
+        return "Default"
+    if net_name in explicit:
+        return explicit[net_name]
+    from fnmatch import fnmatchcase
+    for pat, cls in patterns:
+        try:
+            if fnmatchcase(net_name, pat):
+                return cls
+        except Exception:
+            continue
+    return "Default"
+
+
 def build_pcb_data_from_board(board) -> PCBData:
     """Build PCBData directly from a kipy (KiCad IPC) board object.
 
@@ -1330,6 +1444,26 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
     # synthetic ones, which never match what KiCad expects).
     net_id_to_name = {nid: n.name for nid, n in nets.items()}
 
+    # Net-class settings live in the sibling .kicad_pro file (kipy doesn't
+    # expose per-class values). Best-effort; an empty result is fine.
+    netclass_params: Dict[str, Dict[str, float]] = {}
+    net_to_class: Dict[str, str] = {}
+    try:
+        from kicad_ipc_adapter import get_board_full_path
+        board_path = get_board_full_path()
+    except Exception:
+        board_path = None
+    if board_path:
+        try:
+            classes_by_name, patterns, explicit = read_netclasses_from_kicad_pro(board_path)
+            netclass_params = classes_by_name
+            for n in nets.values():
+                if n.name:
+                    net_to_class[n.name] = _resolve_net_to_class(
+                        n.name, patterns, explicit)
+        except Exception as e:
+            print(f"build_pcb_data_from_board: netclass read failed: {e}")
+
     return PCBData(
         board_info=board_info,
         nets=nets,
@@ -1340,6 +1474,8 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
         zones=zones,
         kicad_version=KICAD_10_MIN_VERSION,
         net_id_to_name=net_id_to_name,
+        netclass_params=netclass_params,
+        net_to_class=net_to_class,
     )
 
 
