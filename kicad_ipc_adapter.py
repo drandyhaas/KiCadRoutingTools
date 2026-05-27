@@ -469,14 +469,18 @@ def make_via(net_map: NetMap, x_mm: float, y_mm: float, size_mm: float,
         v.net = net
     elif net_name:
         print(f"Warning: net '{net_name}' not found on board; via will be netless")
-    # Blind/buried support is TODO — see plan open questions.
+    # Blind/buried vias: kipy stores layer span on padstack.drill, not on
+    # the Via wrapper itself. Through-hole is the default (F.Cu→B.Cu) so
+    # only write when the caller asked for something else.
     if top_layer != "F.Cu" or bottom_layer != "B.Cu":
         try:
-            v.start_layer = layer_id_for(top_layer)
-            v.end_layer = layer_id_for(bottom_layer)
-        except AttributeError:
+            drill = v.padstack.drill
+            drill.start_layer = layer_id_for(top_layer)
+            drill.end_layer = layer_id_for(bottom_layer)
+        except (AttributeError, Exception) as e:
             print(f"Warning: non-through-hole via ({top_layer}→{bottom_layer}) "
-                  f"not supported yet via kipy; falling back to through via")
+                  f"not supported on this kipy version ({e}); "
+                  f"falling back to through via")
     return v
 
 

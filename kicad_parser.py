@@ -1300,8 +1300,15 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
     for v in via_iter:
         try:
             x, y = _vec_to_xy_mm(v.position)
-            top_bl = getattr(v, "start_layer", None) or name_to_bl["F.Cu"]
-            bot_bl = getattr(v, "end_layer", None) or name_to_bl["B.Cu"]
+            # Via layer span lives on padstack.drill, not directly on the
+            # via object. Through-hole vias fall back to F.Cu/B.Cu when
+            # the kipy version doesn't expose them.
+            top_bl = name_to_bl["F.Cu"]
+            bot_bl = name_to_bl["B.Cu"]
+            drill_obj = getattr(getattr(v, "padstack", None), "drill", None)
+            if drill_obj is not None:
+                top_bl = getattr(drill_obj, "start_layer", None) or top_bl
+                bot_bl = getattr(drill_obj, "end_layer", None) or bot_bl
             net_id, _ = resolve_net(getattr(v, "net", None))
             vias.append(Via(
                 x=x, y=y,
@@ -1359,11 +1366,19 @@ def _vec_to_xy_mm(vec) -> Tuple[float, float]:
     return (_nm_to_mm(getattr(vec, "x", 0)), _nm_to_mm(getattr(vec, "y", 0)))
 
 
-def _net_code(net) -> int:
-    """Pull the integer net code from a kipy Net object (or 0 if absent)."""
-    if net is None:
-        return 0
-    return int(getattr(net, "code", 0) or 0)
+# NOTE: build_pcb_data_from_board threads a `resolve_net(net) -> (id, name)`
+# closure into every helper that needs to translate kipy Net objects into
+# our synthetic-id space. kipy.Net.code is deprecated and unreliable in
+# KiCad 10 — relying on it silently sends every read to net_id=0.
+# Callers MUST always go through `resolve_net`; the helper above exists
+# only as a fail-loud guard against future regressions.
+
+def _net_code(_net) -> int:  # pragma: no cover - deliberate footgun guard
+    raise RuntimeError(
+        "_net_code() was called — this used to rely on kipy.Net.code "
+        "which is deprecated in KiCad 10. Use the resolve_net closure "
+        "from build_pcb_data_from_board (resolves by net name) instead."
+    )
 
 
 def _fp_reference(fp) -> str:
@@ -1920,13 +1935,13 @@ def _extract_stackup_kipy(board) -> List[StackupLayer]:
     return stackup
 
 
-def _extract_zones_kipy(board, get_layer_name, resolve_net=None) -> List[Zone]:
+def _extract_zones_kipy(board, get_layer_name, resolve_net) -> List[Zone]:
     """Read filled zones via kipy.
 
-    `resolve_net` (when supplied) is the name→synthetic-id resolver from
-    build_pcb_data_from_board. Without it, zone net_ids fall back to
-    kipy's deprecated `.code`, which gives mismatched ids vs the rest of
-    PCBData and breaks the "is this net connected?" check.
+    `resolve_net` is the name→synthetic-id resolver from
+    build_pcb_data_from_board. Required — without it zones would
+    mismatch the rest of PCBData's net ids and "is connected?" would
+    silently break for zoned nets.
     """
     zones: List[Zone] = []
     try:
@@ -1939,11 +1954,7 @@ def _extract_zones_kipy(board, get_layer_name, resolve_net=None) -> List[Zone]:
     for z in zone_iter:
         try:
             net = getattr(z, "net", None)
-            if resolve_net is not None:
-                net_id, net_name = resolve_net(net)
-            else:
-                net_id = _net_code(net)
-                net_name = getattr(net, "name", "") if net is not None else ""
+            net_id, net_name = resolve_net(net)
             # kipy zones can span multiple layers; emit one Zone entry per
             # layer so callers that filter by single layer match cleanly.
             layers = getattr(z, "layers", None)

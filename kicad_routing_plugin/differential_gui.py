@@ -798,7 +798,7 @@ class DifferentialTab(wx.Panel):
     def _get_selected_pair_netclass(self):
         """Get the net class name for the first selected pair, or None."""
         try:
-            from kicad_ipc_adapter import get_board
+            from kicad_ipc_adapter import get_board, ipc_lock
             board = get_board()
             if board is None:
                 return None
@@ -808,10 +808,17 @@ class DifferentialTab(wx.Panel):
                 return None
             _, p_net_id, _ = selected[0]
 
-            for n in board.get_nets():
-                if getattr(n, "code", None) == p_net_id:
-                    return (getattr(n, "class_name", None)
-                            or getattr(n, "netclass_name", None))
+            # Match by name (kipy.Net.code is deprecated in KiCad 10 and
+            # returns unreliable values). Translate our synthetic id back
+            # to a name through pcb_data, then compare kipy nets by name.
+            target_net = self.pcb_data.nets.get(p_net_id)
+            if target_net is None or not target_net.name:
+                return None
+            with ipc_lock():
+                for n in board.get_nets():
+                    if getattr(n, "name", None) == target_net.name:
+                        return (getattr(n, "class_name", None)
+                                or getattr(n, "netclass_name", None))
             return None
         except Exception:
             return None
