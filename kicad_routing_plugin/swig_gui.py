@@ -54,7 +54,9 @@ def _get_netclass_parameters(class_name):
     if board is None:
         return None
     try:
-        dr = board.get_design_rules()
+        from kicad_ipc_adapter import ipc_lock
+        with ipc_lock():
+            dr = board.get_design_rules()
     except Exception:
         return None
 
@@ -125,7 +127,9 @@ def _get_board_minimum_constraints():
     if board is None:
         return None
     try:
-        dr = board.get_design_rules()
+        from kicad_ipc_adapter import ipc_lock
+        with ipc_lock():
+            dr = board.get_design_rules()
     except Exception:
         return None
 
@@ -334,6 +338,12 @@ class RoutingDialog(wx.Dialog):
         if not self.board_filename:
             self._append_log("Validation: Board has no filename (not saved yet). "
                              "Save the board first to enable file-based validation.\n")
+            return
+        if not os.path.isabs(self.board_filename) or not os.path.isfile(self.board_filename):
+            self._append_log(
+                f"Validation: '{self.board_filename}' isn't an absolute path to an "
+                f"existing file. kicad-python only exposes the basename; the validate "
+                f"feature needs the full path. Skipping.\n")
             return
 
         self._append_log("=== PCB Data Validation ===\n")

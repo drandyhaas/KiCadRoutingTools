@@ -20,61 +20,63 @@ import routing_defaults as defaults
 def _get_net_classes_from_board():
     """Read net-class mapping from the live KiCad board via IPC.
 
+    Called from both the main thread (initial dialog population) and the
+    routing worker thread (clearance lookup mid-run). Holds the IPC lock
+    across all kipy calls so concurrent commits don't corrupt the shared
+    NNG socket.
+
     Returns:
         tuple: (net_to_class dict mapping net_name -> class_name,
                 list of class names sorted with 'Default' first)
     """
     try:
-        from kicad_ipc_adapter import get_board
+        from kicad_ipc_adapter import get_board, ipc_lock
         board = get_board()
         if board is None:
             return {}, ['Default']
 
         net_to_class = {}
         netclass_names = set()
+        with ipc_lock():
+            try:
+                dr = board.get_design_rules()
+            except Exception:
+                dr = None
 
-        # Get design rules / net classes via kipy. Exact attribute names vary
-        # between kicad-python releases, so probe a few candidates.
-        try:
-            dr = board.get_design_rules()
-        except Exception:
-            dr = None
-
-        if dr is not None:
-            classes_iter = None
-            for attr in ("net_classes", "netclasses", "classes"):
-                v = getattr(dr, attr, None)
-                if v is not None:
-                    try:
-                        classes_iter = list(v)
-                        break
-                    except TypeError:
-                        classes_iter = list(v.values()) if hasattr(v, "values") else []
-                        if classes_iter:
+            if dr is not None:
+                classes_iter = None
+                for attr in ("net_classes", "netclasses", "classes"):
+                    v = getattr(dr, attr, None)
+                    if v is not None:
+                        try:
+                            classes_iter = list(v)
                             break
-            for c in classes_iter or []:
-                name = getattr(c, "name", "") or ""
-                if name:
-                    netclass_names.add(name)
+                        except TypeError:
+                            classes_iter = list(v.values()) if hasattr(v, "values") else []
+                            if classes_iter:
+                                break
+                for c in classes_iter or []:
+                    name = getattr(c, "name", "") or ""
+                    if name:
+                        netclass_names.add(name)
 
-        netclass_names.add('Default')
+            netclass_names.add('Default')
 
-        # Map each net to its effective class. kipy exposes either a per-net
-        # `class_name` attribute or a separate mapping accessor; try both.
-        for n in board.get_nets():
-            net_name = getattr(n, "name", "") or ""
-            if not net_name or net_name.lower().startswith('unconnected-'):
-                continue
-            class_name = (getattr(n, "class_name", None)
-                          or getattr(n, "netclass_name", None)
-                          or 'Default')
-            if isinstance(class_name, str) and ',' in class_name:
-                parts = [p.strip() for p in class_name.split(',')]
-                non_default = [p for p in parts if p != 'Default']
-                class_name = non_default[0] if non_default else 'Default'
-            net_to_class[net_name] = class_name or 'Default'
+            # Map each net to its effective class. kipy exposes either a
+            # per-net `class_name` attribute or a separate mapping accessor.
+            for n in board.get_nets():
+                net_name = getattr(n, "name", "") or ""
+                if not net_name or net_name.lower().startswith('unconnected-'):
+                    continue
+                class_name = (getattr(n, "class_name", None)
+                              or getattr(n, "netclass_name", None)
+                              or 'Default')
+                if isinstance(class_name, str) and ',' in class_name:
+                    parts = [p.strip() for p in class_name.split(',')]
+                    non_default = [p for p in parts if p != 'Default']
+                    class_name = non_default[0] if non_default else 'Default'
+                net_to_class[net_name] = class_name or 'Default'
 
-        # Sort with 'Default' first
         sorted_classes = ['Default'] if 'Default' in netclass_names else []
         sorted_classes.extend(sorted(c for c in netclass_names if c != 'Default'))
 
@@ -1154,36 +1156,98 @@ class FanoutTab(wx.Panel):
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga'):
-        """Apply fanout results to the board.
+        """Apply fanout results to the board via the IPC adapter.
 
-        Not yet ported to KiCad 10's IPC API. The original SWIG write path
-        is preserved below as a comment so the next branch (which will port
-        this) has a reference. For now we surface a clear "use SWIG version"
-        notice and bail out.
+        Fanout produces dict-shaped tracks/vias (different from the
+        results_data shape the routing tabs use), so we drive the
+        adapter's begin_commit + make_track + make_via primitives
+        directly rather than going through apply_routing_results.
         """
-        wx.MessageBox(
-            "Fanout: the apply-to-board path has not yet been ported to "
-            "KiCad 10's IPC API. The fanout computation ran successfully, "
-            "but no tracks/vias were written.\n\n"
-            f"Would have applied: {len(tracks)} tracks, {len(vias)} vias.\n\n"
-            "Use the SWIG version (KiCadRoutingTools 0.15.x on KiCad 9) "
-            "if you need fanout for now — IPC port coming in a follow-up "
-            "release.",
-            "Fanout: IPC port pending",
-            wx.OK | wx.ICON_INFORMATION,
+        from kicad_ipc_adapter import (
+            begin_commit, get_board, make_track, make_via,
         )
+
+        board = get_board()
+        if board is None:
+            wx.MessageBox("Board is no longer open", "Error",
+                          wx.OK | wx.ICON_ERROR)
+            return
+
+        # net_id → name lookup uses the dialog's pcb_data, which is the
+        # canonical source for the synthetic ids used everywhere.
+        pcb_data = self.pcb_data
+        def name_for(net_id):
+            net = pcb_data.nets.get(net_id) if pcb_data else None
+            return net.name if net is not None else None
+
+        tracks_added = 0
+        vias_added = 0
+        try:
+            with begin_commit(board, f"KiCadRoutingTools: {fanout_kind} fanout") as commit:
+                for td in tracks:
+                    start = td['start']
+                    end = td['end']
+                    commit.add(make_track(
+                        commit.net_map,
+                        start[0], start[1], end[0], end[1],
+                        td['width'], td['layer'],
+                        net_name=name_for(td.get('net_id')),
+                    ))
+                    tracks_added += 1
+                for vd in vias:
+                    layers = vd.get('layers') or ['F.Cu', 'B.Cu']
+                    top = layers[0]
+                    bot = layers[-1] if len(layers) >= 2 else 'B.Cu'
+                    commit.add(make_via(
+                        commit.net_map,
+                        vd['x'], vd['y'], vd['size'], vd['drill'],
+                        top_layer=top, bottom_layer=bot,
+                        net_name=name_for(vd.get('net_id')),
+                    ))
+                    vias_added += 1
+        except Exception as e:
+            wx.MessageBox(
+                f"Failed to apply fanout to the board:\n\n{e}",
+                "Apply error", wx.OK | wx.ICON_ERROR,
+            )
+            return
+
+        self.status_text.SetLabel(
+            f"Complete: {tracks_added} tracks, {vias_added} vias added")
+        self.progress_bar.SetValue(100)
+
+        msg = f"Fanout complete!\n\n"
+        msg += f"Added to board:\n"
+        msg += f"  {tracks_added} tracks\n"
+        msg += f"  {vias_added} vias\n"
+        if failed_nets:
+            if fanout_kind == 'qfn':
+                msg += f"\nNets whose stubs are too close to neighbours ({len(failed_nets)}):\n"
+            else:
+                msg += f"\nFailed nets ({len(failed_nets)}):\n"
+            for name in failed_nets[:8]:
+                msg += f"  - {name}\n"
+            if len(failed_nets) > 8:
+                msg += f"  ... and {len(failed_nets) - 8} more (see Log tab)\n"
+            try:
+                from routing_diagnostics import (
+                    suggest_bga_fanout_adjustments,
+                    suggest_qfn_fanout_adjustments,
+                    format_suggestions_for_dialog)
+                suggest_fn = (suggest_qfn_fanout_adjustments
+                              if fanout_kind == 'qfn'
+                              else suggest_bga_fanout_adjustments)
+                rough_total = max(len(failed_nets) + tracks_added, len(failed_nets))
+                suggestions = suggest_fn(
+                    failed=len(failed_nets), total=rough_total,
+                    config=fanout_config or {})
+                block = format_suggestions_for_dialog(suggestions)
+                if block:
+                    msg += "\n" + block + "\n"
+            except Exception as e:
+                print(f"Warning: failed to build fanout suggestions: {e}")
+        msg += "\nUse Edit -> Undo to revert changes."
+
+        wx.MessageBox(msg, "Fanout Complete", wx.OK | wx.ICON_INFORMATION)
         if self.on_fanout_complete:
             self.on_fanout_complete()
-
-    # --- Original SWIG apply path, retained as a reference for the future
-    # IPC port. Re-implement via kicad_ipc_adapter.apply_routing_results-style
-    # batched commits when this tab is migrated.
-    #
-    # def _apply_fanout_results_swig(self, tracks, vias, ...):
-    #     import pcbnew
-    #     board = pcbnew.GetBoard()
-    #     for track_dict in tracks:
-    #         track = pcbnew.PCB_TRACK(board); ...; board.Add(track)
-    #     for via_dict in vias:
-    #         via = pcbnew.PCB_VIA(board); ...; board.Add(via)
-    #     board.BuildConnectivity(); pcbnew.Refresh()

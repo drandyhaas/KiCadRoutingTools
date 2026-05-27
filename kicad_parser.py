@@ -1124,6 +1124,15 @@ def build_pcb_data_from_board(board) -> PCBData:
     Returns:
         PCBData object containing all routing-relevant data
     """
+    from kicad_ipc_adapter import layer_maps, layer_name_for, ipc_lock
+    # All board.* reads share one ipc_lock acquisition so the snapshot is
+    # consistent and we don't interleave with a concurrent apply commit.
+    with ipc_lock():
+        return _build_pcb_data_from_board_locked(board)
+
+
+def _build_pcb_data_from_board_locked(board) -> PCBData:
+    """Inner impl of build_pcb_data_from_board, assumes ipc_lock is held."""
     from kicad_ipc_adapter import layer_maps, layer_name_for
 
     name_to_bl, bl_to_name = layer_maps()
@@ -1306,6 +1315,13 @@ def build_pcb_data_from_board(board) -> PCBData:
     # --- Zones ---
     zones = _extract_zones_kipy(board, get_layer_name)
 
+    # IPC plugins only run on KiCad 10+, so unconditionally flag this as
+    # K10-format data. route_planes / output_writer / route_disconnected_planes
+    # gate their "use net names instead of integer net codes" branches on
+    # this; without it they fall back to writing integer codes (our
+    # synthetic ones, which never match what KiCad expects).
+    net_id_to_name = {nid: n.name for nid, n in nets.items()}
+
     return PCBData(
         board_info=board_info,
         nets=nets,
@@ -1313,7 +1329,9 @@ def build_pcb_data_from_board(board) -> PCBData:
         vias=vias,
         segments=segments,
         pads_by_net=pads_by_net,
-        zones=zones
+        zones=zones,
+        kicad_version=KICAD_10_MIN_VERSION,
+        net_id_to_name=net_id_to_name,
     )
 
 

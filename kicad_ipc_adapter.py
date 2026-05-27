@@ -38,6 +38,7 @@ whole route as one undo step:
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from typing import Iterable, Optional
 
@@ -62,12 +63,35 @@ def _import_kipy():
         ) from e
 
 
+def _import_zone_types():
+    """Lazy zone-related imports. Zone APIs are still in flux; isolate here."""
+    from kipy.board_types import Zone, ZoneType
+    from kipy.geometry import PolyLine, PolyLineNode, PolygonWithHoles
+    return Zone, ZoneType, PolyLine, PolyLineNode, PolygonWithHoles
+
+
 # --- Connection -------------------------------------------------------------
 # A single IPC connection is reused across the plugin's lifetime — kipy uses
 # a synchronous, single-threaded protobuf socket, and we never spawn multiple
 # `KiCad()` clients per process.
 
 _KICAD_SINGLETON = None
+# Serialises IPC calls across threads. kipy uses an NNG REQ/REP socket and
+# we have no published guarantee that two threads can hit the same client
+# concurrently without corrupting the socket. RoutingDialog launches a
+# routing worker thread that calls back into IPC (net-class lookup, etc.),
+# so wrap every IPC entry point in `with ipc_lock():`.
+_IPC_LOCK = threading.RLock()
+
+
+@contextmanager
+def ipc_lock():
+    """Context manager that serialises kipy calls across threads."""
+    _IPC_LOCK.acquire()
+    try:
+        yield
+    finally:
+        _IPC_LOCK.release()
 
 
 def connect() -> "kipy.KiCad":
@@ -88,9 +112,47 @@ def get_board(kicad: Optional["kipy.KiCad"] = None):
     if kicad is None:
         kicad = connect()
     try:
-        return kicad.get_board()
+        with ipc_lock():
+            return kicad.get_board()
     except Exception:
         return None
+
+
+def get_board_full_path(kicad: Optional["kipy.KiCad"] = None) -> Optional[str]:
+    """Best-effort absolute filesystem path to the open PCB.
+
+    kipy.Board.name returns just the basename. The PCB file's directory is
+    only exposed via `kicad.get_open_documents(DocumentType.DOCTYPE_PCB)`,
+    and the field names there have shifted between releases — so we probe
+    a few candidates and return the first one that's an existing file.
+    Returns None if nothing usable is reachable.
+    """
+    if kicad is None:
+        kicad = connect()
+    try:
+        from kipy.proto.common.types import DocumentType  # type: ignore
+    except Exception:
+        return None
+    try:
+        docs = kicad.get_open_documents(DocumentType.DOCTYPE_PCB)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+    import os
+    for doc in docs or []:
+        for attr in ("path", "full_path", "file_path", "filename", "file_name"):
+            v = getattr(doc, attr, None)
+            if isinstance(v, str) and v and os.path.isfile(v):
+                return v
+        # Some kipy versions wrap path under board_filename / project / etc.
+        for attr in ("board_filename", "project", "board"):
+            sub = getattr(doc, attr, None)
+            if sub is not None:
+                for inner in ("path", "full_path", "file_path", "filename"):
+                    v = getattr(sub, inner, None)
+                    if isinstance(v, str) and v and os.path.isfile(v):
+                        return v
+    return None
 
 
 # --- Coordinate helpers -----------------------------------------------------
@@ -237,17 +299,19 @@ def begin_commit(board, message: str = "KiCadRoutingTools"):
     """Context manager: yields a `_Commit` that aggregates new items.
 
     On clean exit, pushes everything as a single undo step. On exception,
-    drops the commit so the board state is unchanged.
+    drops the commit so the board state is unchanged. The whole commit is
+    serialised against other IPC calls (see `ipc_lock`).
     """
-    net_map = NetMap(board)
-    commit = _Commit(board, net_map)
-    try:
-        yield commit
-    except Exception:
-        commit.drop()
-        raise
-    else:
-        commit.push(message)
+    with ipc_lock():
+        net_map = NetMap(board)
+        commit = _Commit(board, net_map)
+        try:
+            yield commit
+        except Exception:
+            commit.drop()
+            raise
+        else:
+            commit.push(message)
 
 
 # --- Track / Via / Shape construction --------------------------------------
@@ -335,6 +399,79 @@ def make_debug_line(start_xy: tuple[float, float], end_xy: tuple[float, float],
     return s
 
 
+# --- Zone construction -----------------------------------------------------
+
+def _mm_to_nm(v: float) -> int:
+    return int(round(v * 1_000_000))
+
+
+def make_zone(net_map: NetMap, polygon_mm, layer_name: str,
+              net_name: Optional[str] = None,
+              clearance_mm: float = 0.2,
+              min_thickness_mm: float = 0.1):
+    """Build a kipy Zone (copper fill) ready to be added to a commit.
+
+    polygon_mm: iterable of (x_mm, y_mm) outline points. Must form a
+        closed loop (last point auto-connects to first).
+    """
+    Zone, ZoneType, PolyLine, PolyLineNode, PolygonWithHoles = _import_zone_types()
+
+    pts_nm = [(int(round(x * 1_000_000)), int(round(y * 1_000_000)))
+              for x, y in polygon_mm]
+    polyline = PolyLine()
+    # PolyLineNode.from_xy expects nanometers (the proto's native unit).
+    # Some kipy releases also expose .from_xy_mm — use it if available.
+    if hasattr(PolyLineNode, "from_xy_mm"):
+        for x, y in polygon_mm:
+            polyline.append(PolyLineNode.from_xy_mm(x, y))
+    else:
+        for x_nm, y_nm in pts_nm:
+            polyline.append(PolyLineNode.from_xy(x_nm, y_nm))
+
+    poly_with_holes = PolygonWithHoles()
+    poly_with_holes.outline = polyline
+
+    zone = Zone()
+    zone.type = ZoneType.ZT_COPPER
+    zone.outline = poly_with_holes
+    zone.layers = [layer_id_for(layer_name)]
+    zone.clearance = _mm_to_nm(clearance_mm)
+    zone.min_thickness = _mm_to_nm(min_thickness_mm)
+
+    if net_name:
+        net = net_map.resolve(net_name=net_name)
+        if net is not None:
+            zone.net = net
+        else:
+            print(f"Warning: net '{net_name}' not found; zone will be netless")
+    return zone
+
+
+def existing_zone_keys(board) -> set[tuple[str, str]]:
+    """Return the {(net_name, layer_name)} pairs of zones already on the board.
+
+    Used by the planes tab to skip duplicate zone creation when running the
+    plane builder more than once.
+    """
+    keys: set[tuple[str, str]] = set()
+    try:
+        with ipc_lock():
+            zones = list(board.get_zones())
+    except AttributeError:
+        return keys
+    except Exception:
+        return keys
+    for z in zones:
+        net_name = ""
+        net = getattr(z, "net", None)
+        if net is not None:
+            net_name = getattr(net, "name", "") or ""
+        layers = getattr(z, "layers", None) or []
+        for bl in layers:
+            keys.add((net_name, layer_name_for(bl)))
+    return keys
+
+
 # --- Apply routing results --------------------------------------------------
 
 def apply_routing_results(board, results_data: dict, *,
@@ -378,6 +515,75 @@ def apply_routing_results(board, results_data: dict, *,
         # Optional debug lines on User layers
         if add_debug_lines:
             counts["debug_lines"] = _add_debug_lines(commit, results_data)
+    return counts
+
+
+def apply_planes_results(board, *, pcb_data,
+                         new_vias=None, new_segments=None, new_zones=None,
+                         message: str = "KiCadRoutingTools: planes") -> dict:
+    """Apply planes-tab results (zones + stitch vias + tracks) in one commit.
+
+    Each input is a list of dicts (see planes_gui callers for the exact
+    keys). Returns counts and the list of skipped zones (those whose
+    net+layer already had a zone on the board).
+    """
+    counts = {"tracks": 0, "vias": 0, "zones": 0, "zones_skipped": 0}
+    skipped: list[tuple[str, str]] = []
+
+    def name_for(net_id):
+        if pcb_data is None or net_id is None:
+            return None
+        net = pcb_data.nets.get(net_id)
+        return net.name if net is not None else None
+
+    existing = existing_zone_keys(board)
+
+    with begin_commit(board, message) as commit:
+        for vd in (new_vias or []):
+            layers = vd.get('layers') or ['F.Cu', 'B.Cu']
+            top = layers[0]
+            bot = layers[-1] if len(layers) >= 2 else 'B.Cu'
+            commit.add(make_via(
+                commit.net_map,
+                vd['x'], vd['y'], vd['size'], vd['drill'],
+                top_layer=top, bottom_layer=bot,
+                net_name=name_for(vd.get('net_id')),
+            ))
+            counts["vias"] += 1
+
+        for sd in (new_segments or []):
+            start = sd['start']
+            end = sd['end']
+            commit.add(make_track(
+                commit.net_map,
+                start[0], start[1], end[0], end[1],
+                sd['width'], sd['layer'],
+                net_name=name_for(sd.get('net_id')),
+            ))
+            counts["tracks"] += 1
+
+        for zd in (new_zones or []):
+            net_name = zd.get('net_name') or name_for(zd.get('net_id'))
+            layer = zd.get('layer', 'F.Cu')
+            key = (net_name or "", layer)
+            if key in existing:
+                skipped.append(key)
+                counts["zones_skipped"] += 1
+                continue
+            try:
+                commit.add(make_zone(
+                    commit.net_map,
+                    polygon_mm=zd['polygon_points'],
+                    layer_name=layer,
+                    net_name=net_name,
+                    clearance_mm=zd.get('clearance', 0.2),
+                    min_thickness_mm=zd.get('min_thickness', 0.1),
+                ))
+                counts["zones"] += 1
+            except Exception as e:
+                print(f"Warning: skipped zone for '{net_name}' on {layer}: {e}")
+
+    counts["_skipped_keys"] = skipped
     return counts
 
 

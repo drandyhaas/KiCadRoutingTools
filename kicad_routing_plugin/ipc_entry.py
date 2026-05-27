@@ -193,13 +193,24 @@ def main() -> int:
         )
         return 5
 
-    # Best-effort board filename for settings persistence.
+    # Resolve the board's absolute filesystem path. kipy.Board.name is just
+    # the basename; the full path comes from kicad.get_open_documents()
+    # (best-effort — see kicad_ipc_adapter.get_board_full_path). We need an
+    # absolute path for the schematic-dir picker, _validate_pcb_data, etc.
     board_filename = ""
-    for attr in ("filename", "file_name", "path", "name"):
-        v = getattr(board, attr, None)
-        if isinstance(v, str) and v:
-            board_filename = v
-            break
+    try:
+        from kicad_ipc_adapter import get_board_full_path
+        full = get_board_full_path(kicad)
+        if full:
+            board_filename = full
+    except Exception as e:
+        _log(f"get_board_full_path failed: {e}")
+    if not board_filename:
+        for attr in ("filename", "file_name", "path", "name"):
+            v = getattr(board, attr, None)
+            if isinstance(v, str) and v:
+                board_filename = v
+                break
     _log(f"board_filename={board_filename!r}")
 
     # Construct + show the routing dialog. RoutingDialog.__init__ is large

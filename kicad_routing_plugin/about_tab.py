@@ -126,7 +126,10 @@ class AboutTab(wx.Panel):
         self.transparency_slider.SetMinSize((-1, 40))  # Ensure enough height for thumb
         self.transparency_slider.SetToolTip("Adjust window transparency")
         self.transparency_slider.Bind(wx.EVT_SLIDER, self._on_transparency_slider)
-        transparency_sizer.Add(self.transparency_slider, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        # In a horizontal BoxSizer, wx.EXPAND already fills the cross axis
+        # (vertical), so adding wx.ALIGN_CENTER_VERTICAL is redundant and
+        # trips wxPython 4.2's sizer-flag consistency assertion.
+        transparency_sizer.Add(self.transparency_slider, 1, wx.EXPAND)
         about_sizer.Add(transparency_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 30)
 
         # Validate PCB Data button

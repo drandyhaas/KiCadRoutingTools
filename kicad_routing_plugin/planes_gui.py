@@ -920,13 +920,9 @@ class PlanesTab(wx.Panel):
         self.net_panel.refresh()
 
     def _apply_results_to_board(self):
-        """Apply planes results to the board.
+        """Apply planes results (zones + stitch vias + tracks) via the IPC adapter."""
+        from kicad_ipc_adapter import apply_planes_results, get_board
 
-        Not yet ported to KiCad 10's IPC API. Zone creation in particular
-        needs the kipy padstack/zone APIs which differ structurally from
-        SWIG's pcbnew.ZONE — the original SWIG path is preserved as a
-        comment for the future port.
-        """
         new_vias = list(getattr(self, "_new_vias", []) or [])
         new_segments = list(getattr(self, "_new_segments", []) or [])
         new_zones = list(getattr(self, "_new_zones", []) or [])
@@ -936,30 +932,45 @@ class PlanesTab(wx.Panel):
         self._new_segments = []
         self._new_zones = []
 
-        wx.MessageBox(
-            "Planes: the apply-to-board path has not yet been ported to "
-            "KiCad 10's IPC API. The plane operations were computed "
-            "successfully, but nothing was written to the board.\n\n"
-            f"Would have applied: {len(new_zones)} zones, "
-            f"{len(new_vias)} vias, {len(new_segments)} stitch tracks.\n\n"
-            "Use the SWIG version (KiCadRoutingTools 0.15.x on KiCad 9) "
-            "if you need plane operations for now — IPC port coming in a "
-            "follow-up release.",
-            "Planes: IPC port pending",
-            wx.OK | wx.ICON_INFORMATION,
-        )
+        if not (new_vias or new_segments or new_zones):
+            return
 
-    # --- Original SWIG apply path retained as a reference for the future
-    # IPC port. Re-implement against kipy's zone/track/via APIs and a single
-    # commit when this tab is migrated.
-    #
-    # def _apply_results_to_board_swig(self):
-    #     import pcbnew; board = pcbnew.GetBoard()
-    #     for via_data in self._new_vias: ... pcbnew.PCB_VIA ...
-    #     for seg_data in self._new_segments: ... pcbnew.PCB_TRACK ...
-    #     for zone_data in self._new_zones: ... pcbnew.ZONE ...
-    #     pcbnew.ZONE_FILLER(board).Fill(new_zone_objs)
-    #     pcbnew.Refresh()
+        board = get_board()
+        if board is None:
+            wx.MessageBox("Board is no longer open", "Error",
+                          wx.OK | wx.ICON_ERROR)
+            return
+
+        try:
+            counts = apply_planes_results(
+                board,
+                pcb_data=self.pcb_data,
+                new_vias=new_vias,
+                new_segments=new_segments,
+                new_zones=new_zones,
+                message="KiCadRoutingTools: planes",
+            )
+        except Exception as e:
+            wx.MessageBox(
+                f"Failed to apply plane operations:\n\n{e}",
+                "Apply error", wx.OK | wx.ICON_ERROR,
+            )
+            return
+
+        if counts["zones_skipped"]:
+            for net_name, layer in counts.get("_skipped_keys", []):
+                print(f"Skipped duplicate zone for '{net_name}' on {layer}")
+
+        print(f"Added to board: {counts['zones']} zones, "
+              f"{counts['vias']} vias, {counts['tracks']} tracks "
+              f"({counts['zones_skipped']} zones skipped as duplicates)")
+
+        # KiCad fills zones server-side on commit; no separate ZoneFiller
+        # needed under IPC. If a fill is missing, the user can press B in
+        # the PCB Editor to trigger a full board re-fill.
+
+        if self.sync_pcb_data_callback:
+            self.sync_pcb_data_callback()
 
     def get_assignments(self):
         """Get list of net→layer assignments."""

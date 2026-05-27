@@ -722,45 +722,36 @@ class DifferentialTab(wx.Panel):
         self.pair_panel.refresh()
 
     def _apply_results_to_board(self, results_data):
-        """Apply differential-pair routing results to the board.
+        """Apply differential-pair routing results via the IPC adapter.
 
-        Not yet ported to KiCad 10's IPC API — surface a clear notice and
-        leave the board untouched. Routing computation still runs, so the
-        user can inspect the result counts.
+        results_data has the same shape as the main routing tab
+        (results[].new_segments / new_vias / all_swap_vias), so we hand
+        it straight to apply_routing_results.
         """
-        # Count what would have been applied so the message is informative.
-        tracks_added = 0
-        vias_added = 0
-        for result in results_data.get('results', []):
-            tracks_added += len(result.get('new_segments', []))
-            vias_added += len(result.get('new_vias', []))
-        vias_added += len(results_data.get('all_swap_vias', []))
+        from kicad_ipc_adapter import apply_routing_results, get_board
 
-        wx.MessageBox(
-            "Differential pairs: the apply-to-board path has not yet been "
-            "ported to KiCad 10's IPC API. The routing computation ran "
-            "successfully, but no tracks/vias were written.\n\n"
-            f"Would have applied: {tracks_added} segments, {vias_added} vias.\n\n"
-            "Use the SWIG version (KiCadRoutingTools 0.15.x on KiCad 9) "
-            "if you need differential routing for now — IPC port coming in "
-            "a follow-up release.",
-            "Differential: IPC port pending",
-            wx.OK | wx.ICON_INFORMATION,
-        )
-        return 0, 0
+        board = get_board()
+        if board is None:
+            wx.MessageBox("Board is no longer open", "Error",
+                          wx.OK | wx.ICON_ERROR)
+            return 0, 0
 
-    # --- Original SWIG apply paths retained as a reference for the future
-    # IPC port. Re-implement via kicad_ipc_adapter.apply_routing_results-style
-    # batched commits when this tab is migrated.
-    #
-    # def _apply_results_to_board_swig(self, results_data):
-    #     import pcbnew; board = pcbnew.GetBoard()
-    #     for result in results_data.get('results', []):
-    #         for seg in result.get('new_segments', []):
-    #             track = pcbnew.PCB_TRACK(board); ...; board.Add(track)
-    #         for via in result.get('new_vias', []):
-    #             self._add_via_to_board(board, via, get_layer_id)
-    #     board.BuildConnectivity(); pcbnew.Refresh()
+        try:
+            counts = apply_routing_results(
+                board, results_data,
+                pcb_data=self.pcb_data,
+                message="KiCadRoutingTools: route differential pairs",
+            )
+        except Exception as e:
+            wx.MessageBox(
+                f"Failed to apply differential routing:\n\n{e}",
+                "Apply error", wx.OK | wx.ICON_ERROR,
+            )
+            return 0, 0
+
+        if self.sync_pcb_data_callback:
+            self.sync_pcb_data_callback()
+        return counts["tracks"], counts["vias"]
 
     def get_config(self):
         """Get the differential pair configuration."""
