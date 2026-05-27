@@ -1,7 +1,9 @@
 """
-KiCad Routing Tools - wxPython GUI for SWIG plugin
+KiCad Routing Tools - wxPython GUI (IPC plugin)
 
-Provides a wx-based dialog for routing configuration.
+Provides a wx-based dialog for routing configuration. The dialog itself
+runs in the IPC-plugin's wx process; all board read/write goes through
+`kicad_ipc_adapter`, which wraps the kipy (KiCad IPC) API.
 """
 
 import os
@@ -24,25 +26,21 @@ from .gui_utils import StdoutRedirector
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
 
 
-def _build_layer_mappings():
-    """Build layer name <-> ID mappings using pcbnew.
+def _ipc_board():
+    """Return the currently-open kipy board (or None).
 
-    Returns:
-        tuple: (name_to_id dict, id_to_name dict)
+    Single point of access so the SWIG → IPC migration only changed the
+    plumbing in one place; callers stay agnostic about the connection.
     """
-    import pcbnew
-    name_to_id = {'F.Cu': pcbnew.F_Cu, 'B.Cu': pcbnew.B_Cu}
-    id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
-    for i in range(1, 31):
-        layer_id = getattr(pcbnew, f'In{i}_Cu', None)
-        if layer_id is not None:
-            name_to_id[f'In{i}.Cu'] = layer_id
-            id_to_name[layer_id] = f'In{i}.Cu'
-    return name_to_id, id_to_name
+    try:
+        from kicad_ipc_adapter import get_board
+        return get_board()
+    except Exception:
+        return None
 
 
 def _get_netclass_parameters(class_name):
-    """Get routing parameters for a specific net class from pcbnew.
+    """Get routing parameters for a specific net class via kipy design rules.
 
     Args:
         class_name: Name of the net class (e.g., 'Default', 'Wide')
@@ -52,93 +50,148 @@ def _get_netclass_parameters(class_name):
         diff_pair_width, diff_pair_gap (all in mm)
         Returns None if net class not found or error occurs.
     """
+    board = _ipc_board()
+    if board is None:
+        return None
     try:
-        import pcbnew
-        board = pcbnew.GetBoard()
-        if board is None:
-            return None
-
-        ds = board.GetDesignSettings()
-        net_settings = ds.m_NetSettings
-
-        # Get the net class by name
-        netclass = net_settings.GetNetClassByName(class_name)
-        if not netclass:
-            # Try getting default
-            netclass = net_settings.GetDefaultNetclass()
-        if not netclass:
-            return None
-
-        # KiCad stores values in nanometers, convert to mm
-        nm_to_mm = 1e-6
-
-        result = {
-            'track_width': netclass.GetTrackWidth() * nm_to_mm,
-            'clearance': netclass.GetClearance() * nm_to_mm,
-            'via_size': netclass.GetViaDiameter() * nm_to_mm,
-            'via_drill': netclass.GetViaDrill() * nm_to_mm,
-        }
-
-        # Add differential pair parameters if available
-        if hasattr(netclass, 'GetDiffPairWidth'):
-            result['diff_pair_width'] = netclass.GetDiffPairWidth() * nm_to_mm
-        if hasattr(netclass, 'GetDiffPairGap'):
-            result['diff_pair_gap'] = netclass.GetDiffPairGap() * nm_to_mm
-
-        return result
+        dr = board.get_design_rules()
     except Exception:
         return None
+
+    # kipy exposes a list of netclass-like objects on the design rules; the
+    # exact attribute name varies by version, so probe a few candidates.
+    netclasses = []
+    for attr in ("net_classes", "netclasses", "classes"):
+        v = getattr(dr, attr, None)
+        if v is not None:
+            try:
+                netclasses = list(v)
+                break
+            except TypeError:
+                netclasses = list(v.values()) if hasattr(v, "values") else []
+                if netclasses:
+                    break
+
+    nc = None
+    default_nc = None
+    for c in netclasses:
+        name = getattr(c, "name", "") or ""
+        if name == class_name:
+            nc = c
+            break
+        if name in ("Default", "default") and default_nc is None:
+            default_nc = c
+    if nc is None:
+        nc = default_nc
+    if nc is None:
+        return None
+
+    def _mm(attr):
+        v = getattr(nc, attr, None)
+        if v is None:
+            return None
+        if hasattr(v, "x_mm"):
+            return float(v.x_mm)
+        try:
+            iv = int(v)
+            return iv * 1e-6 if abs(iv) > 1000 else float(iv)
+        except (TypeError, ValueError):
+            return None
+
+    result = {
+        "track_width": _mm("track_width") or _mm("trace_width") or 0.25,
+        "clearance": _mm("clearance") or 0.2,
+        "via_size": _mm("via_diameter") or _mm("via_size") or 0.6,
+        "via_drill": _mm("via_drill") or _mm("via_hole") or 0.3,
+    }
+    dpw = _mm("diff_pair_width")
+    dpg = _mm("diff_pair_gap")
+    if dpw is not None:
+        result["diff_pair_width"] = dpw
+    if dpg is not None:
+        result["diff_pair_gap"] = dpg
+    return result
 
 
 def _get_board_minimum_constraints():
-    """Get board-level minimum constraints from pcbnew.
-
-    These are the hard floors from Board Setup → Design Rules → Constraints.
+    """Read board-level minimum constraints via kipy design rules.
 
     Returns:
         dict with min_track_width, min_clearance, min_via_size, min_via_drill,
-        min_hole_to_hole, min_copper_edge_clearance (in mm)
-        or None if board not available
+        min_hole_to_hole, min_copper_edge_clearance (in mm), or None if not
+        readable.
     """
+    board = _ipc_board()
+    if board is None:
+        return None
     try:
-        import pcbnew
-        board = pcbnew.GetBoard()
-        if board is None:
-            return None
-
-        ds = board.GetDesignSettings()
-        nm_to_mm = 1e-6
-
-        result = {
-            'min_track_width': ds.m_TrackMinWidth * nm_to_mm,
-            'min_clearance': ds.m_MinClearance * nm_to_mm,
-            'min_via_size': ds.m_ViasMinSize * nm_to_mm,
-            'min_via_drill': ds.m_MinThroughDrill * nm_to_mm,
-        }
-
-        # Try to get hole-to-hole clearance (may not be available in all versions)
-        if hasattr(ds, 'm_HoleToHoleMin'):
-            result['min_hole_to_hole'] = ds.m_HoleToHoleMin * nm_to_mm
-
-        # Try to get copper-to-edge clearance
-        if hasattr(ds, 'm_CopperEdgeClearance'):
-            result['min_copper_edge_clearance'] = ds.m_CopperEdgeClearance * nm_to_mm
-
-        return result
+        dr = board.get_design_rules()
     except Exception:
         return None
+
+    def _mm(*attrs):
+        for a in attrs:
+            v = getattr(dr, a, None)
+            if v is None:
+                continue
+            if hasattr(v, "x_mm"):
+                return float(v.x_mm)
+            try:
+                iv = int(v)
+                return iv * 1e-6 if abs(iv) > 1000 else float(iv)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    return {
+        "min_track_width": _mm("min_track_width", "min_trace_width") or 0.1,
+        "min_clearance": _mm("min_clearance") or 0.1,
+        "min_via_size": _mm("min_via_diameter", "min_via_size") or 0.4,
+        "min_via_drill": _mm("min_via_drill", "min_through_drill") or 0.2,
+        "min_hole_to_hole": _mm("min_hole_to_hole", "hole_to_hole_min") or 0.25,
+        "min_copper_edge_clearance": _mm("min_copper_edge_clearance",
+                                          "copper_edge_clearance") or 0.25,
+    }
 
 
 class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
     def __init__(self, parent, pcb_data, board_filename, saved_settings=None):
+        # Default size bumped from 800x800 (which clipped on wxPython 4.2's
+        # taller netclass / fanout panels) to something that fits the full
+        # layout without scrollbars on a 1080p display.
+        default_size = (1100, 900)
+        size = default_size
+        if saved_settings and 'window_size' in saved_settings:
+            try:
+                w, h = saved_settings['window_size']
+                # Clamp to sane bounds so a corrupted setting can't open the
+                # dialog off-screen or as a 0-pixel sliver.
+                size = (max(700, int(w)), max(550, int(h)))
+            except (TypeError, ValueError):
+                size = default_size
+
         super().__init__(
             parent,
             title="KiCad Routing Tools",
-            size=(800, 800),
+            size=size,
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
         )
+        # Keep the user from shrinking below where widgets start clipping.
+        self.SetMinSize((700, 550))
+
+        # Restore position if we have a previously-saved one (and it's still
+        # on-screen). Otherwise we'll Centre() further down.
+        self._restored_position = False
+        if saved_settings and 'window_position' in saved_settings:
+            try:
+                x, y = saved_settings['window_position']
+                if self._position_is_on_screen(int(x), int(y)):
+                    self.SetPosition((int(x), int(y)))
+                    self._restored_position = True
+            except (TypeError, ValueError):
+                pass
 
         # Get saved transparency or use default
         self._initial_transparency = 240
@@ -168,87 +221,52 @@ class RoutingDialog(wx.Dialog):
 
         self._create_ui()
         self._load_nets_immediate()  # Load net names only (fast)
-        self.Centre()
+        if not self._restored_position:
+            self.Centre()
 
         # Defer sync and connectivity check until after dialog is shown
         wx.CallAfter(self._deferred_init)
 
-    def _sync_pcb_data_from_board(self):
-        """Sync pcb_data.segments and pcb_data.vias from pcbnew's in-memory board.
+    @staticmethod
+    def _position_is_on_screen(x: int, y: int) -> bool:
+        """Return True if (x, y) lands on any currently-attached display.
 
-        This is necessary because pcb_data is parsed from the file on disk,
-        but tracks added during previous routing sessions only exist in pcbnew's
-        memory until the file is saved.
+        Guards against restoring a window onto an unplugged second monitor.
+        """
+        try:
+            for i in range(wx.Display.GetCount()):
+                geo = wx.Display(i).GetGeometry()
+                if (geo.x <= x < geo.x + geo.width
+                        and geo.y <= y < geo.y + geo.height):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _sync_pcb_data_from_board(self):
+        """Refresh pcb_data.segments / .vias / .zones from the live IPC board.
+
+        After applying routes, the on-disk file is stale until the user
+        saves; we re-read the board over IPC so the next routing pass and
+        the connectivity-check both see new tracks/vias/zones.
         """
         # Clear connectivity cache since board state is changing
         self._connectivity_cache = {}
 
         try:
-            import pcbnew
-            from kicad_parser import Segment, Via
+            from kicad_ipc_adapter import get_board
+            from kicad_parser import build_pcb_data_from_board
 
-            board = pcbnew.GetBoard()
+            board = get_board()
             if board is None:
                 return
+
+            fresh = build_pcb_data_from_board(board)
+            self.pcb_data.segments = fresh.segments
+            self.pcb_data.vias = fresh.vias
+            self.pcb_data.zones = fresh.zones
         except Exception as e:
             print(f"Warning: Could not sync from board: {e}")
-            return
-
-        try:
-            # Get layer mappings
-            _, id_to_name = _build_layer_mappings()
-
-            def get_layer_name(layer_id):
-                return id_to_name.get(layer_id, 'F.Cu')
-
-            # Collect all segments from board
-            new_segments = []
-            for track in board.GetTracks():
-                if track.GetClass() == "PCB_TRACK":
-                    seg = Segment(
-                        start_x=pcbnew.ToMM(track.GetStart().x),
-                        start_y=pcbnew.ToMM(track.GetStart().y),
-                        end_x=pcbnew.ToMM(track.GetEnd().x),
-                        end_y=pcbnew.ToMM(track.GetEnd().y),
-                        width=pcbnew.ToMM(track.GetWidth()),
-                        layer=get_layer_name(track.GetLayer()),
-                        net_id=track.GetNetCode(),
-                    )
-                    new_segments.append(seg)
-
-            # Collect all vias from board
-            new_vias = []
-            for track in board.GetTracks():
-                if track.GetClass() == "PCB_VIA":
-                    via = track
-                    top_layer = via.TopLayer()
-                    bot_layer = via.BottomLayer()
-                    v = Via(
-                        x=pcbnew.ToMM(via.GetPosition().x),
-                        y=pcbnew.ToMM(via.GetPosition().y),
-                        size=pcbnew.ToMM(via.GetWidth()),
-                        drill=pcbnew.ToMM(via.GetDrill()),
-                        layers=[get_layer_name(top_layer), get_layer_name(bot_layer)],
-                        net_id=via.GetNetCode(),
-                    )
-                    new_vias.append(v)
-
-            # Replace pcb_data segments and vias with what's in pcbnew
-            self.pcb_data.segments = new_segments
-            self.pcb_data.vias = new_vias
-
-            # Also sync zones - the connectivity check uses pcb_data.zones to
-            # determine which nets are connected via copper pours. Without
-            # this, a freshly-created plane is invisible to "hide connected"
-            # until the GUI reopens.
-            try:
-                from kicad_parser import _extract_zones_from_pcbnew
-                self.pcb_data.zones = _extract_zones_from_pcbnew(
-                    board, pcbnew.ToMM, get_layer_name)
-            except Exception as e:
-                print(f"Warning: Error syncing zones from board: {e}")
-        except Exception as e:
-            print(f"Warning: Error syncing tracks from board: {e}")
 
     def _create_ui(self):
         """Create the dialog UI with tabs for Configure, Advanced, and Log."""
@@ -310,7 +328,7 @@ class RoutingDialog(wx.Dialog):
         )
 
     def _validate_pcb_data(self):
-        """Compare pcbnew-extracted PCBData against file-parsed PCBData."""
+        """Compare IPC-extracted PCBData against file-parsed PCBData."""
         from kicad_parser import parse_kicad_pcb, compare_pcb_data
 
         if not self.board_filename:
@@ -319,7 +337,7 @@ class RoutingDialog(wx.Dialog):
             return
 
         self._append_log("=== PCB Data Validation ===\n")
-        self._append_log(f"Comparing pcbnew data vs file parse of: {self.board_filename}\n")
+        self._append_log(f"Comparing IPC data vs file parse of: {self.board_filename}\n")
 
         try:
             file_data = parse_kicad_pcb(self.board_filename)
@@ -330,7 +348,7 @@ class RoutingDialog(wx.Dialog):
         diffs = compare_pcb_data(self.pcb_data, file_data)
 
         if not diffs:
-            self._append_log("PASS: No differences found! pcbnew data matches file parse.\n")
+            self._append_log("PASS: No differences found! IPC data matches file parse.\n")
         else:
             self._append_log(f"Found {len(diffs)} difference(s):\n")
             for diff in diffs:
@@ -2326,72 +2344,48 @@ class RoutingDialog(wx.Dialog):
             self.status_text.SetLabel(step_name)
 
     def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
-        """Apply routing results directly to the open pcbnew board."""
-        import pcbnew
+        """Apply routing results to the open board via the IPC adapter."""
+        from kicad_ipc_adapter import (
+            apply_routing_results,
+            get_board,
+            move_copper_text_to_silkscreen,
+        )
 
-        board = pcbnew.GetBoard()
+        board = get_board()
         if board is None:
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
             return
 
-        # Move copper text to silkscreen if enabled
+        # Move copper text to silkscreen if enabled (separate commit so it
+        # appears as its own undo step).
         text_moved = 0
         if config.get('move_copper_text', True):
-            text_moved = self._move_copper_text_to_silkscreen(board)
+            try:
+                text_moved = move_copper_text_to_silkscreen(board)
+            except Exception as e:
+                print(f"Warning: failed to move copper text: {e}")
 
-        # Track counts for reporting
-        tracks_added = 0
-        vias_added = 0
-        debug_lines_added = 0
+        # Push tracks + vias (+ optional debug lines) as a single commit.
+        try:
+            counts = apply_routing_results(
+                board,
+                results_data,
+                pcb_data=self.pcb_data,
+                add_debug_lines=bool(config.get('debug_lines', False)),
+                message=f"KiCadRoutingTools: route {successful} nets",
+            )
+        except Exception as e:
+            wx.MessageBox(
+                f"Failed to apply routing results to KiCad:\n\n{e}",
+                "Apply error", wx.OK | wx.ICON_ERROR,
+            )
+            return
+        tracks_added = counts["tracks"]
+        vias_added = counts["vias"]
+        debug_lines_added = counts["debug_lines"]
 
-        # Get layer mappings
-        name_to_id, _ = _build_layer_mappings()
-
-        def get_layer_id(layer_name):
-            """Convert layer name to pcbnew layer ID."""
-            return name_to_id.get(layer_name, pcbnew.F_Cu)
-
-        # Add segments from routing results
-        for result in results_data.get('results', []):
-            for seg in result.get('new_segments', []):
-                track = pcbnew.PCB_TRACK(board)
-                # Convert mm to internal units (nanometers)
-                # Round to POSITION_DECIMALS to avoid floating-point precision issues
-                track.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(round(seg.start_x, POSITION_DECIMALS)),
-                    pcbnew.FromMM(round(seg.start_y, POSITION_DECIMALS))
-                ))
-                track.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(round(seg.end_x, POSITION_DECIMALS)),
-                    pcbnew.FromMM(round(seg.end_y, POSITION_DECIMALS))
-                ))
-                track.SetWidth(pcbnew.FromMM(round(seg.width, POSITION_DECIMALS)))
-                track.SetLayer(get_layer_id(seg.layer))
-                track.SetNetCode(seg.net_id)
-                board.Add(track)
-                tracks_added += 1
-
-            for via in result.get('new_vias', []):
-                self._add_via_to_board(board, via, get_layer_id)
-                vias_added += 1
-
-        # Add vias from layer swapping
-        for via in results_data.get('all_swap_vias', []):
-            self._add_via_to_board(board, via, get_layer_id)
-            vias_added += 1
-
-        # Add debug visualization lines if enabled
-        if config.get('debug_lines', False):
-            debug_lines_added = self._add_debug_lines(board, results_data)
-
-        # Build connectivity to register new items properly
-        board.BuildConnectivity()
-
-        # Refresh the view
-        pcbnew.Refresh()
-
-        # Sync pcb_data from pcbnew board to ensure subsequent routing and
-        # connectivity checks see the new tracks
+        # Sync pcb_data so subsequent routing and connectivity checks see
+        # the new tracks.
         self._sync_pcb_data_from_board()
 
         # Update UI and show completion message
@@ -2442,107 +2436,6 @@ class RoutingDialog(wx.Dialog):
         # Refresh net list to hide newly connected nets (don't sync from visible since we just cleared)
         self.net_panel.refresh(sync_from_visible=False)
         self._update_status_bar()
-
-    def _add_via_to_board(self, board, via, get_layer_id):
-        """Add a via to the pcbnew board."""
-        import pcbnew
-        pcb_via = pcbnew.PCB_VIA(board)
-        # Round to POSITION_DECIMALS to avoid floating-point precision issues
-        pcb_via.SetPosition(pcbnew.VECTOR2I(
-            pcbnew.FromMM(round(via.x, POSITION_DECIMALS)),
-            pcbnew.FromMM(round(via.y, POSITION_DECIMALS))
-        ))
-        pcb_via.SetWidth(pcbnew.FromMM(round(via.size, POSITION_DECIMALS)))
-        pcb_via.SetDrill(pcbnew.FromMM(round(via.drill, POSITION_DECIMALS)))
-        pcb_via.SetNetCode(via.net_id)
-        if hasattr(via, 'layers') and len(via.layers) >= 2:
-            top_layer = get_layer_id(via.layers[0])
-            bot_layer = get_layer_id(via.layers[1])
-            pcb_via.SetLayerPair(top_layer, bot_layer)
-        board.Add(pcb_via)
-
-    def _move_copper_text_to_silkscreen(self, board):
-        """Move gr_text items from copper layers to silkscreen."""
-        import pcbnew
-
-        count = 0
-        for drawing in board.GetDrawings():
-            if drawing.GetClass() == "PCB_TEXT":
-                layer = drawing.GetLayer()
-                # Check if on F.Cu or B.Cu
-                if layer == pcbnew.F_Cu:
-                    drawing.SetLayer(pcbnew.F_SilkS)
-                    count += 1
-                elif layer == pcbnew.B_Cu:
-                    drawing.SetLayer(pcbnew.B_SilkS)
-                    count += 1
-        return count
-
-    def _add_debug_lines(self, board, results_data):
-        """Add debug visualization lines to User layers."""
-        import pcbnew
-
-        count = 0
-
-        # User layer mapping
-        user_layers = {
-            'User.3': pcbnew.User_3,   # Connector lines
-            'User.4': pcbnew.User_4,   # Stub direction arrows
-            'User.5': pcbnew.User_5,   # Exclusion zones
-            'User.8': pcbnew.User_8,   # Simplified path
-            'User.9': pcbnew.User_9,   # Raw A* path
-        }
-
-        def add_line(start, end, layer_name, width_mm=0.05):
-            nonlocal count
-            layer_id = user_layers.get(layer_name, pcbnew.User_9)
-            shape = pcbnew.PCB_SHAPE(board)
-            shape.SetShape(pcbnew.SHAPE_T_SEGMENT)
-            shape.SetStart(pcbnew.VECTOR2I(
-                pcbnew.FromMM(start[0]),
-                pcbnew.FromMM(start[1])
-            ))
-            shape.SetEnd(pcbnew.VECTOR2I(
-                pcbnew.FromMM(end[0]),
-                pcbnew.FromMM(end[1])
-            ))
-            shape.SetWidth(pcbnew.FromMM(width_mm))
-            shape.SetLayer(layer_id)
-            board.Add(shape)
-            count += 1
-
-        for result in results_data.get('results', []):
-            # Raw A* path on User.9
-            raw_path = result.get('raw_astar_path', [])
-            if len(raw_path) >= 2:
-                for i in range(len(raw_path) - 1):
-                    x1, y1 = raw_path[i][0], raw_path[i][1]
-                    x2, y2 = raw_path[i + 1][0], raw_path[i + 1][1]
-                    if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
-                        add_line((x1, y1), (x2, y2), 'User.9')
-
-            # Simplified path on User.8
-            simplified_path = result.get('simplified_path', [])
-            if len(simplified_path) >= 2:
-                for i in range(len(simplified_path) - 1):
-                    x1, y1 = simplified_path[i][0], simplified_path[i][1]
-                    x2, y2 = simplified_path[i + 1][0], simplified_path[i + 1][1]
-                    if abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
-                        add_line((x1, y1), (x2, y2), 'User.8')
-
-            # Connector segments on User.3
-            for start, end in result.get('debug_connector_lines', []):
-                add_line(start, end, 'User.3')
-
-            # Stub direction arrows on User.4
-            for start, end in result.get('debug_stub_arrows', []):
-                add_line(start, end, 'User.4')
-
-        # Exclusion zone lines on User.5
-        for start, end in results_data.get('exclusion_zone_lines', []):
-            add_line(start, end, 'User.5')
-
-        return count
 
     def _routing_cancelled(self):
         """Handle routing cancellation."""

@@ -1,5 +1,15 @@
 # Release Pipeline
 
+> **Branch note (`ipc-migration`):** the tag-push trigger on
+> `.github/workflows/release.yml` is currently commented out so that local
+> tagging during the SWIG→IPC port can't accidentally cut a public GitHub
+> Release. The workflow can still be invoked manually via
+> `workflow_dispatch`, but the `release` job is gated on
+> `startsWith(github.ref, 'refs/tags/v')` so a manual run from a branch
+> only builds artifacts — it won't publish a Release. PCM publication is
+> manual either way (a GitLab MR — see below). Re-enable the tag trigger
+> when ready to ship.
+
 This document describes how a new version of KiCad Routing Tools is built, published on GitHub, and submitted to the official KiCad Plugin and Content Manager (PCM) repository.
 
 The release pipeline is mostly automated by `.github/workflows/release.yml`. A maintainer's job is:

@@ -1,1 +1,1 @@
-# KiCad Routing Tools - SWIG Action Plugin package
+# KiCad Routing Tools - IPC plugin package

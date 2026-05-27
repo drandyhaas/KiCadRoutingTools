@@ -171,6 +171,10 @@ def get_dialog_settings(dialog):
 
         # Window transparency
         'window_transparency': dialog.about_tab.transparency_slider.GetValue() if hasattr(dialog, 'about_tab') else 240,
+
+        # Window size & position (restored at next dialog construction)
+        'window_size': tuple(dialog.GetSize()),
+        'window_position': tuple(dialog.GetPosition()),
     }
     return settings
 

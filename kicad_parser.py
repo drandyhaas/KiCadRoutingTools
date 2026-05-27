@@ -1112,155 +1112,104 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
 
 
 def build_pcb_data_from_board(board) -> PCBData:
-    """Build PCBData directly from a pcbnew board object (no file I/O).
+    """Build PCBData directly from a kipy (KiCad IPC) board object.
 
-    This is much faster than parse_kicad_pcb() since it reads from pcbnew's
-    in-memory data structures rather than parsing the file from disk.
+    Reads from the running KiCad's in-memory board over the IPC socket
+    rather than parsing the .kicad_pcb file from disk. Faster than
+    parse_kicad_pcb() and reflects any unsaved changes.
 
     Args:
-        board: A pcbnew.BOARD object (from pcbnew.GetBoard())
+        board: A kipy.board.Board object (from KiCad().get_board())
 
     Returns:
         PCBData object containing all routing-relevant data
     """
-    import pcbnew
+    from kicad_ipc_adapter import layer_maps, layer_name_for
 
-    def to_mm(val):
-        return pcbnew.ToMM(val)
+    name_to_bl, bl_to_name = layer_maps()
 
-    # --- Build layer mappings ---
-    id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
-    for i in range(1, 31):
-        layer_id = getattr(pcbnew, f'In{i}_Cu', None)
-        if layer_id is not None:
-            id_to_name[layer_id] = f'In{i}.Cu'
+    def get_layer_name(bl):
+        return bl_to_name.get(bl) or layer_name_for(bl)
 
-    def get_layer_name(layer_id):
-        if layer_id in id_to_name:
-            return id_to_name[layer_id]
-        return board.GetLayerName(layer_id)
-
-    # --- Pad shape mapping ---
-    pad_shape_map = {}
-    for attr, name in [
-        ('PAD_SHAPE_CIRCLE', 'circle'),
-        ('PAD_SHAPE_RECT', 'rect'),
-        ('PAD_SHAPE_OVAL', 'oval'),
-        ('PAD_SHAPE_ROUNDRECT', 'roundrect'),
-        ('PAD_SHAPE_TRAPEZOID', 'trapezoid'),
-        ('PAD_SHAPE_CUSTOM', 'custom'),
-        ('PAD_SHAPE_CHAMFERED_RECT', 'roundrect'),
-    ]:
-        val = getattr(pcbnew, attr, None)
-        if val is not None:
-            pad_shape_map[val] = name
-
-    def get_pad_shape_name(shape_enum):
-        return pad_shape_map.get(shape_enum, 'rect')
-
-    def get_pad_layers(pad):
-        """Get layer names from a pad's layer set, using wildcards to match file format."""
-        layer_set = pad.GetLayerSet()
-        layers = []
-
-        # Check copper layers - use *.Cu wildcard if pad is on ALL copper layers
-        copper_on = [lname for lid, lname in id_to_name.items() if layer_set.Contains(lid)]
-        if len(copper_on) == len(id_to_name):
-            layers.append('*.Cu')
-        elif copper_on:
-            layers.extend(copper_on)
-
-        # Check mask layers - use *.Mask wildcard if both present
-        f_mask_id = getattr(pcbnew, 'F_Mask', None)
-        b_mask_id = getattr(pcbnew, 'B_Mask', None)
-        has_f_mask = f_mask_id is not None and layer_set.Contains(f_mask_id)
-        has_b_mask = b_mask_id is not None and layer_set.Contains(b_mask_id)
-        if has_f_mask and has_b_mask:
-            layers.append('*.Mask')
-        else:
-            if has_f_mask:
-                layers.append('F.Mask')
-            if has_b_mask:
-                layers.append('B.Mask')
-
-        # Check paste layers - use *.Paste wildcard if both present
-        f_paste_id = getattr(pcbnew, 'F_Paste', None)
-        b_paste_id = getattr(pcbnew, 'B_Paste', None)
-        has_f_paste = f_paste_id is not None and layer_set.Contains(f_paste_id)
-        has_b_paste = b_paste_id is not None and layer_set.Contains(b_paste_id)
-        if has_f_paste and has_b_paste:
-            layers.append('*.Paste')
-        else:
-            if has_f_paste:
-                layers.append('F.Paste')
-            if has_b_paste:
-                layers.append('B.Paste')
-
-        return layers
-
-    # --- Extract board info ---
-    layers_dict = {}
-    copper_layers = []
-    enabled = board.GetEnabledLayers()
-    for lid, lname in id_to_name.items():
-        if enabled.Contains(lid):
-            layers_dict[lid] = lname
-            copper_layers.append(lname)
-
-    # Board bounds from Edge.Cuts drawings. We use each drawing's bounding
-    # box rather than GetStart()/GetEnd() because the latter only describes
-    # the shape's anchor points for non-line shapes (polygons, circles, arcs
-    # can have start==end==(0,0) with the geometry stored separately), which
-    # produced a degenerate (0,0,0,0) board_bounds.
-    board_bounds = None
+    # --- Build copper-layer info ---
+    # `get_enabled_layers()` returns the actual stackup (e.g. just F.Cu+B.Cu
+    # on a 2-layer board), which is what the router needs. Fall back to
+    # F.Cu/B.Cu only if we can't read the stackup at all.
+    layers_dict: Dict[int, str] = {}
+    copper_layers: List[str] = []
+    enabled = None
     try:
-        edge_cuts_id = getattr(pcbnew, 'Edge_Cuts', None)
-        if edge_cuts_id is not None:
-            bmin_x = bmin_y = float('inf')
-            bmax_x = bmax_y = float('-inf')
-            found_edge = False
-            for drawing in board.GetDrawings():
-                if drawing.GetLayer() != edge_cuts_id:
-                    continue
-                class_name = drawing.GetClass()
-                if class_name not in ("PCB_SHAPE", "DRAWSEGMENT"):
-                    continue
-                try:
-                    bbox = drawing.GetBoundingBox()
-                    w, h = bbox.GetWidth(), bbox.GetHeight()
-                    if w <= 0 and h <= 0:
-                        continue
-                    x0, y0 = to_mm(bbox.GetX()), to_mm(bbox.GetY())
-                    x1, y1 = to_mm(bbox.GetX() + w), to_mm(bbox.GetY() + h)
-                    bmin_x = min(bmin_x, x0, x1)
-                    bmin_y = min(bmin_y, y0, y1)
-                    bmax_x = max(bmax_x, x0, x1)
-                    bmax_y = max(bmax_y, y0, y1)
-                    found_edge = True
-                except Exception:
-                    continue
-            if found_edge and bmax_x > bmin_x and bmax_y > bmin_y:
-                board_bounds = (bmin_x, bmin_y, bmax_x, bmax_y)
-    except Exception:
-        pass
-    # Fallback to the whole-board edges bounding box (also handles boards
-    # whose Edge.Cuts items are stored inside footprints rather than as
-    # top-level drawings).
-    if board_bounds is None:
+        enabled = set(board.get_enabled_layers() or [])
+    except Exception as e:
+        print(f"Warning: board.get_enabled_layers() failed ({e}); "
+              "defaulting to F.Cu/B.Cu")
+
+    for name, bl in name_to_bl.items():
+        if not name.endswith(".Cu"):
+            continue
+        # Only include layers actually enabled in this board's stackup.
+        if enabled is not None:
+            if bl not in enabled:
+                continue
+        else:
+            if name not in ("F.Cu", "B.Cu"):
+                continue
+        layers_dict[int(bl) if hasattr(bl, "__int__") else hash(bl)] = name
+        if name not in copper_layers:
+            copper_layers.append(name)
+
+    # --- Nets ---
+    # kipy.Net.code is deprecated in KiCad 10 and returns unreliable values
+    # (often the same code for different nets, or 0 for everything). Key
+    # everything by `.name` instead — that's the canonical identifier
+    # kicad-python guarantees. We synthesise a unique integer per net so
+    # the rest of the codebase, which speaks in net_id ints, keeps working.
+    nets: Dict[int, Net] = {}
+    net_name_to_id: Dict[str, int] = {"": 0}  # reserve 0 for "no net"
+    try:
+        net_list = list(board.get_nets())
+    except Exception as e:
+        print(f"Warning: board.get_nets() failed: {e}")
+        net_list = []
+    for n in net_list:
+        name = getattr(n, "name", "") or ""
+        if not name:
+            continue
+        if name in net_name_to_id:
+            continue  # duplicate name from kipy — keep the first
+        net_id = 1 + len(net_name_to_id)  # 1, 2, 3, ... (0 reserved)
+        net_name_to_id[name] = net_id
+        nets[net_id] = Net(net_id=net_id, name=name)
+    print(f"build_pcb_data_from_board: loaded {len(nets)} nets, "
+          f"{len(copper_layers)} copper layers: {copper_layers}")
+
+    def resolve_net(net_obj) -> Tuple[int, str]:
+        """Resolve a kipy Net object to (net_id, net_name) by name lookup.
+
+        Returns (0, '') for the no-net / unconnected case (pads on board
+        with no electrical connection assigned).
+        """
+        if net_obj is None:
+            return (0, "")
+        name = getattr(net_obj, "name", "") or ""
+        return (net_name_to_id.get(name, 0), name)
+
+    # --- Drawings (Edge.Cuts bounding box + outline polygons) ---
+    edge_cuts_bl = name_to_bl.get("Edge.Cuts")
+    drawings = []
+    try:
+        drawings = list(board.get_shapes())
+    except AttributeError:
         try:
-            bbox = board.GetBoardEdgesBoundingBox()
-            if bbox.GetWidth() > 0 and bbox.GetHeight() > 0:
-                board_bounds = (to_mm(bbox.GetX()), to_mm(bbox.GetY()),
-                                to_mm(bbox.GetX() + bbox.GetWidth()),
-                                to_mm(bbox.GetY() + bbox.GetHeight()))
+            drawings = list(board.get_drawings())  # type: ignore[attr-defined]
         except Exception:
-            pass
+            drawings = []
 
-    # Board outline and cutouts from Edge.Cuts drawings
-    board_outline, board_cutouts = _extract_board_contours_from_pcbnew(board, to_mm)
+    board_bounds = _compute_edge_cuts_bbox_kipy(drawings, edge_cuts_bl)
+    board_outline, board_cutouts = _extract_board_contours_kipy(drawings, edge_cuts_bl)
 
-    # Stackup
-    stackup = _extract_stackup_from_pcbnew(board, to_mm)
+    # Stackup (best-effort via kipy; falls back to parsing the file)
+    stackup = _extract_stackup_kipy(board)
 
     board_info = BoardInfo(
         layers=layers_dict,
@@ -1271,64 +1220,22 @@ def build_pcb_data_from_board(board) -> PCBData:
         board_cutouts=board_cutouts
     )
 
-    # --- Extract nets ---
-    nets = {}
-    try:
-        net_info = board.GetNetInfo()
-        # Use NetsByName which is proven to work (see fanout_gui.py)
-        nets_by_name = net_info.NetsByName()
-        for net_name_wx, net_item in nets_by_name.items():
-            net_id = net_item.GetNetCode()
-            name = str(net_name_wx)
-            nets[net_id] = Net(net_id=net_id, name=name)
-    except Exception:
-        # Fallback: iterate by net count
-        try:
-            for i in range(board.GetNetCount()):
-                net_item = board.GetNetInfo().GetNetItem(i)
-                if net_item:
-                    nets[i] = Net(net_id=i, name=net_item.GetNetname())
-        except Exception:
-            pass
-
-    # --- Extract footprints and pads ---
-    footprints = {}
+    # --- Footprints and pads ---
+    footprints: Dict[str, Footprint] = {}
     pads_by_net: Dict[int, List[Pad]] = {}
 
-    for fp in board.GetFootprints():
-        reference = fp.GetReference()
+    try:
+        fp_iter = board.get_footprints()
+    except Exception:
+        fp_iter = []
 
-        # Get footprint name (library:footprint)
-        try:
-            fp_name = fp.GetFPID().GetUniStringLibItemName()
-        except AttributeError:
-            try:
-                fp_name = str(fp.GetFPID().GetLibItemName())
-            except Exception:
-                fp_name = ""
-
-        # Position
-        pos = fp.GetPosition()
-        fp_x = to_mm(pos.x)
-        fp_y = to_mm(pos.y)
-
-        # Rotation
-        try:
-            fp_rotation = fp.GetOrientationDegrees()
-        except AttributeError:
-            try:
-                fp_rotation = fp.GetOrientation().AsDegrees()
-            except Exception:
-                fp_rotation = fp.GetOrientation() / 10.0  # Older KiCad: tenths of degrees
-
-        # Layer
-        fp_layer = get_layer_name(fp.GetLayer())
-
-        # Value
-        try:
-            fp_value = fp.GetValue()
-        except Exception:
-            fp_value = ""
+    for fp in fp_iter:
+        reference = _fp_reference(fp)
+        fp_name = _fp_library_name(fp)
+        fp_x, fp_y = _vec_to_xy_mm(_fp_position(fp))
+        fp_rotation = _fp_orientation_deg(fp)
+        fp_layer = get_layer_name(getattr(fp, "layer", None))
+        fp_value = _fp_value(fp)
 
         footprint = Footprint(
             reference=reference,
@@ -1340,141 +1247,64 @@ def build_pcb_data_from_board(board) -> PCBData:
             value=fp_value
         )
 
-        # Extract pads
-        for pad in fp.Pads():
-            pad_num = pad.GetNumber()
-
-            # Global position
-            pad_pos = pad.GetPosition()
-            global_x = to_mm(pad_pos.x)
-            global_y = to_mm(pad_pos.y)
-
-            # Local position (relative to footprint, before footprint rotation)
-            try:
-                local_pos = pad.GetPos0()
-                local_x = to_mm(local_pos.x)
-                local_y = to_mm(local_pos.y)
-            except Exception:
-                # Fallback: compute from global position
-                local_x, local_y = _global_to_local(fp_x, fp_y, fp_rotation, global_x, global_y)
-
-            # Size
-            pad_size = pad.GetSize()
-            size_x = to_mm(pad_size.x)
-            size_y = to_mm(pad_size.y)
-
-            # Shape
-            shape = get_pad_shape_name(pad.GetShape())
-
-            # Layers
-            pad_layers = get_pad_layers(pad)
-
-            # Net
-            net_id = pad.GetNetCode()
-            net_name = pad.GetNetname()
-
-            # Pad rotation
-            try:
-                pad_rotation = pad.GetOrientationDegrees()
-            except AttributeError:
-                try:
-                    pad_rotation = pad.GetOrientation().AsDegrees()
-                except Exception:
-                    pad_rotation = pad.GetOrientation() / 10.0
-
-            total_rotation = (pad_rotation + fp_rotation) % 360
-
-            # Apply only pad rotation to get board-space dimensions
-            pad_rot_normalized = pad_rotation % 180
-            if 45 < pad_rot_normalized < 135:
-                size_x, size_y = size_y, size_x
-
-            # Pin metadata
-            try:
-                pinfunction = pad.GetPinFunction()
-            except Exception:
-                pinfunction = ""
-
-            try:
-                pintype = pad.GetPinType()
-            except Exception:
-                pintype = ""
-
-            # Drill
-            try:
-                drill_size = pad.GetDrillSize()
-                drill = to_mm(drill_size.x)
-            except Exception:
-                drill = 0.0
-
-            # Roundrect ratio
-            try:
-                roundrect_rratio = pad.GetRoundRectRadiusRatio()
-            except Exception:
-                roundrect_rratio = 0.0
-
-            pad_obj = Pad(
-                component_ref=reference,
-                pad_number=pad_num,
-                global_x=global_x,
-                global_y=global_y,
-                local_x=local_x,
-                local_y=local_y,
-                size_x=size_x,
-                size_y=size_y,
-                shape=shape,
-                layers=pad_layers,
-                net_id=net_id,
-                net_name=net_name,
-                rotation=total_rotation,
-                pinfunction=pinfunction,
-                pintype=pintype,
-                drill=drill,
-                roundrect_rratio=roundrect_rratio
-            )
-
+        for pad in _fp_pads(fp):
+            pad_obj = _build_pad_from_kipy(pad, reference, fp_x, fp_y, fp_rotation,
+                                            get_layer_name, resolve_net)
+            if pad_obj is None:
+                continue
             footprint.pads.append(pad_obj)
-
-            # Add to pads_by_net
-            if net_id not in pads_by_net:
-                pads_by_net[net_id] = []
-            pads_by_net[net_id].append(pad_obj)
-
-            # Add to Net object
-            if net_id in nets:
-                nets[net_id].pads.append(pad_obj)
+            pads_by_net.setdefault(pad_obj.net_id, []).append(pad_obj)
+            if pad_obj.net_id in nets:
+                nets[pad_obj.net_id].pads.append(pad_obj)
 
         footprints[reference] = footprint
 
-    # --- Extract segments and vias (single pass over tracks) ---
-    segments = []
-    vias = []
-    for track in board.GetTracks():
-        track_class = track.GetClass()
-        if track_class == "PCB_TRACK":
+    # --- Segments (tracks) ---
+    segments: List[Segment] = []
+    try:
+        track_iter = board.get_tracks()
+    except Exception:
+        track_iter = []
+    for track in track_iter:
+        try:
+            start_x, start_y = _vec_to_xy_mm(track.start)
+            end_x, end_y = _vec_to_xy_mm(track.end)
+            net_id, _ = resolve_net(getattr(track, "net", None))
             seg = Segment(
-                start_x=to_mm(track.GetStart().x),
-                start_y=to_mm(track.GetStart().y),
-                end_x=to_mm(track.GetEnd().x),
-                end_y=to_mm(track.GetEnd().y),
-                width=to_mm(track.GetWidth()),
-                layer=get_layer_name(track.GetLayer()),
-                net_id=track.GetNetCode(),
+                start_x=start_x, start_y=start_y,
+                end_x=end_x, end_y=end_y,
+                width=_nm_to_mm(getattr(track, "width", 0)),
+                layer=get_layer_name(getattr(track, "layer", None)),
+                net_id=net_id,
             )
             segments.append(seg)
-        elif track_class == "PCB_VIA":
-            v = Via(
-                x=to_mm(track.GetPosition().x),
-                y=to_mm(track.GetPosition().y),
-                size=to_mm(track.GetWidth()),
-                drill=to_mm(track.GetDrill()),
-                layers=[get_layer_name(track.TopLayer()), get_layer_name(track.BottomLayer())],
-                net_id=track.GetNetCode(),
-            )
-            vias.append(v)
+        except Exception:
+            continue
 
-    # --- Extract zones ---
-    zones = _extract_zones_from_pcbnew(board, to_mm, get_layer_name)
+    # --- Vias ---
+    vias: List[Via] = []
+    try:
+        via_iter = board.get_vias()
+    except Exception:
+        via_iter = []
+    for v in via_iter:
+        try:
+            x, y = _vec_to_xy_mm(v.position)
+            top_bl = getattr(v, "start_layer", None) or name_to_bl["F.Cu"]
+            bot_bl = getattr(v, "end_layer", None) or name_to_bl["B.Cu"]
+            net_id, _ = resolve_net(getattr(v, "net", None))
+            vias.append(Via(
+                x=x, y=y,
+                size=_nm_to_mm(getattr(v, "diameter", 0)),
+                drill=_nm_to_mm(getattr(v, "drill_diameter", 0)),
+                layers=[get_layer_name(top_bl), get_layer_name(bot_bl)],
+                net_id=net_id,
+            ))
+        except Exception:
+            continue
+
+    # --- Zones ---
+    zones = _extract_zones_kipy(board, get_layer_name)
 
     return PCBData(
         board_info=board_info,
@@ -1485,6 +1315,498 @@ def build_pcb_data_from_board(board) -> PCBData:
         pads_by_net=pads_by_net,
         zones=zones
     )
+
+
+# --- kipy helpers used by build_pcb_data_from_board ----------------------
+
+def _nm_to_mm(value) -> float:
+    """Convert a nanometre integer (kipy's internal unit) to millimetres."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value) / 1_000_000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _vec_to_xy_mm(vec) -> Tuple[float, float]:
+    """Read a kipy Vector2 as (x_mm, y_mm), tolerating nm-only fallbacks."""
+    if vec is None:
+        return (0.0, 0.0)
+    x_mm = getattr(vec, "x_mm", None)
+    y_mm = getattr(vec, "y_mm", None)
+    if x_mm is not None and y_mm is not None:
+        return (float(x_mm), float(y_mm))
+    return (_nm_to_mm(getattr(vec, "x", 0)), _nm_to_mm(getattr(vec, "y", 0)))
+
+
+def _net_code(net) -> int:
+    """Pull the integer net code from a kipy Net object (or 0 if absent)."""
+    if net is None:
+        return 0
+    return int(getattr(net, "code", 0) or 0)
+
+
+def _fp_reference(fp) -> str:
+    for attr in ("reference", "reference_field"):
+        v = getattr(fp, attr, None)
+        if isinstance(v, str):
+            return v
+        if v is not None and hasattr(v, "text"):
+            return str(v.text)
+    return ""
+
+
+def _fp_library_name(fp) -> str:
+    """Best-effort 'library:item' name for a kipy footprint."""
+    defn = getattr(fp, "definition", None)
+    for src in (defn, fp):
+        if src is None:
+            continue
+        for attr in ("library_link", "name", "id", "footprint_id"):
+            v = getattr(src, attr, None)
+            if isinstance(v, str) and v:
+                return v
+            if v is not None:
+                try:
+                    return str(v)
+                except Exception:
+                    continue
+    return ""
+
+
+def _fp_position(fp):
+    return getattr(fp, "position", None)
+
+
+def _fp_orientation_deg(fp) -> float:
+    o = getattr(fp, "orientation", None)
+    if o is None:
+        return 0.0
+    for attr in ("degrees", "as_degrees", "deg"):
+        v = getattr(o, attr, None)
+        if callable(v):
+            try:
+                return float(v())
+            except Exception:
+                continue
+        if isinstance(v, (int, float)):
+            return float(v)
+    try:
+        return float(o)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fp_value(fp) -> str:
+    for src in (getattr(fp, "value_field", None), fp):
+        if src is None:
+            continue
+        v = getattr(src, "value", None) or getattr(src, "text", None)
+        if isinstance(v, str):
+            return v
+    return ""
+
+
+def _fp_pads(fp):
+    """Iterate pads on a kipy FootprintInstance regardless of API shape."""
+    # Newer kipy: footprint exposes .pads() / .pads attribute directly
+    pads = getattr(fp, "pads", None)
+    if callable(pads):
+        try:
+            return list(pads())
+        except Exception:
+            pass
+    elif pads is not None:
+        try:
+            return list(pads)
+        except Exception:
+            pass
+    # Older / definition-based: pads live under .definition.pads
+    defn = getattr(fp, "definition", None)
+    if defn is not None:
+        defn_pads = getattr(defn, "pads", None)
+        if callable(defn_pads):
+            try:
+                return list(defn_pads())
+            except Exception:
+                pass
+        elif defn_pads is not None:
+            try:
+                return list(defn_pads)
+            except Exception:
+                pass
+    return []
+
+
+def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
+                         fp_rotation: float, get_layer_name,
+                         resolve_net) -> Optional[Pad]:
+    """Translate a kipy pad into the project's Pad dataclass."""
+    try:
+        pad_num = str(getattr(pad, "number", "") or "")
+
+        # Position
+        pad_pos = getattr(pad, "position", None)
+        global_x, global_y = _vec_to_xy_mm(pad_pos)
+        local_pos = getattr(pad, "position_relative", None)
+        if local_pos is not None:
+            local_x, local_y = _vec_to_xy_mm(local_pos)
+        else:
+            local_x, local_y = _global_to_local(fp_x, fp_y, fp_rotation,
+                                                global_x, global_y)
+
+        # Padstack: size + shape + layers + drill all live here
+        padstack = getattr(pad, "padstack", None) or pad
+
+        size = getattr(padstack, "size", None)
+        if size is not None:
+            size_x, size_y = _vec_to_xy_mm(size)
+        else:
+            size_x = _nm_to_mm(getattr(padstack, "size_x", 0))
+            size_y = _nm_to_mm(getattr(padstack, "size_y", 0))
+
+        shape_attr = getattr(padstack, "shape", None)
+        if shape_attr is None:
+            shape = "rect"
+        else:
+            name = getattr(shape_attr, "name", None)
+            if name:
+                shape = _pad_shape_label(str(name).lower())
+            else:
+                shape = _pad_shape_label(str(shape_attr).lower())
+
+        pad_layers = _pad_layer_names(pad, padstack, get_layer_name)
+
+        net = getattr(pad, "net", None)
+        net_id, net_name = resolve_net(net)
+
+        pad_rotation = 0.0
+        rot_obj = getattr(pad, "orientation", None) or getattr(padstack, "orientation", None)
+        if rot_obj is not None:
+            for attr in ("degrees", "as_degrees", "deg"):
+                v = getattr(rot_obj, attr, None)
+                if callable(v):
+                    try:
+                        pad_rotation = float(v())
+                        break
+                    except Exception:
+                        continue
+                elif isinstance(v, (int, float)):
+                    pad_rotation = float(v)
+                    break
+            else:
+                try:
+                    pad_rotation = float(rot_obj)
+                except (TypeError, ValueError):
+                    pad_rotation = 0.0
+
+        total_rotation = (pad_rotation + fp_rotation) % 360
+        if 45 < (pad_rotation % 180) < 135:
+            size_x, size_y = size_y, size_x
+
+        pinfunction = getattr(pad, "pin_function", "") or ""
+        pintype = getattr(pad, "pin_type", "") or ""
+
+        drill = 0.0
+        drill_obj = getattr(padstack, "drill_diameter", None) or getattr(padstack, "drill", None)
+        if drill_obj is not None:
+            if hasattr(drill_obj, "x_mm"):
+                drill = float(drill_obj.x_mm)
+            elif hasattr(drill_obj, "x"):
+                drill = _nm_to_mm(drill_obj.x)
+            else:
+                drill = _nm_to_mm(drill_obj)
+
+        roundrect_rratio = float(getattr(padstack, "corner_radius_ratio", 0.0) or 0.0)
+
+        return Pad(
+            component_ref=reference,
+            pad_number=pad_num,
+            global_x=global_x, global_y=global_y,
+            local_x=local_x, local_y=local_y,
+            size_x=size_x, size_y=size_y,
+            shape=shape,
+            layers=pad_layers,
+            net_id=net_id,
+            net_name=net_name,
+            rotation=total_rotation,
+            pinfunction=pinfunction,
+            pintype=pintype,
+            drill=drill,
+            roundrect_rratio=roundrect_rratio,
+        )
+    except Exception as e:
+        print(f"Warning: failed to read pad {getattr(pad, 'number', '?')}: {e}")
+        return None
+
+
+def _pad_shape_label(raw: str) -> str:
+    """Normalise a kipy pad-shape name into the strings the rest of the code uses."""
+    raw = raw.lower()
+    if "circle" in raw:
+        return "circle"
+    if "oval" in raw:
+        return "oval"
+    if "roundrect" in raw or "round_rect" in raw or "chamfered" in raw:
+        return "roundrect"
+    if "trapezoid" in raw:
+        return "trapezoid"
+    if "custom" in raw:
+        return "custom"
+    return "rect"
+
+
+def _pad_layer_names(pad, padstack, get_layer_name) -> List[str]:
+    """Best-effort recovery of the layer-name list for a kipy pad.
+
+    kipy doesn't (yet?) expose the wildcard *.Cu / *.Mask / *.Paste forms the
+    file format uses, so we emit the explicit set we know about.
+    """
+    layers = []
+    # Try .layers on padstack or pad
+    raw_layers = getattr(padstack, "layers", None) or getattr(pad, "layers", None)
+    if raw_layers:
+        for bl in raw_layers:
+            name = get_layer_name(bl)
+            if name and name not in layers:
+                layers.append(name)
+    # Drill > 0 → through-hole → all copper + both masks/pastes
+    drill_attr = getattr(padstack, "drill_diameter", None) or getattr(padstack, "drill", None)
+    is_th = False
+    if drill_attr is not None:
+        try:
+            is_th = float(getattr(drill_attr, "x_mm", drill_attr) or 0) > 0
+        except Exception:
+            is_th = False
+    if is_th and not layers:
+        layers = ["*.Cu", "*.Mask"]
+    if not layers:
+        # SMD fallback: assume F.Cu / F.Mask / F.Paste on the footprint's layer
+        layers = ["F.Cu", "F.Mask", "F.Paste"]
+    return layers
+
+
+def _compute_edge_cuts_bbox_kipy(drawings, edge_cuts_bl) -> Optional[Tuple[float, float, float, float]]:
+    """Compute bounding box of Edge.Cuts drawings from a list of kipy shapes."""
+    if not drawings or edge_cuts_bl is None:
+        return None
+    bmin_x = bmin_y = float("inf")
+    bmax_x = bmax_y = float("-inf")
+    found = False
+    for d in drawings:
+        if getattr(d, "layer", None) != edge_cuts_bl:
+            continue
+        for x, y in _shape_extreme_points_kipy(d):
+            bmin_x = min(bmin_x, x); bmax_x = max(bmax_x, x)
+            bmin_y = min(bmin_y, y); bmax_y = max(bmax_y, y)
+            found = True
+    if not found or bmax_x <= bmin_x or bmax_y <= bmin_y:
+        return None
+    return (bmin_x, bmin_y, bmax_x, bmax_y)
+
+
+def _shape_extreme_points_kipy(shape) -> List[Tuple[float, float]]:
+    """Yield a handful of representative points from a kipy shape for bbox use."""
+    pts = []
+    for attr in ("start", "end", "center", "mid", "midpoint"):
+        v = getattr(shape, attr, None)
+        if v is not None:
+            try:
+                pts.append(_vec_to_xy_mm(v))
+            except Exception:
+                continue
+    poly = getattr(shape, "polygon", None) or getattr(shape, "points", None)
+    if poly is not None:
+        try:
+            for p in poly:
+                pts.append(_vec_to_xy_mm(p))
+        except Exception:
+            pass
+    return pts
+
+
+def _extract_board_contours_kipy(drawings, edge_cuts_bl):
+    """Chain Edge.Cuts shapes into (outline, [cutouts]) polygons.
+
+    Re-uses _chain_segments_into_contours; we just need to break each kipy
+    shape into the (start, end) tuples it expects.
+    """
+    if not drawings or edge_cuts_bl is None:
+        return [], []
+
+    segments = []
+    for d in drawings:
+        if getattr(d, "layer", None) != edge_cuts_bl:
+            continue
+        try:
+            start = getattr(d, "start", None)
+            end = getattr(d, "end", None)
+            shape_type = getattr(d, "shape_type", None)
+            type_name = getattr(shape_type, "name", "") if shape_type is not None else ""
+            type_name = str(type_name).lower()
+            if "segment" in type_name and start is not None and end is not None:
+                segments.append((_vec_to_xy_mm(start), _vec_to_xy_mm(end)))
+            elif "rect" in type_name and start is not None and end is not None:
+                x1, y1 = _vec_to_xy_mm(start)
+                x2, y2 = _vec_to_xy_mm(end)
+                segments.append(((x1, y1), (x2, y1)))
+                segments.append(((x2, y1), (x2, y2)))
+                segments.append(((x2, y2), (x1, y2)))
+                segments.append(((x1, y2), (x1, y1)))
+            elif "arc" in type_name and start is not None and end is not None:
+                mid = getattr(d, "mid", None) or getattr(d, "midpoint", None)
+                if mid is not None:
+                    segments.extend(_arc_to_segments(
+                        _vec_to_xy_mm(start),
+                        _vec_to_xy_mm(mid),
+                        _vec_to_xy_mm(end),
+                    ))
+            elif "polygon" in type_name:
+                poly = getattr(d, "polygon", None) or getattr(d, "points", None)
+                if poly:
+                    pts = [_vec_to_xy_mm(p) for p in poly]
+                    for i in range(len(pts)):
+                        segments.append((pts[i], pts[(i + 1) % len(pts)]))
+        except Exception:
+            continue
+
+    if len(segments) < 3:
+        return [], []
+
+    contours = _chain_segments_into_contours(segments)
+    if not contours:
+        return [], []
+    contours.sort(key=lambda c: (max(p[0] for p in c) - min(p[0] for p in c)) *
+                                (max(p[1] for p in c) - min(p[1] for p in c)),
+                  reverse=True)
+    return contours[0], contours[1:]
+
+
+def _extract_stackup_kipy(board) -> List[StackupLayer]:
+    """Best-effort stackup extraction via kipy; falls back to parsing the file."""
+    stackup: List[StackupLayer] = []
+
+    # Try kipy's stackup accessor (shape varies by version)
+    try:
+        s = board.get_stackup()
+        layers = getattr(s, "layers", None) or list(s)
+        for item in layers:
+            try:
+                name = getattr(item, "name", "") or getattr(item, "layer_name", "")
+                ltype = (getattr(item, "type", None) or getattr(item, "layer_type", "") or "").lower()
+                if ltype not in ("copper", "core", "prepreg", "dielectric"):
+                    continue
+                thickness_attr = getattr(item, "thickness", None)
+                if hasattr(thickness_attr, "x_mm"):
+                    thickness = float(thickness_attr.x_mm)
+                elif isinstance(thickness_attr, (int, float)):
+                    thickness = _nm_to_mm(thickness_attr) if thickness_attr > 1000 else float(thickness_attr)
+                else:
+                    thickness = 0.0
+                stackup.append(StackupLayer(
+                    name=name, layer_type=ltype, thickness=thickness,
+                    epsilon_r=float(getattr(item, "epsilon_r", 0.0) or 0.0),
+                    loss_tangent=float(getattr(item, "loss_tangent", 0.0) or 0.0),
+                    material=str(getattr(item, "material", "") or ""),
+                ))
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if stackup:
+        return stackup
+
+    # Fallback: parse the board file (board.name / .filename / .path)
+    board_file = None
+    for attr in ("filename", "file_name", "path", "name"):
+        v = getattr(board, attr, None)
+        if isinstance(v, str) and v.endswith(".kicad_pcb"):
+            board_file = v
+            break
+    if board_file:
+        try:
+            with open(board_file, "r", encoding="utf-8") as f:
+                content = f.read(8192)
+            stackup = extract_stackup(content)
+        except Exception:
+            pass
+
+    return stackup
+
+
+def _extract_zones_kipy(board, get_layer_name) -> List[Zone]:
+    """Read filled zones via kipy."""
+    zones: List[Zone] = []
+    try:
+        zone_iter = board.get_zones()
+    except AttributeError:
+        return zones
+    except Exception:
+        return zones
+
+    for z in zone_iter:
+        try:
+            net = getattr(z, "net", None)
+            net_id = _net_code(net)
+            net_name = getattr(net, "name", "") if net is not None else ""
+            layer = get_layer_name(getattr(z, "layer", None))
+            polygon = []
+            outline = getattr(z, "outline", None) or getattr(z, "polygon", None)
+            if outline is not None:
+                try:
+                    for p in outline:
+                        polygon.append(_vec_to_xy_mm(p))
+                except TypeError:
+                    contour = getattr(outline, "contour", None) or getattr(outline, "points", None)
+                    if contour:
+                        for p in contour:
+                            polygon.append(_vec_to_xy_mm(p))
+            if not polygon:
+                continue
+            zones.append(Zone(
+                net_id=net_id,
+                net_name=net_name,
+                layer=layer,
+                polygon=polygon,
+            ))
+        except Exception:
+            continue
+
+    return zones
+
+
+# --- Legacy SWIG-named aliases ---------------------------------------------
+# Kept so callers that still reference the old names keep working during the
+# migration. Both now route through the kipy implementations above.
+
+def _extract_zones_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
+    get_layer_name = args[1] if len(args) >= 2 else kwargs.get("get_layer_name")
+    if get_layer_name is None:
+        from kicad_ipc_adapter import layer_name_for
+        get_layer_name = layer_name_for
+    return _extract_zones_kipy(board, get_layer_name)
+
+
+def _extract_stackup_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
+    return _extract_stackup_kipy(board)
+
+
+def _extract_board_outline_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
+    outline, _ = _extract_board_contours_from_pcbnew(board)
+    return outline
+
+
+def _extract_board_contours_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
+    from kicad_ipc_adapter import layer_maps
+    name_to_bl, _ = layer_maps()
+    edge_cuts_bl = name_to_bl.get("Edge.Cuts")
+    try:
+        drawings = list(board.get_shapes())
+    except Exception:
+        drawings = []
+    return _extract_board_contours_kipy(drawings, edge_cuts_bl)
 
 
 def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
@@ -1500,178 +1822,6 @@ def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
     local_y = -dx * sin_r + dy * cos_r
 
     return local_x, local_y
-
-
-def _extract_board_outline_from_pcbnew(board, to_mm):
-    """Extract board outline polygon from Edge.Cuts drawings via pcbnew."""
-    outline, _ = _extract_board_contours_from_pcbnew(board, to_mm)
-    return outline
-
-
-def _extract_board_contours_from_pcbnew(board, to_mm):
-    """Extract board outline and cutout polygons from Edge.Cuts drawings via pcbnew.
-
-    Returns (outline, cutouts) where outline is the outer boundary polygon
-    and cutouts is a list of interior cutout polygons.
-    """
-    import pcbnew
-
-    edge_cuts_id = getattr(pcbnew, 'Edge_Cuts', None)
-    if edge_cuts_id is None:
-        return [], []
-
-    segments = []
-    for drawing in board.GetDrawings():
-        if drawing.GetLayer() != edge_cuts_id:
-            continue
-        class_name = drawing.GetClass()
-        if class_name in ("PCB_SHAPE", "DRAWSEGMENT"):
-            try:
-                shape_type = drawing.GetShape()
-                # Line segment
-                if shape_type == getattr(pcbnew, 'SHAPE_T_SEGMENT', getattr(pcbnew, 'S_SEGMENT', -1)):
-                    start = drawing.GetStart()
-                    end = drawing.GetEnd()
-                    segments.append((
-                        (to_mm(start.x), to_mm(start.y)),
-                        (to_mm(end.x), to_mm(end.y))
-                    ))
-                elif shape_type == getattr(pcbnew, 'SHAPE_T_RECT', getattr(pcbnew, 'S_RECT', -1)):
-                    start = drawing.GetStart()
-                    end = drawing.GetEnd()
-                    x1, y1 = to_mm(start.x), to_mm(start.y)
-                    x2, y2 = to_mm(end.x), to_mm(end.y)
-                    segments.append(((x1, y1), (x2, y1)))
-                    segments.append(((x2, y1), (x2, y2)))
-                    segments.append(((x2, y2), (x1, y2)))
-                    segments.append(((x1, y2), (x1, y1)))
-                elif shape_type == getattr(pcbnew, 'SHAPE_T_ARC', getattr(pcbnew, 'S_ARC', -1)):
-                    start = drawing.GetStart()
-                    mid = drawing.GetArcMid()
-                    end = drawing.GetEnd()
-                    segments.extend(_arc_to_segments(
-                        (to_mm(start.x), to_mm(start.y)),
-                        (to_mm(mid.x), to_mm(mid.y)),
-                        (to_mm(end.x), to_mm(end.y))
-                    ))
-            except Exception:
-                continue
-
-    if len(segments) < 3:
-        return [], []
-
-    # Check if this is a simple 4-segment rectangle
-    if len(segments) == 4:
-        vertices = set()
-        for seg in segments:
-            vertices.add((round(seg[0][0], 3), round(seg[0][1], 3)))
-            vertices.add((round(seg[1][0], 3), round(seg[1][1], 3)))
-        if len(vertices) == 4:
-            all_axis_aligned = all(
-                abs(s[0][0] - s[1][0]) < 0.001 or abs(s[0][1] - s[1][1]) < 0.001
-                for s in segments
-            )
-            if all_axis_aligned:
-                return [], []
-
-    contours = _chain_segments_into_contours(segments)
-    if not contours:
-        return [], []
-
-    def contour_bbox_area(contour):
-        xs = [p[0] for p in contour]
-        ys = [p[1] for p in contour]
-        return (max(xs) - min(xs)) * (max(ys) - min(ys))
-
-    contours.sort(key=contour_bbox_area, reverse=True)
-    return contours[0], contours[1:]
-
-
-def _extract_stackup_from_pcbnew(board, to_mm):
-    """Extract board stackup from pcbnew design settings.
-
-    Tries the SWIG API first, falls back to parsing the board file since
-    BOARD_STACKUP bindings aren't fully exposed in all KiCad versions.
-    """
-    stackup = []
-
-    # First try the full SWIG API (works in some KiCad versions)
-    try:
-        ds = board.GetDesignSettings()
-        stackup_desc = ds.GetStackupDescriptor()
-        stack_list = stackup_desc.GetList()
-
-        for item in stack_list:
-            try:
-                layer_name = item.GetLayerName()
-                type_name = item.GetTypeName()
-                if type_name not in ('copper', 'core', 'prepreg', 'dielectric'):
-                    continue
-                thickness = to_mm(item.GetThickness())
-                epsilon_r = getattr(item, 'GetEpsilonR', lambda: 0.0)()
-                loss_tangent = getattr(item, 'GetLossTangent', lambda: 0.0)()
-                material = getattr(item, 'GetMaterial', lambda: "")()
-                stackup.append(StackupLayer(
-                    name=layer_name, layer_type=type_name, thickness=thickness,
-                    epsilon_r=epsilon_r, loss_tangent=loss_tangent, material=material
-                ))
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    if stackup:
-        return stackup
-
-    # Fallback: parse stackup from the board file
-    try:
-        board_filename = board.GetFileName()
-        if board_filename:
-            with open(board_filename, 'r', encoding='utf-8') as f:
-                content = f.read(8192)  # Stackup is near the top of the file
-            stackup = extract_stackup(content)
-    except Exception:
-        pass
-
-    return stackup
-
-
-def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
-    """Extract filled zones from pcbnew board."""
-    zones = []
-
-    try:
-        for zone in board.Zones():
-            net_id = zone.GetNetCode()
-            net_name = zone.GetNetname()
-            layer = get_layer_name(zone.GetLayer())
-
-            # Extract polygon outline
-            polygon = []
-            try:
-                outline = zone.Outline()
-                if outline and outline.OutlineCount() > 0:
-                    contour = outline.Outline(0)
-                    for j in range(contour.PointCount()):
-                        pt = contour.CPoint(j)
-                        polygon.append((to_mm(pt.x), to_mm(pt.y)))
-            except Exception:
-                continue
-
-            if not polygon:
-                continue
-
-            zone_obj = Zone(
-                net_id=net_id,
-                net_name=net_name,
-                layer=layer,
-                polygon=polygon
-            )
-            zones.append(zone_obj)
-    except Exception:
-        pass
-
-    return zones
 
 
 def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: float = 0.01) -> List[str]:

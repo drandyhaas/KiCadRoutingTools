@@ -1,18 +1,27 @@
 name: Build and Release Rust Router
 
 # Builds prebuilt grid_router binaries for Linux x86_64, macOS arm64+x86_64,
-# and Windows x86_64 whenever a version tag (vX.Y.Z) is pushed, packages
-# them into KiCad PCM (Plugin and Content Manager) zips, and attaches
-# everything to a GitHub Release.
+# and Windows x86_64, packages them into KiCad PCM (Plugin and Content
+# Manager) zips, and (when explicitly dispatched) attaches everything to a
+# GitHub Release.
 #
 # The Rust crate uses pyo3 abi3-py39, so one binary per platform works for
 # every Python 3.9+ interpreter.
+#
+# NOTE: The tag-push trigger is intentionally DISABLED on this branch
+# (`ipc-migration`) so that local tagging during the SWIG→IPC port can't
+# accidentally cut a public GitHub Release. Re-enable when the IPC plugin
+# is ready to ship — uncomment the `push.tags` block below.
+#
+# PCM publication itself is unaffected either way: pushing to the KiCad
+# PCM is a manual GitLab MR (see docs/release-pipeline.md) and never
+# happens automatically from this workflow.
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:  # allow manual runs from the Actions tab
+  # push:
+  #   tags:
+  #     - 'v*'
+  workflow_dispatch:  # only path to run the workflow while in IPC migration
 
 permissions:
   contents: write  # needed to create/update the GitHub Release

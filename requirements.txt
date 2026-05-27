@@ -1,4 +1,14 @@
 # KiCad Routing Tools Dependencies
+#
+# KiCad 10 provisions a per-plugin venv from this file on first action
+# invocation, so anything listed here gets pip-installed automatically.
+
+# KiCad IPC client (replaces the in-process SWIG `pcbnew` module)
+kicad-python>=0.7.0
+
+# wxPython is no longer bundled with KiCad once the plugin is out-of-process,
+# so install it explicitly into the venv.
+wxPython~=4.2
 
 # Numerical computation
 numpy>=1.21.0
@@ -6,3 +16,7 @@ scipy>=1.7.0
 
 # Geometry operations
 shapely>=1.8.0
+
+# macOS-only: lets the spawned plugin process become the frontmost app so
+# the wx dialog opens in front of KiCad instead of behind it.
+pyobjc-framework-Cocoa; sys_platform == 'darwin'

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "com.github.drandyhaas.kicadroutingtools",
+  "name": "KiCad Routing Tools",
+  "description": "Fast Rust-accelerated A* autorouter (IPC).",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.9"
+  },
+  "actions": [
+    {
+      "identifier": "routing-tools",
+      "name": "KiCadRoutingTools",
+      "description": "Open the routing tools dialog (placement, fanout, routing, planes).",
+      "entrypoint": "kicad_routing_plugin/ipc_entry.py",
+      "scopes": ["pcb"],
+      "show-button": true,
+      "icons-light": ["kicad_routing_plugin/icon_24.png"],
+      "icons-dark": ["kicad_routing_plugin/icon_24.png"]
+    }
+  ]
+}

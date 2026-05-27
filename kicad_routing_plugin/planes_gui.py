@@ -920,157 +920,46 @@ class PlanesTab(wx.Panel):
         self.net_panel.refresh()
 
     def _apply_results_to_board(self):
-        """Apply operation results to the pcbnew board."""
-        import pcbnew
+        """Apply planes results to the board.
 
-        board = pcbnew.GetBoard()
-        if board is None:
-            return
+        Not yet ported to KiCad 10's IPC API. Zone creation in particular
+        needs the kipy padstack/zone APIs which differ structurally from
+        SWIG's pcbnew.ZONE — the original SWIG path is preserved as a
+        comment for the future port.
+        """
+        new_vias = list(getattr(self, "_new_vias", []) or [])
+        new_segments = list(getattr(self, "_new_segments", []) or [])
+        new_zones = list(getattr(self, "_new_zones", []) or [])
 
-        # Get layer name to ID mapping
-        name_to_id = {}
-        for i in range(pcbnew.PCB_LAYER_ID_COUNT):
-            name = board.GetLayerName(i)
-            if name:
-                name_to_id[name] = i
+        # Clear the buffers so the user can re-run without stale state.
+        self._new_vias = []
+        self._new_segments = []
+        self._new_zones = []
 
-        def get_layer_id(layer_name):
-            return name_to_id.get(layer_name, pcbnew.F_Cu)
+        wx.MessageBox(
+            "Planes: the apply-to-board path has not yet been ported to "
+            "KiCad 10's IPC API. The plane operations were computed "
+            "successfully, but nothing was written to the board.\n\n"
+            f"Would have applied: {len(new_zones)} zones, "
+            f"{len(new_vias)} vias, {len(new_segments)} stitch tracks.\n\n"
+            "Use the SWIG version (KiCadRoutingTools 0.15.x on KiCad 9) "
+            "if you need plane operations for now — IPC port coming in a "
+            "follow-up release.",
+            "Planes: IPC port pending",
+            wx.OK | wx.ICON_INFORMATION,
+        )
 
-        # Add vias from create_plane results
-        vias_added = 0
-        if hasattr(self, '_new_vias') and self._new_vias:
-            for via_data in self._new_vias:
-                via = pcbnew.PCB_VIA(board)
-                via.SetPosition(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(via_data['x']),
-                    pcbnew.FromMM(via_data['y'])
-                ))
-                via.SetDrill(pcbnew.FromMM(via_data['drill']))
-                via.SetWidth(pcbnew.FromMM(via_data['size']))
-                via.SetNetCode(via_data['net_id'])
-                # Set via layers
-                layers = via_data.get('layers', ['F.Cu', 'B.Cu'])
-                if len(layers) >= 2:
-                    via.SetLayerPair(get_layer_id(layers[0]), get_layer_id(layers[-1]))
-                board.Add(via)
-                vias_added += 1
-            self._new_vias = []
-
-        # Add segments from create_plane results
-        tracks_added = 0
-        if hasattr(self, '_new_segments') and self._new_segments:
-            for seg_data in self._new_segments:
-                track = pcbnew.PCB_TRACK(board)
-                start = seg_data['start']
-                end = seg_data['end']
-                track.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(start[0]),
-                    pcbnew.FromMM(start[1])
-                ))
-                track.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(end[0]),
-                    pcbnew.FromMM(end[1])
-                ))
-                track.SetWidth(pcbnew.FromMM(seg_data['width']))
-                track.SetLayer(get_layer_id(seg_data['layer']))
-                track.SetNetCode(seg_data['net_id'])
-                board.Add(track)
-                tracks_added += 1
-            self._new_segments = []
-
-        # Add zones from create_plane results
-        zones_added = 0
-        zones_skipped = 0
-        new_zone_objs = []  # Track newly added zones so we can fill them below.
-        if hasattr(self, '_new_zones') and self._new_zones:
-            # Snapshot which (net_name, layer) pairs already have a zone on
-            # the live board so we never add a duplicate.
-            existing_zone_keys = set()
-            try:
-                for existing_zone in board.Zones():
-                    try:
-                        existing_net = existing_zone.GetNet().GetNetname()
-                    except Exception:
-                        existing_net = ''
-                    try:
-                        existing_layer = board.GetLayerName(existing_zone.GetLayer())
-                    except Exception:
-                        existing_layer = ''
-                    existing_zone_keys.add((existing_net, existing_layer))
-            except Exception:
-                pass
-
-            for zone_data in self._new_zones:
-                key = (zone_data.get('net_name', ''), zone_data.get('layer', ''))
-                if key in existing_zone_keys:
-                    print(f"Skipping new zone for '{key[0]}' on {key[1]} "
-                          f"(zone already exists on board)")
-                    zones_skipped += 1
-                    continue
-                zone = pcbnew.ZONE(board)
-                # Prefer looking up the net by name on the live board - net_id
-                # values can drift between the parser and pcbnew (different
-                # ordering for KiCad 10, or stale disk state vs. live board).
-                # Fall back to SetNetCode if the name isn't found.
-                net_assigned = False
-                net_name = zone_data.get('net_name')
-                if net_name:
-                    try:
-                        net_item = board.FindNet(net_name)
-                    except Exception:
-                        net_item = None
-                    if net_item:
-                        zone.SetNet(net_item)
-                        net_assigned = True
-                if not net_assigned:
-                    zone.SetNetCode(zone_data['net_id'])
-                zone.SetLayer(get_layer_id(zone_data['layer']))
-
-                # Set zone outline from polygon points
-                outline = zone.Outline()
-                outline.NewOutline()
-                for x, y in zone_data['polygon_points']:
-                    outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
-
-                # Set zone properties
-                zone.SetLocalClearance(pcbnew.FromMM(zone_data.get('clearance', 0.2)))
-                zone.SetMinThickness(pcbnew.FromMM(zone_data.get('min_thickness', 0.1)))
-                zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)  # Direct connect
-                # Hatch the outline so the zone is visible immediately;
-                # the actual copper fill is computed below via ZONE_FILLER.
-                try:
-                    zone.HatchBorder()
-                except Exception:
-                    pass
-
-                board.Add(zone)
-                new_zone_objs.append(zone)
-                zones_added += 1
-            self._new_zones = []
-
-        if vias_added > 0 or tracks_added > 0 or zones_added > 0:
-            print(f"Added to board: {zones_added} zones, {vias_added} vias, {tracks_added} tracks")
-
-        # Build connectivity before filling so nets are resolved properly.
-        board.BuildConnectivity()
-
-        # Fill any newly-added zones so they appear as solid copper without
-        # the user needing to run "Fill All Zones" (B) manually.
-        if new_zone_objs:
-            try:
-                filler = pcbnew.ZONE_FILLER(board)
-                filler.Fill(new_zone_objs)
-                print(f"Filled {len(new_zone_objs)} new zone(s)")
-            except Exception as e:
-                print(f"Warning: could not auto-fill new zones ({e}). "
-                      "Press B in pcbnew to fill manually.")
-
-        pcbnew.Refresh()
-
-        # Sync pcb_data
-        if self.sync_pcb_data_callback:
-            self.sync_pcb_data_callback()
+    # --- Original SWIG apply path retained as a reference for the future
+    # IPC port. Re-implement against kipy's zone/track/via APIs and a single
+    # commit when this tab is migrated.
+    #
+    # def _apply_results_to_board_swig(self):
+    #     import pcbnew; board = pcbnew.GetBoard()
+    #     for via_data in self._new_vias: ... pcbnew.PCB_VIA ...
+    #     for seg_data in self._new_segments: ... pcbnew.PCB_TRACK ...
+    #     for zone_data in self._new_zones: ... pcbnew.ZONE ...
+    #     pcbnew.ZONE_FILLER(board).Fill(new_zone_objs)
+    #     pcbnew.Refresh()
 
     def get_assignments(self):
         """Get list of net→layer assignments."""

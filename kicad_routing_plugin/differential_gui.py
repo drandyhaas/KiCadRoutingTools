@@ -722,79 +722,45 @@ class DifferentialTab(wx.Panel):
         self.pair_panel.refresh()
 
     def _apply_results_to_board(self, results_data):
-        """Apply routing results directly to the open pcbnew board."""
-        import pcbnew
-        from .swig_gui import _build_layer_mappings
+        """Apply differential-pair routing results to the board.
 
-        board = pcbnew.GetBoard()
-        if board is None:
-            wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
-            return 0, 0
-
+        Not yet ported to KiCad 10's IPC API — surface a clear notice and
+        leave the board untouched. Routing computation still runs, so the
+        user can inspect the result counts.
+        """
+        # Count what would have been applied so the message is informative.
         tracks_added = 0
         vias_added = 0
-
-        # Get layer mappings
-        name_to_id, _ = _build_layer_mappings()
-
-        def get_layer_id(layer_name):
-            return name_to_id.get(layer_name, pcbnew.F_Cu)
-
-        # Add segments from routing results
         for result in results_data.get('results', []):
-            for seg in result.get('new_segments', []):
-                track = pcbnew.PCB_TRACK(board)
-                track.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(seg.start_x),
-                    pcbnew.FromMM(seg.start_y)
-                ))
-                track.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(seg.end_x),
-                    pcbnew.FromMM(seg.end_y)
-                ))
-                track.SetWidth(pcbnew.FromMM(seg.width))
-                track.SetLayer(get_layer_id(seg.layer))
-                track.SetNetCode(seg.net_id)
-                board.Add(track)
-                tracks_added += 1
+            tracks_added += len(result.get('new_segments', []))
+            vias_added += len(result.get('new_vias', []))
+        vias_added += len(results_data.get('all_swap_vias', []))
 
-            for via in result.get('new_vias', []):
-                self._add_via_to_board(board, via, get_layer_id)
-                vias_added += 1
+        wx.MessageBox(
+            "Differential pairs: the apply-to-board path has not yet been "
+            "ported to KiCad 10's IPC API. The routing computation ran "
+            "successfully, but no tracks/vias were written.\n\n"
+            f"Would have applied: {tracks_added} segments, {vias_added} vias.\n\n"
+            "Use the SWIG version (KiCadRoutingTools 0.15.x on KiCad 9) "
+            "if you need differential routing for now — IPC port coming in "
+            "a follow-up release.",
+            "Differential: IPC port pending",
+            wx.OK | wx.ICON_INFORMATION,
+        )
+        return 0, 0
 
-        # Add vias from layer swapping
-        for via in results_data.get('all_swap_vias', []):
-            self._add_via_to_board(board, via, get_layer_id)
-            vias_added += 1
-
-        # Build connectivity to register new items properly
-        board.BuildConnectivity()
-
-        # Refresh the view
-        pcbnew.Refresh()
-
-        # Sync pcb_data from pcbnew board
-        if self.sync_pcb_data_callback:
-            self.sync_pcb_data_callback()
-
-        return tracks_added, vias_added
-
-    def _add_via_to_board(self, board, via, get_layer_id):
-        """Add a via to the pcbnew board."""
-        import pcbnew
-        pcb_via = pcbnew.PCB_VIA(board)
-        pcb_via.SetPosition(pcbnew.VECTOR2I(
-            pcbnew.FromMM(via.x),
-            pcbnew.FromMM(via.y)
-        ))
-        pcb_via.SetWidth(pcbnew.FromMM(via.size))
-        pcb_via.SetDrill(pcbnew.FromMM(via.drill))
-        pcb_via.SetNetCode(via.net_id)
-        if hasattr(via, 'layers') and len(via.layers) >= 2:
-            top_layer = get_layer_id(via.layers[0])
-            bot_layer = get_layer_id(via.layers[1])
-            pcb_via.SetLayerPair(top_layer, bot_layer)
-        board.Add(pcb_via)
+    # --- Original SWIG apply paths retained as a reference for the future
+    # IPC port. Re-implement via kicad_ipc_adapter.apply_routing_results-style
+    # batched commits when this tab is migrated.
+    #
+    # def _apply_results_to_board_swig(self, results_data):
+    #     import pcbnew; board = pcbnew.GetBoard()
+    #     for result in results_data.get('results', []):
+    #         for seg in result.get('new_segments', []):
+    #             track = pcbnew.PCB_TRACK(board); ...; board.Add(track)
+    #         for via in result.get('new_vias', []):
+    #             self._add_via_to_board(board, via, get_layer_id)
+    #     board.BuildConnectivity(); pcbnew.Refresh()
 
     def get_config(self):
         """Get the differential pair configuration."""
@@ -838,20 +804,20 @@ class DifferentialTab(wx.Panel):
     def _get_selected_pair_netclass(self):
         """Get the net class name for the first selected pair, or None."""
         try:
-            import pcbnew
-            board = pcbnew.GetBoard()
+            from kicad_ipc_adapter import get_board
+            board = get_board()
             if board is None:
                 return None
 
-            # Get first selected pair's P net
             selected = self.get_selected_pair_net_ids()
             if not selected:
                 return None
-
             _, p_net_id, _ = selected[0]
-            net = board.FindNet(p_net_id)
-            if net:
-                return net.GetNetClassName()
+
+            for n in board.get_nets():
+                if getattr(n, "code", None) == p_net_id:
+                    return (getattr(n, "class_name", None)
+                            or getattr(n, "netclass_name", None))
             return None
         except Exception:
             return None
