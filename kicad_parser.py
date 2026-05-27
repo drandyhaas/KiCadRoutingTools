@@ -2,6 +2,7 @@
 KiCad PCB Parser - Extracts pads, nets, tracks, vias, and board info from .kicad_pcb files.
 """
 
+import os
 import re
 import math
 import json
@@ -1117,6 +1118,94 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
     )
 
 
+def read_pin_metadata_from_kicad_pcb(board_filename: str) -> Dict[Tuple[str, str], Tuple[str, str]]:
+    """Extract (component_ref, pad_number) → (pinfunction, pintype) from .kicad_pcb.
+
+    kipy.Pad doesn't expose pin_function or pin_type, but the .kicad_pcb
+    file stores them as `(pinfunction "...")` / `(pintype "...")` on each
+    pad. This reader walks footprint blocks with a regex pass so the
+    power-net / high-speed-net / plan-routing skills get real data
+    without parsing the whole board file.
+
+    Returns {} on any failure — callers should treat absence as "all pads
+    have empty pinfunction/pintype".
+    """
+    if not board_filename or not os.path.isfile(board_filename):
+        return {}
+    try:
+        with open(board_filename, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return {}
+
+    result: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    # Walk each (footprint ...) block by paren-matching from the opening
+    # token, so we don't get confused by nested s-expressions.
+    fp_marker = "(footprint "
+    pos = 0
+    while True:
+        start = content.find(fp_marker, pos)
+        if start < 0:
+            break
+        # Find the matching close-paren for this footprint block.
+        depth = 0
+        end = start
+        for i in range(start, len(content)):
+            c = content[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        block = content[start:end]
+        pos = end
+
+        # Reference: (property "Reference" "U1" ...) — newer KiCad, or
+        # (fp_text reference "U1" ...) — older.
+        ref_match = (re.search(r'\(property\s+"Reference"\s+"([^"]*)"', block)
+                     or re.search(r'\(fp_text\s+reference\s+"([^"]*)"', block))
+        if not ref_match:
+            continue
+        ref = ref_match.group(1)
+
+        # Iterate pad blocks inside this footprint. (pad "N" SHAPE ...).
+        # Use the same paren walker scoped to the footprint block.
+        ppos = 0
+        pad_marker = "(pad "
+        while True:
+            pstart = block.find(pad_marker, ppos)
+            if pstart < 0:
+                break
+            pdepth = 0
+            pend = pstart
+            for i in range(pstart, len(block)):
+                c = block[i]
+                if c == "(":
+                    pdepth += 1
+                elif c == ")":
+                    pdepth -= 1
+                    if pdepth == 0:
+                        pend = i + 1
+                        break
+            pad_block = block[pstart:pend]
+            ppos = pend
+
+            num_m = re.match(r'\(pad\s+"([^"]*)"', pad_block)
+            if not num_m:
+                continue
+            pad_number = num_m.group(1)
+            pinfunc_m = re.search(r'\(pinfunction\s+"([^"]*)"\)', pad_block)
+            pintype_m = re.search(r'\(pintype\s+"([^"]*)"\)', pad_block)
+            pinfunc = pinfunc_m.group(1) if pinfunc_m else ""
+            pintype = pintype_m.group(1) if pintype_m else ""
+            if pinfunc or pintype:
+                result[(ref, pad_number)] = (pinfunc, pintype)
+
+    return result
+
+
 def read_netclasses_from_kicad_pro(board_filename: str) -> Tuple[Dict[str, Dict[str, float]], List[Tuple[str, str]], Dict[str, str]]:
     """Parse net-class definitions out of the .kicad_pro project JSON.
 
@@ -1463,6 +1552,21 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
                         n.name, patterns, explicit)
         except Exception as e:
             print(f"build_pcb_data_from_board: netclass read failed: {e}")
+
+        # kipy.Pad doesn't expose pin_function / pin_type, so pull them
+        # from the .kicad_pcb file. Power-net detection and the
+        # high-speed-net / plan-routing skills rely on these.
+        try:
+            pin_meta = read_pin_metadata_from_kicad_pcb(board_path)
+        except Exception as e:
+            print(f"build_pcb_data_from_board: pin metadata read failed: {e}")
+            pin_meta = {}
+        if pin_meta:
+            for ref, fp in footprints.items():
+                for pad_obj in fp.pads:
+                    meta = pin_meta.get((ref, pad_obj.pad_number))
+                    if meta:
+                        pad_obj.pinfunction, pad_obj.pintype = meta
 
     return PCBData(
         board_info=board_info,
@@ -2019,31 +2123,64 @@ def _extract_board_contours_kipy(drawings, edge_cuts_bl):
 
 
 def _extract_stackup_kipy(board) -> List[StackupLayer]:
-    """Best-effort stackup extraction via kipy; falls back to parsing the file."""
+    """Stackup extraction via kipy with file-parse fallback.
+
+    BoardStackupLayer in kipy 0.7 exposes:
+        layer (BoardLayer enum), user_name (str), thickness (nm int),
+        type (BoardStackupLayer.Type enum), material_name (str),
+        dielectric (BoardStackupDielectricLayer with epsilon_r,
+                    loss_tangent, material_name, thickness)
+    We map type → 'copper' / 'core' / 'prepreg' / 'dielectric' and pull
+    epsilon_r / loss_tangent off the .dielectric sub-message when present.
+    """
     stackup: List[StackupLayer] = []
 
-    # Try kipy's stackup accessor (shape varies by version)
     try:
         s = board.get_stackup()
-        layers = getattr(s, "layers", None) or list(s)
+        layers = getattr(s, "layers", None) or []
         for item in layers:
             try:
-                name = getattr(item, "name", "") or getattr(item, "layer_name", "")
-                ltype = (getattr(item, "type", None) or getattr(item, "layer_type", "") or "").lower()
-                if ltype not in ("copper", "core", "prepreg", "dielectric"):
+                name = getattr(item, "user_name", "") or ""
+                # type is a proto enum; map by its .name (e.g. "BSLT_COPPER").
+                type_enum = getattr(item, "type", None)
+                if type_enum is None:
                     continue
-                thickness_attr = getattr(item, "thickness", None)
-                if hasattr(thickness_attr, "x_mm"):
-                    thickness = float(thickness_attr.x_mm)
-                elif isinstance(thickness_attr, (int, float)):
-                    thickness = _nm_to_mm(thickness_attr) if thickness_attr > 1000 else float(thickness_attr)
+                type_name = (getattr(type_enum, "name", None) or str(type_enum)).lower()
+                if "copper" in type_name:
+                    ltype = "copper"
+                elif "core" in type_name:
+                    ltype = "core"
+                elif "prepreg" in type_name:
+                    ltype = "prepreg"
+                elif "dielec" in type_name:
+                    ltype = "dielectric"
                 else:
-                    thickness = 0.0
+                    # Skip silkscreen / soldermask / paste / etc.
+                    continue
+
+                thickness_mm = _nm_to_mm(getattr(item, "thickness", 0) or 0)
+                material = str(getattr(item, "material_name", "") or "")
+
+                epsilon_r = 0.0
+                loss_tangent = 0.0
+                dielectric = getattr(item, "dielectric", None)
+                if dielectric is not None:
+                    try:
+                        epsilon_r = float(getattr(dielectric, "epsilon_r", 0.0) or 0.0)
+                        loss_tangent = float(getattr(dielectric, "loss_tangent", 0.0) or 0.0)
+                        # Dielectric sub-message may carry its own thickness /
+                        # material_name; prefer them if the top-level fields
+                        # are empty.
+                        if thickness_mm == 0:
+                            thickness_mm = _nm_to_mm(getattr(dielectric, "thickness", 0) or 0)
+                        if not material:
+                            material = str(getattr(dielectric, "material_name", "") or "")
+                    except Exception:
+                        pass
+
                 stackup.append(StackupLayer(
-                    name=name, layer_type=ltype, thickness=thickness,
-                    epsilon_r=float(getattr(item, "epsilon_r", 0.0) or 0.0),
-                    loss_tangent=float(getattr(item, "loss_tangent", 0.0) or 0.0),
-                    material=str(getattr(item, "material", "") or ""),
+                    name=name, layer_type=ltype, thickness=thickness_mm,
+                    epsilon_r=epsilon_r, loss_tangent=loss_tangent, material=material,
                 ))
             except Exception:
                 continue
@@ -2053,17 +2190,16 @@ def _extract_stackup_kipy(board) -> List[StackupLayer]:
     if stackup:
         return stackup
 
-    # Fallback: parse the board file (board.name / .filename / .path)
-    board_file = None
-    for attr in ("filename", "file_name", "path", "name"):
-        v = getattr(board, attr, None)
-        if isinstance(v, str) and v.endswith(".kicad_pcb"):
-            board_file = v
-            break
+    # Fallback: parse from the .kicad_pcb file using the absolute path.
+    try:
+        from kicad_ipc_adapter import get_board_full_path
+        board_file = get_board_full_path()
+    except Exception:
+        board_file = None
     if board_file:
         try:
             with open(board_file, "r", encoding="utf-8") as f:
-                content = f.read(8192)
+                content = f.read(8192)  # stackup lives near the top of the file
             stackup = extract_stackup(content)
         except Exception:
             pass
