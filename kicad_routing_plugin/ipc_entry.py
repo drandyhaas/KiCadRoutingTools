@@ -221,7 +221,10 @@ def main() -> int:
     # Construct + show the routing dialog. RoutingDialog.__init__ is large
     # (loads nets, builds fanout/differential/planes panels, etc.) and any
     # exception there used to take the whole process down silently.
-    from . import ipc_settings_store
+    # Absolute import (not `from . import`) — KiCad runs this file as a
+    # top-level script with no parent package, so relative imports fail.
+    # _PLUGIN_DIR is on sys.path (see the top of this file).
+    import ipc_settings_store
     saved_settings = ipc_settings_store.load()
     _log(f"loaded {len(saved_settings)} saved-settings keys "
          f"from {ipc_settings_store.path()}")
