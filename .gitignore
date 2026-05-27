@@ -49,3 +49,4 @@ rust_router/target/
 /kicad_files/flat_hierarchy_*.kicad_pcb
 /kicad_files/interf_u_*.kicad_pcb
 /kicad_files/sonde_u_*.kicad_pcb
+/kicad_files/.history/

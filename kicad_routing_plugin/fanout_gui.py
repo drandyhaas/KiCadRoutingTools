@@ -885,7 +885,8 @@ class FanoutTab(wx.Panel):
 
     def _create_ui(self):
         """Create the tab UI."""
-        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # GridSizer for an even 50/50 split — see swig_gui._create_config_tab.
+        main_sizer = wx.GridSizer(rows=1, cols=2, hgap=0, vgap=0)
 
         # Left side: Net selection (same as other tabs)
         net_box = wx.StaticBox(self, label="Net Selection")
@@ -904,7 +905,7 @@ class FanoutTab(wx.Panel):
         )
         net_box_sizer.Add(self.net_panel, 1, wx.EXPAND)
 
-        main_sizer.Add(net_box_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(net_box_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         # Right side: Fanout type and options
         right_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -951,7 +952,7 @@ class FanoutTab(wx.Panel):
 
         right_sizer.Add(btn_sizer, 0, wx.EXPAND)
 
-        main_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(right_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(main_sizer)
 

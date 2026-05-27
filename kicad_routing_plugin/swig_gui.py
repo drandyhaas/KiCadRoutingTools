@@ -162,17 +162,15 @@ class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
     def __init__(self, parent, pcb_data, board_filename, saved_settings=None):
-        # Default size bumped from 800x800 (which clipped on wxPython 4.2's
-        # taller netclass / fanout panels) to something that fits the full
-        # layout without scrollbars on a 1080p display.
-        default_size = (1100, 900)
+        # Default matches the SWIG-version dialog size so the layout stays
+        # familiar across the migration.
+        default_size = (800, 800)
         size = default_size
         if saved_settings and 'window_size' in saved_settings:
             try:
                 w, h = saved_settings['window_size']
-                # Clamp to sane bounds so a corrupted setting can't open the
-                # dialog off-screen or as a 0-pixel sliver.
-                size = (max(700, int(w)), max(550, int(h)))
+                # Clamp away absurd values (e.g. a corrupted settings file).
+                size = (max(400, int(w)), max(300, int(h)))
             except (TypeError, ValueError):
                 size = default_size
 
@@ -182,8 +180,6 @@ class RoutingDialog(wx.Dialog):
             size=size,
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
         )
-        # Keep the user from shrinking below where widgets start clipping.
-        self.SetMinSize((700, 550))
 
         # Restore position if we have a previously-saved one (and it's still
         # on-screen). Otherwise we'll Centre() further down.
@@ -230,6 +226,80 @@ class RoutingDialog(wx.Dialog):
 
         # Defer sync and connectivity check until after dialog is shown
         wx.CallAfter(self._deferred_init)
+
+        # Heartbeat: ping KiCad every few seconds and close ourselves if it
+        # goes away. IPC plugins run out-of-process; without this the dialog
+        # would outlive KiCad with every IPC call silently failing.
+        self._ipc_heartbeat_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_ipc_heartbeat, self._ipc_heartbeat_timer)
+        self._ipc_heartbeat_timer.Start(3000)  # ms; balance of responsiveness vs IPC load
+
+    def _on_ipc_heartbeat(self, event):
+        """Periodic check that KiCad is still reachable over IPC."""
+        # Skip the ping during routing — the worker thread may be holding
+        # the IPC lock for an extended period and we don't want the timer
+        # to falsely conclude KiCad is gone just because we couldn't acquire
+        # the lock quickly.
+        if self._routing_thread is not None and self._routing_thread.is_alive():
+            return
+        try:
+            from kicad_ipc_adapter import ping
+        except Exception:
+            return
+        if not ping():
+            try:
+                self._ipc_heartbeat_timer.Stop()
+            except Exception:
+                pass
+            self._kicad_died()
+
+    def _kicad_died(self):
+        """Tear down hard when KiCad disappears.
+
+        We deliberately bypass the normal wx EndModal → Destroy →
+        close_connection() path here: that path calls kicad.close(), which
+        can itself block waiting on a half-closed socket — and in the
+        worst case KiCad was observed to hang on shutdown when the plugin
+        tried to gracefully close at the same time. So instead: persist
+        settings to disk synchronously, then os._exit() so the kernel
+        drops our end of the socket immediately and KiCad's poll sees the
+        peer disconnect at once.
+        """
+        import os as _os
+        print("Heartbeat: KiCad is no longer reachable over IPC; force-exiting plugin")
+        try:
+            from .settings_persistence import get_dialog_settings
+            settings = get_dialog_settings(self)
+            # Inline the disk write to avoid pulling in ipc_entry (which
+            # imports wx things that may already be torn down).
+            import json
+            def _coerce(o):
+                if isinstance(o, tuple):
+                    return [_coerce(x) for x in o]
+                if isinstance(o, list):
+                    return [_coerce(x) for x in o]
+                if isinstance(o, dict):
+                    return {k: _coerce(v) for k, v in o.items()}
+                if isinstance(o, set):
+                    return [_coerce(x) for x in o]
+                return o
+            path = _os.path.expanduser("~/.kicad_routing_tools_settings.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(_coerce(settings), f, indent=2, default=str)
+            print(f"Heartbeat: settings saved to {path}")
+        except Exception as e:
+            print(f"Heartbeat: settings save failed: {e}")
+        # _exit (not sys.exit) because we want NO cleanup — no atexit hooks,
+        # no thread joins, no kipy close() that could re-enter the wedged
+        # socket. The OS closes the socket as part of process teardown,
+        # which is what KiCad needs to see to finish its own shutdown.
+        _os.flush = getattr(_os, "flush", lambda: None)
+        try:
+            import sys as _sys
+            _sys.stdout.flush(); _sys.stderr.flush()
+        except Exception:
+            pass
+        _os._exit(0)
 
     @staticmethod
     def _position_is_on_screen(x: int, y: int) -> bool:
@@ -380,9 +450,15 @@ class RoutingDialog(wx.Dialog):
         """Create the Basic tab with basic routing parameters and options."""
         panel = wx.Panel(self.notebook)
         config_sizer = wx.BoxSizer(wx.VERTICAL)
-        h_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # GridSizer (vs BoxSizer with proportion=1:1) gives two strictly
+        # equal columns regardless of inner content's natural width.
+        # wxPython 4.2's BoxSizer became more content-aware about minimum
+        # sizes, which pushed the net-selection column wider than the
+        # right column under the original 1:1 proportion. GridSizer
+        # restores the SWIG-version even split.
+        h_sizer = wx.GridSizer(rows=1, cols=2, hgap=0, vgap=0)
 
-        # Left side: Net selection (1:1 ratio with right side)
+        # Left side: Net selection
         net_box = wx.StaticBox(panel, label="Net Selection")
         net_sizer = wx.StaticBoxSizer(net_box, wx.VERTICAL)
 
@@ -402,7 +478,7 @@ class RoutingDialog(wx.Dialog):
         self.net_panel.set_tabbed_view_changed_callback(self._on_tabbed_view_changed)
         net_sizer.Add(self.net_panel, 1, wx.EXPAND)
 
-        h_sizer.Add(net_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        h_sizer.Add(net_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         # Right side: Basic parameters, layers, options, progress, buttons (2:1:2 ratio)
         right_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -411,7 +487,7 @@ class RoutingDialog(wx.Dialog):
         right_sizer.Add(self._create_basic_options_panel(panel), 2, wx.EXPAND | wx.BOTTOM, 5)
         right_sizer.Add(self._create_progress_panel(panel), 0, wx.EXPAND | wx.BOTTOM, 5)
         right_sizer.Add(self._create_buttons_panel(panel), 0, wx.EXPAND)
-        h_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        h_sizer.Add(right_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         config_sizer.Add(h_sizer, 1, wx.EXPAND | wx.ALL, 5)
         panel.SetSizer(config_sizer)
@@ -1111,17 +1187,18 @@ class RoutingDialog(wx.Dialog):
     def _create_advanced_tab(self):
         """Create the Advanced tab with swappable nets on left, parameters+options on right."""
         panel = wx.Panel(self.notebook)
-        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # GridSizer for the same reason as the Basic tab — see _create_config_tab.
+        main_sizer = wx.GridSizer(rows=1, cols=2, hgap=0, vgap=0)
 
-        # Left side: Swappable nets selection (1:1 ratio with right side)
+        # Left side: Swappable nets selection
         left_sizer = self._create_swappable_nets_panel(panel)
-        main_sizer.Add(left_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(left_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         # Right side: Advanced parameters and options
         right_sizer = wx.BoxSizer(wx.VERTICAL)
         right_sizer.Add(self._create_advanced_parameters_panel(panel), 1, wx.EXPAND | wx.BOTTOM, 5)
         right_sizer.Add(self._create_options_panel(panel), 1, wx.EXPAND)
-        main_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(right_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         panel.SetSizer(main_sizer)
 

@@ -332,7 +332,10 @@ class DifferentialTab(wx.Panel):
 
     def _create_ui(self):
         """Create the tab UI."""
-        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # GridSizer (vs BoxSizer with proportion=1:1) gives strictly equal
+        # columns regardless of the children's natural widths — see
+        # swig_gui._create_config_tab for the reasoning.
+        main_sizer = wx.GridSizer(rows=1, cols=2, hgap=0, vgap=0)
 
         # Left side: Diff pair selection
         pair_box = wx.StaticBox(self, label="Differential Pair Selection")
@@ -346,7 +349,7 @@ class DifferentialTab(wx.Panel):
         )
         pair_box_sizer.Add(self.pair_panel, 1, wx.EXPAND)
 
-        main_sizer.Add(pair_box_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(pair_box_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         # Right side: Parameters
         right_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -482,7 +485,7 @@ class DifferentialTab(wx.Panel):
         # Add spacer to push content up
         right_sizer.AddStretchSpacer(1)
 
-        main_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(right_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(main_sizer)
 

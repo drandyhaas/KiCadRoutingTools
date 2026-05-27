@@ -97,6 +97,46 @@ def _log(msg: str) -> None:
         pass
 
 
+class _TeeStream:
+    """File-like wrapper that mirrors writes to both the original stream and
+    the diagnostic log file.
+
+    KiCad swallows the spawned plugin's stdout/stderr, so any print() from
+    the adapter / kicad_parser / routing-core would otherwise be invisible.
+    Wiring sys.stdout / sys.stderr through this class makes those messages
+    show up in ~/.kicad_routing_tools.log.
+    """
+
+    def __init__(self, original, prefix: str = ""):
+        self._original = original
+        self._prefix = prefix
+
+    def write(self, data: str) -> int:
+        try:
+            self._original.write(data)
+        except Exception:
+            pass
+        for line in (data.rstrip("\n").splitlines() if data else []):
+            if line.strip():
+                _log(f"{self._prefix}{line}")
+        return len(data) if data else 0
+
+    def flush(self) -> None:
+        try:
+            self._original.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+def _tee_stdout_stderr_to_log() -> None:
+    """Mirror stdout/stderr writes into the diagnostic log file."""
+    sys.stdout = _TeeStream(sys.stdout, prefix="[stdout] ")
+    sys.stderr = _TeeStream(sys.stderr, prefix="[stderr] ")
+
+
 def _activate_macos_app() -> None:
     """Force the spawned process to become the frontmost macOS app.
 
@@ -116,6 +156,7 @@ def _activate_macos_app() -> None:
 
 
 def main() -> int:
+    _tee_stdout_stderr_to_log()
     _log("=" * 60)
     _log(f"ipc_entry start, pid={os.getpid()}, cwd={os.getcwd()}")
     _log(f"sys.executable={sys.executable}")
@@ -268,6 +309,15 @@ def main() -> int:
             dlg.Destroy()
         except Exception:
             pass
+        # Close the IPC connection explicitly so KiCad releases its end of
+        # the socket. Without this, KiCad may sit in its shutdown path
+        # waiting for the plugin to drop the connection.
+        try:
+            from kicad_ipc_adapter import close_connection
+            close_connection()
+            _log("IPC connection closed")
+        except Exception as e:
+            _log(f"close_connection failed: {e}")
         _log("ipc_entry exiting")
 
     return 0

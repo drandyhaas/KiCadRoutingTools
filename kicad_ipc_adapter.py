@@ -118,40 +118,180 @@ def get_board(kicad: Optional["kipy.KiCad"] = None):
         return None
 
 
+def ping(kicad: Optional["kipy.KiCad"] = None, timeout: float = 1.0) -> bool:
+    """Lightweight liveness check: returns True if KiCad is still reachable.
+
+    The ping runs on a daemon thread with a hard timeout so a half-closed
+    NNG socket (KiCad mid-shutdown) can't deadlock the dialog. If kipy's
+    `get_version()` doesn't return within `timeout` seconds we treat it
+    as "KiCad gone" — leaking the daemon thread is fine; it dies with
+    the process.
+
+    Without this, pinging KiCad while it was tearing down its API server
+    caused both processes to wedge: kipy waited for a response that never
+    arrived, and KiCad waited for our socket to close cleanly.
+    """
+    if kicad is None:
+        kicad = connect()
+
+    # If someone else holds the lock (a commit is in flight, or a previous
+    # ping is still stuck on a half-closed socket), don't queue up — just
+    # report "alive" and try again next tick. Wedging here would create a
+    # growing pile of daemon threads on every heartbeat.
+    if not _IPC_LOCK.acquire(blocking=False):
+        return True
+    try:
+        result: list = [None]
+
+        def _do_ping():
+            try:
+                # kipy.KiCad ships its own purpose-built ping() — cheaper
+                # than get_version() and the call kipy itself recommends
+                # for connectivity checks.
+                if hasattr(kicad, "ping"):
+                    kicad.ping()
+                else:
+                    kicad.get_version()
+                result[0] = True
+            except Exception:
+                result[0] = False
+
+        t = threading.Thread(target=_do_ping, daemon=True)
+        t.start()
+        t.join(timeout)
+        if result[0] is None:
+            # The kipy call is still sitting on the socket. Treat as gone;
+            # the daemon thread will exit with the process.
+            return False
+        return bool(result[0])
+    finally:
+        try:
+            _IPC_LOCK.release()
+        except RuntimeError:
+            # Lock wasn't held (defensive — shouldn't happen).
+            pass
+
+
+def close_connection(timeout: float = 1.0) -> None:
+    """Close the IPC connection, releasing KiCad's end of the socket.
+
+    kicad.close() can itself block when KiCad is mid-shutdown (it tries
+    to handshake with a peer that's already tearing down). Run it on a
+    daemon thread with a hard timeout so the plugin exit path is never
+    held up. Safe to call multiple times.
+    """
+    global _KICAD_SINGLETON
+    if _KICAD_SINGLETON is None:
+        return
+    target = _KICAD_SINGLETON
+    _KICAD_SINGLETON = None
+
+    def _do_close():
+        try:
+            if hasattr(target, "close"):
+                target.close()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_do_close, daemon=True)
+    t.start()
+    t.join(timeout)
+    # If t is still alive, we let it die with the process; the OS will
+    # drop the socket when this process exits.
+
+
 def get_board_full_path(kicad: Optional["kipy.KiCad"] = None) -> Optional[str]:
     """Best-effort absolute filesystem path to the open PCB.
 
-    kipy.Board.name returns just the basename. The PCB file's directory is
-    only exposed via `kicad.get_open_documents(DocumentType.DOCTYPE_PCB)`,
-    and the field names there have shifted between releases — so we probe
-    a few candidates and return the first one that's an existing file.
-    Returns None if nothing usable is reachable.
+    kipy.Board.name returns just the basename. The PCB file's directory
+    is only reachable through `kicad.get_open_documents(DOCTYPE_PCB)`,
+    and protobuf field names have shifted between kicad-python releases.
+    This function walks every attribute on the returned DocumentSpecifier
+    looking for a string that points at an existing .kicad_pcb file.
+    Returns None if nothing matches.
     """
     if kicad is None:
         kicad = connect()
     try:
         from kipy.proto.common.types import DocumentType  # type: ignore
     except Exception:
+        print("get_board_full_path: kipy.proto.common.types not importable")
         return None
     try:
-        docs = kicad.get_open_documents(DocumentType.DOCTYPE_PCB)  # type: ignore[attr-defined]
-    except Exception:
+        with ipc_lock():
+            docs = list(kicad.get_open_documents(DocumentType.DOCTYPE_PCB))  # type: ignore[attr-defined]
+    except Exception as e:
+        print(f"get_board_full_path: get_open_documents failed: {e}")
         return None
 
     import os
-    for doc in docs or []:
-        for attr in ("path", "full_path", "file_path", "filename", "file_name"):
-            v = getattr(doc, attr, None)
+    if not docs:
+        print("get_board_full_path: get_open_documents returned no PCB docs")
+        return None
+
+    # Diagnostic dump on first call. Protobuf Messages don't expose field
+    # accessors via dir() until those fields have values set, so use
+    # DESCRIPTOR.fields_by_name to enumerate every defined field instead.
+    first = docs[0]
+    try:
+        field_names = list(first.DESCRIPTOR.fields_by_name.keys())
+        print(f"get_board_full_path: DocumentSpecifier fields = {field_names}")
+    except Exception as e:
+        print(f"get_board_full_path: descriptor introspection failed: {e}")
+        field_names = []
+
+    def _walk(obj, depth: int = 0):
+        """Yield (path, value) for every string field reachable in the proto."""
+        if depth > 4 or obj is None:
+            return
+        # Iterate the declared proto fields (works even when unset).
+        try:
+            fields = list(obj.DESCRIPTOR.fields_by_name.keys())
+        except Exception:
+            fields = []
+        for name in fields:
+            try:
+                v = getattr(obj, name)
+            except Exception:
+                continue
+            if isinstance(v, str):
+                yield (name, v, depth)
+            elif hasattr(v, "DESCRIPTOR"):
+                yield from _walk(v, depth + 1)
+
+    for doc in docs:
+        # Primary path: kipy v0.7 exposes the PCB as
+        #   doc.board_filename = 'foo.kicad_pcb'   (basename only)
+        #   doc.project.path   = '/abs/dir'        (project directory)
+        # Join them and verify the file exists.
+        basename = getattr(doc, "board_filename", "") or ""
+        proj = getattr(doc, "project", None)
+        proj_path = getattr(proj, "path", "") if proj is not None else ""
+        if basename and proj_path:
+            joined = os.path.join(proj_path, basename)
+            if os.path.isfile(joined):
+                print(f"get_board_full_path: resolved via project.path + board_filename -> {joined}")
+                return joined
+            # Some KiCad releases put project.path on the .kicad_pro file
+            # instead of the project directory; fall back to its dirname.
+            joined2 = os.path.join(os.path.dirname(proj_path), basename)
+            if os.path.isfile(joined2):
+                print(f"get_board_full_path: resolved via dirname(project.path) + board_filename -> {joined2}")
+                return joined2
+
+        # Fallback: walk every string field on the doc tree and pick the
+        # first one that points at an on-disk file by itself.
+        candidates = list(_walk(doc))
+        for name, v, depth in candidates:
+            if v:
+                print(f"get_board_full_path: field {name!r} (depth={depth}) = {v!r}")
+        for name, v, _ in candidates:
             if isinstance(v, str) and v and os.path.isfile(v):
+                print(f"get_board_full_path: resolved via {name} -> {v}")
                 return v
-        # Some kipy versions wrap path under board_filename / project / etc.
-        for attr in ("board_filename", "project", "board"):
-            sub = getattr(doc, attr, None)
-            if sub is not None:
-                for inner in ("path", "full_path", "file_path", "filename"):
-                    v = getattr(sub, inner, None)
-                    if isinstance(v, str) and v and os.path.isfile(v):
-                        return v
+
+    print("get_board_full_path: could not assemble an existing PCB path from "
+          "DocumentSpecifier")
     return None
 
 
