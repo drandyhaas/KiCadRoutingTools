@@ -1128,11 +1128,11 @@ def build_pcb_data_from_board(board) -> PCBData:
     # All board.* reads share one ipc_lock acquisition so the snapshot is
     # consistent and we don't interleave with a concurrent apply commit.
     with ipc_lock():
-        return _build_pcb_data_from_board_locked(board)
+        return _build_pcb_data_from_board_impl(board)
 
 
-def _build_pcb_data_from_board_locked(board) -> PCBData:
-    """Inner impl of build_pcb_data_from_board, assumes ipc_lock is held."""
+def _build_pcb_data_from_board_impl(board) -> PCBData:
+    """Inner impl — caller is responsible for holding ipc_lock."""
     from kicad_ipc_adapter import layer_maps, layer_name_for
 
     name_to_bl, bl_to_name = layer_maps()
@@ -1795,38 +1795,6 @@ def _extract_zones_kipy(board, get_layer_name) -> List[Zone]:
     return zones
 
 
-# --- Legacy SWIG-named aliases ---------------------------------------------
-# Kept so callers that still reference the old names keep working during the
-# migration. Both now route through the kipy implementations above.
-
-def _extract_zones_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
-    get_layer_name = args[1] if len(args) >= 2 else kwargs.get("get_layer_name")
-    if get_layer_name is None:
-        from kicad_ipc_adapter import layer_name_for
-        get_layer_name = layer_name_for
-    return _extract_zones_kipy(board, get_layer_name)
-
-
-def _extract_stackup_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
-    return _extract_stackup_kipy(board)
-
-
-def _extract_board_outline_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
-    outline, _ = _extract_board_contours_from_pcbnew(board)
-    return outline
-
-
-def _extract_board_contours_from_pcbnew(board, *args, **kwargs):  # pragma: no cover - shim
-    from kicad_ipc_adapter import layer_maps
-    name_to_bl, _ = layer_maps()
-    edge_cuts_bl = name_to_bl.get("Edge.Cuts")
-    try:
-        drawings = list(board.get_shapes())
-    except Exception:
-        drawings = []
-    return _extract_board_contours_kipy(drawings, edge_cuts_bl)
-
-
 def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
     """Reverse transform: global board coordinates to local footprint coordinates."""
     rad = math.radians(fp_rotation_deg)  # Positive rotation to reverse the transform
@@ -1849,7 +1817,7 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     results as parse_kicad_pcb().
 
     Args:
-        from_board: PCBData built from pcbnew SWIG API
+        from_board: PCBData built from the live KiCad board over IPC
         from_file: PCBData parsed from .kicad_pcb file
         tolerance: Position tolerance in mm for coordinate comparisons
 

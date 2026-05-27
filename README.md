@@ -552,9 +552,9 @@ KiCadRoutingTools/
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
-├── kicad_routing_plugin/     # KiCad ActionPlugin
-│   ├── action_plugin.py      # ActionPlugin entry point
-│   ├── swig_gui.py           # Main routing dialog (Basic/Advanced tabs)
+├── kicad_routing_plugin/     # KiCad IPC plugin
+│   ├── ipc_entry.py          # Process entry point KiCad spawns per action
+│   ├── routing_dialog.py     # Main routing dialog (Basic/Advanced tabs)
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
 │   ├── planes_gui.py         # Power/ground planes tab

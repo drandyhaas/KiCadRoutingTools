@@ -885,7 +885,7 @@ class FanoutTab(wx.Panel):
 
     def _create_ui(self):
         """Create the tab UI."""
-        # GridSizer for an even 50/50 split — see swig_gui._create_config_tab.
+        # GridSizer for an even 50/50 split — see routing_dialog._create_config_tab.
         main_sizer = wx.GridSizer(rows=1, cols=2, hgap=0, vgap=0)
 
         # Left side: Net selection (same as other tabs)

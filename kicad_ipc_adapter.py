@@ -1,8 +1,8 @@
 """KiCad IPC adapter — centralises all `kipy` (kicad-python) interaction.
 
-Every place that used to import `pcbnew` now calls into this module instead,
-so the SWIG → IPC churn doesn't leak across the codebase. Keep the surface
-small and stable.
+This is the only module that imports kipy. Every other file in the plugin
+talks to KiCad through the helpers here so the public surface stays small
+and any kicad-python API drift only needs to be patched in one place.
 
 Coordinate model
 ----------------
@@ -43,16 +43,23 @@ from contextlib import contextmanager
 from typing import Iterable, Optional
 
 
-# --- Lazy imports -----------------------------------------------------------
-# kipy is only installed inside KiCad's per-plugin venv, so guard the import
-# to give a clear error if someone tries to use this module outside KiCad.
+# --- kipy imports -----------------------------------------------------------
+# kipy is only installed inside KiCad's per-plugin venv, so we import on
+# first use and give a clear error if someone tries to use this module
+# outside KiCad. Lazily cached in `_kipy` so subsequent calls are free.
 
-def _import_kipy():
+_kipy = None  # set by _ensure_kipy() on first call
+
+
+def _ensure_kipy():
+    """Import kipy once, cache the modules we use, and return the cache."""
+    global _kipy
+    if _kipy is not None:
+        return _kipy
     try:
-        import kipy
-        from kipy.board_types import BoardLayer, Track, Via, BoardShape
-        from kipy.geometry import Vector2
-        return kipy, BoardLayer, Track, Via, BoardShape, Vector2
+        import kipy  # noqa: F401  (exposed as _kipy.kipy)
+        from kipy import board_types as bt
+        from kipy import geometry as geom
     except ImportError as e:
         raise ImportError(
             "kicad-python (kipy) is not installed. This plugin runs as a "
@@ -62,12 +69,34 @@ def _import_kipy():
             "`pip install kicad-python>=0.7.0`."
         ) from e
 
+    class _Cache:
+        pass
+    c = _Cache()
+    c.kipy = kipy
+    c.BoardLayer = bt.BoardLayer
+    c.Track = bt.Track
+    c.Via = bt.Via
+    c.BoardShape = bt.BoardShape
+    c.Vector2 = geom.Vector2
+    # Zone-related types are imported lazily on first zone construction
+    # so plugins that never touch the planes tab don't trigger the import.
+    c._zone_types = None
+    _kipy = c
+    return _kipy
 
-def _import_zone_types():
-    """Lazy zone-related imports. Zone APIs are still in flux; isolate here."""
-    from kipy.board_types import Zone, ZoneType
-    from kipy.geometry import PolyLine, PolyLineNode, PolygonWithHoles
-    return Zone, ZoneType, PolyLine, PolyLineNode, PolygonWithHoles
+
+def _zone_types():
+    """Lazy import of zone-related types (Zone, ZoneType, PolyLine, ...).
+
+    Kept separate so callers that only route tracks/vias don't pay the
+    import cost or break if a kicad-python release moves zone classes around.
+    """
+    c = _ensure_kipy()
+    if c._zone_types is None:
+        from kipy.board_types import Zone, ZoneType
+        from kipy.geometry import PolyLine, PolyLineNode, PolygonWithHoles
+        c._zone_types = (Zone, ZoneType, PolyLine, PolyLineNode, PolygonWithHoles)
+    return c._zone_types
 
 
 # --- Connection -------------------------------------------------------------
@@ -102,8 +131,7 @@ def connect() -> "kipy.KiCad":
     """
     global _KICAD_SINGLETON
     if _KICAD_SINGLETON is None:
-        kipy, *_ = _import_kipy()
-        _KICAD_SINGLETON = kipy.KiCad()
+        _KICAD_SINGLETON = _ensure_kipy().kipy.KiCad()
     return _KICAD_SINGLETON
 
 
@@ -203,95 +231,37 @@ def close_connection(timeout: float = 1.0) -> None:
 def get_board_full_path(kicad: Optional["kipy.KiCad"] = None) -> Optional[str]:
     """Best-effort absolute filesystem path to the open PCB.
 
-    kipy.Board.name returns just the basename. The PCB file's directory
-    is only reachable through `kicad.get_open_documents(DOCTYPE_PCB)`,
-    and protobuf field names have shifted between kicad-python releases.
-    This function walks every attribute on the returned DocumentSpecifier
-    looking for a string that points at an existing .kicad_pcb file.
-    Returns None if nothing matches.
+    kipy.Board.name only returns the basename. The directory lives on the
+    DocumentSpecifier returned by `get_open_documents(DOCTYPE_PCB)` —
+    specifically `doc.project.path` on kicad-python 0.7. Returns None if
+    the joined path doesn't exist on disk.
     """
+    import os
     if kicad is None:
         kicad = connect()
     try:
         from kipy.proto.common.types import DocumentType  # type: ignore
     except Exception:
-        print("get_board_full_path: kipy.proto.common.types not importable")
         return None
     try:
         with ipc_lock():
             docs = list(kicad.get_open_documents(DocumentType.DOCTYPE_PCB))  # type: ignore[attr-defined]
-    except Exception as e:
-        print(f"get_board_full_path: get_open_documents failed: {e}")
+    except Exception:
         return None
 
-    import os
-    if not docs:
-        print("get_board_full_path: get_open_documents returned no PCB docs")
-        return None
-
-    # Diagnostic dump on first call. Protobuf Messages don't expose field
-    # accessors via dir() until those fields have values set, so use
-    # DESCRIPTOR.fields_by_name to enumerate every defined field instead.
-    first = docs[0]
-    try:
-        field_names = list(first.DESCRIPTOR.fields_by_name.keys())
-        print(f"get_board_full_path: DocumentSpecifier fields = {field_names}")
-    except Exception as e:
-        print(f"get_board_full_path: descriptor introspection failed: {e}")
-        field_names = []
-
-    def _walk(obj, depth: int = 0):
-        """Yield (path, value) for every string field reachable in the proto."""
-        if depth > 4 or obj is None:
-            return
-        # Iterate the declared proto fields (works even when unset).
-        try:
-            fields = list(obj.DESCRIPTOR.fields_by_name.keys())
-        except Exception:
-            fields = []
-        for name in fields:
-            try:
-                v = getattr(obj, name)
-            except Exception:
-                continue
-            if isinstance(v, str):
-                yield (name, v, depth)
-            elif hasattr(v, "DESCRIPTOR"):
-                yield from _walk(v, depth + 1)
-
-    for doc in docs:
-        # Primary path: kipy v0.7 exposes the PCB as
-        #   doc.board_filename = 'foo.kicad_pcb'   (basename only)
-        #   doc.project.path   = '/abs/dir'        (project directory)
-        # Join them and verify the file exists.
+    for doc in docs or []:
         basename = getattr(doc, "board_filename", "") or ""
         proj = getattr(doc, "project", None)
         proj_path = getattr(proj, "path", "") if proj is not None else ""
-        if basename and proj_path:
-            joined = os.path.join(proj_path, basename)
-            if os.path.isfile(joined):
-                print(f"get_board_full_path: resolved via project.path + board_filename -> {joined}")
-                return joined
-            # Some KiCad releases put project.path on the .kicad_pro file
-            # instead of the project directory; fall back to its dirname.
-            joined2 = os.path.join(os.path.dirname(proj_path), basename)
-            if os.path.isfile(joined2):
-                print(f"get_board_full_path: resolved via dirname(project.path) + board_filename -> {joined2}")
-                return joined2
-
-        # Fallback: walk every string field on the doc tree and pick the
-        # first one that points at an on-disk file by itself.
-        candidates = list(_walk(doc))
-        for name, v, depth in candidates:
-            if v:
-                print(f"get_board_full_path: field {name!r} (depth={depth}) = {v!r}")
-        for name, v, _ in candidates:
-            if isinstance(v, str) and v and os.path.isfile(v):
-                print(f"get_board_full_path: resolved via {name} -> {v}")
-                return v
-
-    print("get_board_full_path: could not assemble an existing PCB path from "
-          "DocumentSpecifier")
+        if not (basename and proj_path):
+            continue
+        # Try project.path/basename first; fall back to its dirname (some
+        # releases put the .kicad_pro file path in project.path instead of
+        # the project directory).
+        for candidate in (os.path.join(proj_path, basename),
+                          os.path.join(os.path.dirname(proj_path), basename)):
+            if os.path.isfile(candidate):
+                return candidate
     return None
 
 
@@ -299,13 +269,12 @@ def get_board_full_path(kicad: Optional["kipy.KiCad"] = None) -> Optional[str]:
 
 def vec_mm(x_mm: float, y_mm: float):
     """Construct a kipy Vector2 from millimetre coordinates."""
-    _, _, _, _, _, Vector2 = _import_kipy()
-    return Vector2.from_xy_mm(x_mm, y_mm)
+    return _ensure_kipy().Vector2.from_xy_mm(x_mm, y_mm)
 
 
-def to_mm_xy(vec) -> tuple[float, float]:
-    """Convert a kipy Vector2 to a (x_mm, y_mm) tuple."""
-    return (vec.x_mm, vec.y_mm)
+def _mm_to_nm(v: float) -> int:
+    """Convert millimetres to the integer nanometres kipy expects on the wire."""
+    return int(round(v * 1_000_000))
 
 
 # --- Layer mappings ---------------------------------------------------------
@@ -314,8 +283,7 @@ def _build_layer_maps():
     """Build dicts that translate between KiCad string layer names and the
     `BoardLayer` enum kipy exposes. Returns (name_to_bl, bl_to_name).
     """
-    _, BoardLayer, *_ = _import_kipy()
-
+    BoardLayer = _ensure_kipy().BoardLayer
     name_to_bl: dict[str, "BoardLayer"] = {
         "F.Cu": BoardLayer.BL_F_Cu,
         "B.Cu": BoardLayer.BL_B_Cu,
@@ -390,9 +358,6 @@ class NetMap:
             (getattr(n, "name", "") or ""): n for n in nets
         }
 
-    def by_name(self, name: str):
-        return self._by_name.get(name)
-
     def resolve(self, net_name: Optional[str] = None, **_ignored):
         """Return a kipy Net object for the given net name, or None."""
         if not net_name:
@@ -464,11 +429,10 @@ def make_track(net_map: NetMap, start_x_mm: float, start_y_mm: float,
     Net is assigned by name (the only stable identifier between PCBData's
     synthetic net_ids and kipy's Net objects).
     """
-    _, _, Track, _, _, _ = _import_kipy()
-    t = Track()
+    t = _ensure_kipy().Track()
     t.start = vec_mm(start_x_mm, start_y_mm)
     t.end = vec_mm(end_x_mm, end_y_mm)
-    t.width = int(round(width_mm * 1_000_000))  # mm → nm
+    t.width = _mm_to_nm(width_mm)
     t.layer = layer_id_for(layer_name)
     net = net_map.resolve(net_name=net_name)
     if net is not None:
@@ -488,18 +452,18 @@ def make_via(net_map: NetMap, x_mm: float, y_mm: float, size_mm: float,
     vias may need padstack customisation — see TODO in plan's open
     questions.
     """
-    _, _, _, Via, _, _ = _import_kipy()
-    v = Via()
+    v = _ensure_kipy().Via()
     v.position = vec_mm(x_mm, y_mm)
-    # kipy Via exposes diameter + drill in nm via setter helpers if present.
+    # kipy 0.7 has set_diameter/set_drill_diameter setters; older releases
+    # exposed the same fields as attributes. Use the setter when present.
     if hasattr(v, "set_diameter"):
-        v.set_diameter(int(round(size_mm * 1_000_000)))
+        v.set_diameter(_mm_to_nm(size_mm))
     else:
-        v.diameter = int(round(size_mm * 1_000_000))
+        v.diameter = _mm_to_nm(size_mm)
     if hasattr(v, "set_drill_diameter"):
-        v.set_drill_diameter(int(round(drill_mm * 1_000_000)))
+        v.set_drill_diameter(_mm_to_nm(drill_mm))
     else:
-        v.drill_diameter = int(round(drill_mm * 1_000_000))
+        v.drill_diameter = _mm_to_nm(drill_mm)
     net = net_map.resolve(net_name=net_name)
     if net is not None:
         v.net = net
@@ -519,11 +483,9 @@ def make_via(net_map: NetMap, x_mm: float, y_mm: float, size_mm: float,
 def make_debug_line(start_xy: tuple[float, float], end_xy: tuple[float, float],
                     layer_name: str, width_mm: float = 0.05):
     """Build a kipy BoardShape segment for debug visualisation on a User layer."""
-    _, _, _, _, BoardShape, _ = _import_kipy()
-    s = BoardShape()
-    # The BoardShape API varies by kipy version; the common surface is to set
-    # type to segment and provide start/end points. Try the high-level path
-    # first; fall back to attribute assignment if not present.
+    s = _ensure_kipy().BoardShape()
+    # BoardShape.shape_type / .stroke_width vary between kipy releases.
+    # Probe defensively; missing attrs are silently ignored.
     try:
         from kipy.board_types import BoardShapeType
         s.shape_type = BoardShapeType.SEGMENT
@@ -533,17 +495,13 @@ def make_debug_line(start_xy: tuple[float, float], end_xy: tuple[float, float],
     s.end = vec_mm(*end_xy)
     s.layer = layer_id_for(layer_name)
     if hasattr(s, "stroke_width"):
-        s.stroke_width = int(round(width_mm * 1_000_000))
+        s.stroke_width = _mm_to_nm(width_mm)
     else:
-        s.width = int(round(width_mm * 1_000_000))
+        s.width = _mm_to_nm(width_mm)
     return s
 
 
 # --- Zone construction -----------------------------------------------------
-
-def _mm_to_nm(v: float) -> int:
-    return int(round(v * 1_000_000))
-
 
 def make_zone(net_map: NetMap, polygon_mm, layer_name: str,
               net_name: Optional[str] = None,
@@ -554,19 +512,17 @@ def make_zone(net_map: NetMap, polygon_mm, layer_name: str,
     polygon_mm: iterable of (x_mm, y_mm) outline points. Must form a
         closed loop (last point auto-connects to first).
     """
-    Zone, ZoneType, PolyLine, PolyLineNode, PolygonWithHoles = _import_zone_types()
+    Zone, ZoneType, PolyLine, PolyLineNode, PolygonWithHoles = _zone_types()
 
-    pts_nm = [(int(round(x * 1_000_000)), int(round(y * 1_000_000)))
-              for x, y in polygon_mm]
     polyline = PolyLine()
-    # PolyLineNode.from_xy expects nanometers (the proto's native unit).
-    # Some kipy releases also expose .from_xy_mm — use it if available.
+    # PolyLineNode.from_xy_mm exists on kipy 0.7+; older releases only
+    # have from_xy which takes nanometres. Probe both.
     if hasattr(PolyLineNode, "from_xy_mm"):
-        for x, y in polygon_mm:
-            polyline.append(PolyLineNode.from_xy_mm(x, y))
+        for x_mm, y_mm in polygon_mm:
+            polyline.append(PolyLineNode.from_xy_mm(x_mm, y_mm))
     else:
-        for x_nm, y_nm in pts_nm:
-            polyline.append(PolyLineNode.from_xy(x_nm, y_nm))
+        for x_mm, y_mm in polygon_mm:
+            polyline.append(PolyLineNode.from_xy(_mm_to_nm(x_mm), _mm_to_nm(y_mm)))
 
     poly_with_holes = PolygonWithHoles()
     poly_with_holes.outline = polyline
@@ -776,7 +732,7 @@ def move_copper_text_to_silkscreen(board) -> int:
     Returns the count of moved items. Wrapped in its own commit so it
     appears as a separate undo step from the route.
     """
-    _, BoardLayer, *_ = _import_kipy()
+    BoardLayer = _ensure_kipy().BoardLayer
     moved = []
     try:
         items = board.get_shapes()

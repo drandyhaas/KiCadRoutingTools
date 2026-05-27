@@ -29,8 +29,8 @@ from .settings_persistence import get_dialog_settings, restore_dialog_settings
 def _ipc_board():
     """Return the currently-open kipy board (or None).
 
-    Single point of access so the SWIG → IPC migration only changed the
-    plumbing in one place; callers stay agnostic about the connection.
+    Single point of access so the rest of this module stays agnostic
+    about how we reach KiCad.
     """
     try:
         from kicad_ipc_adapter import get_board
@@ -162,8 +162,8 @@ class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
     def __init__(self, parent, pcb_data, board_filename, saved_settings=None):
-        # Default matches the SWIG-version dialog size so the layout stays
-        # familiar across the migration.
+        # Default dialog size; can be overridden by the user, persisted
+        # in the settings file.
         default_size = (800, 800)
         size = default_size
         if saved_settings and 'window_size' in saved_settings:
@@ -256,44 +256,26 @@ class RoutingDialog(wx.Dialog):
     def _kicad_died(self):
         """Tear down hard when KiCad disappears.
 
-        We deliberately bypass the normal wx EndModal → Destroy →
-        close_connection() path here: that path calls kicad.close(), which
-        can itself block waiting on a half-closed socket — and in the
-        worst case KiCad was observed to hang on shutdown when the plugin
-        tried to gracefully close at the same time. So instead: persist
-        settings to disk synchronously, then os._exit() so the kernel
-        drops our end of the socket immediately and KiCad's poll sees the
-        peer disconnect at once.
+        Bypasses the normal wx EndModal → Destroy → close_connection()
+        path because kicad.close() can block waiting on a half-closed
+        socket — KiCad was observed to hang on shutdown when the plugin
+        tried to close gracefully at the same time. Save settings inline,
+        then os._exit() so the kernel drops our end of the socket and
+        KiCad's poll sees the peer disconnect at once.
         """
         import os as _os
         print("Heartbeat: KiCad is no longer reachable over IPC; force-exiting plugin")
         try:
             from .settings_persistence import get_dialog_settings
-            settings = get_dialog_settings(self)
-            # Inline the disk write to avoid pulling in ipc_entry (which
-            # imports wx things that may already be torn down).
-            import json
-            def _coerce(o):
-                if isinstance(o, tuple):
-                    return [_coerce(x) for x in o]
-                if isinstance(o, list):
-                    return [_coerce(x) for x in o]
-                if isinstance(o, dict):
-                    return {k: _coerce(v) for k, v in o.items()}
-                if isinstance(o, set):
-                    return [_coerce(x) for x in o]
-                return o
-            path = _os.path.expanduser("~/.kicad_routing_tools_settings.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(_coerce(settings), f, indent=2, default=str)
-            print(f"Heartbeat: settings saved to {path}")
+            from . import ipc_settings_store
+            if ipc_settings_store.save(get_dialog_settings(self)):
+                print(f"Heartbeat: settings saved to {ipc_settings_store.path()}")
         except Exception as e:
             print(f"Heartbeat: settings save failed: {e}")
         # _exit (not sys.exit) because we want NO cleanup — no atexit hooks,
         # no thread joins, no kipy close() that could re-enter the wedged
         # socket. The OS closes the socket as part of process teardown,
         # which is what KiCad needs to see to finish its own shutdown.
-        _os.flush = getattr(_os, "flush", lambda: None)
         try:
             import sys as _sys
             _sys.stdout.flush(); _sys.stderr.flush()
@@ -452,10 +434,9 @@ class RoutingDialog(wx.Dialog):
         config_sizer = wx.BoxSizer(wx.VERTICAL)
         # GridSizer (vs BoxSizer with proportion=1:1) gives two strictly
         # equal columns regardless of inner content's natural width.
-        # wxPython 4.2's BoxSizer became more content-aware about minimum
-        # sizes, which pushed the net-selection column wider than the
-        # right column under the original 1:1 proportion. GridSizer
-        # restores the SWIG-version even split.
+        # wxPython 4.2's BoxSizer is content-aware about minimum sizes and
+        # would push the net-selection column wider than the right column
+        # because the component dropdown has long label strings.
         h_sizer = wx.GridSizer(rows=1, cols=2, hgap=0, vgap=0)
 
         # Left side: Net selection

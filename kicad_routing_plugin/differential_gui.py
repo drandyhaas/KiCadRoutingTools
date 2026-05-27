@@ -334,7 +334,7 @@ class DifferentialTab(wx.Panel):
         """Create the tab UI."""
         # GridSizer (vs BoxSizer with proportion=1:1) gives strictly equal
         # columns regardless of the children's natural widths — see
-        # swig_gui._create_config_tab for the reasoning.
+        # routing_dialog._create_config_tab for the reasoning.
         main_sizer = wx.GridSizer(rows=1, cols=2, hgap=0, vgap=0)
 
         # Left side: Diff pair selection
@@ -779,7 +779,7 @@ class DifferentialTab(wx.Panel):
         if use_netclass:
             # Try to get net class from first selected pair, fall back to Default
             class_name = self._get_selected_pair_netclass() or 'Default'
-            from .swig_gui import _get_netclass_parameters
+            from .routing_dialog import _get_netclass_parameters
             params = _get_netclass_parameters(class_name)
             if params:
                 # Update diff pair width and gap from net class

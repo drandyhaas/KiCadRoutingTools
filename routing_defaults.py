@@ -2,7 +2,7 @@
 Default routing parameter values.
 
 This module defines the default values for routing parameters, used by both
-the CLI (route.py) and the GUI (swig_gui.py) to ensure consistency.
+the CLI (route.py) and the GUI (routing_dialog.py) to ensure consistency.
 """
 
 # Track/Via parameters

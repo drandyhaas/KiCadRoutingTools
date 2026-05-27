@@ -50,42 +50,6 @@ if _PLUGIN_DIR not in sys.path:
 
 
 _LOG_PATH = os.path.expanduser("~/.kicad_routing_tools.log")
-_SETTINGS_PATH = os.path.expanduser("~/.kicad_routing_tools_settings.json")
-
-
-def _load_settings() -> dict:
-    """Read previously-persisted dialog settings, or {} on first launch."""
-    import json
-    try:
-        with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        _log(f"settings load failed ({e}); starting with defaults")
-        return {}
-
-
-def _save_settings(settings: dict) -> None:
-    """Persist dialog settings. Tuples become lists (JSON has no tuples)."""
-    import json
-
-    def _coerce(obj):
-        if isinstance(obj, tuple):
-            return [_coerce(x) for x in obj]
-        if isinstance(obj, list):
-            return [_coerce(x) for x in obj]
-        if isinstance(obj, dict):
-            return {k: _coerce(v) for k, v in obj.items()}
-        if isinstance(obj, set):
-            return [_coerce(x) for x in obj]
-        return obj
-
-    try:
-        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(_coerce(settings), f, indent=2, default=str)
-    except Exception as e:
-        _log(f"settings save failed: {e}")
 
 
 def _log(msg: str) -> None:
@@ -257,12 +221,13 @@ def main() -> int:
     # Construct + show the routing dialog. RoutingDialog.__init__ is large
     # (loads nets, builds fanout/differential/planes panels, etc.) and any
     # exception there used to take the whole process down silently.
-    saved_settings = _load_settings()
+    from . import ipc_settings_store
+    saved_settings = ipc_settings_store.load()
     _log(f"loaded {len(saved_settings)} saved-settings keys "
-         f"from {_SETTINGS_PATH}")
+         f"from {ipc_settings_store.path()}")
     try:
         _log("constructing RoutingDialog...")
-        from kicad_routing_plugin.swig_gui import RoutingDialog
+        from kicad_routing_plugin.routing_dialog import RoutingDialog
         dlg = RoutingDialog(None, pcb_data, board_filename,
                              saved_settings=saved_settings)
         dlg._ipc_board = board
@@ -301,8 +266,8 @@ def main() -> int:
         # Snapshot settings (window size/pos + all dialog state) to disk
         # before destruction so the next launch can restore them.
         try:
-            _save_settings(dlg.get_settings())
-            _log(f"settings saved to {_SETTINGS_PATH}")
+            if ipc_settings_store.save(dlg.get_settings()):
+                _log(f"settings saved to {ipc_settings_store.path()}")
         except Exception as e:
             _log(f"could not capture settings on exit: {e}")
         try:
