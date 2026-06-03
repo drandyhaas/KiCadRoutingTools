@@ -25,6 +25,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance; uses segment intersection with MST for non-BGA boards), inside-out (BGA), or original order
 - **MPS layer swap** - When MPS detects crossing conflicts (nets in Round 2+), attempts layer swaps to eliminate same-layer crossings. Tries swapping both the conflicting Round 2 unit and Round 1 unit. Re-runs MPS after swaps to verify conflict resolution
 - **Board edge clearance** - Tracks and vias respect Edge.Cuts boundaries including curved edges (gr_arc), non-rectangular outlines, and interior cutouts. Arcs are automatically linearized into polylines for accurate clearance checking
+- **Keep-out rule areas** - Tracks and/or vias respect KiCad keep-out zones (rule areas with `(keepout (tracks not_allowed) (vias not_allowed) ...)`), blocking only the disallowed item on the keepout's listed layers (or all routing layers if none are listed). Track/via copper is kept clear of the boundary by the configured clearance, e.g. an antenna-flange RF exclusion
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs, with direction-aware costs (moving away from stubs costs less)
 - **BGA proximity avoidance** - Penalizes routes near BGA edges, with direction-aware costs (moving away from BGA zones costs less)
@@ -39,6 +40,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
 - **Bus routing** - Automatically detects groups of nets with clustered endpoints (buses) and routes them together. Uses direction-based attraction so each net follows its neighbor's path in parallel, creating clean parallel traces. Routes from the middle of the bus outward, alternating sides. Enable with `--bus` flag. Configurable detection radius, attraction radius, and attraction bonus
+- **Guide corridor (preferred route)** - Draw a polyline on a User layer (e.g. `User.1`) in KiCad and the selected nets are routed to follow it as waypoints — source → along your drawn path → target — getting as close to the line as obstacles allow. For multi-point nets each waypoint steers the nearest segment of the net's existing MST, so endpoints/topology are untouched. It's strictly best-effort: a waypoint it can't follow on the current layer is skipped (so a guide never makes a route fail or adds vias the direct route wouldn't need), and multiple nets following the same corridor pack alongside without overlapping. Enable with `--guide-corridor` (CLI) or the "Follow User-layer guide path" checkbox (plugin); configurable layer and waypoint spacing
+- **Keepout zones** - Draw one or more closed polygons on a User layer (e.g. `User.2`) in KiCad and routed tracks (and vias) are kept **out** of those areas on every copper layer. It's a hard keepout applied to all nets routed in the run — useful for reserving analog regions, antenna clearances, or mechanical exclusions. Enable with `--keepout` (CLI) or the "Keep out of User-layer polygon(s)" checkbox (plugin); configurable layer. (Don't draw a zone over a pad you need to route.)
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
 - **Time matching** - Alternative to length matching that matches propagation delay instead of physical length. Accounts for different signal speeds on outer layers (microstrip, faster) vs inner layers (stripline, slower) using effective dielectric constants from the board stackup. Use `--time-matching` to enable. Tolerance specified in picoseconds
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
@@ -182,6 +185,8 @@ The installer automatically detects your KiCad installation directory (supports 
 - **Linux**: `~/.local/share/kicad/<version>/3rdparty/plugins/`
 - **Windows**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
 
+If you previously installed this plugin through the Plugin & Content Manager, that copy sits next to the local install and would shadow it on `sys.path` (causing stale-code errors). The installer detects any such PCM copy and moves it aside to `<kicad-base>/disabled_pcm_plugins/<version>/`, leaving it recoverable. Pass `--keep-pcm` to skip this.
+
 ### Releasing a new version (maintainers)
 
 The full release flow — version bump, GitHub Release, and the merge request to the official KiCad PCM repository — is documented step by step in **[docs/release-pipeline.md](docs/release-pipeline.md)**.
@@ -202,18 +207,26 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 
 1. Open KiCad (9.0 or later)
 2. Open a PCB in Pcbnew
-3. Go to **Tools → External Plugins → KiCadRoutingTools**
-4. Configure routing parameters and select nets to route
-5. Click **Route** to run the router
+3. *(Optional)* Select one or more nets in the PCB editor first — for example by
+   clicking tracks/pads, or right-clicking a track and choosing
+   **Select → All Tracks in Net**. Any nets you have selected are automatically
+   pre-checked for routing when the plugin opens.
+4. Go to **Tools → External Plugins → KiCadRoutingTools**
+5. Configure routing parameters and select (or adjust) the nets to route
+6. Click **Route** to run the router
 
 ### Plugin Tabs
 
 **Basic Tab:**
 - Net selection with filtering and component filtering
+- Nets selected in the PCB editor before opening the plugin are pre-checked automatically (also applies to the Fanout, Planes, and Differential tabs)
 - Option to separate nets by net class (organizes into tabs per class)
 - Track width, clearance, via size/drill from net class or manual override
 - Layer selection with per-layer cost multipliers
 - Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
+- **Guide corridor** - draw a polyline on a User layer (e.g. `User.1`) and tick "Follow User-layer guide path" to route the selected nets along it (waypoints, avoiding obstacles, packed non-overlapping)
+- **Keepout zones** - draw one or more closed polygons on a User layer (e.g. `User.2`) and tick "Keep out of User-layer polygon(s)" to keep routed tracks out of those areas (hard keepout, all routed nets)
+- **Clear guide/keepout layers** - optional "Clear guide layer after routing" / "Clear keepout layer after routing" checkboxes (unchecked by default) delete the drawn guide/keepout graphics from their User layer after a successful route, so you can draw fresh ones for the next run
 
 **Advanced Tab:**
 - Swappable nets configuration for target swap optimization
@@ -734,6 +747,15 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --bus-attraction-radius 5.0     # Attraction radius from neighbor track (mm)
 --bus-attraction-bonus 5000     # Cost bonus for staying parallel to neighbor
 --bus-min-nets 2                # Minimum nets to form a bus group
+
+# Guide corridor: route selected nets to follow a polyline drawn on a User layer (issue #7)
+--guide-corridor                # Steer routed nets along the drawn guide polyline
+--guide-corridor-layer User.1   # User layer the guide polyline is drawn on
+--guide-corridor-spacing 0.0    # Max mm between waypoints (0 = drawn vertices only; >0 subdivides)
+
+# Keepout zones: keep routed tracks out of polygons drawn on a User layer (issue #27)
+--keepout                       # Keep routed tracks out of the drawn keepout polygons
+--keepout-layer User.2          # User layer the keepout polygons are drawn on
 
 # Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching

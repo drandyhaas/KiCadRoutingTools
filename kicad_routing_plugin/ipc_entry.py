@@ -271,11 +271,23 @@ def main() -> int:
     saved_settings = ipc_settings_store.load()
     _log(f"loaded {len(saved_settings)} saved-settings keys "
          f"from {ipc_settings_store.path()}")
+
+    # Pre-select the nets the user has selected in the PCB editor (issue #6).
+    preselected_nets = set()
+    try:
+        from kicad_ipc_adapter import get_selected_net_names
+        preselected_nets = get_selected_net_names(board)
+        if preselected_nets:
+            _log(f"preselected {len(preselected_nets)} net(s) from board selection")
+    except Exception as e:
+        _log(f"selection read failed: {e}")
+
     try:
         _log("constructing RoutingDialog...")
         from kicad_routing_plugin.routing_dialog import RoutingDialog
         dlg = RoutingDialog(None, pcb_data, board_filename,
-                             saved_settings=saved_settings)
+                             saved_settings=saved_settings,
+                             preselected_nets=preselected_nets)
         dlg._ipc_board = board
         dlg._ipc_kicad = kicad
         _log("RoutingDialog constructed; calling Raise() + ShowModal()")

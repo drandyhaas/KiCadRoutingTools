@@ -870,10 +870,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         print(f"    GridRouter targets: {forward_targets[:3]}{'...' if len(forward_targets) > 3 else ''}")
         if use_single_direction:
             print(f"    Bus routing: single-direction mode (start from clustered endpoints)")
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _probe_route_with_frontier(
-        router, obstacles, forward_sources, forward_targets, config,
-        print_prefix="", direction_labels=direction_labels, track_margin=track_margin,
-        pcb_data=pcb_data, current_net_id=net_id, single_direction=use_single_direction
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _route_main_connection(
+        router, obstacles, config, forward_sources, forward_targets, track_margin,
+        pcb_data, net_id, print_prefix="", direction_labels=direction_labels,
+        single_direction=use_single_direction
     )
 
     # Adjust reversed_path based on start direction
@@ -997,6 +997,300 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         'path_length': len(path),
         'path': path,
     }
+
+
+# ---------------------------------------------------------------------------
+# Guide corridor (waypoint) routing (issue #7)
+# ---------------------------------------------------------------------------
+
+def build_corridor_waypoints(pcb_data: PCBData, config: GridRouteConfig) -> List[Tuple[int, int]]:
+    """Convert user-drawn guide polylines into ordered grid waypoint cells.
+
+    By default the waypoints are just the endpoints of each drawn line segment
+    (the polyline vertices); A* routes near-straight between them, hugging the
+    drawn line. If guide_corridor_spacing > 0, long segments are subdivided so
+    no two consecutive waypoints are farther apart than that spacing (useful to
+    follow a curve more tightly). Returns [] when no guide paths are present.
+    """
+    if not getattr(config, 'guide_corridor_enabled', False) or not pcb_data.guide_paths:
+        return []
+
+    coord = GridCoord(config.grid_step)
+    spacing_mm = getattr(config, 'guide_corridor_spacing', 0.0) or 0.0
+    spacing = coord.to_grid_dist(spacing_mm) if spacing_mm > 0 else 0
+
+    cells: List[Tuple[int, int]] = []
+    for gp in pcb_data.guide_paths:
+        pts = list(gp.points)
+        if gp.is_closed and len(pts) >= 2:
+            pts.append(pts[0])
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            g1 = coord.to_grid(x1, y1)
+            g2 = coord.to_grid(x2, y2)
+            cells.append(g1)
+            # Optionally subdivide a long segment into intermediate waypoints.
+            if spacing > 0:
+                seg_len = max(abs(g2[0] - g1[0]), abs(g2[1] - g1[1]))
+                n = seg_len // spacing
+                for k in range(1, int(n) + 1):
+                    t = (k * spacing) / seg_len if seg_len else 0
+                    if t >= 1.0:
+                        break
+                    cells.append((round(g1[0] + t * (g2[0] - g1[0])),
+                                  round(g1[1] + t * (g2[1] - g1[1]))))
+        cells.append(coord.to_grid(*pts[-1]))  # final vertex of this chain
+
+    # Drop consecutive duplicates
+    out: List[Tuple[int, int]] = []
+    for c in cells:
+        if not out or out[-1] != c:
+            out.append(c)
+    return out
+
+
+def _cell_margin_clear(obstacles, x, y, layer, margin):
+    """True if (x, y) and every cell within `margin` (Chebyshev) is unblocked on layer."""
+    if margin <= 0:
+        return not obstacles.is_blocked(x, y, layer)
+    for ox in range(-margin, margin + 1):
+        for oy in range(-margin, margin + 1):
+            if obstacles.is_blocked(x + ox, y + oy, layer):
+                return False
+    return True
+
+
+def _nearest_free_cell(obstacles, gx, gy, num_layers, max_radius=80, margin=0):
+    """BFS for the nearest (gx, gy) unblocked on at least one layer.
+
+    When margin > 0, the cell only qualifies if every cell within `margin`
+    (Chebyshev) is also unblocked on that layer, so a track centered there
+    clears nearby obstacles instead of clipping them (grid quantization).
+    Falls back to margin=0 if no clearer cell is found, so it never fails to
+    return when something is free. Returns (gx, gy, layer) or None.
+    """
+    from collections import deque
+
+    def clear_on_layer(x, y, layer):
+        return _cell_margin_clear(obstacles, x, y, layer, margin)
+
+    q = deque([(gx, gy)])
+    seen = {(gx, gy)}
+    fallback = None  # nearest cell free at margin=0, used if no margin-clear cell exists
+    while q:
+        x, y = q.popleft()
+        for layer in range(num_layers):
+            if not obstacles.is_blocked(x, y, layer):
+                if fallback is None:
+                    fallback = (x, y, layer)
+                if clear_on_layer(x, y, layer):
+                    return (x, y, layer)
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            nx, ny = x + dx, y + dy
+            if (nx, ny) not in seen and abs(nx - gx) + abs(ny - gy) <= max_radius:
+                seen.add((nx, ny))
+                q.append((nx, ny))
+    return fallback
+
+
+def _route_leg(router, obstacles, config, sources, targets, track_margin, pcb_data, net_id):
+    """Route one leg (sources -> targets). Returns (path, iterations).
+
+    The path is normalized to run from a source to a target (the bidirectional
+    probe may return it reversed), so legs chain correctly end-to-start.
+    """
+    path, iters, _fb, _bb, reversed_path, _fi, _bi = _probe_route_with_frontier(
+        router, obstacles, sources, targets, config,
+        print_prefix="      ", track_margin=track_margin,
+        pcb_data=pcb_data, current_net_id=net_id)
+    if path is not None and reversed_path:
+        path = path[::-1]
+    return path, iters
+
+
+def _point_segment_dist2(px, py, ax, ay, bx, by):
+    """Squared distance from point (px,py) to segment (ax,ay)-(bx,by)."""
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return (px - ax) ** 2 + (py - ay) ** 2
+    t = ((px - ax) * dx + (py - ay) * dy) / float(dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    cx, cy = ax + t * dx, ay + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
+
+
+def assign_waypoints_to_mst_edges(waypoints, pad_grid, mst_edges):
+    """Bucket corridor waypoints onto the MST edge each is nearest to (issue #7).
+
+    Each MST segment then follows the contiguous run of waypoints "in its middle";
+    a waypoint lands in exactly one bucket, so once a segment uses it the others
+    need not care. Corridor order is preserved within each bucket.
+
+    Args:
+        waypoints: ordered list of (gx, gy) grid waypoints.
+        pad_grid: list of (gx, gy) grid positions indexed by pad index.
+        mst_edges: list of (idx_a, idx_b, dist) MST edges.
+
+    Returns:
+        dict mapping frozenset({idx_a, idx_b}) -> ordered list of (gx, gy).
+    """
+    buckets = {frozenset((ia, ib)): [] for ia, ib, _ in mst_edges}
+    if not mst_edges:
+        return buckets
+    for (wx, wy) in waypoints:
+        best_key, best_d = None, None
+        for ia, ib, _ in mst_edges:
+            ax, ay = pad_grid[ia]
+            bx, by = pad_grid[ib]
+            d = _point_segment_dist2(wx, wy, ax, ay, bx, by)
+            if best_d is None or d < best_d:
+                best_d, best_key = d, frozenset((ia, ib))
+        buckets[best_key].append((wx, wy))
+    return buckets
+
+
+def _route_main_connection(router, obstacles, config, sources, targets, track_margin,
+                           pcb_data, net_id, print_prefix="",
+                           direction_labels=("forward", "backward"), single_direction=False,
+                           waypoints=None):
+    """Route sources->targets, steering through the guide corridor (issue #7).
+
+    A drop-in replacement for _probe_route_with_frontier with the SAME return
+    shape. When a guide corridor is configured (config.corridor_waypoints) it
+    routes sources -> waypoints -> targets as concatenated A* legs; otherwise it
+    behaves exactly like _probe_route_with_frontier.
+
+    The waypoints only steer the path BETWEEN the given sources and targets -
+    endpoint/pad/MST selection is the caller's and is left untouched. It is
+    strictly best-effort: a waypoint that can't be reached (or that would strand
+    the target) is dropped, and if no waypoints can be followed it falls back to
+    the direct sources->targets route. So a corridor can never make a connection
+    fail that would otherwise route, and the worst it can do is be ignored.
+    """
+    def direct():
+        return _probe_route_with_frontier(
+            router, obstacles, sources, targets, config,
+            print_prefix=print_prefix, direction_labels=direction_labels,
+            track_margin=track_margin, pcb_data=pcb_data, current_net_id=net_id,
+            single_direction=single_direction)
+
+    # `waypoints` may be a per-segment bucket (multi-point MST edge); when not
+    # given, fall back to the whole corridor (single-segment / 2-pad nets).
+    if waypoints is None:
+        waypoints = getattr(config, 'corridor_waypoints', None)
+    # Bus routing (single_direction) has its own neighbor attraction; leave it be.
+    if not waypoints or single_direction or not sources or not targets:
+        return direct()
+
+    # Legs use the SAME track_margin the direct route would - inflating it can make
+    # a leg unroutable where a direct route succeeds, violating "a corridor never
+    # makes a route worse than no corridor".
+    num_layers = len(config.layers)
+    net_track_width = config.get_net_track_width(net_id, config.layers[0])
+    snap_margin = max(1, int(math.ceil((net_track_width / 2 + config.clearance) / config.grid_step)))
+
+    # Orient waypoints to enter at the end nearest the sources.
+    def d2(a, b):
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+    s0 = sources[0]
+    wp = list(waypoints)
+    if d2(s0, wp[0]) > d2(s0, wp[-1]):
+        wp.reverse()
+
+    # Drop waypoints sitting essentially on this segment's own endpoints. The user
+    # usually draws the guide starting/ending at the pads, but a waypoint right next
+    # to a pad is redundant (the route reaches the pad anyway) and, because the pad's
+    # clearance halo blocks the current layer there, can force a needless via/detour.
+    endpoint_cells = list(sources) + list(targets)
+    skip_d = 2 * snap_margin
+    wp = [(wx, wy) for (wx, wy) in wp
+          if not any(abs(wx - c[0]) + abs(wy - c[1]) <= skip_d for c in endpoint_cells)]
+    if not wp:
+        return direct()
+
+    def _waypoint_cells(wgx, wgy, prefer_layer):
+        """Candidate target cell(s) for a waypoint.
+
+        Each leg is an independent A* that can't see the via cost at a leg
+        boundary, so switching layers between waypoints would leave spurious
+        vias. Once the route is committed to a layer we therefore only steer to a
+        waypoint that's clear on THAT layer; if it isn't, we skip the waypoint
+        (return []) rather than change layers - the leg to the next waypoint still
+        follows the corridor, and a leg only vias when it genuinely must. Before a
+        layer is committed (e.g. a through-hole start spanning layers) we pick any
+        clear layer, snapping to the nearest clear cell if the vertex isn't clear.
+        """
+        if prefer_layer is not None:
+            if _cell_margin_clear(obstacles, wgx, wgy, prefer_layer, snap_margin):
+                return [(wgx, wgy, prefer_layer)]
+            return []
+        free = [(wgx, wgy, L) for L in range(num_layers)
+                if _cell_margin_clear(obstacles, wgx, wgy, L, snap_margin)]
+        if free:
+            return free
+        nf = _nearest_free_cell(obstacles, wgx, wgy, num_layers, margin=snap_margin)
+        return [nf] if nf is not None else []
+
+    spine: List[Tuple[int, int, int]] = []
+    total = 0
+    current = list(sources)
+    # checkpoints[i] = (len(spine), current_sources) after accepting i waypoints.
+    checkpoints = [(0, list(sources))]
+
+    def _extend(path):
+        if spine and spine[-1] == path[0]:
+            spine.extend(path[1:])
+        else:
+            spine.extend(path)
+
+    for (wgx, wgy) in wp:
+        # The committed layer is the one all current sources share (a single cell,
+        # or e.g. tap points all on the same track layer); None until committed
+        # (a through-hole start spans both). _waypoint_cells keeps the route on the
+        # committed layer (skipping waypoints not clear there) to avoid boundary vias.
+        cur_layers = set(c[2] for c in current)
+        prefer_layer = next(iter(cur_layers)) if len(cur_layers) == 1 else None
+        tgts = _waypoint_cells(wgx, wgy, prefer_layer)
+        if not tgts:
+            continue
+        path, iters = _route_leg(router, obstacles, config, current, tgts,
+                                 track_margin, pcb_data, net_id)
+        total += iters
+        if path is None:
+            continue  # waypoint unreachable from here -> drop it
+        _extend(path)
+        current = [path[-1]]
+        checkpoints.append((len(spine), current))
+
+    if len(checkpoints) == 1:
+        # No waypoints could be placed/followed -> behave exactly like no corridor.
+        return direct()
+
+    # Reach the targets, backing off trailing waypoints if the approach is stranded.
+    while True:
+        path, iters = _route_leg(router, obstacles, config, current, targets,
+                                 track_margin, pcb_data, net_id)
+        total += iters
+        if path is not None:
+            _extend(path)
+            break
+        if len(checkpoints) > 1:
+            checkpoints.pop()
+            trunc, current = checkpoints[-1]
+            del spine[trunc:]
+            continue
+        # No waypoints could be followed to the target; use the authoritative
+        # direct route (also returns blocking info the caller needs for rip-up).
+        return direct()
+
+    kept = len(checkpoints) - 1
+    dropped = len(wp) - kept
+    if dropped > 0:
+        print(f"{print_prefix}Guide corridor: followed {kept}/{len(wp)} waypoints "
+              f"(dropped {dropped} that would have blocked this segment)")
+    elif kept > 0:
+        print(f"{print_prefix}Guide corridor: following {kept} waypoint(s)")
+
+    return (spine, total, [], [], False, total, 0)
 
 
 def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -1381,6 +1675,14 @@ def route_multipoint_main(
     # Sort MST edges by length (longest first)
     mst_edges = sorted(mst_edges, key=lambda e: -e[2])
 
+    # Distribute guide-corridor waypoints across the MST edges: each waypoint
+    # steers the edge it's nearest to, so the net follows the drawn line across
+    # its whole topology, not just one edge (issue #7). Buckets are passed to the
+    # main edge here and to the tap edges in route_multipoint_taps.
+    pad_grid = [(info[0], info[1]) for info in pad_info]
+    waypoint_buckets = assign_waypoints_to_mst_edges(
+        getattr(config, 'corridor_waypoints', None) or [], pad_grid, mst_edges)
+
     # Route the longest MST edge first
     idx_a, idx_b, longest_len = mst_edges[0]
 
@@ -1458,11 +1760,12 @@ def route_multipoint_main(
     extra_half_width = (net_track_width - layer_track_width) / 2
     track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
-    # Use probe routing helper
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _probe_route_with_frontier(
-        router, obstacles, sources, targets, config,
-        print_prefix="  ", direction_labels=("forward", "backward"), track_margin=track_margin,
-        pcb_data=pcb_data, current_net_id=net_id
+    # Use probe routing helper, steered through this edge's bucket of corridor
+    # waypoints (the tap edges follow their own buckets in route_multipoint_taps).
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _route_main_connection(
+        router, obstacles, config, sources, targets, track_margin,
+        pcb_data, net_id, print_prefix="  ", direction_labels=("forward", "backward"),
+        waypoints=waypoint_buckets.get(frozenset((idx_a, idx_b)), [])
     )
 
     if path is None:
@@ -1511,6 +1814,8 @@ def route_multipoint_main(
         'original_segments': segments,
         # Store MST edges for Phase 3 (sorted longest first)
         'mst_edges': mst_edges,
+        # Per-edge guide-corridor waypoint buckets (issue #7), for Phase 3 taps
+        'waypoint_buckets': waypoint_buckets,
         # Initial tap stats (Phase 1 connects 2 pads via 1 edge)
         'tap_edges_routed': 1,
         'tap_edges_failed': 0,
@@ -1613,6 +1918,7 @@ def route_multipoint_taps(
     routed_indices = set(main_result['routed_pad_indices'])
     mst_edges = main_result.get('mst_edges', [])
     pad_components = main_result.get('pad_components', {i: i for i in range(len(pad_info))})
+    waypoint_buckets = main_result.get('waypoint_buckets', {})  # per-edge corridor waypoints
 
     # Build set of "routed components" - components with at least one explicitly routed pad
     # Pads in zone-connected components are effectively routed if any pad in that component is routed
@@ -1794,10 +2100,10 @@ def route_multipoint_taps(
         # Use probe routing helper to detect stuck directions early
         tap_start_time = time.time()
 
-        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _ = _probe_route_with_frontier(
-            router, obstacles, sources, targets, config,
-            print_prefix="      ", direction_labels=("forward", "backward"), track_margin=track_margin,
-            pcb_data=pcb_data, current_net_id=net_id
+        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _ = _route_main_connection(
+            router, obstacles, config, sources, targets, track_margin,
+            pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
+            waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
         )
 
         # If path was found in reverse direction, reverse it so it goes sources -> targets

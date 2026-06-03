@@ -111,6 +111,7 @@ The `GridObstacleMap` (implemented in Rust) tracks blocked cells efficiently usi
 4. **Allowed Cells** - Override for BGA zones at source/target positions
 5. **Source/Target Cells** - Override for track clearance at endpoints
 6. **Stub Proximity Costs** - Soft penalties to avoid routing near unrouted stubs
+7. **Keep-out rule areas** - KiCad `(zone ... (keepout ...))` regions blocking tracks and/or vias (per the keepout flags) on the keepout's listed layers, or all routing layers if none are listed
 
 ### Building the Obstacle Map
 
@@ -138,6 +139,9 @@ def build_base_obstacle_map(pcb_data, config, nets_to_route, extra_clearance=0.0
         if net_id not in nets_to_route:
             for pad in pads:
                 _add_pad_obstacle(obstacles, pad, ...)
+
+    # 5. Add keep-out rule areas (tracks/vias not-allowed zones), per-layer
+    add_keepout_obstacles(obstacles, pcb_data, config)
 
     return obstacles
 ```

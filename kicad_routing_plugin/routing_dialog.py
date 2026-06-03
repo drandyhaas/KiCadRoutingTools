@@ -118,7 +118,8 @@ def _get_board_minimum_constraints():
 class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
-    def __init__(self, parent, pcb_data, board_filename, saved_settings=None):
+    def __init__(self, parent, pcb_data, board_filename, saved_settings=None,
+                 preselected_nets=None):
         # Default dialog size; can be overridden by the user, persisted
         # in the settings file.
         default_size = (800, 800)
@@ -169,6 +170,9 @@ class RoutingDialog(wx.Dialog):
         self._routing_thread = None
         self._connectivity_cache = {}  # Cache: net_id -> is_connected
         self._saved_settings = saved_settings  # Settings to restore after init
+        # Nets the user selected in the PCB editor before opening the plugin.
+        # These pre-check the matching nets for routing (GitHub issue #6).
+        self._preselected_nets = set(preselected_nets) if preselected_nets else set()
         self._last_notebook = None  # Track netclass notebook for cleanup
         self._initial_load = True  # Skip board sync on first refresh (data is already current)
         # Per-session "no" responses to the "make a plane first?" suggestion
@@ -753,6 +757,55 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetToolTip("Add teardrop settings to all pads in output file")
         options_inner.Add(self.add_teardrops_check, 0, wx.ALL, 3)
 
+        # Guide corridor: follow a user-drawn polyline (issue #7)
+        self.guide_corridor_check = wx.CheckBox(options_scroll, label="Follow User-layer guide path")
+        self.guide_corridor_check.SetValue(defaults.GUIDE_CORRIDOR_ENABLED)
+        self.guide_corridor_check.SetToolTip(
+            "Route the selected nets so they follow a polyline you draw on a User layer "
+            "(waypoints), avoiding obstacles. Multiple nets pack alongside without overlapping.")
+        options_inner.Add(self.guide_corridor_check, 0, wx.ALL, 3)
+
+        gc_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        gc_sizer.Add(wx.StaticText(options_scroll, label="Guide Layer:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.guide_corridor_layer_ctrl = wx.TextCtrl(options_scroll, value=defaults.GUIDE_CORRIDOR_LAYER, size=(70, -1))
+        self.guide_corridor_layer_ctrl.SetToolTip("User layer the guide polyline is drawn on (e.g., User.1)")
+        gc_sizer.Add(self.guide_corridor_layer_ctrl, 0, wx.RIGHT, 8)
+        gc_sizer.Add(wx.StaticText(options_scroll, label="Spacing(mm):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.guide_corridor_spacing_ctrl = wx.TextCtrl(options_scroll, value=str(defaults.GUIDE_CORRIDOR_SPACING), size=(45, -1))
+        self.guide_corridor_spacing_ctrl.SetToolTip("Max mm between waypoints. 0 = only the drawn segment endpoints; "
+                                                    ">0 subdivides long segments to follow curves more tightly.")
+        gc_sizer.Add(self.guide_corridor_spacing_ctrl, 0)
+        options_inner.Add(gc_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        self.clear_guide_layer_check = wx.CheckBox(options_scroll, label="Clear guide layer after routing")
+        self.clear_guide_layer_check.SetValue(False)
+        self.clear_guide_layer_check.SetToolTip(
+            "After a successful route, delete the guide graphics from the guide layer so you "
+            "can draw new ones. Only acts when 'Follow User-layer guide path' is enabled.")
+        options_inner.Add(self.clear_guide_layer_check, 0, wx.ALL, 3)
+
+        # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
+        self.keepout_check = wx.CheckBox(options_scroll, label="Keep out of User-layer polygon(s)")
+        self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
+        self.keepout_check.SetToolTip(
+            "Keep routed tracks out of any closed polygons you draw on a User layer. "
+            "Applies to all nets being routed this run. Don't draw them over pads you need to route.")
+        options_inner.Add(self.keepout_check, 0, wx.ALL, 3)
+
+        ko_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        ko_sizer.Add(wx.StaticText(options_scroll, label="Keepout Layer:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.keepout_layer_ctrl = wx.TextCtrl(options_scroll, value=defaults.KEEPOUT_LAYER, size=(70, -1))
+        self.keepout_layer_ctrl.SetToolTip("User layer the keepout polygons are drawn on (e.g., User.2)")
+        ko_sizer.Add(self.keepout_layer_ctrl, 0)
+        options_inner.Add(ko_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        self.clear_keepout_layer_check = wx.CheckBox(options_scroll, label="Clear keepout layer after routing")
+        self.clear_keepout_layer_check.SetValue(False)
+        self.clear_keepout_layer_check.SetToolTip(
+            "After a successful route, delete the keepout polygons from the keepout layer so you "
+            "can draw new ones. Only acts when 'Keep out of User-layer polygon(s)' is enabled.")
+        options_inner.Add(self.clear_keepout_layer_check, 0, wx.ALL, 3)
+
         # Power nets
         power_sizer = wx.BoxSizer(wx.HORIZONTAL)
         power_sizer.Add(wx.StaticText(options_scroll, label="Power Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -1319,11 +1372,37 @@ class RoutingDialog(wx.Dialog):
             if self.net_panel.hide_check:
                 self.net_panel.hide_check.SetValue(True)
 
+        # Pre-check nets the user selected in the PCB editor. This overrides any
+        # restored/default net selection so the KiCad selection takes priority.
+        self._apply_preselected_nets()
+
         # Apply board-level minimum constraints if checkbox is enabled
         self._apply_board_minimums_to_controls()
 
         # Do initial refresh
         self.refresh_from_board()
+
+    def _apply_preselected_nets(self):
+        """Pre-check the nets the user selected in the PCB editor.
+
+        Applies the selection to every net-based tab (Basic routing, Fanout,
+        Planes) and to differential pairs whose nets are selected. Does nothing
+        when no nets were selected, leaving restored/default behaviour intact.
+        """
+        if not self._preselected_nets:
+            return
+
+        names = self._preselected_nets
+
+        # Show selected nets even if they are already routed, so the user can
+        # see exactly what was carried over from their KiCad selection.
+        if self.net_panel.hide_check:
+            self.net_panel.hide_check.SetValue(False)
+
+        self.net_panel.set_selected_nets(names)
+        self.fanout_tab.net_panel.set_selected_nets(names)
+        self.planes_tab.net_panel.set_selected_nets(names)
+        self.differential_tab.pair_panel.set_selected_pairs_by_net(names)
 
     def refresh_from_board(self):
         """Refresh pcb_data from the current board state.
@@ -1712,6 +1791,14 @@ class RoutingDialog(wx.Dialog):
 
         return selected_nets, selected_layers
 
+    @staticmethod
+    def _safe_float(text, default):
+        """Parse a float from a text control, falling back to default."""
+        try:
+            return float(str(text).strip())
+        except (ValueError, TypeError):
+            return default
+
     def _build_routing_config(self, selected_nets, selected_layers):
         """Build the routing configuration dictionary from UI controls.
 
@@ -1765,6 +1852,16 @@ class RoutingDialog(wx.Dialog):
             'direction': ['forward', 'backward'][self.direction_choice.GetSelection() - 1] if self.direction_choice.GetSelection() > 0 else None,
             # Options
             'add_teardrops': self.add_teardrops_check.GetValue(),
+            # Guide corridor (issue #7)
+            'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
+            'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
+            'guide_corridor_spacing': self._safe_float(self.guide_corridor_spacing_ctrl.GetValue(), defaults.GUIDE_CORRIDOR_SPACING),
+            # Keepout zone (issue #27)
+            'keepout_enabled': self.keepout_check.GetValue(),
+            'keepout_layer': self.keepout_layer_ctrl.GetValue().strip() or defaults.KEEPOUT_LAYER,
+            # Clear User-layer graphics after a successful route (plugin-only)
+            'clear_guide_layer': self.clear_guide_layer_check.GetValue(),
+            'clear_keepout_layer': self.clear_keepout_layer_check.GetValue(),
             'verbose': self.verbose_check.GetValue(),
             'skip_routing': self.skip_routing_check.GetValue(),
             'debug_memory': self.debug_memory_check.GetValue(),
@@ -2155,6 +2252,43 @@ class RoutingDialog(wx.Dialog):
                 print(f"Warning: Could not get net class clearances: {e}")
                 # Fall back to using config clearance for all nets
 
+            # Re-read user-layer guide polylines from the saved board file using
+            # the configured layer. kipy doesn't surface User-layer graphics, so
+            # the polyline must be drawn AND saved before routing (issue #7).
+            if config.get('guide_corridor_enabled'):
+                guide_layer = config.get('guide_corridor_layer', 'User.1')
+                try:
+                    from kicad_parser import parse_guide_paths
+                    if self.board_filename and os.path.isfile(self.board_filename):
+                        with open(self.board_filename, "r", encoding="utf-8") as f:
+                            _content = f.read()
+                        self.pcb_data.guide_paths = parse_guide_paths(_content, guide_layer)
+                        print(f"Guide corridor: found {len(self.pcb_data.guide_paths)} "
+                              f"polyline(s) on {guide_layer}")
+                        if not self.pcb_data.guide_paths:
+                            print(f"  (No graphic lines found on {guide_layer} in the saved "
+                                  f"file - draw a line there and save to guide routing.)")
+                except Exception as e:
+                    print(f"Warning: could not read guide paths from board file: {e}")
+
+            # Re-read user-layer keepout polygons from the saved board file using
+            # the configured layer (draw AND save before routing). Issue #27.
+            if config.get('keepout_enabled'):
+                keepout_layer = config.get('keepout_layer', 'User.2')
+                try:
+                    from kicad_parser import parse_keepout_zones
+                    if self.board_filename and os.path.isfile(self.board_filename):
+                        with open(self.board_filename, "r", encoding="utf-8") as f:
+                            _content = f.read()
+                        self.pcb_data.keepout_zones = parse_keepout_zones(_content, keepout_layer)
+                        print(f"Keepout: found {len(self.pcb_data.keepout_zones)} "
+                              f"polygon(s) on {keepout_layer}")
+                        if not self.pcb_data.keepout_zones:
+                            print(f"  (No closed polygon found on {keepout_layer} in the saved "
+                                  f"file - draw a polygon there and save to keep tracks out.)")
+                except Exception as e:
+                    print(f"Warning: could not read keepout zones from board file: {e}")
+
             def run_batch(net_names, track_width, clearance, via_size, via_drill):
                 """Run batch_route with given parameters."""
                 return batch_route(
@@ -2206,6 +2340,11 @@ class RoutingDialog(wx.Dialog):
                     bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
                     bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
                     bus_min_nets=config.get('bus_min_nets', 2),
+                    guide_corridor_enabled=config.get('guide_corridor_enabled', False),
+                    guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
+                    guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
+                    keepout_enabled=config.get('keepout_enabled', False),
+                    keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
@@ -2311,6 +2450,11 @@ class RoutingDialog(wx.Dialog):
                         bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
                         bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
                         bus_min_nets=config.get('bus_min_nets', 2),
+                        guide_corridor_enabled=config.get('guide_corridor_enabled', False),
+                        guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
+                        guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
+                        keepout_enabled=config.get('keepout_enabled', False),
+                        keepout_layer=config.get('keepout_layer', 'User.2'),
                         power_nets=config.get('power_nets', []),
                         power_nets_widths=config.get('power_nets_widths', []),
                         disable_bga_zones=config.get('no_bga_zones'),
@@ -2428,6 +2572,23 @@ class RoutingDialog(wx.Dialog):
         tracks_added = counts["tracks"]
         vias_added = counts["vias"]
         debug_lines_added = counts["debug_lines"]
+
+        # Clear guide/keepout User-layer graphics after a successful route, if
+        # requested (only for features that were actually enabled this run).
+        if successful > 0:
+            cleared = 0
+            try:
+                from kicad_ipc_adapter import clear_user_layer_graphics
+                if config.get('clear_guide_layer') and config.get('guide_corridor_enabled'):
+                    cleared += clear_user_layer_graphics(
+                        board, config.get('guide_corridor_layer', 'User.1'))
+                if config.get('clear_keepout_layer') and config.get('keepout_enabled'):
+                    cleared += clear_user_layer_graphics(
+                        board, config.get('keepout_layer', 'User.2'))
+            except Exception as e:
+                print(f"Warning: could not clear guide/keepout layer(s): {e}")
+            if cleared:
+                print(f"Cleared {cleared} graphic(s) from the guide/keepout User layer(s)")
 
         # Sync pcb_data so subsequent routing and connectivity checks see
         # the new tracks.

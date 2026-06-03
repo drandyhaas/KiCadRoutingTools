@@ -475,6 +475,20 @@ class NetSelectionPanel(wx.Panel):
         # Return all checked nets
         return list(self._checked_nets)
 
+    def set_selected_nets(self, net_names):
+        """Pre-check the given net names (only those present in this panel).
+
+        Replaces the current checked state with the intersection of net_names
+        and the nets known to this panel, then refreshes the view.
+
+        Args:
+            net_names: Iterable of net name strings to check.
+        """
+        available = {name for name, _ in self.all_nets}
+        self._checked_nets = {name for name in net_names if name in available}
+        self.refresh(sync_from_visible=False)
+        self._notify_selection_changed()
+
     def refresh(self, sync_from_visible=True):
         """Refresh the net list.
 

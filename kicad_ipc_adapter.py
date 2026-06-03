@@ -770,3 +770,53 @@ def move_copper_text_to_silkscreen(board) -> int:
         board.drop_commit(handle)
         raise
     return len(moved)
+
+
+def clear_user_layer_graphics(board, layer_name: str) -> int:
+    """Remove graphic shapes on a User layer, as its own undo step.
+
+    Used to clear guide/keepout drawings after a successful route so the user
+    can draw fresh ones. Returns the count removed. A direct layer-map lookup
+    (not layer_id_for) is used so an unmapped name is a no-op rather than
+    accidentally clearing F.Cu.
+    """
+    name_to_bl, _ = layer_maps()
+    bl = name_to_bl.get(layer_name)
+    if bl is None:
+        return 0
+    try:
+        shapes = list(board.get_shapes())
+    except AttributeError:
+        return 0
+    to_remove = [s for s in shapes if getattr(s, "layer", None) == bl]
+    if not to_remove:
+        return 0
+    handle = board.begin_commit()
+    try:
+        board.remove_items(to_remove)
+        board.push_commit(handle, "KiCadRoutingTools: clear guide/keepout layer")
+    except Exception:
+        board.drop_commit(handle)
+        raise
+    return len(to_remove)
+
+
+def get_selected_net_names(board) -> set:
+    """Return the set of net names of items currently selected in KiCad (issue #6).
+
+    Reads the live selection over IPC (tracks, vias, pads, zones) and collects
+    each item's net name. Selecting any item that belongs to a net is treated as
+    selecting that net for routing. Empty set if nothing relevant is selected, so
+    the dialog falls back to its normal behaviour.
+    """
+    try:
+        items = board.get_selection()
+    except Exception:
+        return set()
+    names = set()
+    for item in items or []:
+        net = getattr(item, "net", None)
+        name = getattr(net, "name", None) if net is not None else None
+        if name:
+            names.add(name)
+    return names

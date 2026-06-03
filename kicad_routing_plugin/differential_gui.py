@@ -274,6 +274,27 @@ class DiffPairSelectionPanel(wx.Panel):
             selected.append(base_name)
         return selected
 
+    def set_selected_pairs_by_net(self, net_names):
+        """Pre-check differential pairs whose P or N net is in net_names.
+
+        Replaces the current checked state with the pairs that have either
+        their positive or negative net named in net_names, then refreshes.
+
+        Args:
+            net_names: Iterable of net name strings.
+        """
+        names = set(net_names)
+        checked = set()
+        for display_name, base_name, p_net_id, n_net_id in self.all_pairs:
+            p_net = self.pcb_data.nets.get(p_net_id)
+            n_net = self.pcb_data.nets.get(n_net_id)
+            p_name = p_net.name if p_net else None
+            n_name = n_net.name if n_net else None
+            if p_name in names or n_name in names:
+                checked.add(display_name)
+        self._checked_pairs = checked
+        self.refresh(sync_from_visible=False)
+
     def get_selected_pair_net_ids(self):
         """Get list of (base_name, p_net_id, n_net_id) for selected pairs."""
         selected_names = set(self._checked_pairs)
