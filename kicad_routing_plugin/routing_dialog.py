@@ -2252,42 +2252,40 @@ class RoutingDialog(wx.Dialog):
                 print(f"Warning: Could not get net class clearances: {e}")
                 # Fall back to using config clearance for all nets
 
-            # Re-read user-layer guide polylines from the saved board file using
-            # the configured layer. kipy doesn't surface User-layer graphics, so
-            # the polyline must be drawn AND saved before routing (issue #7).
+            # Re-read user-layer guide polylines live from the board (over IPC)
+            # using the configured layer, so a path drawn this session is used
+            # without saving the file first (issue #7).
             if config.get('guide_corridor_enabled'):
                 guide_layer = config.get('guide_corridor_layer', 'User.1')
                 try:
-                    from kicad_parser import parse_guide_paths
-                    if self.board_filename and os.path.isfile(self.board_filename):
-                        with open(self.board_filename, "r", encoding="utf-8") as f:
-                            _content = f.read()
-                        self.pcb_data.guide_paths = parse_guide_paths(_content, guide_layer)
+                    from kicad_ipc_adapter import get_board, read_guide_paths
+                    board = get_board()
+                    if board is not None:
+                        self.pcb_data.guide_paths = read_guide_paths(board, guide_layer)
                         print(f"Guide corridor: found {len(self.pcb_data.guide_paths)} "
                               f"polyline(s) on {guide_layer}")
                         if not self.pcb_data.guide_paths:
-                            print(f"  (No graphic lines found on {guide_layer} in the saved "
-                                  f"file - draw a line there and save to guide routing.)")
+                            print(f"  (No graphic lines found on {guide_layer} - "
+                                  f"draw a line there to guide routing.)")
                 except Exception as e:
-                    print(f"Warning: could not read guide paths from board file: {e}")
+                    print(f"Warning: could not read guide paths from board: {e}")
 
-            # Re-read user-layer keepout polygons from the saved board file using
-            # the configured layer (draw AND save before routing). Issue #27.
+            # Re-read user-layer keepout polygons live from the board (over IPC)
+            # using the configured layer (issue #27).
             if config.get('keepout_enabled'):
                 keepout_layer = config.get('keepout_layer', 'User.2')
                 try:
-                    from kicad_parser import parse_keepout_zones
-                    if self.board_filename and os.path.isfile(self.board_filename):
-                        with open(self.board_filename, "r", encoding="utf-8") as f:
-                            _content = f.read()
-                        self.pcb_data.keepout_zones = parse_keepout_zones(_content, keepout_layer)
+                    from kicad_ipc_adapter import get_board, read_keepout_zones
+                    board = get_board()
+                    if board is not None:
+                        self.pcb_data.keepout_zones = read_keepout_zones(board, keepout_layer)
                         print(f"Keepout: found {len(self.pcb_data.keepout_zones)} "
                               f"polygon(s) on {keepout_layer}")
                         if not self.pcb_data.keepout_zones:
-                            print(f"  (No closed polygon found on {keepout_layer} in the saved "
-                                  f"file - draw a polygon there and save to keep tracks out.)")
+                            print(f"  (No closed polygon found on {keepout_layer} - "
+                                  f"draw a polygon there to keep tracks out.)")
                 except Exception as e:
-                    print(f"Warning: could not read keepout zones from board file: {e}")
+                    print(f"Warning: could not read keepout zones from board: {e}")
 
             def run_batch(net_names, track_width, clearance, via_size, via_drill):
                 """Run batch_route with given parameters."""

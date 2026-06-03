@@ -572,59 +572,6 @@ def _chain_guide_segments(segments, layer: str, tol: float = 0.01) -> List["Guid
     return paths
 
 
-def _poly_points_from_drawing(drawing, to_mm) -> List[Tuple[float, float]]:
-    """Extract a poly PCB_SHAPE's outline vertices as (x, y) mm tuples."""
-    pts = []
-    outline = drawing.GetPolyShape().Outline(0)
-    for i in range(outline.PointCount()):
-        pt = outline.CPoint(i)
-        pts.append((to_mm(pt.x), to_mm(pt.y)))
-    return pts
-
-
-def extract_guide_paths_from_board(board, layer_name: str = "User.1") -> List["GuidePath"]:
-    """Read user-layer guide polylines from a live pcbnew board (best-effort)."""
-    import pcbnew
-
-    try:
-        layer_id = board.GetLayerID(layer_name)
-    except Exception:
-        return []
-    if layer_id is None or layer_id < 0:
-        return []
-
-    seg_shape = getattr(pcbnew, 'S_SEGMENT', getattr(pcbnew, 'SHAPE_T_SEGMENT', None))
-    poly_shape = getattr(pcbnew, 'S_POLYGON', getattr(pcbnew, 'SHAPE_T_POLY', None))
-    to_mm = pcbnew.ToMM
-    segments = []
-    paths: List[GuidePath] = []
-    for drawing in board.GetDrawings():
-        try:
-            if drawing.GetLayer() != layer_id:
-                continue
-            if drawing.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
-                continue
-            shape_type = drawing.GetShape()
-        except Exception:
-            continue
-        if seg_shape is not None and shape_type == seg_shape:
-            try:
-                s, e = drawing.GetStart(), drawing.GetEnd()
-                segments.append(((to_mm(s.x), to_mm(s.y)), (to_mm(e.x), to_mm(e.y))))
-            except Exception:
-                continue
-        elif poly_shape is not None and shape_type == poly_shape:
-            try:
-                pts = _poly_points_from_drawing(drawing, to_mm)
-                if len(pts) >= 2:
-                    paths.append(GuidePath(layer=layer_name, points=pts, is_closed=True))
-            except Exception:
-                continue
-
-    paths.extend(_chain_guide_segments(segments, layer_name))
-    return paths
-
-
 def parse_keepout_zones(content: str, layer: str) -> List["GuidePath"]:
     """Parse user-drawn closed keepout polygons on a given layer from file content.
 
@@ -659,51 +606,6 @@ def parse_keepout_zones(content: str, layer: str) -> List["GuidePath"]:
             layer=layer,
             points=[(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
             is_closed=True))
-
-    return zones
-
-
-def extract_keepout_zones_from_board(board, layer_name: str = "User.2") -> List["GuidePath"]:
-    """Read user-layer closed keepout polygons from a live pcbnew board (best-effort)."""
-    import pcbnew
-
-    try:
-        layer_id = board.GetLayerID(layer_name)
-    except Exception:
-        return []
-    if layer_id is None or layer_id < 0:
-        return []
-
-    poly_shape = getattr(pcbnew, 'S_POLYGON', getattr(pcbnew, 'SHAPE_T_POLY', None))
-    rect_shape = getattr(pcbnew, 'S_RECT', getattr(pcbnew, 'SHAPE_T_RECT', None))
-    to_mm = pcbnew.ToMM
-    zones: List[GuidePath] = []
-    for drawing in board.GetDrawings():
-        try:
-            if drawing.GetLayer() != layer_id:
-                continue
-            if drawing.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
-                continue
-            shape_type = drawing.GetShape()
-        except Exception:
-            continue
-        if poly_shape is not None and shape_type == poly_shape:
-            try:
-                pts = _poly_points_from_drawing(drawing, to_mm)
-                if len(pts) >= 3:
-                    zones.append(GuidePath(layer=layer_name, points=pts, is_closed=True))
-            except Exception:
-                continue
-        elif rect_shape is not None and shape_type == rect_shape:
-            try:
-                s, e = drawing.GetStart(), drawing.GetEnd()
-                x1, y1, x2, y2 = to_mm(s.x), to_mm(s.y), to_mm(e.x), to_mm(e.y)
-                zones.append(GuidePath(
-                    layer=layer_name,
-                    points=[(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
-                    is_closed=True))
-            except Exception:
-                continue
 
     return zones
 
@@ -1627,9 +1529,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     rather than parsing the .kicad_pcb file from disk. Faster than
     parse_kicad_pcb() and reflects any unsaved changes.
 
-    User-layer guide corridors (#7) and keepout polygons (#27) are read from
-    the saved .kicad_pcb file, since kipy doesn't surface User-layer graphics
-    the way pcbnew did; draw + save before routing for these to take effect.
+    User-layer guide corridors (#7) and keepout polygons (#27) are read live
+    from the running board via the kipy graphics API, so unsaved drawings are
+    honoured.
 
     Args:
         board: A kipy.board.Board object (from KiCad().get_board())
@@ -1881,18 +1783,16 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
                         pad_obj.pinfunction, pad_obj.pintype = meta
 
     # --- User-layer guide corridors (#7) and keepout polygons (#27) ---
-    # kipy doesn't surface User-layer graphics, so read them from the saved
-    # .kicad_pcb file. Best-effort; empty when the file isn't available.
+    # Read live from the running board over IPC (reflects unsaved edits), via
+    # the kipy graphics API. Best-effort; empty on any failure.
     guide_paths = []
     keepout_zones = []
-    if board_path and os.path.isfile(board_path):
-        try:
-            with open(board_path, "r", encoding="utf-8") as f:
-                _content = f.read()
-            guide_paths = parse_guide_paths(_content, guide_layer)
-            keepout_zones = parse_keepout_zones(_content, keepout_layer)
-        except Exception as e:
-            print(f"build_pcb_data_from_board: guide/keepout read failed: {e}")
+    try:
+        from kicad_ipc_adapter import read_guide_paths, read_keepout_zones
+        guide_paths = read_guide_paths(board, guide_layer)
+        keepout_zones = read_keepout_zones(board, keepout_layer)
+    except Exception as e:
+        print(f"build_pcb_data_from_board: guide/keepout read failed: {e}")
 
     return PCBData(
         board_info=board_info,
