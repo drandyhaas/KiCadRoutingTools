@@ -120,6 +120,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 guide_corridor_enabled: bool = False,
                 guide_corridor_layer: str = "User.1",
                 guide_corridor_spacing: float = 0.0,
+                keepout_enabled: bool = False,
+                keepout_layer: str = "User.2",
                 proximity_heuristic_factor: float = 0.02,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
@@ -216,7 +218,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     if pcb_data is None:
         print(f"Loading {input_file}...")
-        pcb_data = parse_kicad_pcb(input_file, guide_layer=guide_corridor_layer)
+        pcb_data = parse_kicad_pcb(input_file, guide_layer=guide_corridor_layer,
+                                   keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
 
@@ -274,6 +277,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         bus_min_nets=bus_min_nets,
         guide_corridor_enabled=guide_corridor_enabled, guide_corridor_layer=guide_corridor_layer,
         guide_corridor_spacing=guide_corridor_spacing,
+        keepout_enabled=keepout_enabled, keepout_layer=keepout_layer,
         proximity_heuristic_factor=proximity_heuristic_factor,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
@@ -307,6 +311,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if config.corridor_waypoints:
         print(f"Guide corridor: steering routes through {len(config.corridor_waypoints)} "
               f"waypoint(s) from {len(pcb_data.guide_paths)} polyline(s) on {config.guide_corridor_layer}")
+
+    # Report keepout zones (issue #27): tracks are blocked from these polygons.
+    if config.keepout_enabled and pcb_data.keepout_zones:
+        print(f"Keepout: blocking routes from {len(pcb_data.keepout_zones)} "
+              f"polygon(s) on {config.keepout_layer}")
 
     # Identify power nets and set up per-net widths
     if power_nets and power_nets_widths:
@@ -901,6 +910,10 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--guide-corridor-spacing", type=float, default=defaults.GUIDE_CORRIDOR_SPACING,
                         help=f"Max mm between waypoints; 0 = use only the drawn segment endpoints, "
                              f">0 subdivides long segments to follow curves more tightly (default: {defaults.GUIDE_CORRIDOR_SPACING})")
+    parser.add_argument("--keepout", action="store_true",
+                        help="Keep routed tracks out of one or more polygons drawn on a User layer (issue #27)")
+    parser.add_argument("--keepout-layer", type=str, default=defaults.KEEPOUT_LAYER,
+                        help=f"User layer the keepout polygons are drawn on (default: {defaults.KEEPOUT_LAYER})")
     parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
                         help="Factor for proximity heuristic estimation (default: 0.02, higher=faster but may find suboptimal paths)")
 
@@ -1112,6 +1125,8 @@ For differential pair routing, use route_diff.py:
                 guide_corridor_enabled=args.guide_corridor,
                 guide_corridor_layer=args.guide_corridor_layer,
                 guide_corridor_spacing=args.guide_corridor_spacing,
+                keepout_enabled=args.keepout,
+                keepout_layer=args.keepout_layer,
                 proximity_heuristic_factor=args.proximity_heuristic_factor,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,

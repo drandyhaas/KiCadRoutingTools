@@ -105,6 +105,9 @@ class GridRouteConfig:
     guide_corridor_layer: str = "User.1"  # User layer the guide polyline is drawn on
     guide_corridor_spacing: float = 0.0  # mm; 0 = endpoints only, else subdivide long segments
     corridor_waypoints: List[Tuple[int, int]] = field(default_factory=list)  # prebuilt grid waypoints
+    # Keepout zone - keep routed tracks out of a user-drawn polygon (issue #27)
+    keepout_enabled: bool = False  # Block routed tracks from a drawn keepout polygon
+    keepout_layer: str = "User.2"  # User layer the keepout polygon is drawn on
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).

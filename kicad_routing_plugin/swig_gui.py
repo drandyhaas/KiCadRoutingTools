@@ -720,6 +720,21 @@ class RoutingDialog(wx.Dialog):
         gc_sizer.Add(self.guide_corridor_spacing_ctrl, 0)
         options_inner.Add(gc_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
+        self.keepout_check = wx.CheckBox(options_scroll, label="Keep out of User-layer polygon(s)")
+        self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
+        self.keepout_check.SetToolTip(
+            "Keep routed tracks out of any closed polygons you draw on a User layer. "
+            "Applies to all nets being routed this run. Don't draw them over pads you need to route.")
+        options_inner.Add(self.keepout_check, 0, wx.ALL, 3)
+
+        ko_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        ko_sizer.Add(wx.StaticText(options_scroll, label="Keepout Layer:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.keepout_layer_ctrl = wx.TextCtrl(options_scroll, value=defaults.KEEPOUT_LAYER, size=(70, -1))
+        self.keepout_layer_ctrl.SetToolTip("User layer the keepout polygons are drawn on (e.g., User.2)")
+        ko_sizer.Add(self.keepout_layer_ctrl, 0)
+        options_inner.Add(ko_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Power nets
         power_sizer = wx.BoxSizer(wx.HORIZONTAL)
         power_sizer.Add(wx.StaticText(options_scroll, label="Power Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -1764,6 +1779,9 @@ class RoutingDialog(wx.Dialog):
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
             'guide_corridor_spacing': self._safe_float(self.guide_corridor_spacing_ctrl.GetValue(), defaults.GUIDE_CORRIDOR_SPACING),
+            # Keepout zone (issue #27)
+            'keepout_enabled': self.keepout_check.GetValue(),
+            'keepout_layer': self.keepout_layer_ctrl.GetValue().strip() or defaults.KEEPOUT_LAYER,
             'verbose': self.verbose_check.GetValue(),
             'skip_routing': self.skip_routing_check.GetValue(),
             'debug_memory': self.debug_memory_check.GetValue(),
@@ -2172,6 +2190,24 @@ class RoutingDialog(wx.Dialog):
                 except Exception as e:
                     print(f"Warning: could not read guide paths from board: {e}")
 
+            # Refresh user-layer keepout polygons from the live board so a zone
+            # drawn this session is used without saving the file first (issue #27).
+            if config.get('keepout_enabled'):
+                keepout_layer = config.get('keepout_layer', 'User.2')
+                try:
+                    import pcbnew
+                    from kicad_parser import extract_keepout_zones_from_board
+                    board = pcbnew.GetBoard()
+                    if board is not None:
+                        self.pcb_data.keepout_zones = extract_keepout_zones_from_board(board, keepout_layer)
+                        print(f"Keepout: found {len(self.pcb_data.keepout_zones)} "
+                              f"polygon(s) on {keepout_layer}")
+                        if not self.pcb_data.keepout_zones:
+                            print(f"  (No closed polygon found on {keepout_layer} - "
+                                  f"draw a polygon there to keep tracks out.)")
+                except Exception as e:
+                    print(f"Warning: could not read keepout zones from board: {e}")
+
             def run_batch(net_names, track_width, clearance, via_size, via_drill):
                 """Run batch_route with given parameters."""
                 return batch_route(
@@ -2226,6 +2262,8 @@ class RoutingDialog(wx.Dialog):
                     guide_corridor_enabled=config.get('guide_corridor_enabled', False),
                     guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
                     guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
+                    keepout_enabled=config.get('keepout_enabled', False),
+                    keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
@@ -2334,6 +2372,8 @@ class RoutingDialog(wx.Dialog):
                         guide_corridor_enabled=config.get('guide_corridor_enabled', False),
                         guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
                         guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
+                        keepout_enabled=config.get('keepout_enabled', False),
+                        keepout_layer=config.get('keepout_layer', 'User.2'),
                         power_nets=config.get('power_nets', []),
                         power_nets_widths=config.get('power_nets_widths', []),
                         disable_bga_zones=config.get('no_bga_zones'),

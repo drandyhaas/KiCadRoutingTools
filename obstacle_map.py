@@ -122,10 +122,78 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
 
+    # Add user-drawn keepout polygons (issue #27) - block all copper layers
+    add_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
+
     # Add hole-to-hole clearance blocking for existing drills
     add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set)
 
     return obstacles
+
+
+def _polygon_grid_cells(points_mm, coord: GridCoord):
+    """Rasterize a closed polygon (mm vertices) to the set of interior grid cells.
+
+    Vectorized even-odd ray casting over the polygon's grid bounding box (same
+    approach as the board-cutout fill above). Returns a set of (gx, gy) tuples.
+    """
+    if len(points_mm) < 3:
+        return set()
+    poly = np.array(points_mm, dtype=np.float64)
+    x1 = poly[:, 0]
+    y1 = poly[:, 1]
+    x2 = np.roll(x1, -1)
+    y2 = np.roll(y1, -1)
+
+    gx_lo, gy_lo = coord.to_grid(poly[:, 0].min(), poly[:, 1].min())
+    gx_hi, gy_hi = coord.to_grid(poly[:, 0].max(), poly[:, 1].max())
+    gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
+    gy_range = np.arange(gy_lo, gy_hi + 1, dtype=np.int32)
+    if gx_range.size == 0 or gy_range.size == 0:
+        return set()
+
+    gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
+    gx_flat = gx_grid.ravel()
+    gy_flat = gy_grid.ravel()
+    px = gx_flat.astype(np.float64) * coord.grid_step
+    py = gy_flat.astype(np.float64) * coord.grid_step
+
+    py_col, px_col = py[:, np.newaxis], px[:, np.newaxis]
+    y1r, y2r = y1[np.newaxis, :], y2[np.newaxis, :]
+    x1r, x2r = x1[np.newaxis, :], x2[np.newaxis, :]
+    cond_y = (y1r > py_col) != (y2r > py_col)
+    safe_dy = np.where(y2r - y1r == 0, 1.0, y2r - y1r)
+    x_intercept = (x2r - x1r) * (py_col - y1r) / safe_dy + x1r
+    crossings = np.sum(cond_y & (px_col < x_intercept), axis=1)
+    inside = (crossings % 2) == 1
+    return set(zip(gx_flat[inside].tolist(), gy_flat[inside].tolist()))
+
+
+def add_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                          config: GridRouteConfig, coord: GridCoord, num_layers: int):
+    """Block all grid cells inside user-drawn keepout polygons on every copper layer.
+
+    Keepout zones (issue #27) are hard blocks: routed tracks cannot enter them. The
+    block applies to every net routed in the run. Because cells are blocked
+    unconditionally, a zone drawn over a routed net's pad can make that net
+    unroutable -- zones are meant for open board area, not over pads.
+    """
+    if not config.keepout_enabled or not pcb_data.keepout_zones:
+        return
+
+    all_cells = set()
+    for zone in pcb_data.keepout_zones:
+        all_cells |= _polygon_grid_cells(zone.points, coord)
+
+    if not all_cells:
+        return
+
+    xy_arr = np.array(sorted(all_cells), dtype=np.int32)
+    for layer_idx in range(num_layers):
+        layer_col = np.full((xy_arr.shape[0], 1), layer_idx, dtype=np.int32)
+        obstacles.add_blocked_cells_batch(np.hstack([xy_arr, layer_col]))
+    # Block vias inside the zone too (vias span all layers)
+    obstacles.add_blocked_vias_batch(xy_arr)
 
 
 def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:

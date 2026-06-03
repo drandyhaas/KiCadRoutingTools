@@ -171,6 +171,32 @@ blocked-waypoint detour can cross an earlier leg of the same net. KiCad permits
 same-net copper to overlap, so this is electrically harmless (the net stays
 connected) — a route-quality nicety to improve later.
 
+### test_keepout.py - Keepout-Zone Routing Test
+
+Pass/fail tests for the keepout feature (issue #27), where routed tracks are kept
+**out** of a closed polygon drawn on a User layer. Like `test_guide_corridor.py`,
+it is self-contained: it builds temporary boards from
+`kicad_files/flat_hierarchy.kicad_pcb` by inserting a `User.2` `gr_poly`, routes
+with/without `--keepout`, and asserts each scenario. It prints a `PASS`/`FAIL` line
+per scenario plus log detail, and exits non-zero if any scenario fails.
+
+```bash
+python3 tests/test_keepout.py        # run with KiCad's python (needs the Rust router)
+python3 tests/test_keepout.py -v      # verbose routing output
+```
+
+**Scenarios:**
+| ID | Checks |
+|----|--------|
+| K0 | Regression — with the flag OFF, a keepout polygon is ignored; the net cuts straight through the zone region (guards against behavior change when the feature isn't requested) |
+| K1 | Hard avoid — a polygon straddling a net's straight path forces a detour; the net still connects, is DRC-clean, and no routed cell lies inside the polygon |
+| K2 | Multi-net — two nets routed with the keepout enabled both connect and neither occupies a cell inside the zone |
+| K3 | Real board — `kicad_files/lvds_converter_dualclk.kicad_pcb` with a `User.2` polygon across the `/CLK` net's path: `/CLK` routes, connects, is DRC-clean, and avoids the zone interior |
+
+Unlike the guide corridor (best-effort), a keepout is a **hard** block: a zone that
+walls off the only path to a pad will make that net fail — by design. Zones are
+meant for open board area, not over pads.
+
 ## Performance Benchmarks
 
 Results from `test_fanout_and_route.py` (full mode):

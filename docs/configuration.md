@@ -154,6 +154,39 @@ Notes:
   non-overlap, flag-off regression, never-blocks-routing, spacing subdivision, and a real
   bundled board (`kicad_files/lvds_converter_dualclk.kicad_pcb`) with a `User.1` guide.
 
+### Keepout Zone Options
+
+Draw one or more closed polygons (`gr_poly`) or rectangles (`gr_rect`) on a User layer in KiCad,
+then enable `--keepout` to keep routed tracks **out** of those areas. This is a **hard** keepout:
+routes (and vias) cannot enter any of the polygons on any copper layer. It applies to every net
+routed in the run.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--keepout` | off | Keep routed tracks out of polygons drawn on a User layer |
+| `--keepout-layer` | User.2 | User layer the keepout polygons are drawn on |
+
+```bash
+# Route a net so it avoids keepout polygons drawn on User.2
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(A)" --keepout
+```
+
+Notes:
+- All closed polygons (`gr_poly`) and rectangles (`gr_rect`) found on the keepout layer are
+  blocked — draw as many as you need. Use the polygon or rectangle tool, not the line tool: open
+  lines (`gr_line`) don't bound an area and are ignored.
+- The default keepout layer is `User.2`, distinct from the guide-corridor layer (`User.1`), so
+  you can use both features at once.
+- It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the
+  router.
+- **Don't draw a zone over a pad you need to route.** Cells inside the polygon are blocked
+  unconditionally, so a zone covering a routed net's pad can make that net unroutable. Zones are
+  meant for open board area.
+- Unlike a guide corridor (which is best-effort), a keepout is absolute — if a zone walls off the
+  only path to a pad, that net will fail to route. With the flag off, routing is unchanged.
+- Tested by `tests/test_keepout.py` — flag-off regression, single-net detour, multi-net avoidance,
+  and a real bundled board (`kicad_files/lvds_converter_dualclk.kicad_pcb`).
+
 ### Differential Pair Options (route_diff.py only)
 
 These options are only available in `route_diff.py`. All nets passed to route_diff.py are treated as differential pairs.

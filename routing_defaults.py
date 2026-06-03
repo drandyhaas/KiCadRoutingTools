@@ -78,6 +78,10 @@ GUIDE_CORRIDOR_ENABLED = False
 GUIDE_CORRIDOR_LAYER = "User.1"  # User layer the guide polyline is drawn on
 GUIDE_CORRIDOR_SPACING = 0.0  # mm; 0 = waypoints only at drawn segment endpoints (else subdivide long segments)
 
+# Keepout zone - keep routed tracks out of a user-drawn polygon (issue #27)
+KEEPOUT_ENABLED = False
+KEEPOUT_LAYER = "User.2"  # User layer the keepout polygon is drawn on
+
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0
 HOLE_TO_HOLE_CLEARANCE = 0.2  # mm
