@@ -120,6 +120,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 bus_min_nets: int = defaults.BUS_MIN_NETS,
                 keepout_enabled: bool = False,
                 keepout_layer: str = defaults.KEEPOUT_LAYER,
+                guide_corridor_enabled: bool = False,
+                guide_corridor_layer: str = defaults.GUIDE_CORRIDOR_LAYER,
+                guide_corridor_spacing: float = defaults.GUIDE_CORRIDOR_SPACING,
                 proximity_heuristic_factor: float = defaults.PROXIMITY_HEURISTIC_FACTOR,
                 stub_proximity_radius: float = defaults.STUB_PROXIMITY_RADIUS,
                 stub_proximity_cost: float = defaults.STUB_PROXIMITY_COST,
@@ -202,7 +205,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Load or use provided pcb_data
     if pcb_data is None:
         print(f"Loading {input_file}...")
-        pcb_data = parse_kicad_pcb(input_file, keepout_layer=keepout_layer)
+        pcb_data = parse_kicad_pcb(input_file, guide_layer=guide_corridor_layer,
+                                   keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
 
@@ -244,6 +248,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         bus_attraction_radius=bus_attraction_radius, bus_attraction_bonus=bus_attraction_bonus,
         bus_min_nets=bus_min_nets, proximity_heuristic_factor=proximity_heuristic_factor,
         keepout_enabled=keepout_enabled, keepout_layer=keepout_layer,
+        guide_corridor_enabled=guide_corridor_enabled, guide_corridor_layer=guide_corridor_layer,
+        guide_corridor_spacing=guide_corridor_spacing,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
         via_proximity_cost=via_proximity_cost, bga_proximity_radius=bga_proximity_radius,
@@ -279,6 +285,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
     config = GridRouteConfig(**config_kwargs)
+
+    # Build guide-corridor waypoints once (#7). These steer each pair's centerline
+    # through a user-drawn polyline; empty when the feature is off / no guide.
+    from single_ended_routing import build_corridor_waypoints
+    config.corridor_waypoints = build_corridor_waypoints(pcb_data, config)
+    if config.corridor_waypoints:
+        print(f"Guide corridor: steering pairs through {len(config.corridor_waypoints)} "
+              f"waypoint(s) from {len(pcb_data.guide_paths)} polyline(s) on {config.guide_corridor_layer}")
 
     # Find differential pairs from all provided nets
     diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, net_names)
@@ -862,6 +876,13 @@ Examples:
                         help="Keep routed tracks out of polygons drawn on a User layer (issue #27)")
     parser.add_argument("--keepout-layer", type=str, default=defaults.KEEPOUT_LAYER,
                         help=f"User layer the keepout polygons are drawn on (default: {defaults.KEEPOUT_LAYER})")
+    parser.add_argument("--guide-corridor", action="store_true",
+                        help="Steer each pair's centerline along a polyline drawn on a User layer (issue #7)")
+    parser.add_argument("--guide-corridor-layer", type=str, default=defaults.GUIDE_CORRIDOR_LAYER,
+                        help=f"User layer the guide polyline is drawn on (default: {defaults.GUIDE_CORRIDOR_LAYER})")
+    parser.add_argument("--guide-corridor-spacing", type=float, default=defaults.GUIDE_CORRIDOR_SPACING,
+                        help=f"Max mm between waypoints; 0 = drawn segment endpoints only, "
+                             f">0 subdivides long segments (default: {defaults.GUIDE_CORRIDOR_SPACING})")
 
     # Stub proximity penalty
     parser.add_argument("--stub-proximity-radius", type=float, default=2.0,
@@ -1027,6 +1048,9 @@ Examples:
                 bus_min_nets=args.bus_min_nets,
                 keepout_enabled=args.keepout,
                 keepout_layer=args.keepout_layer,
+                guide_corridor_enabled=args.guide_corridor,
+                guide_corridor_layer=args.guide_corridor_layer,
+                guide_corridor_spacing=args.guide_corridor_spacing,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
                 via_proximity_cost=args.via_proximity_cost,
