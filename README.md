@@ -185,6 +185,8 @@ The installer automatically detects your KiCad installation directory (supports 
 - **Linux**: `~/.local/share/kicad/<version>/3rdparty/plugins/`
 - **Windows**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
 
+If you previously installed this plugin through the Plugin & Content Manager, that copy sits next to the local install and would shadow it on `sys.path` (causing stale-code errors). The installer detects any such PCM copy and moves it aside to `<kicad-base>/disabled_pcm_plugins/<version>/`, leaving it recoverable. Pass `--keep-pcm` to skip this.
+
 ### Releasing a new version (maintainers)
 
 The full release flow — version bump, GitHub Release, and the merge request to the official KiCad PCM repository — is documented step by step in **[docs/release-pipeline.md](docs/release-pipeline.md)**.

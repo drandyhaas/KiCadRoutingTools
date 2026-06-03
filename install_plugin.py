@@ -5,16 +5,23 @@ KiCad Routing Tools Plugin Installer
 Installs the plugin to the KiCad 9 plugins directory.
 
 Usage:
-    python install_plugin.py [--no-deps] [--uninstall] [--symlink]
+    python install_plugin.py [--no-deps] [--uninstall] [--symlink] [--keep-pcm]
 
 Options:
     --no-deps               Skip installing Python dependencies
     --uninstall             Remove the plugin instead of installing
     --symlink               Create symlink instead of copying (for development)
+    --keep-pcm              Don't disable conflicting PCM copies of this plugin
+
+On install, any copy of this plugin previously installed through KiCad's Plugin &
+Content Manager is detected (it sits next to the local install in
+3rdparty/plugins and would shadow it on sys.path) and moved aside, unless
+--keep-pcm is given.
 """
 
 import os
 import sys
+import json
 import shutil
 import platform
 import argparse
@@ -27,6 +34,11 @@ from startup_checks import get_cargo_version
 PLUGIN_NAME = "KiCadRoutingTools"
 PLUGIN_DISPLAY_NAME = "KiCad Routing Tools"
 KICAD_VERSIONS = ["10.0", "9.99", "9.0"]  # Checked in order; 9.99 = nightly
+# PCM (Plugin & Content Manager) package identifier from metadata.json. A PCM
+# install lands in 3rdparty/plugins/<identifier-with-dots-as-underscores>/ next
+# to our dev install, putting the same top-level modules on sys.path and
+# shadowing the local version. We detect and disable such copies on install.
+PCM_IDENTIFIER = "com.github.drandyhaas.kicadroutingtools"
 
 
 def get_kicad_python() -> Path | None:
@@ -300,6 +312,90 @@ def uninstall_plugin(dest_dir: Path):
         print(f"  Plugin not installed at {dest_dir}")
 
 
+def _dir_is_our_pcm_plugin(d: Path) -> bool:
+    """True if directory `d` is a PCM-installed copy of THIS plugin.
+
+    Identified authoritatively by a metadata.json declaring our PCM identifier,
+    falling back to the PCM directory-naming convention (identifier with dots
+    replaced by underscores) if the metadata file is missing.
+    """
+    meta = d / "metadata.json"
+    if meta.is_file():
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if data.get("identifier") == PCM_IDENTIFIER:
+                return True
+        except (OSError, ValueError):
+            pass
+    return d.name == PCM_IDENTIFIER.replace(".", "_")
+
+
+def find_conflicting_pcm_installs(plugins_dir: Path) -> list:
+    """Find PCM-installed copies of this plugin under `plugins_dir`.
+
+    Any PCM copy shares our top-level module names (route.py, obstacle_map.py,
+    ...) on sys.path and will shadow the locally-installed version, so every PCM
+    copy is treated as a conflict. Our own install (named PLUGIN_NAME) is skipped.
+    """
+    if not plugins_dir.is_dir():
+        return []
+    conflicts = []
+    for child in sorted(plugins_dir.iterdir()):
+        if not child.is_dir() or child.name == PLUGIN_NAME:
+            continue
+        if _dir_is_our_pcm_plugin(child):
+            conflicts.append(child)
+    return conflicts
+
+
+def disable_pcm_install(pcm_dir: Path, version: str) -> Path | None:
+    """Move a conflicting PCM plugin copy out of the plugin search path.
+
+    Moved to <kicad_base>/disabled_pcm_plugins/<version>/ so it leaves sys.path
+    (resolving the conflict) but stays recoverable. Returns the backup path, or
+    None if the move failed.
+    """
+    backup_root = get_kicad_base_dir() / "disabled_pcm_plugins" / version
+    try:
+        backup_root.mkdir(parents=True, exist_ok=True)
+        dest = backup_root / pcm_dir.name
+        counter = 1
+        while dest.exists():
+            dest = backup_root / f"{pcm_dir.name}.{counter}"
+            counter += 1
+        shutil.move(str(pcm_dir), str(dest))
+        return dest
+    except OSError as e:
+        print(f"    Error: could not move PCM copy aside: {e}")
+        print(f"    Please remove it manually via KiCad's Plugin & Content Manager,")
+        print(f"    or delete: {pcm_dir}")
+        return None
+
+
+def handle_pcm_conflicts(plugins_dir: Path, version: str) -> int:
+    """Detect and disable PCM copies of this plugin that would shadow our install.
+
+    Returns the number of conflicting copies disabled.
+    """
+    conflicts = find_conflicting_pcm_installs(plugins_dir)
+    if not conflicts:
+        return 0
+    print(f"  Found {len(conflicts)} PCM-installed copy(ies) of this plugin that "
+          f"would shadow the local install:")
+    disabled = 0
+    for pcm_dir in conflicts:
+        print(f"    - {pcm_dir}")
+        backup = disable_pcm_install(pcm_dir, version)
+        if backup is not None:
+            print(f"      Disabled (moved to {backup})")
+            disabled += 1
+    if disabled:
+        print(f"  Note: the Plugin & Content Manager may still list this package as")
+        print(f"        installed; you can formally remove it there (Plugins -> Manage")
+        print(f"        -> Uninstall), or just delete the backup folder above.")
+    return disabled
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=f"Install {PLUGIN_DISPLAY_NAME} plugin for KiCad 9+",
@@ -325,6 +421,11 @@ Examples:
         "--symlink", "-s",
         action="store_true",
         help="Create symlink instead of copying (for development)"
+    )
+    parser.add_argument(
+        "--keep-pcm",
+        action="store_true",
+        help="Don't disable conflicting PCM (Plugin & Content Manager) copies of this plugin"
     )
 
     args = parser.parse_args()
@@ -372,6 +473,10 @@ Examples:
         if args.uninstall:
             uninstall_plugin(dest_dir)
             continue
+
+        # Disable any PCM-installed copy that would shadow this install
+        if not args.keep_pcm:
+            handle_pcm_conflicts(dest_base, version)
 
         # Create destination directory if needed
         if not dest_base.exists():
