@@ -1448,6 +1448,11 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
 
+    # Add user-drawn keepout polygons (#27) and KiCad keep-out rule areas (#25),
+    # mirroring build_base_obstacle_map so the visualize path blocks them too.
+    add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
+    add_rule_area_keepout_obstacles(obstacles, pcb_data, config)
+
     # Add hole-to-hole clearance blocking for existing drills
     add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set)
 

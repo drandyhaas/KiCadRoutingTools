@@ -177,6 +177,10 @@ Notes:
   lines (`gr_line`) don't bound an area and are ignored.
 - The default keepout layer is `User.2`, distinct from the guide-corridor layer (`User.1`), so
   you can use both features at once.
+- **Coverage:** keepouts are respected across single-ended, multipoint, and **differential-pair**
+  routing (`route_diff.py --keepout`), and across plane via-stitching and plane repair. KiCad
+  native keep-out rule areas (`(zone … (keepout …))`) are honoured automatically everywhere too,
+  with no flag. (Guide corridors, by contrast, steer single-ended/multipoint routing only.)
 - It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the
   router.
 - **Don't draw a zone over a pad you need to route.** Cells inside the polygon are blocked

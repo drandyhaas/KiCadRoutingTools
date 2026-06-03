@@ -16,7 +16,8 @@ from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
 from geometry_utils import UnionFind
 from bresenham_utils import walk_line
-from obstacle_map import add_board_edge_obstacles
+from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
+                          add_rule_area_keepout_obstacles)
 from plane_obstacle_builder import (
     _precompute_circle_offsets, _bresenham_centers,
     _batch_block_circles_via, _batch_block_circles_cell
@@ -1216,6 +1217,11 @@ def build_base_obstacles(
 
     # Block areas outside the board outline (supports non-rectangular boards)
     add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)
+
+    # Keep plane-repair routes out of user-drawn keepouts (#27) and KiCad
+    # keep-out rule areas (#25), on the plane routing layers.
+    add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
+    add_rule_area_keepout_obstacles(obstacles, pcb_data, config, layers=routing_layers)
 
     return obstacles, layer_map
 

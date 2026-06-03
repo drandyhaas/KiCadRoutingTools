@@ -14,7 +14,8 @@ import numpy as np
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
-from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
+from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
+                          add_user_keepout_obstacles, add_rule_area_keepout_obstacles)
 
 import sys
 import os
@@ -363,6 +364,11 @@ def build_via_obstacle_map(
     _add_drill_hole_via_obstacles(obstacles, pcb_data, config, exclude_net_id)
     if verbose:
         print(f"  Drill holes: {time.time() - t0:.2f}s")
+
+    # Keep stitching vias out of user-drawn keepouts (#27) and KiCad keep-out
+    # rule areas (#25).
+    add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
+    add_rule_area_keepout_obstacles(obstacles, pcb_data, config)
 
     if verbose:
         print(f"  Total obstacle build: {time.time() - t_start:.2f}s")
@@ -751,6 +757,11 @@ def build_routing_obstacle_map(
     _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
     if verbose:
         print(f"  Board edge: {time.time() - t0:.2f}s")
+
+    # Keep plane-routing tracks out of keepouts. This map has a single layer
+    # (index 0 == route_layer), so scope the rule-area pass to route_layer.
+    add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
+    add_rule_area_keepout_obstacles(obstacles, pcb_data, config, layers=[route_layer])
 
     if verbose:
         print(f"  Total routing obstacle build: {time.time() - t_start:.2f}s")

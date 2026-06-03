@@ -118,6 +118,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 bus_attraction_radius: float = defaults.BUS_ATTRACTION_RADIUS,
                 bus_attraction_bonus: int = defaults.BUS_ATTRACTION_BONUS,
                 bus_min_nets: int = defaults.BUS_MIN_NETS,
+                keepout_enabled: bool = False,
+                keepout_layer: str = defaults.KEEPOUT_LAYER,
                 proximity_heuristic_factor: float = defaults.PROXIMITY_HEURISTIC_FACTOR,
                 stub_proximity_radius: float = defaults.STUB_PROXIMITY_RADIUS,
                 stub_proximity_cost: float = defaults.STUB_PROXIMITY_COST,
@@ -200,7 +202,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Load or use provided pcb_data
     if pcb_data is None:
         print(f"Loading {input_file}...")
-        pcb_data = parse_kicad_pcb(input_file)
+        pcb_data = parse_kicad_pcb(input_file, keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
 
@@ -241,6 +243,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         bus_enabled=bus_enabled, bus_detection_radius=bus_detection_radius,
         bus_attraction_radius=bus_attraction_radius, bus_attraction_bonus=bus_attraction_bonus,
         bus_min_nets=bus_min_nets, proximity_heuristic_factor=proximity_heuristic_factor,
+        keepout_enabled=keepout_enabled, keepout_layer=keepout_layer,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
         via_proximity_cost=via_proximity_cost, bga_proximity_radius=bga_proximity_radius,
@@ -855,6 +858,10 @@ Examples:
                         help=f"Cost bonus for staying near neighbor track (default: {defaults.BUS_ATTRACTION_BONUS})")
     parser.add_argument("--bus-min-nets", type=int, default=defaults.BUS_MIN_NETS,
                         help=f"Minimum nets to form a bus group (default: {defaults.BUS_MIN_NETS})")
+    parser.add_argument("--keepout", action="store_true",
+                        help="Keep routed tracks out of polygons drawn on a User layer (issue #27)")
+    parser.add_argument("--keepout-layer", type=str, default=defaults.KEEPOUT_LAYER,
+                        help=f"User layer the keepout polygons are drawn on (default: {defaults.KEEPOUT_LAYER})")
 
     # Stub proximity penalty
     parser.add_argument("--stub-proximity-radius", type=float, default=2.0,
@@ -1018,6 +1025,8 @@ Examples:
                 bus_attraction_radius=args.bus_attraction_radius,
                 bus_attraction_bonus=args.bus_attraction_bonus,
                 bus_min_nets=args.bus_min_nets,
+                keepout_enabled=args.keepout,
+                keepout_layer=args.keepout_layer,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,
                 via_proximity_cost=args.via_proximity_cost,
