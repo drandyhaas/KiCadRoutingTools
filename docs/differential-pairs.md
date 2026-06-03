@@ -42,9 +42,17 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
 python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --diff-pair-gap 0.1 \
     --diff-pair-centerline-setback 1.5
+
+# Keep diff pairs out of a keepout polygon drawn on a User layer (issue #27)
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
+    --keepout --keepout-layer User.2
 ```
 
 Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
+
+Differential pairs respect user-drawn keepout polygons (`--keepout`, default layer
+`User.2`) and KiCad native keep-out rule areas (`(zone … (keepout …))`, honoured
+automatically). See [configuration.md](configuration.md#keepout-zone-options) for details.
 
 ## Centerline Routing
 
