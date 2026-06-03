@@ -98,41 +98,6 @@ def run_route(board_in, board_out, nets, corridor=False, verbose=False, geom=Non
     return (r.returncode == 0), (r.stdout + r.stderr)
 
 
-DIFF_GEOM = ["--track-width", "0.2", "--clearance", "0.2", "--layers", "F.Cu", "B.Cu"]
-
-
-def run_route_diff(board_in, board_out, nets, corridor=False, verbose=False, geom=None):
-    """Run route_diff.py; return (routed_ok, combined_output)."""
-    cmd = [sys.executable, "route_diff.py", board_in, board_out] + (geom or DIFF_GEOM) + ["--nets"] + nets
-    if corridor:
-        cmd.append("--guide-corridor")
-    if verbose:
-        cmd.append("-v")
-    r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
-    out = r.stdout + r.stderr
-    return ('"successful": 1' in out or "1/1 routed" in out), out
-
-
-def _insert_user1_guide(base_path, segments):
-    """Write a temp board = base_path + the given User.1 guide segments."""
-    text = open(base_path).read()
-    guide = "\n" + "".join(_gr_line(*s) for s in segments) + "\n"
-    idx = text.rstrip().rfind(")")
-    fd, path = tempfile.mkstemp(suffix=".kicad_pcb", prefix="diffguide_")
-    os.close(fd)
-    with open(path, "w") as f:
-        f.write(text[:idx] + guide + text[idx:])
-    return path
-
-
-def _net_min_y(board, names):
-    """Smallest y over the routed segments of the named nets (top of the route)."""
-    pcb = kp.parse_kicad_pcb(board)
-    nids = {nid for nid, net in pcb.nets.items() if net.name in names}
-    ys = [v for s in pcb.segments if s.net_id in nids for v in (s.start_y, s.end_y)]
-    return min(ys) if ys else None
-
-
 def _pt_seg_dist(px, py, ax, ay, bx, by):
     """Distance (mm) from point to segment."""
     import math as _m
@@ -423,51 +388,6 @@ def scenario_real_board_spacing(verbose):
     return "S7 real board: /CLK with spacing>0 routes cleanly and follows", passed, log
 
 
-def scenario_diff_pair_follow(verbose):
-    """D1: a differential pair's centerline follows a guide arch drawn over it.
-
-    Routes the /CLK+ /CLK- pair on the LVDS board with and without the guide and
-    checks the guided centerline bows toward the drawn arch (issue #7 for diff
-    pairs, via the pose-router wildcard waypoint legs).
-    """
-    log = []
-    if not os.path.exists(LVDS_BOARD):
-        return "D1 diff-pair follows guide", True, ["SKIP: board not present"]
-    nets = ["/CLK+", "/CLK-"]
-    # The pair routes in the y~63-67 band between J1 (x~84) and R3 (x~97);
-    # arch peaks UP at y=57, so following it lowers the route's min_y.
-    arch = [(86, 64, 91, 57), (91, 57, 96, 64)]
-    board = _insert_user1_guide(LVDS_BOARD, arch)
-    base_out = board.replace(".kicad_pcb", "_base.kicad_pcb")
-    guided_out = board.replace(".kicad_pcb", "_guided.kicad_pcb")
-    ok_b, _ = run_route_diff(board, base_out, nets, corridor=False, verbose=verbose)
-    ok_g, _ = run_route_diff(board, guided_out, nets, corridor=True, verbose=verbose)
-    if not (ok_b and ok_g):
-        return "D1 diff-pair follows guide", False, [f"route_diff failed (base={ok_b}, guided={ok_g})"]
-    mb = _net_min_y(base_out, set(nets))
-    mg = _net_min_y(guided_out, set(nets))
-    follows = mb is not None and mg is not None and mg <= mb - 1.0  # bows >=1mm toward arch
-    log.append(f"baseline min_y={mb:.2f}  guided min_y={mg:.2f}  (arch peak=57.0)")
-    log.append(f"both pairs routed; guided bows toward arch by {mb - mg:.2f}mm -> follows={follows}")
-    return "D1 diff-pair centerline follows the drawn guide", (ok_g and follows), log
-
-
-def scenario_diff_pair_never_blocks(verbose):
-    """D2: a guide a diff pair can't follow must not make it fail (falls back)."""
-    log = []
-    if not os.path.exists(LVDS_BOARD):
-        return "D2 diff-pair guide never blocks", True, ["SKIP: board not present"]
-    nets = ["/CLK+", "/CLK-"]
-    # An unreachable off-board vertex; the chained legs fail and the pair falls
-    # back to the direct centerline.
-    arch = [(86, 64, 10, 10), (10, 10, 96, 64)]
-    board = _insert_user1_guide(LVDS_BOARD, arch)
-    out = board.replace(".kicad_pcb", "_nb.kicad_pcb")
-    ok, _ = run_route_diff(board, out, nets, corridor=True, verbose=verbose)
-    log.append(f"guide has an unreachable off-board vertex (10,10); pair routed={ok}")
-    return "D2 diff-pair guide never prevents routing (falls back)", ok, log
-
-
 SCENARIOS = [
     scenario_regression_off,
     scenario_follow,
@@ -477,8 +397,6 @@ SCENARIOS = [
     scenario_real_board,
     scenario_spacing_subdivides,
     scenario_real_board_spacing,
-    scenario_diff_pair_follow,
-    scenario_diff_pair_never_blocks,
 ]
 
 

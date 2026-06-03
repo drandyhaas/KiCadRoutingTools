@@ -163,8 +163,6 @@ python3 tests/test_guide_corridor.py -v      # verbose routing output
 | S5 | Real board — `kicad_files/lvds_converter_dualclk.kicad_pcb` has a 6-vertex `User.1` guide spanning the 3-pad `/CLK` net (the board from the issue #7 bug report). `/CLK` routes, connects, is DRC-clean, adds no vias the direct route didn't need, and passes near all guide vertices, distributed across both MST segments |
 | S6 | Spacing subdivides — with `--guide-corridor-spacing 1.0`, `build_corridor_waypoints` subdivides the LVDS guide's long segments into denser, evenly-spaced waypoints (more points, no consecutive gap larger than the spacing) |
 | S7 | Real board, spacing>0 — routing `/CLK` with `--guide-corridor-spacing 1.0` still connects, is DRC-clean, adds no extra vias, and follows the guide (exercises the subdivision path end-to-end) |
-| D1 | Differential pair — the `/CLK+ /CLK-` pair on the LVDS board is routed with `route_diff.py --guide-corridor`; the guided centerline bows toward an arch drawn over it (compared against the un-guided baseline), confirming pose-router waypoint legs steer the pair |
-| D2 | Diff-pair never blocks — an unreachable off-board guide vertex must not make the pair fail; it falls back to the direct centerline and still routes |
 
 Pass/fail uses real clearance violations (to OTHER nets) plus connectivity / follow /
 non-overlap. **Same-net self-crossings** are reported as a quality note, not a

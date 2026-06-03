@@ -46,10 +46,6 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
 # Keep diff pairs out of a keepout polygon drawn on a User layer (issue #27)
 python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --keepout --keepout-layer User.2
-
-# Steer a pair's centerline along a guide polyline drawn on a User layer (issue #7)
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
-    --guide-corridor --guide-corridor-layer User.1
 ```
 
 Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
@@ -57,12 +53,6 @@ Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
 Differential pairs respect user-drawn keepout polygons (`--keepout`, default layer
 `User.2`) and KiCad native keep-out rule areas (`(zone … (keepout …))`, honoured
 automatically). See [configuration.md](configuration.md#keepout-zone-options) for details.
-
-They can also **follow a guide corridor** (`--guide-corridor`, default layer `User.1`):
-the pair's centerline is routed through the drawn waypoints by chaining pose-router
-legs that pass through each waypoint at any angle (the arrival heading seeds the next
-leg). Best-effort — if a waypoint can't be reached the pair falls back to the direct
-centerline, so a guide never makes a pair fail.
 
 ## Centerline Routing
 
