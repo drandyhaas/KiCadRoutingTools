@@ -11,12 +11,6 @@ use crate::dubins::DubinsCalculator;
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{PoseState, PoseOpenEntry, BlockedCellTracker, DIRECTIONS, ORTHO_COST, DIAG_COST};
 
-/// Sentinel target orientation meaning "any angle": the goal matches on
-/// position + layer regardless of heading. Used to route a centerline through a
-/// guide waypoint (issue #7 for differential pairs) where the arrival angle is
-/// free. Valid theta indices are 0..7, so 255 is unambiguous.
-pub const ANY_THETA: u8 = 255;
-
 /// Pose-based A* Router with Dubins heuristic
 #[pyclass]
 pub struct PoseRouter {
@@ -150,9 +144,7 @@ impl PoseRouter {
             }
 
             // Goal check: position AND orientation must match
-            if current_key == goal_key
-                || (tgt_theta_idx == ANY_THETA
-                    && current.gx == tgt_x && current.gy == tgt_y && current.layer == tgt_layer) {
+            if current_key == goal_key {
                 let path = self.reconstruct_pose_path(&parents, current_key);
                 let gnd_via_dirs = self.compute_gnd_via_directions(obstacles, &path);
                 return (Some(path), iterations, gnd_via_dirs);
@@ -463,9 +455,7 @@ impl PoseRouter {
 
             if closed.contains(&current_key) { continue; }
 
-            if current_key == goal_key
-                || (tgt_theta_idx == ANY_THETA
-                    && current.gx == tgt_x && current.gy == tgt_y && current.layer == tgt_layer) {
+            if current_key == goal_key {
                 let path = self.reconstruct_pose_path(&parents, current_key);
                 let gnd_via_dirs = self.compute_gnd_via_directions(obstacles, &path);
                 return (Some(path), iterations, Vec::new(), gnd_via_dirs);
@@ -706,14 +696,6 @@ impl PoseRouter {
 impl PoseRouter {
     /// Dubins heuristic: estimate shortest path considering orientation
     fn dubins_heuristic(&self, dubins: &DubinsCalculator, state: &PoseState, goal: &PoseState) -> i32 {
-        // Wildcard target orientation: the lower bound is the cheapest Dubins
-        // path to the goal position over any final heading (admissible).
-        if goal.theta_idx == ANY_THETA {
-            return (0..8u8)
-                .map(|t| self.dubins_heuristic(dubins, state, &PoseState::new(goal.gx, goal.gy, t, goal.layer)))
-                .min()
-                .unwrap_or(0);
-        }
         let theta1 = state.theta_radians();
         let theta2 = goal.theta_radians();
 

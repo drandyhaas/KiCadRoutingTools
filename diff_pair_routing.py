@@ -1160,79 +1160,11 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
     }
 
 
-_ANY_THETA = 255  # pose-router wildcard target orientation (matches Rust ANY_THETA)
-
-
-def _assign_waypoints_to_pair(corridor_waypoints, src_xy, tgt_xy, skip_grid):
-    """Order the global guide waypoints along this pair's source->target line (#7).
-
-    Keeps waypoints whose projection falls strictly between the endpoints and
-    that are at least `skip_grid` cells from either endpoint, ordered along the
-    route. Returns a list of (gx, gy). Empty when no guide is active.
-    """
-    if not corridor_waypoints:
-        return []
-    sx, sy = src_xy
-    tx, ty = tgt_xy
-    dx, dy = tx - sx, ty - sy
-    length_sq = dx * dx + dy * dy
-    if length_sq == 0:
-        return []
-    ordered = []
-    for (wx, wy) in corridor_waypoints:
-        t = ((wx - sx) * dx + (wy - sy) * dy) / length_sq
-        if t <= 0.0 or t >= 1.0:
-            continue
-        if (math.hypot(wx - sx, wy - sy) < skip_grid
-                or math.hypot(wx - tx, wy - ty) < skip_grid):
-            continue
-        ordered.append((t, (int(wx), int(wy))))
-    ordered.sort(key=lambda e: e[0])
-    return [wp for _, wp in ordered]
-
-
-def _route_centerline_through_waypoints(pose_router, obstacles,
-                                        s_gx, s_gy, src_layer, s_theta,
-                                        t_gx, t_gy, tgt_layer, t_theta,
-                                        waypoints, max_iters, via_spacing):
-    """Route the diff-pair centerline through guide waypoints as chained pose legs.
-
-    Each waypoint is reached at ANY angle (ANY_THETA); that arrival heading/layer
-    seeds the next leg, so the centerline stays continuous. Returns
-    (path | None, total_iters, gnd_via_dirs). None if any leg fails, so the caller
-    falls back to a direct centerline (a guide never makes a pair fail).
-    """
-    full = []
-    full_gv = []
-    cur_gx, cur_gy, cur_layer, cur_theta = s_gx, s_gy, src_layer, s_theta
-    total_iters = 0
-    # Waypoint legs stay on the current layer at a free angle; the final leg
-    # targets the real endpoint pose.
-    legs = [(wx, wy, None, _ANY_THETA) for (wx, wy) in waypoints]
-    legs.append((t_gx, t_gy, tgt_layer, t_theta))
-    for (gx, gy, leg_layer, leg_theta) in legs:
-        ll = cur_layer if leg_layer is None else leg_layer
-        path, iters, _blocked, leg_gv = pose_router.route_pose_with_frontier(
-            obstacles, cur_gx, cur_gy, cur_layer, cur_theta,
-            gx, gy, ll, leg_theta, max_iters, diff_pair_via_spacing=via_spacing)
-        total_iters += iters
-        if not path:
-            return None, total_iters, []
-        if full:
-            path = path[1:]  # drop the duplicate joint pose
-        full.extend(path)
-        if leg_gv:
-            full_gv.extend(leg_gv)
-        last = full[-1]
-        cur_gx, cur_gy, cur_theta, cur_layer = last[0], last[1], last[2], last[3]
-    return full, total_iters, full_gv
-
-
 def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                          coord, layer_names, spacing_mm, p_net_id, n_net_id,
                          max_iterations_override=None, neighbor_stubs=None,
                          preferred_angles=None, direction_label=None, is_backward=False,
-                         prox_h_cost=0, pair_waypoints=None):
+                         prox_h_cost=0):
     """
     Attempt to route a diff pair in one direction.
 
@@ -1457,27 +1389,11 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         s_theta = direction_to_theta_idx(s_dx, s_dy)
         t_theta = direction_to_theta_idx(-t_dx, -t_dy)
 
-        path, iters, blocked, gnd_via_dirs = None, 0, [], []
-        # Guide corridor (#7): steer the centerline through the assigned waypoints
-        # as chained pose legs. Best-effort — on failure, fall back to the direct
-        # centerline below so a guide never makes a pair fail.
-        if pair_waypoints:
-            wp_path, wp_iters, wp_gv = _route_centerline_through_waypoints(
-                pose_router, obstacles, s_gx, s_gy, src_layer, s_theta,
-                t_gx, t_gy, tgt_layer, t_theta,
-                pair_waypoints, max_iters, via_spacing_grid)
-            iters += wp_iters
-            if wp_path is not None:
-                path, gnd_via_dirs = wp_path, wp_gv
-
-        if path is None:
-            direct_path, direct_iters, blocked, gnd_via_dirs = pose_router.route_pose_with_frontier(
-                obstacles, s_gx, s_gy, src_layer, s_theta,
-                t_gx, t_gy, tgt_layer, t_theta,
-                max_iters, diff_pair_via_spacing=via_spacing_grid
-            )
-            iters += direct_iters
-            path = direct_path
+        path, iters, blocked, gnd_via_dirs = pose_router.route_pose_with_frontier(
+            obstacles, s_gx, s_gy, src_layer, s_theta,
+            t_gx, t_gy, tgt_layer, t_theta,
+            max_iters, diff_pair_via_spacing=via_spacing_grid
+        )
         return path, iters, blocked, (s_dx, s_dy), (t_dx, t_dy), s_ang, t_ang, gnd_via_dirs
 
     # Select best angles - during probe, try angles sequentially until one works
@@ -1664,17 +1580,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     n_src_gx, n_src_gy = original_src[2], original_src[3]
     p_tgt_gx, p_tgt_gy = original_tgt[0], original_tgt[1]
     n_tgt_gx, n_tgt_gy = original_tgt[2], original_tgt[3]
-
-    # Guide corridor (#7): assign the drawn waypoints to this pair, ordered along
-    # the centerline (midpoint of the P/N endpoints). Empty unless a guide is set.
-    src_mid = ((p_src_gx + n_src_gx) // 2, (p_src_gy + n_src_gy) // 2)
-    tgt_mid = ((p_tgt_gx + n_tgt_gx) // 2, (p_tgt_gy + n_tgt_gy) // 2)
-    skip_grid = max(2, coord.to_grid_dist(2 * (config.track_width + config.diff_pair_gap)))
-    pair_waypoints = _assign_waypoints_to_pair(
-        getattr(config, 'corridor_waypoints', None) or [], src_mid, tgt_mid, skip_grid)
-    if pair_waypoints and config.verbose:
-        print(f"  Guide corridor: {len(pair_waypoints)} waypoint(s) assigned to this pair")
-
     p_src_prox = obstacles.get_stub_proximity_cost(p_src_gx, p_src_gy)
     n_src_prox = obstacles.get_stub_proximity_cost(n_src_gx, n_src_gy)
     p_tgt_prox = obstacles.get_stub_proximity_cost(p_tgt_gx, p_tgt_gy)
@@ -1733,7 +1638,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         coord, layer_names, spacing_mm, p_net_id, n_net_id,
         max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
         direction_label=first_label, is_backward=(first_label == "backward"),
-        prox_h_cost=prox_h_cost, pair_waypoints=pair_waypoints
+        prox_h_cost=prox_h_cost
     )
 
     # Check if first probe was blocked (all angles failed)
@@ -1770,7 +1675,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             coord, layer_names, spacing_mm, p_net_id, n_net_id,
             max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
             direction_label=second_label, is_backward=(second_label == "backward"),
-            prox_h_cost=prox_h_cost, pair_waypoints=pair_waypoints
+            prox_h_cost=prox_h_cost
         )
 
         # Check if second probe was blocked (all angles failed)
@@ -1849,7 +1754,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                 coord, layer_names, spacing_mm, p_net_id, n_net_id,
                 neighbor_stubs=unrouted_stubs, preferred_angles=preferred,
                 direction_label=None, is_backward=(promising_label == "backward"),
-                prox_h_cost=prox_h_cost, pair_waypoints=pair_waypoints
+                prox_h_cost=prox_h_cost
             )
             total_iterations = first_probe_iters + second_probe_iters + full_iters
 
@@ -1880,7 +1785,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                     coord, layer_names, spacing_mm, p_net_id, n_net_id,
                     neighbor_stubs=unrouted_stubs, preferred_angles=fallback_preferred,
                     direction_label=None, is_backward=(fallback_label == "backward"),
-                    prox_h_cost=prox_h_cost, pair_waypoints=pair_waypoints
+                    prox_h_cost=prox_h_cost
                 )
                 total_iterations += fallback_full_iters
 
