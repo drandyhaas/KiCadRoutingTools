@@ -65,6 +65,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 |--------|---------|-------------|
 | `--zone-clearance` | 0.2 | Zone clearance from other copper in mm |
 | `--min-thickness` | 0.1 | Minimum zone copper thickness in mm |
+| `--skip-existing-zones` | off | Keep an existing same-net zone on the target layer instead of replacing it (place stitching vias only), and tolerate other-net zones on the same layer (e.g. a GND island under an RF feed). When off (the CLI default), an existing same-net zone on the target layer is replaced |
 
 ### Algorithm Options
 

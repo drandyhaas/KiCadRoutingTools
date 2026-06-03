@@ -770,3 +770,142 @@ def move_copper_text_to_silkscreen(board) -> int:
         board.drop_commit(handle)
         raise
     return len(moved)
+
+
+def clear_user_layer_graphics(board, layer_name: str) -> int:
+    """Remove graphic shapes on a User layer, as its own undo step.
+
+    Used to clear guide/keepout drawings after a successful route so the user
+    can draw fresh ones. Returns the count removed. A direct layer-map lookup
+    (not layer_id_for) is used so an unmapped name is a no-op rather than
+    accidentally clearing F.Cu.
+    """
+    name_to_bl, _ = layer_maps()
+    bl = name_to_bl.get(layer_name)
+    if bl is None:
+        return 0
+    try:
+        shapes = list(board.get_shapes())
+    except AttributeError:
+        return 0
+    to_remove = [s for s in shapes if getattr(s, "layer", None) == bl]
+    if not to_remove:
+        return 0
+    handle = board.begin_commit()
+    try:
+        board.remove_items(to_remove)
+        board.push_commit(handle, "KiCadRoutingTools: clear guide/keepout layer")
+    except Exception:
+        board.drop_commit(handle)
+        raise
+    return len(to_remove)
+
+
+def get_selected_net_names(board) -> set:
+    """Return the set of net names of items currently selected in KiCad (issue #6).
+
+    Reads the live selection over IPC (tracks, vias, pads, zones) and collects
+    each item's net name. Selecting any item that belongs to a net is treated as
+    selecting that net for routing. Empty set if nothing relevant is selected, so
+    the dialog falls back to its normal behaviour.
+    """
+    try:
+        items = board.get_selection()
+    except Exception:
+        return set()
+    names = set()
+    for item in items or []:
+        net = getattr(item, "net", None)
+        name = getattr(net, "name", None) if net is not None else None
+        if name:
+            names.add(name)
+    return names
+
+
+# --- Live User-layer graphics read (guide corridors #7 / keepouts #27) ------
+
+def _nm_to_mm(value) -> float:
+    """Convert a nanometre integer (kipy's internal unit) to millimetres."""
+    try:
+        return float(value) / 1_000_000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _vec_xy_mm(v) -> tuple:
+    """Read a kipy Vector2 as (x_mm, y_mm), tolerating x_mm/y_mm or nm fields."""
+    if v is None:
+        return (0.0, 0.0)
+    x_mm = getattr(v, "x_mm", None)
+    y_mm = getattr(v, "y_mm", None)
+    if x_mm is not None and y_mm is not None:
+        return (float(x_mm), float(y_mm))
+    return (_nm_to_mm(getattr(v, "x", 0)), _nm_to_mm(getattr(v, "y", 0)))
+
+
+def _polyline_points_mm(polyline) -> list:
+    """Read (x_mm, y_mm) point nodes from a kipy PolyLine (arc nodes skipped)."""
+    pts = []
+    for node in getattr(polyline, "nodes", None) or []:
+        try:
+            if getattr(node, "has_point", True):
+                pts.append(_vec_xy_mm(node.point))
+        except Exception:
+            continue
+    return pts
+
+
+def _user_layer_shapes(board, layer_name):
+    """Return (segments, closed_polys) of graphic shapes on a User layer.
+
+    segments    : list of ((x1,y1),(x2,y2)) line segments in mm
+    closed_polys: list of [(x,y), ...] closed polygons/rectangles in mm
+    Read live over IPC via board.get_shapes(); empty on any failure.
+    """
+    name_to_bl, _ = layer_maps()
+    bl = name_to_bl.get(layer_name)
+    if bl is None:
+        return [], []
+    try:
+        import kipy.board_types as bt
+        shapes = list(board.get_shapes())
+    except Exception:
+        return [], []
+    segments, closed = [], []
+    for s in shapes:
+        if getattr(s, "layer", None) != bl:
+            continue
+        if isinstance(s, bt.BoardSegment):
+            segments.append((_vec_xy_mm(s.start), _vec_xy_mm(s.end)))
+        elif isinstance(s, bt.BoardRectangle):
+            x1, y1 = _vec_xy_mm(s.top_left)
+            x2, y2 = _vec_xy_mm(s.bottom_right)
+            closed.append([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
+        elif isinstance(s, bt.BoardPolygon):
+            for pwh in getattr(s, "polygons", None) or []:
+                pts = _polyline_points_mm(getattr(pwh, "outline", None))
+                if len(pts) >= 3:
+                    closed.append(pts)
+    return segments, closed
+
+
+def read_guide_paths(board, layer_name: str = "User.1") -> list:
+    """Live-read User-layer guide polylines (#7) via kipy.
+
+    Mirrors kicad_parser.parse_guide_paths but from the running board: closed
+    polygons become closed GuidePaths; line segments are stitched into chains.
+    """
+    from kicad_parser import GuidePath, _chain_guide_segments
+    segments, closed = _user_layer_shapes(board, layer_name)
+    paths = [GuidePath(layer=layer_name, points=pts, is_closed=True)
+             for pts in closed if len(pts) >= 2]
+    paths.extend(_chain_guide_segments(segments, layer_name))
+    return paths
+
+
+def read_keepout_zones(board, layer_name: str = "User.2") -> list:
+    """Live-read User-layer keepout polygons (#27) via kipy (closed shapes only)."""
+    from kicad_parser import GuidePath
+    _segments, closed = _user_layer_shapes(board, layer_name)
+    return [GuidePath(layer=layer_name, points=pts, is_closed=True)
+            for pts in closed if len(pts) >= 3]
