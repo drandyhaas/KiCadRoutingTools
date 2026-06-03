@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.15.0**
+**Current Version: 0.16.0**
 
 ## Features
 
@@ -306,6 +306,7 @@ src/
 
 ## Version History
 
+- **0.16.0**: Added a wildcard target orientation (`ANY_THETA = 255`) to the pose router (`route_pose` / `route_pose_with_frontier`). When the target theta index is `255`, the goal matches on position + layer regardless of heading, and the Dubins heuristic relaxes to the cheapest path over any final orientation. This lets a differential-pair centerline be routed through a guide waypoint "at any angle" by chaining pose legs (each waypoint's arrival heading seeds the next leg), extending the guide-corridor feature (#7) to differential pairs. Inert for normal calls (theta 0..7).
 - **0.15.0**: Changed bus routing attraction from proximity-based to direction-based. The router now only gives attraction bonus when moving in the same direction as the neighbor path was moving, not just for being near it. This prevents spiraling behavior where strong attraction could cause the router to circle around the neighbor path instead of making progress toward the target. Same direction = full bonus, 45° off = 70% bonus, perpendicular or opposite = no bonus. Bonus has quadratic distance falloff (stronger near the guide path). Python-side changes: bus detection now tracks `clique_endpoint` (source vs target clustering), routes from clustered endpoints using single-direction mode, and uses dense path sampling for direction vectors.
 - **0.14.0**: Added path attraction feature for bus routing. New `attraction_path`, `attraction_radius`, and `attraction_bonus` parameters to GridRouter. Routes can be attracted to a previously routed path (same layer only) using `set_attraction_path()`. Enables parallel routing of bus groups where each net follows its neighbor.
 - **0.13.0**: Added layer direction preference feature. New `layer_direction_preferences` parameter (list of u8: 0=horizontal, 1=vertical, 255=none) and `direction_preference_cost` parameter (penalty for non-preferred direction moves). Encourages horizontal routing on some layers and vertical on others, creating more organized, human-like routing patterns.
