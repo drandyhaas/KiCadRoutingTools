@@ -910,7 +910,14 @@ def get_multipoint_net_pads(
                             y,
                             _make_endpoint_stub(x, y, layer)
                         ))
-            return endpoint_info if len(endpoint_info) >= 3 else None
+            if len(endpoint_info) >= 3:
+                return endpoint_info
+            # Fall through to Case 3: free stub ends alone didn't establish a
+            # multi-point net. Segment groups can terminate entirely at pads
+            # (no dangling free ends) while other pads remain fully unconnected
+            # to any copper - those still need tap routing. Returning None here
+            # would mis-classify such nets as single-ended and falsely report
+            # the whole net routed after connecting just one pair.
 
     # Case 3: Segment group(s) + unconnected pads totaling 3+ endpoints
     # This handles the case where some pads have fanout stubs and others don't
