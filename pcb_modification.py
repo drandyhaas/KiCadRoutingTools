@@ -640,10 +640,47 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         cleaned = collapse_appendices(net_segs, existing_segments, vias=net_vias, pads=net_pads, debug_lines=debug_lines)
         cleaned_segments.extend(cleaned)
 
-    # Filter out very short (degenerate) segments
+    # Filter out very short (degenerate) segments. A dropped segment whose BOTH
+    # ends touch other segments is a micro-bridge (sub-grid geometry like
+    # bisector offsets can produce um-scale bridges between a connector and the
+    # parallel path) - weld its neighbors together at the midpoint so no gap is
+    # left behind. One-ended micro-stubs (e.g. collapsed appendices) are
+    # dropped as before, without disturbing the junction they hang off.
     def seg_len(s):
         return math.sqrt((s.end_x - s.start_x)**2 + (s.end_y - s.start_y)**2)
-    cleaned_segments = [s for s in cleaned_segments if seg_len(s) > 0.01]
+
+    def touching(seg, ax, ay):
+        """Other segments with an endpoint at (ax, ay)."""
+        result = []
+        for other in cleaned_segments:
+            if other is seg or other.net_id != seg.net_id or other.layer != seg.layer:
+                continue
+            if ((abs(other.start_x - ax) < 0.005 and abs(other.start_y - ay) < 0.005) or
+                    (abs(other.end_x - ax) < 0.005 and abs(other.end_y - ay) < 0.005)):
+                result.append(other)
+        return result
+
+    kept_segments = []
+    for seg in cleaned_segments:
+        if seg_len(seg) > 0.01:
+            kept_segments.append(seg)
+            continue
+        start_touch = touching(seg, seg.start_x, seg.start_y)
+        end_touch = touching(seg, seg.end_x, seg.end_y)
+        if len(start_touch) != 1 or len(end_touch) != 1 or start_touch[0] is end_touch[0]:
+            # Not a simple chain bridge (dangling micro-stub, junction, or
+            # T-tap) - drop it without disturbing the neighbors
+            continue
+        mid_x = (seg.start_x + seg.end_x) / 2
+        mid_y = (seg.start_y + seg.end_y) / 2
+        for ax, ay, others in ((seg.start_x, seg.start_y, start_touch),
+                               (seg.end_x, seg.end_y, end_touch)):
+            for other in others:
+                if abs(other.start_x - ax) < 0.005 and abs(other.start_y - ay) < 0.005:
+                    other.start_x, other.start_y = mid_x, mid_y
+                if abs(other.end_x - ax) < 0.005 and abs(other.end_y - ay) < 0.005:
+                    other.end_x, other.end_y = mid_x, mid_y
+    cleaned_segments = kept_segments
 
     for seg in cleaned_segments:
         pcb_data.segments.append(seg)
