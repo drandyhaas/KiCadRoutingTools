@@ -341,12 +341,19 @@ def route_diff_pairs(
             invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
         else:
             iterations = result['iterations'] if result else 0
-            print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
+            polarity_skip = bool(result and result.get('polarity_skip'))
+            if polarity_skip:
+                # Intentionally skipped: polarity mismatch with fixing disabled
+                # and no opposite-side connector option. Rip-up and layer swaps
+                # cannot resolve polarity, so skip the rescue machinery.
+                print(f"  {RED}SKIPPED - polarity swap needed but polarity fixing is disabled{RESET}")
+            else:
+                print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             total_iterations += iterations
 
             # Try rip-up and reroute with progressive N+1
             ripped_up = False
-            if routed_net_paths and result:
+            if not polarity_skip and routed_net_paths and result:
                 # Find the direction that failed faster
                 fwd_iters = result.get('iterations_forward', 0)
                 bwd_iters = result.get('iterations_backward', 0)
@@ -735,7 +742,8 @@ def route_diff_pairs(
                         ripped_up = True
 
             if not ripped_up:
-                print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
+                if not polarity_skip:
+                    print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 failed += 1
 
     return successful, failed, total_time, total_iterations, route_index

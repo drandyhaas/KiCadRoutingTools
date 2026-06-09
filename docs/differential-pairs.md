@@ -218,10 +218,16 @@ Polarity: src_p_sign=1, tgt_p_sign=-1, swap_needed=True, has_vias=True
 The swap changes pad net assignments on the **board only** - update the
 schematic to match (the CLI can do this with `--schematic-dir`).
 
-Use `--no-fix-polarity` to disable this behavior. When disabled and a swap
-would have been needed, the P/N connectors **cross at the target** and short
-the pair (a warning is printed) - so only disable it when you know the pair's
-polarity is consistent or you plan to fix it another way.
+Use `--no-fix-polarity` to disable this behavior (the KiCad plugin GUI has it
+disabled by default). When disabled and a swap would have been needed, the
+router resolves the mismatch geometrically instead: it re-routes with the
+connectors taken out the **opposite side at one end** (flipping one end flips
+its P/N handedness; flipping both would reintroduce the mismatch). Only
+bare-pad endpoints can flip - stub directions are fixed by existing copper.
+Flipped attempts get a full-loop turn budget since they must wrap around
+their endpoint, and the result is validated for P/N track crossings. If no
+flip produces a clean route, the pair is **skipped** with a warning (no
+crossing tracks are ever written).
 
 ## Via Placement
 
@@ -449,6 +455,6 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
 
 ## Limitations
 
-1. **Polarity swap** - Enabled by default; use `--no-fix-polarity` to disable automatic target pad swapping. With fixing disabled, a pair whose polarity differs between source and target is routed with crossing connectors that short P to N (a warning is printed)
+1. **Polarity swap** - Enabled by default on the CLI (disabled by default in the plugin GUI); use `--no-fix-polarity` to disable automatic target pad swapping. With fixing disabled, a mismatched pair is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible
 2. **Fixed spacing** - Spacing is constant along the route (no tapering)
 3. **Grid snapping** - Centerline endpoints snap to grid
