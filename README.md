@@ -34,7 +34,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced. Uses 0° when clearance to the nearest stub is sufficient (≥2× spacing), only angling away when stubs are too close
 - **U-turn prevention** - Prevents differential pair routes from making U-turns (>180° cumulative turn)
 - **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
-- **Automatic polarity swap** - Detects when differential pair P/N polarity differs between source and target pads and automatically swaps target pad net assignments to match. Use `--no-fix-polarity` to disable
+- **Automatic polarity swap** - Detects when differential pair P/N polarity differs between source and target pads and automatically swaps target pad net assignments to match - consistently in the output file (CLI), the live board (plugin), and in-memory state. Use `--no-fix-polarity` to disable (the pair will then route with crossing connectors if a swap was needed, and a warning is printed)
+- **Bare-pad differential pairs** - Routes diff pairs directly between SMD pads with no fanout stubs (e.g., SOIC pins, termination resistors). The escape direction is derived from the pad geometry (perpendicular to the pad axis, away from the component body), and the pair's own pads are treated as obstacles outside the pad-entry corridors so the P/N tracks cannot cross the partner polarity's pad
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
 - **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
@@ -627,7 +628,7 @@ KiCadRoutingTools/
 Key functions in `net_queries.py`:
 - `identify_power_nets(pcb, patterns, widths)` - Pattern-based power net detection for `--power-nets` CLI option
 - `compute_mps_net_ordering(pcb, net_ids)` - MPS algorithm for optimal net ordering
-- `find_differential_pairs(pcb, patterns)` - Detect P/N pairs from net names
+- `find_differential_pairs(pcb, patterns)` - Detect P/N pairs from net names (suffix-style aware: `+`/`-` nets only pair with each other, never with `_P`/`_N` nets sharing the same base name)
 
 Key functions in `analyze_power_paths.py` (used by `/analyze-power-nets` skill):
 - `analyze_pcb(filepath)` - Load PCB and extract components for analysis

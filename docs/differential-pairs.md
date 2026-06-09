@@ -25,6 +25,12 @@ The router recognizes common differential pair naming conventions:
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
 
+Pairing is suffix-style aware: nets only pair when both use the **same**
+convention. For example `/CLK+` pairs with `/CLK-` but never with an unrelated
+`/CLK_N` net, even though both reduce to the base name `/CLK`. This prevents
+boards that mix conventions (e.g. an LVDS input pair `CLK+`/`CLK-` alongside a
+single-ended inverted output `CLK_N`) from producing corrupted pairs.
+
 ## Usage
 
 Use `route_diff.py` for differential pair routing. All nets specified are treated as differential pairs:
@@ -79,6 +85,26 @@ Centerline:       o---o
 The centerline endpoints are positioned:
 - At the midpoint between P and N stub tips
 - Offset by the setback distance in the stub direction
+
+### Bare-Pad Endpoints (No Fanout Stubs)
+
+When a pair connects directly to bare SMD pads (no stub segments, e.g. SOIC
+pins or a termination resistor), there is no stub direction to derive the
+setback from. In that case the router synthesizes an escape direction:
+
+1. Perpendicular to the P-N pad axis
+2. Pointing away from the owning component's pad centroid (so pin-row pads
+   escape away from the chip body)
+3. For symmetric parts (e.g. a 2-pad resistor), pointing toward the other end
+   of the route
+4. If the chosen side is blocked, the opposite side is tried
+
+Additionally, the pair's **own pads** are added as obstacles for the
+centerline (`add_diff_pair_own_pads_as_obstacles`), since the pair's nets are
+otherwise excluded from the obstacle map and the offset P/N tracks could cross
+the partner polarity's pad mid-route. Capsule-shaped corridors from each
+pad-pair center out past the setback position stay open so the route can still
+reach its endpoints and fan out to the pads.
 
 ### Pose-Based Centerline Routing
 
@@ -180,7 +206,22 @@ The router also detects if polarity differs between source and target (polarity 
 Polarity: src_p_sign=1, tgt_p_sign=-1, swap_needed=True, has_vias=True
 ```
 
-**Note:** Polarity swaps are automatically fixed by default, which swaps the target pad net assignments (P↔N) so polarity matches. Use `--no-fix-polarity` to disable this behavior.
+**Note:** Polarity swaps are automatically fixed by default, which swaps the target pad net assignments (P↔N) so polarity matches. The swap is applied consistently in three places:
+
+- the in-memory `pcb_data` (pads and stub segments/vias), so post-route cleanup
+  and subsequent routes see the swapped nets - without this, the appendix
+  cleanup would collapse the connectors ending on the swapped pads, leaving
+  gaps between tracks and pads
+- the output file (CLI mode, via `write_routed_output`)
+- the live pcbnew board (plugin mode, via `kicad_routing_plugin/board_swaps.py`)
+
+The swap changes pad net assignments on the **board only** - update the
+schematic to match (the CLI can do this with `--schematic-dir`).
+
+Use `--no-fix-polarity` to disable this behavior. When disabled and a swap
+would have been needed, the P/N connectors **cross at the target** and short
+the pair (a warning is printed) - so only disable it when you know the pair's
+polarity is consistent or you plan to fix it another way.
 
 ## Via Placement
 
@@ -408,6 +449,6 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
 
 ## Limitations
 
-1. **Polarity swap** - Enabled by default; use `--no-fix-polarity` to disable automatic target pad swapping
+1. **Polarity swap** - Enabled by default; use `--no-fix-polarity` to disable automatic target pad swapping. With fixing disabled, a pair whose polarity differs between source and target is routed with crossing connectors that short P to N (a warning is printed)
 2. **Fixed spacing** - Spacing is constant along the route (no tapering)
 3. **Grid snapping** - Centerline endpoints snap to grid
