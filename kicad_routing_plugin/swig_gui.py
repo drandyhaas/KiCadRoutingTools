@@ -461,13 +461,17 @@ class RoutingDialog(wx.Dialog):
         edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.edge_clearance_check = wx.CheckBox(parent, label="")
         self.edge_clearance_check.SetValue(False)
-        self.edge_clearance_check.SetToolTip("Enable custom edge clearance (unchecked = use track clearance)")
+        self.edge_clearance_check.SetToolTip(
+            "Enable custom edge clearance (unchecked = use the board's minimum "
+            "copper-to-edge constraint when obeying design rules, else none)")
         self.edge_clearance_check.Bind(wx.EVT_CHECKBOX, self._on_edge_clearance_check)
         r = defaults.PARAM_RANGES['board_edge_clearance']
         self.board_edge_clearance = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
         self.board_edge_clearance.SetDigits(r['digits'])
         self.board_edge_clearance.Bind(wx.EVT_SPINCTRLDOUBLE, lambda evt: self._on_drc_param_changed(evt, 'board_edge_clearance'))
-        self.board_edge_clearance.SetToolTip("When disabled, tracks use the Clearance value for board edge spacing")
+        self.board_edge_clearance.SetToolTip(
+            "When disabled, the board's minimum copper-to-edge constraint is used "
+            "(if obeying design rules)")
         self.board_edge_clearance.Enable(False)
         edge_sizer.Add(self.edge_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         edge_sizer.Add(self.board_edge_clearance, 1, wx.EXPAND)
@@ -499,6 +503,17 @@ class RoutingDialog(wx.Dialog):
         """Handle checkbox toggle - apply board minimums if enabled."""
         if self.obey_drc_check.GetValue():
             self._apply_board_minimums_to_controls()
+
+    def _effective_board_edge_clearance(self):
+        """Board-edge clearance to route with: the dedicated control when its
+        checkbox is enabled; otherwise the board's minimum copper-to-edge
+        constraint when obeying design rules (0 = no edge keepout)."""
+        if self.edge_clearance_check.GetValue():
+            return self.board_edge_clearance.GetValue()
+        if self.obey_drc_check.GetValue():
+            minimums = _get_board_minimum_constraints() or {}
+            return minimums.get('min_copper_edge_clearance') or 0.0
+        return 0.0
 
     def _on_drc_param_changed(self, event, ctrl_name):
         """Validate parameter change against DRC minimums."""
@@ -1071,7 +1086,7 @@ class RoutingDialog(wx.Dialog):
         from .planes_gui import PlanesTab
 
         def get_shared_params():
-            edge_clearance = self.board_edge_clearance.GetValue() if self.edge_clearance_check.GetValue() else self.clearance.GetValue()
+            edge_clearance = self._effective_board_edge_clearance()
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -1115,6 +1130,8 @@ class RoutingDialog(wx.Dialog):
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
+                'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
+                'board_edge_clearance': self._effective_board_edge_clearance(),
                 'grid_step': self.grid_step.GetValue(),
                 'via_cost': self.via_cost.GetValue(),
                 'max_iterations': self.max_iterations.GetValue(),
@@ -1797,7 +1814,7 @@ class RoutingDialog(wx.Dialog):
             'crossing_penalty': self.crossing_penalty.GetValue(),
             'routing_clearance_margin': self.routing_clearance_margin.GetValue(),
             'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
-            'board_edge_clearance': self.board_edge_clearance.GetValue() if self.edge_clearance_check.GetValue() else 0.0,
+            'board_edge_clearance': self._effective_board_edge_clearance(),
             'enable_layer_switch': self.enable_layer_switch.GetValue(),
             # Direction
             'direction': ['forward', 'backward'][self.direction_choice.GetSelection() - 1] if self.direction_choice.GetSelection() > 0 else None,
