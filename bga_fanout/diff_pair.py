@@ -24,7 +24,9 @@ def find_differential_pairs(footprint: Footprint,
     Returns:
         Dict mapping base_name to DiffPairPads
     """
-    pairs: Dict[str, DiffPairPads] = {}
+    # Key by (base_name, suffix style) so nets only pair within the same naming
+    # convention (e.g. CLK+ pairs with CLK-, never with an unrelated CLK_N)
+    pairs: Dict[tuple, DiffPairPads] = {}
 
     for pad in footprint.pads:
         if not pad.net_name or pad.net_id == 0:
@@ -41,17 +43,24 @@ def find_differential_pairs(footprint: Footprint,
         if result is None:
             continue
 
-        base_name, is_p = result
+        base_name, is_p, style = result
+        key = (base_name, style)
 
-        if base_name not in pairs:
-            pairs[base_name] = DiffPairPads(base_name=base_name)
+        if key not in pairs:
+            pairs[key] = DiffPairPads(base_name=base_name)
 
         if is_p:
-            pairs[base_name].p_pad = pad
+            pairs[key].p_pad = pad
         else:
-            pairs[base_name].n_pad = pad
+            pairs[key].n_pad = pad
 
-    # Filter to only complete pairs
-    complete_pairs = {k: v for k, v in pairs.items() if v.is_complete}
+    # Filter to only complete pairs, keyed by base name (disambiguate with the
+    # suffix style in the unlikely case two conventions share a base name)
+    complete_pairs: Dict[str, DiffPairPads] = {}
+    for (base_name, style), pair in pairs.items():
+        if not pair.is_complete:
+            continue
+        name = base_name if base_name not in complete_pairs else f"{base_name}({style})"
+        complete_pairs[name] = pair
 
     return complete_pairs

@@ -266,7 +266,7 @@ def identify_power_nets(pcb_data: PCBData,
     return power_net_widths
 
 
-def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
+def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     """
     Extract differential pair base name and polarity from net name.
 
@@ -277,7 +277,10 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     - name_t / name_c (true/complement, common for DDR)
     - name_t_X / name_c_X (true/complement with suffix, e.g., DQS0_t_A)
 
-    Returns (base_name, is_positive) or None if not a diff pair.
+    Returns (base_name, is_positive, style) or None if not a diff pair.
+    style identifies the suffix convention ('_t', '_P', 'P', '+') - nets only
+    form a pair when both use the same convention, so e.g. /CLK+ does not pair
+    with an unrelated /CLK_N net.
     """
     import re
 
@@ -290,34 +293,34 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool]]:
     if tc_match:
         base = tc_match.group(1) + '_X_' + tc_match.group(3)  # Keep suffix in base for pairing
         is_positive = tc_match.group(2) == 't'
-        return (base, is_positive)
+        return (base, is_positive, '_t')
 
     # Try _t/_c suffix (DDR style, e.g., CK_t / CK_c)
     if net_name.endswith('_t'):
-        return (net_name[:-2], True)
+        return (net_name[:-2], True, '_t')
     if net_name.endswith('_c'):
-        return (net_name[:-2], False)
+        return (net_name[:-2], False, '_t')
 
     # Try _P/_N suffix (most common for LVDS)
     if net_name.endswith('_P'):
-        return (net_name[:-2], True)
+        return (net_name[:-2], True, '_P')
     if net_name.endswith('_N'):
-        return (net_name[:-2], False)
+        return (net_name[:-2], False, '_P')
 
     # Try P/N suffix without underscore
     if net_name.endswith('P') and len(net_name) > 1:
         # Check it's not just ending in P as part of name
         if net_name[-2] in '0123456789_':
-            return (net_name[:-1], True)
+            return (net_name[:-1], True, 'P')
     if net_name.endswith('N') and len(net_name) > 1:
         if net_name[-2] in '0123456789_':
-            return (net_name[:-1], False)
+            return (net_name[:-1], False, 'P')
 
     # Try +/- suffix
     if net_name.endswith('+'):
-        return (net_name[:-1], True)
+        return (net_name[:-1], True, '+')
     if net_name.endswith('-'):
-        return (net_name[:-1], False)
+        return (net_name[:-1], False, '+')
 
     return None
 
@@ -333,7 +336,9 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
     Returns:
         Dict mapping base_name to DiffPair with complete P/N pairs
     """
-    pairs: Dict[str, DiffPairNet] = {}
+    # Key by (base_name, suffix style) so nets only pair within the same naming
+    # convention (e.g. /CLK+ pairs with /CLK-, never with an unrelated /CLK_N)
+    pairs: Dict[Tuple[str, str], DiffPairNet] = {}
 
     # Collect all net names from pcb_data
     for net_id, net in pcb_data.nets.items():
@@ -351,20 +356,27 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
         if result is None:
             continue
 
-        base_name, is_p = result
+        base_name, is_p, style = result
+        key = (base_name, style)
 
-        if base_name not in pairs:
-            pairs[base_name] = DiffPairNet(base_name=base_name)
+        if key not in pairs:
+            pairs[key] = DiffPairNet(base_name=base_name)
 
         if is_p:
-            pairs[base_name].p_net_id = net_id
-            pairs[base_name].p_net_name = net_name
+            pairs[key].p_net_id = net_id
+            pairs[key].p_net_name = net_name
         else:
-            pairs[base_name].n_net_id = net_id
-            pairs[base_name].n_net_name = net_name
+            pairs[key].n_net_id = net_id
+            pairs[key].n_net_name = net_name
 
-    # Filter to only complete pairs
-    complete_pairs = {k: v for k, v in pairs.items() if v.is_complete}
+    # Filter to only complete pairs, keyed by base name (disambiguate with the
+    # suffix style in the unlikely case two conventions share a base name)
+    complete_pairs: Dict[str, DiffPairNet] = {}
+    for (base_name, style), pair in pairs.items():
+        if not pair.is_complete:
+            continue
+        name = base_name if base_name not in complete_pairs else f"{base_name}({style})"
+        complete_pairs[name] = pair
 
     return complete_pairs
 

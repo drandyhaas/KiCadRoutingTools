@@ -6,6 +6,8 @@ Usage:
 
 All nets matching the patterns are treated as differential pairs (P/N pairs).
 Nets with _P/_N, P/N, or +/- suffixes will be paired and routed together.
+Nets only pair within the same suffix convention (e.g. CLK+ pairs with CLK-,
+never with an unrelated CLK_N).
 
 Requires the Rust router module. Build it with:
     cd rust_router && cargo build --release
