@@ -109,6 +109,17 @@ def extract_result_line(text):
     return None
 
 
+def auth_error_hint(error):
+    """Extra guidance when a run failed because the claude CLI isn't
+    logged in - the CLI's own message ("Please run /login") assumes the
+    user knows /login is a command inside the claude terminal app."""
+    markers = ("invalid api key", "/login", "not logged in", "authentication", "oauth")
+    if error and any(m in error.lower() for m in markers):
+        return ("\nClaude Code is installed but not logged in: open a "
+                "terminal, run `claude`, complete /login, then retry.")
+    return ""
+
+
 def summarize_tool_use(name, tool_input):
     """One-line human-readable summary of a tool call."""
     if name == "Bash":
@@ -345,7 +356,7 @@ class ClaudeSkillDialog(wx.Dialog):
         self.gauge.SetValue(0)
         self.action_btn.SetLabel("Close")
         if error:
-            self.output_ctrl.AppendText(f"\n{error}\n")
+            self.output_ctrl.AppendText(f"\n{error}{auth_error_hint(error)}\n")
             return
         self.result_text = result_text
         self.result_value = extract_result_line(result_text)
@@ -717,7 +728,7 @@ class ClaudeTab(wx.Panel):
         kind, self._pending_kind = self._pending_kind, None
 
         if error:
-            self.output_ctrl.AppendText(f"\n{error}\n")
+            self.output_ctrl.AppendText(f"\n{error}{auth_error_hint(error)}\n")
             self._log(f"Claude: {error}")
             return
 
