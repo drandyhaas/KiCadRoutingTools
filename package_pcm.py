@@ -67,6 +67,7 @@ ROOT_EXCLUDE = {
     "tests",
     "docs",
     "kicad_files",  # sample boards: large and unnecessary at runtime
+    "artifacts",  # CI downloads release binaries here before packaging
 }
 
 # CLAUDE.md and .claude/ (the routing skills) ship intentionally so they can be
@@ -98,13 +99,23 @@ def read_version():
     return (SCRIPT_DIR / "VERSION").read_text().strip()
 
 
-def stage_plugins(stage_root: Path):
+def stage_plugins(stage_root: Path, binary_dir: Path | None = None):
     """Copy the repo working tree (minus ROOT_EXCLUDE / IGNORE_PATTERNS) into
-    <stage_root>/plugins/."""
+    <stage_root>/plugins/.
+
+    binary_dir, when it lives inside the repo (CI downloads release binaries to
+    ./artifacts before packaging), is skipped so it isn't swept into the plugin.
+    """
     plugins_dir = stage_root / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
 
     ignored_names = set(ROOT_EXCLUDE)
+    if binary_dir is not None:
+        try:
+            ignored_names.add(binary_dir.resolve().relative_to(SCRIPT_DIR).parts[0])
+        except (ValueError, IndexError):
+            pass  # binary_dir is outside the repo; nothing to skip
+
     for entry in sorted(SCRIPT_DIR.iterdir()):
         if entry.name in ignored_names:
             continue
@@ -228,7 +239,7 @@ def main():
     print(f"Building PCM package: {zip_name}")
     with tempfile.TemporaryDirectory(prefix="kicadrt-pcm-") as tmp:
         stage_root = Path(tmp)
-        plugins_dir = stage_plugins(stage_root)
+        plugins_dir = stage_plugins(stage_root, binary_dir)
         install_binaries(plugins_dir, version, binary_dir)
         write_top_level(stage_root, version)
         install_size = make_zip(stage_root, out_zip)
