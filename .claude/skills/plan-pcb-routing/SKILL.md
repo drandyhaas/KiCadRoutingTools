@@ -44,8 +44,8 @@ plan report** so problems surface before any routing work:
 ```python
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
-for layer in pcb.stackup:
-    print(layer.name, layer.thickness, layer.epsilon_r)
+for layer in pcb.board_info.stackup:  # List[StackupLayer], ordered top to bottom
+    print(layer.name, layer.layer_type, layer.thickness, layer.epsilon_r)
 ```
 
 - No stackup section, or all dielectrics with identical thickness and ε_r ≈ 4.5, means

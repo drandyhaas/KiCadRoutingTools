@@ -28,6 +28,17 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pcb.nets` - Dict[int, Net] keyed by net_id
 - `pcb.segments` - List of track segments
 - `pcb.vias` - List of vias
+- `pcb.board_info` - BoardInfo (layers, bounds, stackup)
+
+### BoardInfo / Stackup Attributes
+
+- `pcb.board_info.copper_layers` - List[str] of copper layer names (e.g., ['F.Cu', 'B.Cu'])
+- `pcb.board_info.layers` - Dict[int, str] layer_id -> layer_name
+- `pcb.board_info.board_bounds` - (min_x, min_y, max_x, max_y) or None
+- `pcb.board_info.stackup` - List[StackupLayer], ordered top to bottom
+  (NOT `pcb.stackup`). Empty list if the board has no stackup section.
+- StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),
+  `thickness` (mm), `epsilon_r`, `loss_tangent`, `material`
 
 ### Footprint Attributes
 
