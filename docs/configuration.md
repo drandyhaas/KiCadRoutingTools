@@ -293,6 +293,8 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "*DQ*" \
 
 ### Visualization Options
 
+Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the [PyGame visualizer documentation](../pygame_visualizer/README.md) for the full list of interactive controls (pause/step, zoom/pan, layer filtering, speed). Requires pygame (`pip install pygame-ce`); without it, routing falls back to normal batch mode.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--visualize` / `-V` | false | Show real-time visualization of routing (requires pygame) |

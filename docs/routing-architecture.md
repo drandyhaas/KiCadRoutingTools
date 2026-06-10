@@ -367,3 +367,7 @@ After routing, segments undergo cleanup:
 3. **Degenerate segment removal** - Filters segments shorter than 0.01mm
 
 See `pcb_modification.py` for implementation details.
+
+## Visualizing the Search
+
+The optional [PyGame visualizer](../pygame_visualizer/README.md) renders the A* search in real time — open/closed sets, per-layer coloring, and completed routes — using the same Rust engine and obstacle maps as batch routing, so what you watch is exactly what gets routed. Enable it with `route.py --visualize`; it is the quickest way to see why a route takes a particular path or where a search is getting stuck.
