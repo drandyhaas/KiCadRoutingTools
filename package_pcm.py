@@ -49,26 +49,41 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.resolve()
 GITHUB_REPO = "drandyhaas/KiCadRoutingTools"
 
-# Files at the repo root that ship inside plugins/. Anything not listed is
-# excluded.
-PLUGIN_FILES_KEEP = {
-    "__init__.py",
-    "VERSION",
-    "LICENSE",
-    "requirements.txt",
-}
-# Directories at the repo root to include under plugins/.
-PLUGIN_DIRS_KEEP = {
-    "kicad_routing_plugin",
-    "rust_router",  # binaries are placed here separately
-}
-# Build/install scripts that should NOT ship inside the plugin.
-ROOT_SCRIPTS_EXCLUDE = {
+# The plugin ships the whole repo working tree minus the entries below, so a
+# PCM install contains the same code as git: the GUI runs, and the command-line
+# tools work straight from the installed plugin directory. Using a denylist
+# (rather than an allowlist of files/dirs) means new modules and packages ship
+# automatically -- forgetting to allowlist a package was issue #49.
+ROOT_EXCLUDE = {
+    # Build / release / install tooling: not needed at runtime.
     "build_router.py",
     "install_plugin.py",
     "package_pcm.py",
     "update_metadata.py",
+    # The repo metadata.json is rewritten to the zip root separately by
+    # write_top_level(); it must not also appear under plugins/.
+    "metadata.json",
+    # Dev-only directories.
+    "tests",
+    "docs",
+    "kicad_files",  # sample boards: large and unnecessary at runtime
+    "artifacts",  # CI downloads release binaries here before packaging
 }
+
+# CLAUDE.md and .claude/ (the routing skills) ship intentionally so they can be
+# used from the installed plugin later.
+
+# Names skipped anywhere in the tree (VCS, caches, build artifacts). The Rust
+# crate's build dir and the per-platform binaries are stripped here; the right
+# binary is added back under platform-suffix names by install_binaries().
+IGNORE_PATTERNS = shutil.ignore_patterns(
+    ".git", ".github", ".gitignore", ".DS_Store",
+    "__pycache__", "*.pyc", "dist",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".venv",
+    "target",  # rust_router/target/ is the cargo build dir
+    "grid_router.so", "grid_router.pyd", "grid_router.abi3.so",
+    "Cargo.lock",
+)
 
 # All binaries bundled in every PCM zip. The startup resolver in the root
 # __init__.py picks the right one based on sys.platform + machine.
@@ -84,39 +99,34 @@ def read_version():
     return (SCRIPT_DIR / "VERSION").read_text().strip()
 
 
-def _is_py_module(name):
-    return name.endswith(".py") and name not in ROOT_SCRIPTS_EXCLUDE
+def stage_plugins(stage_root: Path, binary_dir: Path | None = None):
+    """Copy the repo working tree (minus ROOT_EXCLUDE / IGNORE_PATTERNS) into
+    <stage_root>/plugins/.
 
-
-def stage_plugins(stage_root: Path):
-    """Copy plugin source into <stage_root>/plugins/."""
+    binary_dir, when it lives inside the repo (CI downloads release binaries to
+    ./artifacts before packaging), is skipped so it isn't swept into the plugin.
+    """
     plugins_dir = stage_root / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
 
-    for name in PLUGIN_FILES_KEEP:
-        src = SCRIPT_DIR / name
-        if src.exists():
-            shutil.copy2(src, plugins_dir / name)
+    ignored_names = set(ROOT_EXCLUDE)
+    if binary_dir is not None:
+        try:
+            ignored_names.add(binary_dir.resolve().relative_to(SCRIPT_DIR).parts[0])
+        except (ValueError, IndexError):
+            pass  # binary_dir is outside the repo; nothing to skip
 
-    for entry in SCRIPT_DIR.iterdir():
-        if entry.is_file() and _is_py_module(entry.name):
-            shutil.copy2(entry, plugins_dir / entry.name)
-
-    for dirname in PLUGIN_DIRS_KEEP:
-        src = SCRIPT_DIR / dirname
-        if not src.is_dir():
+    for entry in sorted(SCRIPT_DIR.iterdir()):
+        if entry.name in ignored_names:
             continue
-        dst = plugins_dir / dirname
-        shutil.copytree(
-            src,
-            dst,
-            ignore=shutil.ignore_patterns(
-                "__pycache__", "*.pyc", ".DS_Store",
-                "target",  # rust_router/target/ is the cargo build dir
-                "grid_router.so", "grid_router.pyd", "grid_router.abi3.so",
-                "Cargo.lock",
-            ),
-        )
+        # IGNORE_PATTERNS handles dotfiles/caches uniformly at the top level too.
+        if IGNORE_PATTERNS(str(SCRIPT_DIR), [entry.name]):
+            continue
+        dst = plugins_dir / entry.name
+        if entry.is_dir():
+            shutil.copytree(entry, dst, ignore=IGNORE_PATTERNS)
+        else:
+            shutil.copy2(entry, dst)
 
     return plugins_dir
 
@@ -229,7 +239,7 @@ def main():
     print(f"Building PCM package: {zip_name}")
     with tempfile.TemporaryDirectory(prefix="kicadrt-pcm-") as tmp:
         stage_root = Path(tmp)
-        plugins_dir = stage_plugins(stage_root)
+        plugins_dir = stage_plugins(stage_root, binary_dir)
         install_binaries(plugins_dir, version, binary_dir)
         write_top_level(stage_root, version)
         install_size = make_zip(stage_root, out_zip)

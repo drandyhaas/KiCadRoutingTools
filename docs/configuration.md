@@ -86,6 +86,8 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--ripped-route-avoidance-radius` | 1.0 | Radius around ripped route corridors to apply soft penalty (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Cost penalty for routing through ripped corridors (0 = disabled) |
 
+See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up, how blockers are identified and ranked, and how ripped nets are rerouted.
+
 ### Routing Strategy Options
 
 | Option | Default | Description |
@@ -110,6 +112,18 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
 | `--vertical-attraction-cost` | 0.0 | Cost bonus for aligning with tracks on other layers (0 = disabled) |
 
+### Bus Routing Options
+
+Detects groups of nets with clustered endpoints (buses) and routes them as parallel tracks, each net attracted to its already-routed neighbor. See [Bus Routing](bus-routing.md) for the detection algorithm, middle-out routing order, and tuning guidance.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bus` | off | Enable bus detection and routing |
+| `--bus-detection-radius` | 5.0 | Max endpoint distance for nets to form a bus (mm) |
+| `--bus-min-nets` | 2 | Minimum number of nets to form a bus group |
+| `--bus-attraction-radius` | 5.0 | Attraction radius around the neighbor's track (mm) |
+| `--bus-attraction-bonus` | 5000 | Cost bonus for moving parallel to the neighbor's track |
+
 ### Guide Corridor Options (preferred route)
 
 Draw a polyline on a User layer in KiCad, then enable `--guide-corridor` to route the
@@ -119,7 +133,9 @@ routes source → waypoints → target. It keeps the route on a single layer whe
 waypoint it can't reach cleanly on the current layer is skipped rather than forcing a layer
 change, so a corridor doesn't add vias the direct route wouldn't need. It applies to all nets
 routed in the run and works in either draw direction; multiple nets following the same
-corridor pack alongside each other without overlapping.
+corridor pack alongside each other without overlapping. Supported by `route.py` and the
+plugin ("Follow User-layer guide path" checkbox); not currently supported by `route_diff.py`
+or `route_planes.py`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -267,6 +283,8 @@ Groups nets by byte lane: DQ0-7 + DQS0, DQ8-15 + DQS1, etc.
 - Uses 45° chamfered corners for smooth trombone patterns
 - Supports multi-layer routes: meanders are applied to same-layer sections, preserving via positions
 
+See [Length Matching](length-matching.md) for the full algorithm: meander geometry, per-bump clearance checking, via barrel lengths, and DDR4 auto-grouping details.
+
 ### Time Matching Options
 
 Time matching is an alternative to length matching that matches propagation delay instead of physical length. This accounts for different signal speeds on different layers:
@@ -291,7 +309,11 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "*DQ*" \
     --time-match-tolerance 1.0
 ```
 
+See [Length Matching](length-matching.md#time-matching) for how propagation delay is computed from the stackup, including via barrel delays.
+
 ### Visualization Options
+
+Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the [PyGame visualizer documentation](../pygame_visualizer/README.md) for the full list of interactive controls (pause/step, zoom/pan, layer filtering, speed). Requires pygame (`pip install pygame-ce`); without it, routing falls back to normal batch mode.
 
 | Option | Default | Description |
 |--------|---------|-------------|

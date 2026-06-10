@@ -496,7 +496,7 @@ class DifferentialTab(wx.Panel):
 
         # Route and Cancel buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.route_btn = wx.Button(self, label="Route")
+        self.route_btn = wx.Button(self, label="Route Pairs")
         self.route_btn.SetToolTip("Start routing selected differential pairs")
         self.route_btn.Bind(wx.EVT_BUTTON, self._on_route)
         btn_sizer.Add(self.route_btn, 1, wx.RIGHT, 5)

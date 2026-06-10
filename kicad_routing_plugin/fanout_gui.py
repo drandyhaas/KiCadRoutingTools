@@ -917,6 +917,11 @@ class FanoutTab(wx.Panel):
         self.fanout_btn.Bind(wx.EVT_BUTTON, self._on_fanout)
         btn_sizer.Add(self.fanout_btn, 1, wx.RIGHT, 5)
 
+        self.close_btn = wx.Button(self, label="Close")
+        self.close_btn.SetToolTip("Close dialog")
+        self.close_btn.Bind(wx.EVT_BUTTON, self._on_close)
+        btn_sizer.Add(self.close_btn, 1)
+
         right_sizer.Add(btn_sizer, 0, wx.EXPAND)
 
         main_sizer.Add(right_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -925,6 +930,10 @@ class FanoutTab(wx.Panel):
 
         # Initial state
         self._on_type_changed(None)
+
+    def _on_close(self, event):
+        """Close the parent dialog (matches the other tabs' Close button)."""
+        self.GetTopLevelParent().EndModal(wx.ID_CANCEL)
 
     def _on_type_changed(self, event):
         """Handle fanout type change."""

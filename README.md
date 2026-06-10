@@ -17,7 +17,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
 - **Multi-layer routing** with automatic via insertion
 - **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
-- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes.
+- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes. See [Rip-Up and Reroute](docs/rip-up-reroute.md) for details
 - **Ripped route corridor avoidance** - When a net is ripped up, soft penalties are applied to its former corridor. This encourages the current route to avoid that area, increasing the chance the ripped net can be successfully re-routed later.
 - **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
 - **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations. Validates that stub endpoints won't be too close to other stubs on the destination layer.
@@ -41,11 +41,11 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
-- **Bus routing** - Automatically detects groups of nets with clustered endpoints (buses) and routes them together. Uses direction-based attraction so each net follows its neighbor's path in parallel, creating clean parallel traces. Routes from the middle of the bus outward, alternating sides. Enable with `--bus` flag. Configurable detection radius, attraction radius, and attraction bonus
-- **Guide corridor (preferred route)** - Draw a polyline on a User layer (e.g. `User.1`) in KiCad and the selected nets are routed to follow it as waypoints — source → along your drawn path → target — getting as close to the line as obstacles allow. For multi-point nets each waypoint steers the nearest segment of the net's existing MST, so endpoints/topology are untouched. It's strictly best-effort: a waypoint it can't follow on the current layer is skipped (so a guide never makes a route fail or adds vias the direct route wouldn't need), and multiple nets following the same corridor pack alongside without overlapping. Enable with `--guide-corridor` (CLI) or the "Follow User-layer guide path" checkbox (plugin); configurable layer and waypoint spacing
+- **Bus routing** - Automatically detects groups of nets with clustered endpoints (buses) and routes them together. Uses direction-based attraction so each net follows its neighbor's path in parallel, creating clean parallel traces. Routes from the middle of the bus outward, alternating sides. Enable with `--bus` flag. Configurable detection radius, attraction radius, and attraction bonus. See [Bus Routing](docs/bus-routing.md) for details
+- **Guide corridor (preferred route)** - Draw a polyline on a User layer (e.g. `User.1`) in KiCad and the selected nets are routed to follow it as waypoints — source → along your drawn path → target — getting as close to the line as obstacles allow. For multi-point nets each waypoint steers the nearest segment of the net's existing MST, so endpoints/topology are untouched. It's strictly best-effort: a waypoint it can't follow on the current layer is skipped (so a guide never makes a route fail or adds vias the direct route wouldn't need), and multiple nets following the same corridor pack alongside without overlapping. Enable with `--guide-corridor` (CLI) or the "Follow User-layer guide path" checkbox (plugin); configurable layer and waypoint spacing. See [Guide Corridor Options](docs/configuration.md#guide-corridor-options-preferred-route) for details
 - **Keepout zones** - Draw one or more closed polygons on a User layer (e.g. `User.2`) in KiCad and routed tracks (and vias) are kept **out** of those areas on every copper layer. It's a hard keepout that applies across single-ended, multipoint, and differential-pair routing, plus plane via-stitching and plane repair — useful for reserving analog regions, antenna clearances, or mechanical exclusions. Enable with `--keepout` (`route.py` / `route_diff.py`) or the "Keep out of User-layer polygon(s)" checkbox (plugin); configurable layer. (Don't draw a zone over a pad you need to route.)
-- **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
-- **Time matching** - Alternative to length matching that matches propagation delay instead of physical length. Accounts for different signal speeds on outer layers (microstrip, faster) vs inner layers (stripline, slower) using effective dielectric constants from the board stackup. Use `--time-matching` to enable. Tolerance specified in picoseconds
+- **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance. See [Length Matching](docs/length-matching.md) for details
+- **Time matching** - Alternative to length matching that matches propagation delay instead of physical length. Accounts for different signal speeds on outer layers (microstrip, faster) vs inner layers (stripline, slower) using effective dielectric constants from the board stackup. Use `--time-matching` to enable. Tolerance specified in picoseconds. See [Length Matching](docs/length-matching.md#time-matching) for details
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Impedance-controlled routing** - Specify target impedance (e.g., 50Ω single-ended, 100Ω differential) and track widths are automatically calculated per layer from the board stackup. Uses IPC-2141 formulas for microstrip (outer layers) and stripline (inner layers). Widths adjust automatically when switching layers via vias to maintain target impedance
 - **Power net routing** - Route power nets (GND, VCC, etc.) with wider tracks than signal nets. Specify patterns and corresponding widths (e.g., `--power-nets "*GND*" "*VCC*" --power-nets-widths 0.4 0.5`). First matching pattern determines width for each net. Obstacle clearances automatically adjust for wider power traces. Power net widths are never smaller than the base track width
@@ -55,7 +55,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
 - **Disconnected plane region repair** - After power planes are created, regions may be effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects disconnected regions and routes wide, short tracks between them to ensure electrical continuity
 - **GND return via placement** - Automatically places GND vias near signal vias for return current paths. Searches from minimum viable distance outward (24 angles, fine step), placing GND vias as close as possible while respecting track clearances. Through-hole GND pads count as existing return paths. Use `--add-gnd-vias` with route_planes.py
-- **AI-powered high-speed net analysis** - Use the `/find-high-speed-nets` skill to identify which nets carry high-speed signals. Looks up component datasheets via WebSearch to find max interface frequencies and rise times, traces signals through series passives, and recommends `--gnd-via-distance` values based on the fastest signals on the board. See the [GND return via distance guidance](#gnd-return-via-distance-guidance) in the planes documentation
+- **Real-time visualization** - Watch the A* search explore the grid live with the optional [PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`), with pause/step, zoom/pan, per-layer filtering, and speed control
+- **AI-powered high-speed net analysis** - Use the `/find-high-speed-nets` skill to identify which nets carry high-speed signals. Looks up component datasheets via WebSearch to find max interface frequencies and rise times, traces signals through series passives, and recommends `--gnd-via-distance` values based on the fastest signals on the board. See [Claude Skills](docs/claude-skills.md) and the [GND return via distance guidance](#gnd-return-via-distance-guidance) in the planes documentation
 
 ## Quick Start
 
@@ -136,9 +137,15 @@ Claude will:
 
 Other useful skills:
 ```
-> /find-high-speed-nets kicad_files/my_board.kicad_pcb   # Identify high-speed nets via datasheet lookup
-> /analyze-power-nets kicad_files/my_board.kicad_pcb     # Identify power nets and track widths
+> /find-high-speed-nets kicad_files/my_board.kicad_pcb       # Identify high-speed nets via datasheet lookup
+> /analyze-power-nets kicad_files/my_board.kicad_pcb         # Identify power nets and track widths
+> /identify-diff-pairs kicad_files/my_board.kicad_pcb        # Find diff pairs by pin function, recommend gap/impedance
+> /recommend-stackup kicad_files/my_board.kicad_pcb          # Stackup advice for impedance/time-matching accuracy
+> /diagnose-routing-failures my_board.kicad_pcb /tmp/route_output.txt  # Root-cause failed routes, get a retry command
+> /review-routed-board my_board_routed.kicad_pcb             # Post-route QA: DRC, connectivity, length match, GND vias
 ```
+
+See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
 **Option C: Manual Command Line (For scripting and automation)**
 
@@ -467,6 +474,10 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Configuration](docs/configuration.md) | Command-line options, GridRouteConfig parameters |
 | [Differential Pairs](docs/differential-pairs.md) | P/N pairing, polarity swaps, via handling |
 | [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
+| [Rip-Up and Reroute](docs/rip-up-reroute.md) | Blocking analysis, progressive N+1 escalation, reroute loop |
+| [Length Matching](docs/length-matching.md) | Trombone meanders, via barrel lengths, DDR auto-grouping, time matching |
+| [Bus Routing](docs/bus-routing.md) | Bus detection, middle-out ordering, neighbor attraction |
+| [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
 | [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
 | [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher |
 | [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
@@ -474,7 +485,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
-| [High-Speed Net Analysis](#6-high-speed-net-analysis) | Signal speed classification, GND return via recommendations |
+| [Claude Skills](docs/claude-skills.md) | All seven AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, failure diagnosis, board review |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
@@ -585,7 +596,11 @@ KiCadRoutingTools/
 └── .claude/skills/           # Claude Code skills
     ├── analyze-power-nets/   # AI-powered power net analysis skill
     ├── find-high-speed-nets/ # AI-powered high-speed net identification skill
-    └── plan-pcb-routing/     # AI-powered routing plan generation skill
+    ├── plan-pcb-routing/     # AI-powered routing plan generation skill (orchestrates the others)
+    ├── identify-diff-pairs/  # Datasheet-based diff pair detection skill
+    ├── recommend-stackup/    # Stackup review/recommendation skill
+    ├── diagnose-routing-failures/  # Failure root-cause and retry skill
+    └── review-routed-board/  # Post-route QA and sign-off skill
 ```
 
 ## Module Overview
