@@ -175,6 +175,10 @@ The plugin provides a full graphical interface for all routing features, running
 
 ### AI assistance (Claude tab)
 
+<p align="center">
+  <img src="docs/claude_tab.png" alt="Claude tab: planned steps, controls, and live transcript" width="700">
+</p>
+
 With [Claude Code](https://claude.ai/claude-code) installed, the routing dialog gains AI assistance throughout (the plugin spawns `claude` headless, streams a live transcript, and fills GUI controls from the results):
 
 - **Claude tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Model and effort dropdowns control every AI run and persist with the dialog settings.
