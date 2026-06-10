@@ -11,7 +11,8 @@ import numpy as np
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map, iter_pad_blocked_cells
+from routing_utils import build_layer_map, iter_pad_blocked_cells, \
+    pad_blocked_cells_array, square_offsets, circle_offsets
 from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 
@@ -61,9 +62,10 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
 
-    # Collect cells/vias into sets to deduplicate
-    blocked_cells_set: Set[Tuple[int, int, int]] = set()
-    blocked_vias_set: Set[Tuple[int, int]] = set()
+    # Collect cell arrays; deduplicated with np.unique at the end (same
+    # unique-cell semantics as the per-cell sets this replaces)
+    blocked_cells_set: List["np.ndarray"] = []
+    blocked_vias_set: List["np.ndarray"] = []
 
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
@@ -107,14 +109,15 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         _collect_pad_obstacles(pad, coord, layer_map, config, extra_clearance,
                                 blocked_cells_set, blocked_vias_set)
 
-    # Convert sets to numpy arrays for memory efficiency
+    # Concatenate and deduplicate (the Rust map refcounts batch adds, so
+    # each cell must appear once per net - same as the old set semantics)
     if blocked_cells_set:
-        blocked_cells_arr = np.array(list(blocked_cells_set), dtype=np.int32)
+        blocked_cells_arr = np.unique(np.concatenate(blocked_cells_set), axis=0)
     else:
         blocked_cells_arr = np.empty((0, 3), dtype=np.int32)
 
     if blocked_vias_set:
-        blocked_vias_arr = np.array(list(blocked_vias_set), dtype=np.int32)
+        blocked_vias_arr = np.unique(np.concatenate(blocked_vias_set), axis=0)
     else:
         blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
 
@@ -126,8 +129,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
 def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
                                 expansion_grid: int, via_block_grid: int,
-                                blocked_cells: Set[Tuple[int, int, int]],
-                                blocked_vias: Set[Tuple[int, int]]):
+                                blocked_cells: List["np.ndarray"],
+                                blocked_vias: List["np.ndarray"]):
     """Collect segment obstacle cells into sets (no obstacle map modification)."""
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
@@ -135,59 +138,64 @@ def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
     is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
     effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
 
-    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-        for ex in range(-expansion_grid, expansion_grid + 1):
-            for ey in range(-expansion_grid, expansion_grid + 1):
-                blocked_cells.add((gx + ex, gy + ey, layer_idx))
-        for ex in range(-via_block_range, via_block_range + 1):
-            for ey in range(-via_block_range, via_block_range + 1):
-                if ex*ex + ey*ey <= effective_via_block_sq:
-                    blocked_vias.add((gx + ex, gy + ey))
+    # Batched rasterization (issue #35): collect cell arrays; the caller
+    # deduplicates with np.unique, matching the old per-cell set semantics.
+    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
+
+    track_offs = square_offsets(expansion_grid)
+    cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
+    rows = np.empty((len(cells), 3), dtype=np.int32)
+    rows[:, :2] = cells
+    rows[:, 2] = layer_idx
+    blocked_cells.append(rows)
+
+    via_offs = circle_offsets(via_block_range, effective_via_block_sq)
+    blocked_vias.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
 
 
 def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
                             via_track_expansion_grid, via_via_expansion_grid: int,
                             diagonal_margin: float,
-                            blocked_cells: Set[Tuple[int, int, int]],
-                            blocked_vias: Set[Tuple[int, int]]):
+                            blocked_cells: List["np.ndarray"],
+                            blocked_vias: List["np.ndarray"]):
     """Collect via obstacle cells into sets (no obstacle map modification).
 
     Args:
         via_track_expansion_grid: Either a single int or list of ints (per-layer) for impedance control
     """
     gx, gy = coord.to_grid(via.x, via.y)
+    center = np.array([gx, gy], dtype=np.int32)
+
+    def add_layer_cells(offs, layer_idx):
+        cells = center + offs
+        rows = np.empty((len(cells), 3), dtype=np.int32)
+        rows[:, :2] = cells
+        rows[:, 2] = layer_idx
+        blocked_cells.append(rows)
 
     # Support per-layer expansion for impedance-controlled routing
     if isinstance(via_track_expansion_grid, list):
-        # Per-layer blocking
         for layer_idx in range(num_layers):
             layer_expansion = via_track_expansion_grid[layer_idx]
             effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
             track_block_range = layer_expansion + 1
-            for ex in range(-track_block_range, track_block_range + 1):
-                for ey in range(-track_block_range, track_block_range + 1):
-                    if ex*ex + ey*ey <= effective_track_block_sq:
-                        blocked_cells.add((gx + ex, gy + ey, layer_idx))
+            add_layer_cells(circle_offsets(track_block_range, effective_track_block_sq), layer_idx)
     else:
-        # Single value for all layers (legacy behavior)
         effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
         track_block_range = via_track_expansion_grid + 1
-        for ex in range(-track_block_range, track_block_range + 1):
-            for ey in range(-track_block_range, track_block_range + 1):
-                if ex*ex + ey*ey <= effective_track_block_sq:
-                    for layer_idx in range(num_layers):
-                        blocked_cells.add((gx + ex, gy + ey, layer_idx))
+        offs = circle_offsets(track_block_range, effective_track_block_sq)
+        for layer_idx in range(num_layers):
+            add_layer_cells(offs, layer_idx)
 
-    for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-        for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-            if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
-                blocked_vias.add((gx + ex, gy + ey))
+    via_offs = circle_offsets(via_via_expansion_grid,
+                              via_via_expansion_grid * via_via_expansion_grid)
+    blocked_vias.append(center + via_offs)
 
 
 def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
                             config: GridRouteConfig, extra_clearance: float,
-                            blocked_cells: Set[Tuple[int, int, int]],
-                            blocked_vias: Set[Tuple[int, int]]):
+                            blocked_cells: List["np.ndarray"],
+                            blocked_vias: List["np.ndarray"]):
     """Collect pad obstacle cells into sets (no obstacle map modification).
 
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
@@ -206,19 +214,24 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
     expanded_layers = expand_pad_layers(pad.layers, config.layers)
 
-    # Use shared utility for consistent pad blocking
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
-        for layer in expanded_layers:
-            layer_idx = layer_map.get(layer)
-            if layer_idx is not None:
-                blocked_cells.add((cell_gx, cell_gy, layer_idx))
+    # Batched rasterization (issue #35): same cell sets as the generator
+    # (pad_blocked_cells_array is bit-identical to iter_pad_blocked_cells)
+    cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
+                                    config.grid_step, corner_radius)
+    for layer in expanded_layers:
+        layer_idx = layer_map.get(layer)
+        if layer_idx is not None:
+            rows = np.empty((len(cells), 3), dtype=np.int32)
+            rows[:, :2] = cells
+            rows[:, 2] = layer_idx
+            blocked_cells.append(rows)
 
     # Via blocking around pads
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         # Add half grid step buffer to account for grid quantization errors
         via_margin = config.via_size / 2 + config.clearance + config.grid_step / 2
-        for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin, config.grid_step, corner_radius):
-            blocked_vias.add((cell_gx, cell_gy))
+        blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
+                                                    via_margin, config.grid_step, corner_radius))
 
 
 def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: GridRouteConfig,

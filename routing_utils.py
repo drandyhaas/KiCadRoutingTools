@@ -11,6 +11,8 @@ The bulk of routing functionality has been split into:
 import math
 from typing import Dict, List, Tuple
 
+import numpy as np
+
 from kicad_parser import Segment, POSITION_DECIMALS
 
 
@@ -142,3 +144,99 @@ def iter_pad_blocked_cells(
             dist_sq = dist_sq_to_rounded_rect(cell_x, cell_y, half_width, half_height, corner_radius)
             if dist_sq < effective_margin_sq:
                 yield (pad_gx + ex, pad_gy + ey)
+
+
+def pad_blocked_cells_array(
+    pad_gx: int, pad_gy: int,
+    half_width: float, half_height: float,
+    margin: float,
+    grid_step: float,
+    corner_radius: float = 0.0,
+    corner_buffer: float = None,
+):
+    """Vectorized twin of iter_pad_blocked_cells: returns an (N, 2) int32
+    array of blocked (gx, gy) cells, in the same row-major (ex, ey) order
+    and with bit-identical float comparisons (same IEEE operations on the
+    same values), so the produced cell set matches the generator exactly.
+    """
+    if corner_buffer is None:
+        corner_buffer = grid_step / 2
+    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step))
+    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step))
+    margin_sq = margin * margin
+    buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
+
+    corner_threshold = grid_step / 2 if corner_radius == 0 else 0
+    inner_half_w = half_width - corner_radius - corner_threshold
+    inner_half_h = half_height - corner_radius - corner_threshold
+
+    ex = np.arange(-expand_x, expand_x + 1, dtype=np.int64)
+    ey = np.arange(-expand_y, expand_y + 1, dtype=np.int64)
+    # Match the generator's loop order: ex outer, ey inner
+    exg, eyg = np.meshgrid(ex, ey, indexing="ij")
+    cell_x = exg.astype(np.float64) * grid_step
+    cell_y = eyg.astype(np.float64) * grid_step
+    abs_x = np.abs(cell_x)
+    abs_y = np.abs(cell_y)
+
+    in_corner = (abs_x > inner_half_w) & (abs_y > inner_half_h)
+    effective_margin_sq = np.where(in_corner, buffered_margin_sq, margin_sq)
+
+    # dist_sq_to_rounded_rect, vectorized with the same operations
+    if corner_radius > 0:
+        cr_inner_w = half_width - corner_radius
+        cr_inner_h = half_height - corner_radius
+        corner_region = (abs_x > cr_inner_w) & (abs_y > cr_inner_h)
+        dxc = abs_x - cr_inner_w
+        dyc = abs_y - cr_inner_h
+        dist = np.sqrt(dxc * dxc + dyc * dyc) - corner_radius
+        corner_dist_sq = np.where(dist > 0, dist * dist, 0.0)
+    else:
+        corner_region = np.zeros_like(abs_x, dtype=bool)
+        corner_dist_sq = np.zeros_like(abs_x)
+
+    closest_x = np.maximum(-half_width, np.minimum(cell_x, half_width))
+    closest_y = np.maximum(-half_height, np.minimum(cell_y, half_height))
+    dx = cell_x - closest_x
+    dy = cell_y - closest_y
+    rect_dist_sq = dx * dx + dy * dy
+
+    dist_sq = np.where(corner_region, corner_dist_sq, rect_dist_sq)
+    mask = dist_sq < effective_margin_sq
+
+    cells = np.empty((int(mask.sum()), 2), dtype=np.int32)
+    cells[:, 0] = (exg[mask] + pad_gx).astype(np.int32)
+    cells[:, 1] = (eyg[mask] + pad_gy).astype(np.int32)
+    return cells
+
+
+# Offset-pattern caches for batched rasterization. The patterns are tiny
+# (a few hundred cells) and reused for every segment/via on the board.
+_SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
+_CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
+
+
+def square_offsets(expansion: int) -> "np.ndarray":
+    """(K, 2) int32 offsets covering the full square [-e, e] x [-e, e],
+    in the same (ex outer, ey inner) order as the legacy loops."""
+    offs = _SQUARE_OFFSETS_CACHE.get(expansion)
+    if offs is None:
+        r = np.arange(-expansion, expansion + 1, dtype=np.int32)
+        exg, eyg = np.meshgrid(r, r, indexing="ij")
+        offs = np.column_stack([exg.ravel(), eyg.ravel()]).astype(np.int32)
+        _SQUARE_OFFSETS_CACHE[expansion] = offs
+    return offs
+
+
+def circle_offsets(block_range: int, effective_sq: float) -> "np.ndarray":
+    """(K, 2) int32 offsets with ex^2 + ey^2 <= effective_sq, matching the
+    legacy loops' integer-vs-float comparison and iteration order."""
+    key = (block_range, float(effective_sq))
+    offs = _CIRCLE_OFFSETS_CACHE.get(key)
+    if offs is None:
+        r = np.arange(-block_range, block_range + 1, dtype=np.int32)
+        exg, eyg = np.meshgrid(r, r, indexing="ij")
+        mask = (exg.astype(np.int64) ** 2 + eyg.astype(np.int64) ** 2) <= effective_sq
+        offs = np.column_stack([exg[mask], eyg[mask]]).astype(np.int32)
+        _CIRCLE_OFFSETS_CACHE[key] = offs
+    return offs

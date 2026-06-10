@@ -337,9 +337,13 @@ class ClaudeSkillDialog(wx.Dialog):
         self._runner.run(prompt, allowed_tools=allowed_tools, model=model, effort=effort)
 
     def _append(self, text):
+        if not self:  # dialog destroyed while the run streamed
+            return
         self.output_ctrl.AppendText(text)
 
     def _on_done(self, result_text, error):
+        if not self:
+            return
         self._done = True
         self._elapsed_timer.Stop()
         self.gauge.SetValue(0)
@@ -368,6 +372,8 @@ class ClaudeSkillDialog(wx.Dialog):
         self.EndModal(wx.ID_CANCEL)
 
     def _on_elapsed_tick(self, event):
+        if not self:
+            return
         self._elapsed_seconds += 1
         mins, secs = divmod(self._elapsed_seconds, 60)
         self.elapsed_label.SetLabel(f"{mins}m {secs:02d}s" if mins else f"{secs}s")
@@ -394,6 +400,24 @@ class ClaudeTab(wx.Panel):
             self._runner = ClaudeSkillRunner(
                 self._claude_path, self._append_transcript, self._on_done)
         self._create_ui()
+        # The runner streams via wx.CallAfter from a background thread; if the
+        # dialog is destroyed mid-run those callbacks would land on dead
+        # widgets (crashing pcbnew). Shut the run down with the window.
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
+
+    def _on_destroy(self, event):
+        if event.GetEventObject() is self:
+            self.shutdown()
+        event.Skip()
+
+    def shutdown(self):
+        """Stop background work before the dialog goes away: cancel the
+        claude subprocess, stop the plan executor and the elapsed timer."""
+        if self._runner is not None:
+            self._runner.cancel()
+        if self._plan_executor is not None:
+            self._plan_executor.stop()
+        self._elapsed_timer.Stop()
 
     def _create_ui(self):
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -680,9 +704,13 @@ class ClaudeTab(wx.Panel):
                         "(board analysis + datasheet lookups; typically several minutes)")
 
     def _append_transcript(self, text):
+        if not self:  # dialog destroyed while the run streamed
+            return
         self.output_ctrl.AppendText(text)
 
     def _on_done(self, result_text, error):
+        if not self:  # dialog destroyed while the run finished
+            return
         self._elapsed_timer.Stop()
         self.gauge.SetValue(0)
         self.plan_btn.Enable(self.routing_dialog is not None)
@@ -779,6 +807,8 @@ class ClaudeTab(wx.Panel):
             self._log("Claude plan: stop requested (after current step)")
 
     def _on_plan_step_status(self, index, status):
+        if not self:
+            return
         from .claude_plan import step_label
         mark = {"running": "> ", "done": "[ok] ", "failed": "[FAIL] "}[status]
         self.plan_list.SetString(index, mark + step_label(index + 1, self._plan_steps[index]))
@@ -787,6 +817,8 @@ class ClaudeTab(wx.Panel):
 
     def _on_plan_finished(self, completed, aborted_reason):
         self._plan_executor = None
+        if not self:  # dialog destroyed while a step was running
+            return
         self.stop_plan_btn.Disable()
         self.run_plan_btn.Enable(bool(self._plan_steps))
         self.plan_btn.Enable()
@@ -806,6 +838,8 @@ class ClaudeTab(wx.Panel):
         self._log("Claude: cancel requested")
 
     def _on_elapsed_tick(self, event):
+        if not self:
+            return
         self._elapsed_seconds += 1
         mins, secs = divmod(self._elapsed_seconds, 60)
         self.elapsed_label.SetLabel(f"{mins}m {secs:02d}s" if mins else f"{secs}s")

@@ -12,7 +12,8 @@ import math
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map, iter_pad_blocked_cells
+from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
+    square_offsets, circle_offsets
 from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 from obstacle_costs import add_bga_proximity_costs
@@ -1157,6 +1158,28 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
     return positions
 
 
+def _batch_cells_one_layer(obstacles, cells_xy: "np.ndarray", layer_idx: int,
+                           blocked_cells=None):
+    """Block an (N, 2) array of cells on one layer via the batch API."""
+    if len(cells_xy) == 0:
+        return
+    rows = np.empty((len(cells_xy), 3), dtype=np.int32)
+    rows[:, :2] = cells_xy
+    rows[:, 2] = layer_idx
+    obstacles.add_blocked_cells_batch(np.ascontiguousarray(rows))
+    if blocked_cells is not None:
+        blocked_cells[layer_idx].update(map(tuple, cells_xy.tolist()))
+
+
+def _batch_vias(obstacles, vias_xy: "np.ndarray", blocked_vias=None):
+    """Block an (N, 2) array of via positions via the batch API."""
+    if len(vias_xy) == 0:
+        return
+    obstacles.add_blocked_vias_batch(np.ascontiguousarray(vias_xy.astype(np.int32)))
+    if blocked_vias is not None:
+        blocked_vias.update(map(tuple, vias_xy.tolist()))
+
+
 def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
                           layer_idx: int, expansion_grid: int, via_block_grid: int,
                           blocked_cells: List[Set[Tuple[int, int]]] = None,
@@ -1179,18 +1202,20 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
     is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
     effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
 
-    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-        for ex in range(-expansion_grid, expansion_grid + 1):
-            for ey in range(-expansion_grid, expansion_grid + 1):
-                obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-                if blocked_cells is not None:
-                    blocked_cells[layer_idx].add((gx + ex, gy + ey))
-        for ex in range(-via_block_range, via_block_range + 1):
-            for ey in range(-via_block_range, via_block_range + 1):
-                if ex*ex + ey*ey <= effective_via_block_sq:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
-                    if blocked_vias is not None:
-                        blocked_vias.add((gx + ex, gy + ey))
+    # Batched rasterization (issue #35): every line step contributes its full
+    # offset pattern, so the emitted (cell, layer) MULTISET - including the
+    # duplicates where patterns of adjacent steps overlap - is identical to
+    # the per-cell loops this replaces. Reference counts in the Rust map (and
+    # therefore later removals during rip-up) are unchanged.
+    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
+
+    track_offs = square_offsets(expansion_grid)
+    cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
+    _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
+
+    via_offs = circle_offsets(via_block_range, effective_via_block_sq)
+    vias = (line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
+    _batch_vias(obstacles, vias, blocked_vias)
 
 
 def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
@@ -1209,39 +1234,31 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
         blocked_vias: Optional set to collect blocked via positions for visualization
     """
     gx, gy = coord.to_grid(via.x, via.y)
+    center = np.array([gx, gy], dtype=np.int32)
 
-    # Support per-layer expansion for impedance-controlled routing
+    # Batched rasterization (issue #35) - emits the same cell multiset as the
+    # per-cell loops it replaces (each layer gets the full circle pattern).
     if isinstance(via_track_expansion_grid, list):
-        # Per-layer blocking
+        # Per-layer blocking (impedance-controlled routing)
         for layer_idx in range(num_layers):
             layer_expansion = via_track_expansion_grid[layer_idx]
             effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
             track_block_range = layer_expansion + 1
-            for ex in range(-track_block_range, track_block_range + 1):
-                for ey in range(-track_block_range, track_block_range + 1):
-                    if ex*ex + ey*ey <= effective_track_block_sq:
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-                        if blocked_cells is not None:
-                            blocked_cells[layer_idx].add((gx + ex, gy + ey))
+            offs = circle_offsets(track_block_range, effective_track_block_sq)
+            _batch_cells_one_layer(obstacles, center + offs, layer_idx, blocked_cells)
     else:
         # Single value for all layers (legacy behavior)
         effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
         track_block_range = via_track_expansion_grid + 1
-        for ex in range(-track_block_range, track_block_range + 1):
-            for ey in range(-track_block_range, track_block_range + 1):
-                if ex*ex + ey*ey <= effective_track_block_sq:
-                    for layer_idx in range(num_layers):
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-                        if blocked_cells is not None:
-                            blocked_cells[layer_idx].add((gx + ex, gy + ey))
+        offs = circle_offsets(track_block_range, effective_track_block_sq)
+        cells = center + offs
+        for layer_idx in range(num_layers):
+            _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
     # Block cells for via placement
-    for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-        for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-            if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
-                obstacles.add_blocked_via(gx + ex, gy + ey)
-                if blocked_vias is not None:
-                    blocked_vias.add((gx + ex, gy + ey))
+    via_offs = circle_offsets(via_via_expansion_grid,
+                               via_via_expansion_grid * via_via_expansion_grid)
+    _batch_vias(obstacles, center + via_offs, blocked_vias)
 
 
 def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
@@ -1293,28 +1310,30 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # passes by round pads cannot shave below the clearance
     corner_buffer = config.grid_step * 0.75 if extra_clearance > 0 else None
 
-    # Use shared utility for consistent pad blocking
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin,
-                                                   config.grid_step, corner_radius, corner_buffer):
-        if skip_cell is not None and skip_cell(cell_gx, cell_gy):
-            continue
-        for layer in expanded_layers:
-            layer_idx = layer_map.get(layer)
-            if layer_idx is not None:
-                obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
-                if blocked_cells is not None:
-                    blocked_cells[layer_idx].add((cell_gx, cell_gy))
+    # Batched rasterization (issue #35): pad_blocked_cells_array produces the
+    # exact cell set of iter_pad_blocked_cells (verified bit-identical). The
+    # rare skip_cell path (per-cell Python predicate, used for connector
+    # exemptions) filters the array with the same predicate.
+    layer_idxs = [layer_map[layer] for layer in expanded_layers if layer in layer_map]
+    cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
+                                    config.grid_step, corner_radius, corner_buffer)
+    if skip_cell is not None and len(cells):
+        keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in cells),
+                           dtype=bool, count=len(cells))
+        cells = cells[keep]
+    for layer_idx in layer_idxs:
+        _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_margin = config.via_size / 2 + clearance + extra_clearance
-        for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin,
-                                                       config.grid_step, corner_radius, corner_buffer):
-            if skip_cell is not None and skip_cell(cell_gx, cell_gy):
-                continue
-            obstacles.add_blocked_via(cell_gx, cell_gy)
-            if blocked_vias is not None:
-                blocked_vias.add((cell_gx, cell_gy))
+        via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
+                                            config.grid_step, corner_radius, corner_buffer)
+        if skip_cell is not None and len(via_cells):
+            keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in via_cells),
+                               dtype=bool, count=len(via_cells))
+            via_cells = via_cells[keep]
+        _batch_vias(obstacles, via_cells, blocked_vias)
 
 
 def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, int, int]],
