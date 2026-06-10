@@ -50,14 +50,16 @@ EFFORT_CHOICES = ["Default", "low", "medium", "high", "xhigh", "max"]
 
 
 def board_path_for_analysis(board_filename):
-    """Validate the board file for a headless analysis run.
+    """Return the board file path for a headless analysis run.
 
-    The skills read the .kicad_pcb from disk while the user edits the
-    in-memory board, so unsaved changes would be invisible to the analysis.
-    Offers to save the live pcbnew board first (silently skipped when the
-    board is unmodified or we're not running inside pcbnew).
+    Inside pcbnew the user edits an in-memory board that may be newer than
+    the file on disk, and the routing dialog is modal so they can't save
+    first. Saving over the editor's open file from the plugin crashed
+    pcbnew at close (the frame's document state diverges), so instead the
+    live board is snapshotted to a temp file and the analysis runs on
+    that - the user's file is never touched and no prompt is needed.
 
-    Returns the absolute board path, or None if the run should not proceed.
+    Returns the path to analyze, or None if the run should not proceed.
     """
     board = None
     try:
@@ -66,24 +68,18 @@ def board_path_for_analysis(board_filename):
     except Exception:
         pass  # not running inside pcbnew (e.g. tests) - use the file as-is
     if board is not None:
-        # Always offer to save: the editor's dirty state isn't reliably
-        # exposed to plugins (BOARD.IsModified() tracks an internal item
-        # flag, not unsaved edits), so we can't tell whether the file is
-        # current. Saving an already-saved board is harmless.
-        choice = wx.MessageBox(
-            "The analysis reads the saved .kicad_pcb file.\n\n"
-            "Yes = save the board and continue\n"
-            "No = continue with the last saved file\n",
-            "Claude", wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
-        if choice == wx.CANCEL:
-            return None
-        if choice == wx.YES:
-            try:
-                pcbnew.SaveBoard(board_filename, board)
-            except Exception as e:
-                wx.MessageBox(f"Saving the board failed: {e}",
-                              "Claude", wx.OK | wx.ICON_WARNING)
-                return None
+        import tempfile
+        base = os.path.basename(board_filename) if board_filename else "board.kicad_pcb"
+        snapshot = os.path.join(tempfile.gettempdir(), f"kicadrt_analysis_{base}")
+        try:
+            pcbnew.SaveBoard(snapshot, board)
+            return snapshot
+        except Exception as e:
+            wx.MessageBox(
+                f"Could not snapshot the board for analysis: {e}\n\n"
+                "Falling back to the last saved file - unsaved changes "
+                "will not be visible to the analysis.",
+                "Claude", wx.OK | wx.ICON_WARNING)
     if not board_filename or not os.path.isfile(board_filename):
         wx.MessageBox(
             "Board file not found on disk. Save the board first so the "
