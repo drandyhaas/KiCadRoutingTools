@@ -33,7 +33,12 @@ PLAN_RESULT_SCHEMA = (
     '"layer": "<copper layer e.g. In1.Cu>"}], '
     '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>}} '
     ']} '
-    'List steps in execution order (fanout before routing, planes where they fit). '
+    'List steps in execution order: fanout first, then route_diff, then route, '
+    'then route_planes - signals route before planes because plane stitching '
+    'vias can adapt around tracks, but a via placed early can block a diff '
+    'pair. The route step\'s "nets" globs support "!" exclusions and MUST '
+    'exclude any net that a route_planes step will handle, e.g. '
+    '["*", "!GND", "!VCC"]. '
     'Use only these actions; omit any parameter you have no recommendation for; '
     'all params are optional.'
 )
@@ -211,9 +216,16 @@ def apply_step_selection(step, dialog):
 
 
 def _match_net_names(pcb_data, globs):
+    """Match net names against include globs, minus "!" exclusion globs
+    (CLI semantics: the plan's route step excludes plane nets as "!GND")."""
+    includes = [g for g in globs if not g.startswith("!")] or ["*"]
+    excludes = [g[1:] for g in globs if g.startswith("!")]
     names = []
     for net in pcb_data.nets.values():
-        if net.net_id and net.name and any(fnmatch.fnmatch(net.name, g) for g in globs):
+        if not net.net_id or not net.name:
+            continue
+        if any(fnmatch.fnmatch(net.name, g) for g in includes) and \
+                not any(fnmatch.fnmatch(net.name, g) for g in excludes):
             names.append(net.name)
     return names
 

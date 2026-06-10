@@ -219,11 +219,21 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 
 ### Routing Order Rationale
 
-1. **Power Planes First** - Create GND and VCC planes together, handles most-connected nets
-2. **Fanout** (if needed) - Escape routing before signal routing, exclude plane nets
-3. **Differential Pairs** - Route before single-ended to get best paths (if present)
-4. **Signal Routing** - All remaining nets
-5. **GND Return Vias** - Add return current vias near signal vias (when GND planes present)
+1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
+   nets that planes will handle (`"*" "!GND" "!VCC"`).
+2. **Differential Pairs** - The most constrained routes claim their channels before
+   anything else can block them (if present).
+3. **Signal Routing** - All remaining nets, **excluding the plane nets**
+   (`--nets "*" "!GND" "!VCC"`). Routing them as tracks now would defeat the
+   planes step - the exclusions are mandatory whenever a later step gives those
+   nets planes.
+4. **Power Planes** - Create GND and VCC planes together. Stitching vias adapt
+   around the routed signals; the reverse is not true - a stitching via placed
+   early can block the only clean channel for a diff pair (issue #56). If signal
+   tracks boxed in a power pad, add `--rip-blocker-nets` so the blockers are
+   ripped and rerouted.
+5. **GND Return Vias** - Add return current vias near signal vias (when GND planes
+   present); folds into the planes call with `--add-gnd-vias`.
 6. **Plane Repair** - Reconnect any broken plane regions
 7. **Verification** - DRC and connectivity checks
 
@@ -253,61 +263,60 @@ Present the plan to the user as a numbered list with explanations:
 
 ## Step-by-Step Routing Commands
 
-### Step 1: Create Power Planes (GND and VCC)
-Creates power planes in a single call. Each net is paired with its corresponding
-layer (GND→B.Cu, VCC→F.Cu). Through-hole PGA/BGA pads automatically connect to
-planes on their layer; SMD pads get vias routed to the plane.
-
-python3 -X utf8 route_planes.py board.kicad_pcb board_step1.kicad_pcb \
-    --nets GND VCC \
-    --plane-layers B.Cu F.Cu \
-    2>&1 | tee /tmp/step1_planes.txt
-
-### Step 2: Fanout U9 (PGA120) - All Non-Plane Nets
-Generates escape routing for ALL nets on the component EXCEPT those handled
-by power planes. This ensures every signal net gets fanned out, avoiding
-`--no-bga-zone` workarounds during routing.
+### Step 1: Fanout U9 (PGA120) - All Non-Plane Nets
+Generates escape routing for ALL nets on the component EXCEPT those that the
+planes step will handle. This ensures every signal net gets fanned out,
+avoiding `--no-bga-zone` workarounds during routing.
 
 **Important:** Use `"*" "!GND" "!VCC"` to fan out all nets except the power
 plane nets. Do NOT use `"/*"` alone, as it misses nets with non-hierarchical
 names like `Net-(U9-Pad1)` which would then require `--no-bga-zone` to route.
 
-python3 -X utf8 bga_fanout.py board_step1.kicad_pcb \
+python3 -X utf8 bga_fanout.py board.kicad_pcb \
     --component U9 \
     --nets "*" "!GND" "!VCC" \
-    --output board_step2.kicad_pcb \
-    2>&1 | tee /tmp/step2_fanout.txt
+    --output board_step1.kicad_pcb \
+    2>&1 | tee /tmp/step1_fanout.txt
 
-### Step 3: Route All Signal Nets
-Routes all remaining unrouted nets. For boards with BGA/PGA components,
-use `--no-bga-zone` to allow the router to find alternative paths through
-the dense pin area (even when fanout was done, some paths may require this).
-Use `--max-ripup 10 --max-iterations 1000000` for difficult 2-layer boards.
+### Step 2: Route All Signal Nets (excluding plane nets)
+Routes all remaining unrouted nets EXCEPT the nets that get planes in the
+next step - the `"!GND" "!VCC"` exclusions are mandatory here, otherwise the
+power nets get routed as ordinary tracks and the planes step has nothing to
+do. Routing signals before planes means the plane stitching vias (placed
+next) adapt around the signals instead of blocking them.
 
-python3 -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
-    --nets "*" \
+For boards with BGA/PGA components, use `--no-bga-zone` to allow the router
+to find alternative paths through the dense pin area (even when fanout was
+done, some paths may require this). Use `--max-ripup 10
+--max-iterations 1000000` for difficult 2-layer boards.
+
+python3 -X utf8 route.py board_step1.kicad_pcb board_step2.kicad_pcb \
+    --nets "*" "!GND" "!VCC" \
     --no-bga-zone \
     --max-ripup 10 \
     --max-iterations 1000000 \
-    2>&1 | tee /tmp/step3_routing.txt
+    2>&1 | tee /tmp/step2_routing.txt
 
-### Step 4: Add GND Return Vias *(when GND planes present)*
-Adds GND vias near signal vias that transition between layers, providing
-a low-impedance return current path through the GND plane. The
-`--gnd-via-distance` value is based on the speed analysis from Step 4
-of the analysis (see "Lightweight High-Speed Signal Detection" above).
+### Step 3: Create Power Planes (GND and VCC) + GND Return Vias
+Creates power planes in a single call, after signal routing so the stitching
+vias find spots around the finished tracks. Each net is paired with its
+corresponding layer (GND→B.Cu, VCC→F.Cu). Through-hole PGA/BGA pads
+automatically connect to planes on their layer; SMD pads get vias routed to
+the plane. `--add-gnd-vias` also places return-current vias near the signal
+vias that now exist. If signal tracks boxed in a power pad, add
+`--rip-blocker-nets` to rip and re-route the blockers.
 
-> **Note to user:** This step is included because the board uses GND planes.
-> GND return vias improve signal integrity for high-speed signals. Based on
-> the speed analysis, this board has [speed_tier] signals, so `--gnd-via-distance`
-> is set to [X] mm. If this is a purely low-frequency board (I2C/UART/GPIO only),
-> this step can be skipped. Let me know if you'd like to remove it.
+> **Note to user:** GND return vias improve signal integrity for high-speed
+> signals. Based on the speed analysis, this board has [speed_tier] signals,
+> so `--gnd-via-distance` is set to [X] mm. If this is a purely low-frequency
+> board (I2C/UART/GPIO only), drop `--add-gnd-vias`. Let me know if you'd
+> like that.
 
-python3 -X utf8 route_planes.py board_step3.kicad_pcb board_step4.kicad_pcb \
-    --nets GND \
-    --plane-layers B.Cu \
+python3 -X utf8 route_planes.py board_step2.kicad_pcb board_step4.kicad_pcb \
+    --nets GND VCC \
+    --plane-layers B.Cu F.Cu \
     --add-gnd-vias --gnd-via-distance 2.0 \
-    2>&1 | tee /tmp/step4_gnd_vias.txt
+    2>&1 | tee /tmp/step3_planes.txt
 
 Adjust `--gnd-via-distance` based on the board's highest signal speed:
 - Ultra-high (>1 GHz): 2.0 mm
@@ -337,25 +346,21 @@ python3 -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step
 If you prefer not to use a VCC plane, route VCC with wide traces instead:
 
 ```
-### Step 2 (Alternative): Fanout U9 Including VCC
-python3 -X utf8 bga_fanout.py board_step1.kicad_pcb \
+### Step 1 (Alternative): Fanout U9 Including VCC
+python3 -X utf8 bga_fanout.py board.kicad_pcb \
     --component U9 \
-    --nets "/*" VCC \
-    --output board_step2.kicad_pcb
+    --nets "*" "!GND" \
+    --output board_step1.kicad_pcb
 
-### Step 3 (Alternative): Route VCC with Wide Traces
-python3 -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
-    --nets VCC \
-    --track-width 0.5
+### Step 2 (Alternative): Route Signals + VCC as Wide Traces
+python3 -X utf8 route.py board_step1.kicad_pcb board_step2.kicad_pcb \
+    --nets "*" "!GND" \
+    --power-nets VCC --power-nets-widths 0.5
 ```
 
-Or if VCC wasn't fanned out, use `--no-bga-zone` to allow router access:
-```
-python3 -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
-    --nets VCC \
-    --track-width 0.5 \
-    --no-bga-zone U9
-```
+Only GND keeps its exclusion (it still gets a plane in Step 3, now with
+`--nets GND --plane-layers B.Cu` only). If VCC wasn't fanned out, add
+`--no-bga-zone U9` to allow router access.
 
 ## Step 7: Check for High-Speed Signal Requirements
 
@@ -619,7 +624,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 
 1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the plane vias will handle it
 2. **Fanout ALL non-plane nets** - Use `--nets "*" "!GND" "!VCC"` to fan out all nets except those handled by planes. Do NOT use `"/*"` alone as it misses nets with non-hierarchical names like `Net-(U9-Pad1)`. Unconnected nets are automatically filtered out.
-3. **Order matters** - Planes first, then fanout, then diff pairs, then signals, then GND return vias, then repair
+3. **Order matters** - Fanout, then diff pairs, then signals (always excluding plane nets with `"!GND" "!VCC"` exclusions), then planes + GND return vias, then repair. Signals route first because stitching vias can relocate around tracks, but a diff pair cannot relocate around a badly placed via
 4. **Verify at the end** - Always run DRC, connectivity, and orphan stub checks
 5. **Consider the analyze-power-nets skill** - For complex boards where power net identification isn't obvious, use that skill first to analyze component datasheets
 6. **Consider the find-high-speed-nets skill** - For accurate GND return via distance recommendations based on actual component datasheet speeds and rise times, run `/find-high-speed-nets` before planning. The lightweight inline analysis (Step 4) uses net name patterns only.
