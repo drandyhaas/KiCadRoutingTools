@@ -113,6 +113,12 @@ tapping leg's P/N tracks would have to cross the existing pair. So pairs with
 3+ pad-pair terminals (e.g. connector -> termination resistor -> IC pins) are
 routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
 
+<img src="multipoint_diff.png" alt="Multi-point diff pairs routed as chains" width="500">
+
+*Two multi-point pairs on a 2-layer LVDS converter: CLK spans 4 terminals
+(connector, termination resistor, and two IC pin pairs - note the swapped
+IC pins 6/7), DATA spans 3. Each chain passes "through" its shared terminals.*
+
 1. The pair's pads are grouped into (P pad, N pad) terminals by nearest
    matching (connector pins, IC input pairs, termination resistors).
 2. Terminals are ordered as the shortest open chain. Each terminal has only
@@ -124,9 +130,11 @@ routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
    on the **opposite side** from the leg that arrived - the chain passes
    "through" the pads. The forced side gets a connector corridor exemption in
    the obstacle map (own pads AND the previous leg's tracks).
-4. Polarity is resolved per leg geometrically by choosing the side at the
-   fresh terminal; pad swaps are never used (a swap at a shared terminal
-   would break the already-routed leg).
+4. Polarity is resolved per leg: connector flips at the fresh terminal, and -
+   when polarity fixing is enabled - pad swaps at **chain-fresh terminals
+   only** (each leg's far terminal; never a shared terminal, which already
+   has a routed leg attached). Swap and flip candidates compete by routed
+   length. If a chain attempt is ripped out, its pad swaps are undone too.
 5. If a leg fails (unroutable, or its P/N tracks cross), the attempt's legs
    are ripped out and the next-best chain ordering is tried - the side
    constraints depend on routing order, so a reversed chain can succeed
@@ -244,16 +252,22 @@ Polarity: src_p_sign=1, tgt_p_sign=-1, swap_needed=True, has_vias=True
 The swap changes pad net assignments on the **board only** - update the
 schematic to match (the CLI can do this with `--schematic-dir`).
 
-Use `--no-fix-polarity` to disable this behavior (the KiCad plugin GUI has it
-disabled by default). When disabled and a swap would have been needed, the
-router resolves the mismatch geometrically instead: it re-routes with the
+There is a second, purely geometric resolution: re-routing with the
 connectors taken out the **opposite side at one end** (flipping one end flips
 its P/N handedness; flipping both would reintroduce the mismatch). Only
 bare-pad endpoints can flip - stub directions are fixed by existing copper.
 Flipped attempts get a full-loop turn budget since they must wrap around
-their endpoint, and the result is validated for P/N track crossings. If no
-flip produces a clean route, the pair is **skipped** with a warning (no
-crossing tracks are ever written).
+their endpoint, and every candidate is validated for P/N track crossings.
+
+With polarity fixing **enabled** (CLI default), the pad-swap and connector-flip
+candidates **compete by routed length** and the shortest clean route wins; if
+only one mechanism succeeds, it is used. (When no end can flip - e.g. both
+ends have stubs - the swap is committed directly without re-routing.)
+
+With `--no-fix-polarity` (the KiCad plugin GUI default), pad swaps never
+happen: only the flip resolution is tried, and if no flip produces a clean
+route the pair is **skipped** with a warning (no crossing tracks are ever
+written).
 
 ## Via Placement
 
