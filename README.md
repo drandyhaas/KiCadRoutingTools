@@ -56,6 +56,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Disconnected plane region repair** - After power planes are created, regions may be effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects disconnected regions and routes wide, short tracks between them to ensure electrical continuity
 - **GND return via placement** - Automatically places GND vias near signal vias for return current paths. Searches from minimum viable distance outward (24 angles, fine step), placing GND vias as close as possible while respecting track clearances. Through-hole GND pads count as existing return paths. Use `--add-gnd-vias` with route_planes.py
 - **Real-time visualization** - Watch the A* search explore the grid live with the optional [PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`), with pause/step, zoom/pan, per-layer filtering, and speed control
+- **AI-assisted routing from the plugin (Claude tab)** - The plugin GUI drives [Claude Code](https://claude.ai/claude-code) headless: a Claude tab generates a full routing plan (`/plan-pcb-routing`) that fills the dialog's parameters and executes as a checkable step list in-process on the live board, plus one-click reviews and per-field "Ask Claude" buttons on the Basic/Differential/Planes tabs (power nets, diff pairs, plane mappings, GND via distance, stackup). See [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration)
 - **AI-powered high-speed net analysis** - Use the `/find-high-speed-nets` skill to identify which nets carry high-speed signals. Looks up component datasheets via WebSearch to find max interface frequencies and rise times, traces signals through series passives, and recommends `--gnd-via-distance` values based on the fastest signals on the board. See [Claude Skills](docs/claude-skills.md) and the [GND return via distance guidance](#gnd-return-via-distance-guidance) in the planes documentation
 
 ## Quick Start
@@ -147,6 +148,8 @@ Other useful skills:
 
 See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
+All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-claude-tab) below.
+
 **Option C: Manual Command Line (For scripting and automation)**
 
 ```bash
@@ -169,6 +172,15 @@ The plugin provides a full graphical interface for all routing features, running
 <p align="center">
   <img src="kicad_routing_plugin/gui.png" alt="KiCad Plugin GUI" width="600">
 </p>
+
+### AI assistance (Claude tab)
+
+With [Claude Code](https://claude.ai/claude-code) installed, the routing dialog gains AI assistance throughout (the plugin spawns `claude` headless, streams a live transcript, and fills GUI controls from the results):
+
+- **Claude tab** - *Plan Routing with Claude* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Model and effort dropdowns control every AI run and persist with the dialog settings.
+- **Per-field "Ask Claude" buttons** - power nets/widths (Basic tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
+
+The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration). Datasheet-based skills use web lookups and take a few minutes; every run shows a live transcript with cancel.
 
 ### Installation
 
