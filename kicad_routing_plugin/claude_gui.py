@@ -356,7 +356,12 @@ class ClaudeSkillDialog(wx.Dialog):
         self.gauge.SetValue(0)
         self.action_btn.SetLabel("Close")
         if error:
-            self.output_ctrl.AppendText(f"\n{error}{auth_error_hint(error)}\n")
+            if self.output_ctrl.GetValue().rstrip().endswith(error.strip()):
+                appended = auth_error_hint(error)
+            else:
+                appended = f"\n{error}{auth_error_hint(error)}"
+            if appended:
+                self.output_ctrl.AppendText(appended + "\n")
             return
         self.result_text = result_text
         self.result_value = extract_result_line(result_text)
@@ -728,7 +733,15 @@ class ClaudeTab(wx.Panel):
         kind, self._pending_kind = self._pending_kind, None
 
         if error:
-            self.output_ctrl.AppendText(f"\n{error}{auth_error_hint(error)}\n")
+            # The CLI often streams the failure text (e.g. 'Not logged in')
+            # as an assistant message before the error result repeats it -
+            # don't print the same line twice.
+            if self.output_ctrl.GetValue().rstrip().endswith(error.strip()):
+                appended = auth_error_hint(error)
+            else:
+                appended = f"\n{error}{auth_error_hint(error)}"
+            if appended:
+                self.output_ctrl.AppendText(appended + "\n")
             self._log(f"Claude: {error}")
             return
 
