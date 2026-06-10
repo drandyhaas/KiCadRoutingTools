@@ -622,7 +622,7 @@ class PlanesTab(wx.Panel):
     def _on_ask_claude_gnd_via(self):
         """Run /find-high-speed-nets headless and fill the GND via distance
         field from its recommendation (issue #39)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
 
         claude_path = find_claude()
         if claude_path is None:
@@ -631,12 +631,8 @@ class PlanesTab(wx.Panel):
                 "and make sure `claude` is on your PATH.",
                 "Claude", wx.OK | wx.ICON_WARNING)
             return
-        board = self.board_filename
-        if not board or not os.path.isfile(board):
-            wx.MessageBox(
-                "Board file not found on disk. Save the board first so the "
-                f"analysis sees the current state.\n\nLooked for: {board}",
-                "Claude", wx.OK | wx.ICON_WARNING)
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
             return
 
         prompt = (
@@ -665,7 +661,7 @@ class PlanesTab(wx.Panel):
     def _on_ask_claude_plane_mappings(self):
         """Run /recommend-plane-mappings headless and fill the assignment
         list from its recommendation (issue #53)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
 
         claude_path = find_claude()
         if claude_path is None:
@@ -674,12 +670,8 @@ class PlanesTab(wx.Panel):
                 "and make sure `claude` is on your PATH.",
                 "Claude", wx.OK | wx.ICON_WARNING)
             return
-        board = self.board_filename
-        if not board or not os.path.isfile(board):
-            wx.MessageBox(
-                "Board file not found on disk. Save the board first so the "
-                f"analysis sees the current state.\n\nLooked for: {board}",
-                "Claude", wx.OK | wx.ICON_WARNING)
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
             return
 
         prompt = (
