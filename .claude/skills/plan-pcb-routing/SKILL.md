@@ -36,6 +36,14 @@ Report to user:
 - Available copper layers (F.Cu, B.Cu, In1.Cu, In2.Cu, etc.)
 - Whether it's a 2-layer, 4-layer, or multi-layer board
 
+### Stackup Sanity Check
+
+If the board has impedance-relevant signals (see the speed detection in Step 4) and you plan
+to recommend `--impedance` or `--time-matching`, check the stackup first: an untouched KiCad
+default stackup (no stackup section, or uniform dielectric thickness/ε_r) makes those
+calculations wrong for the user's fab. In that case recommend running `/recommend-stackup`
+before routing, and take plane-layer assignments from its output when available.
+
 ## Step 3: Check for Components Needing Fanout
 
 Identify BGA, QFN, QFP, PGA, and other array packages that benefit from escape routing:
@@ -128,6 +136,15 @@ If differential pairs are found:
 - List each P/N pair
 - Note that `route_diff.py` should be used for these
 - Explain that diff pairs maintain consistent spacing and length matching
+
+> **Tip:** Name-based detection misses pairs with unconventional names. For boards with
+> high-speed ICs (PHYs, SerDes, USB, FPGA transceivers), or when detection finds suspiciously
+> few pairs, run `/identify-diff-pairs` for datasheet-based detection by pin function and
+> per-interface gap/impedance recommendations.
+
+Also note: `route_diff.py` resolves P/N polarity mismatches automatically, which can swap
+target pad net assignments. Swaps are reported in the output — when they happen, the
+schematic sync step below applies (see "Schematic Synchronization After Swaps").
 
 ### Check for DDR/High-Speed Memory Signals
 
@@ -335,8 +352,9 @@ python -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5.ki
     2>&1 | tee /tmp/step5_plane_repair.txt
 
 ### Step 6: Verify Results
-Check for DRC violations, unrouted nets, and orphan stubs.
-Save outputs to /tmp for analysis if issues are found.
+Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
+connectivity, orphan stubs, length-match tolerances, GND return via coverage,
+diff pair checks). If that skill is unavailable, run the raw checks:
 
 python -X utf8 check_drc.py board_step5.kicad_pcb --clearance 0.25 2>&1 | tee /tmp/step6_drc.txt
 python -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
@@ -510,6 +528,49 @@ This updates the `.kicad_sch` files with any pad swaps made during routing.
 Schematic sync is **disabled by default** to avoid unexpected changes. Only enable
 when the user confirms they want schematic updates.
 
+### Guide Corridors (user-drawn preferred routes)
+
+When specific nets keep taking bad paths (or the user wants control over where a bundle
+runs), the user can draw a polyline on `User.1` in KiCad and re-route those nets with:
+
+```bash
+python3 route.py board.kicad_pcb --nets "SPI*" --guide-corridor --output board_routed.kicad_pcb
+```
+
+The route follows the line as waypoints, strictly best-effort — a guide never makes a route
+fail or adds vias. See `docs/configuration.md` "Guide Corridor Options" for details.
+
+**Scope rule: do NOT draw guide corridor geometry yourself.** Suggest *in words* where a
+corridor would help ("a line on User.1 south of J3, between the mounting hole and C14") and
+let the user draw it; then incorporate `--guide-corridor` into the plan.
+
+### Keepout Zones (RF / analog exclusions)
+
+Check the board for components that warrant routing exclusions: antennas (footprint/value
+keywords ANT, ANTENNA, chip antenna parts), RF modules, and sensitive analog front-ends. If
+found, recommend the user draw closed polygon(s) on `User.2` around those regions and add
+`--keepout` to every routing step (`route.py`, `route_diff.py`) so tracks and vias stay out
+on all copper layers. Same scope rule as guide corridors: describe where the keepout should
+go; the user draws it.
+
+### MPS Layer Swap (crossing conflicts)
+
+When MPS ordering reports crossing conflicts (nets in Round 2+), or failures show pairs of
+nets repeatedly ripping each other up, add `--mps-layer-swap` to attempt layer swaps that
+eliminate same-layer crossings before routing begins.
+
+### Vertical Track Alignment
+
+On 4+ layer boards where through-hole components need via space, `--vertical-attraction-radius`
+/ `--vertical-attraction-cost` attract tracks on different layers to stack vertically,
+consolidating routing corridors.
+
+### Plane Via Placement Options (route_planes.py)
+
+- Multiple nets can share one plane layer (Voronoi partitioning): `--nets GND VCC --plane-layers In2.Cu In2.Cu`
+- `--same-net-pad-clearance <mm>` forces plane vias outside same-net pads with that edge-to-edge clearance (default places at pad center when possible)
+- `--rip-blocker-nets` rips up interfering routed nets to maximize via placement, then re-routes them
+
 ### Net Ordering Strategies
 
 | Strategy | Flag | Best For |
@@ -602,6 +663,8 @@ python3 route.py board.kicad_pcb --nets "*" \
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
 15. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10 --max-iterations 1000000` from the start for boards with dense components. These parameters help resolve routing conflicts that would otherwise fail.
+16. **Guide corridors and keepouts are user-drawn** - Never draw `User.1` guide polylines or `User.2` keepout polygons yourself; suggest in words where they should go and let the user draw them, then add `--guide-corridor` / `--keepout` to the plan.
+17. **Companion skills** - Defer to `/identify-diff-pairs` (datasheet-based pair detection), `/recommend-stackup` (before impedance/time-matching work), `/diagnose-routing-failures` (after failures), and `/review-routed-board` (final verification) rather than duplicating their logic inline.
 
 ## Presenting the Plan
 
@@ -654,7 +717,10 @@ The JSON_SUMMARY line contains structured data including:
 
 After running routing commands:
 1. Report how many nets were routed successfully
-2. **If routes failed**, parse the logs to understand why, then retry with appropriate parameters:
+2. **If routes failed**, invoke `/diagnose-routing-failures <board> <log files>` — it parses
+   the JSON summary, failed-net histories, and blocking reports, correlates failures
+   spatially, and outputs a targeted retry command. Apply its recommendation. If that skill
+   is unavailable, fall back to this table:
 
 | Failure Pattern | Likely Cause | Solution |
 |-----------------|--------------|----------|
@@ -683,7 +749,7 @@ python -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
    - Ask if they want to sync the schematic
    - If yes, ask for the KiCad project directory path
    - Re-run the routing command with `--schematic-dir` added
-4. Run verification (DRC and connectivity checks)
+4. Run verification: invoke `/review-routed-board` (falls back to the raw DRC and connectivity checks)
 5. Summarize the final state of the board
 6. **Offer to clean up intermediate files**:
    - List the intermediate `.kicad_pcb` files created (e.g., `board_step1.kicad_pcb`, `board_step2.kicad_pcb`, etc.)

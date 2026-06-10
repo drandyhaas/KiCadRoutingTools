@@ -137,8 +137,12 @@ Claude will:
 
 Other useful skills:
 ```
-> /find-high-speed-nets kicad_files/my_board.kicad_pcb   # Identify high-speed nets via datasheet lookup
-> /analyze-power-nets kicad_files/my_board.kicad_pcb     # Identify power nets and track widths
+> /find-high-speed-nets kicad_files/my_board.kicad_pcb       # Identify high-speed nets via datasheet lookup
+> /analyze-power-nets kicad_files/my_board.kicad_pcb         # Identify power nets and track widths
+> /identify-diff-pairs kicad_files/my_board.kicad_pcb        # Find diff pairs by pin function, recommend gap/impedance
+> /recommend-stackup kicad_files/my_board.kicad_pcb          # Stackup advice for impedance/time-matching accuracy
+> /diagnose-routing-failures my_board.kicad_pcb /tmp/route_output.txt  # Root-cause failed routes, get a retry command
+> /review-routed-board my_board_routed.kicad_pcb             # Post-route QA: DRC, connectivity, length match, GND vias
 ```
 
 **Option C: Manual Command Line (For scripting and automation)**
@@ -590,7 +594,11 @@ KiCadRoutingTools/
 └── .claude/skills/           # Claude Code skills
     ├── analyze-power-nets/   # AI-powered power net analysis skill
     ├── find-high-speed-nets/ # AI-powered high-speed net identification skill
-    └── plan-pcb-routing/     # AI-powered routing plan generation skill
+    ├── plan-pcb-routing/     # AI-powered routing plan generation skill (orchestrates the others)
+    ├── identify-diff-pairs/  # Datasheet-based diff pair detection skill
+    ├── recommend-stackup/    # Stackup review/recommendation skill
+    ├── diagnose-routing-failures/  # Failure root-cause and retry skill
+    └── review-routed-board/  # Post-route QA and sign-off skill
 ```
 
 ## Module Overview
