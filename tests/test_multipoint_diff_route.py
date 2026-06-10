@@ -23,6 +23,14 @@ Each scenario asserts the pair(s) routed, EVERY terminal is connected
 is DRC-clean scoped to the pair nets. Geometry matches the board's netclass
 (0.2mm track / 0.25mm pair gap / 0.2mm clearance).
 
+Also covers the issue #56 regression on
+`kicad_files/lvds_converter_dualclk_gnd.kicad_pcb` - the same board with a
+GND plane and stitching vias, one of which blocks the channel between R3 and
+IC4. Wrap-around legs must never cross earlier legs (shorts): with polarity
+fixing on the pair routes cleanly around the via; with --no-fix-polarity the
+CLK pair must FAIL HONESTLY (all chain orderings rejected, no segments
+committed) instead of shorting.
+
 Run:
     python3 tests/test_multipoint_diff_route.py
     python3 tests/test_multipoint_diff_route.py -v   # keep routing output
@@ -41,6 +49,7 @@ ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
 
 BOARD = os.path.join(ROOT_DIR, "kicad_files", "lvds_converter_dualclk.kicad_pcb")
+GND_BOARD = os.path.join(ROOT_DIR, "kicad_files", "lvds_converter_dualclk_gnd.kicad_pcb")
 # Match the board's netclass: 0.2mm track, 0.25mm pair gap, 0.2mm clearance
 GEOM = ["--track-width", "0.2", "--diff-pair-gap", "0.25", "--clearance", "0.2",
         "--layers", "F.Cu", "B.Cu"]
@@ -156,6 +165,95 @@ def scenario(name, runs, expect_legs, extra_args, expect_swapped, verbose):
                 os.remove(out)
 
 
+def _pair_segments_and_crossings(board_path, net_names):
+    """(segment count, proper same-layer crossing count) for the given nets."""
+    from kicad_parser import parse_kicad_pcb
+
+    pcb = parse_kicad_pcb(board_path)
+    net_ids = {n.net_id for n in pcb.nets.values() if n.name in net_names}
+    segs = [s for s in pcb.segments if s.net_id in net_ids]
+
+    def crosses(a, b, eps=1e-6):
+        for (x, y) in ((a.start_x, a.start_y), (a.end_x, a.end_y)):
+            for (u, v) in ((b.start_x, b.start_y), (b.end_x, b.end_y)):
+                if abs(x - u) < eps and abs(y - v) < eps:
+                    return False
+        def d(px, py, qx, qy, rx, ry):
+            return (qx - px) * (ry - py) - (qy - py) * (rx - px)
+        d1 = d(b.start_x, b.start_y, b.end_x, b.end_y, a.start_x, a.start_y)
+        d2 = d(b.start_x, b.start_y, b.end_x, b.end_y, a.end_x, a.end_y)
+        d3 = d(a.start_x, a.start_y, a.end_x, a.end_y, b.start_x, b.start_y)
+        d4 = d(a.start_x, a.start_y, a.end_x, a.end_y, b.end_x, b.end_y)
+        return ((d1 > eps) != (d2 > eps)) and ((d3 > eps) != (d4 > eps)) and \
+            min(abs(d1), abs(d2), abs(d3), abs(d4)) > eps
+
+    n_cross = sum(1 for i in range(len(segs)) for j in range(i + 1, len(segs))
+                  if segs[i].layer == segs[j].layer and crosses(segs[i], segs[j]))
+    return len(segs), n_cross
+
+
+def gnd_obstacle_scenario_fix_on(verbose):
+    """Issue #56 board, polarity fixing ON: both pairs route around the
+    blocking stitching via with zero crossings."""
+    name = "GND-via obstacle (fix-polarity on: routes clean, no crossings)"
+    log = []
+    fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
+    os.close(fd)
+    try:
+        nets = ["/CLK+", "/CLK-", "/DATA+", "/DATA-"]
+        summary, txt = route(GND_BOARD, nets, out)
+        if verbose:
+            print(txt)
+        if summary is None:
+            return name, False, ["route_diff produced no summary"]
+        routed_ok = summary.get("successful") == 2 and summary.get("failed") == 0
+        log.append(f"routed: {summary.get('successful')}/2 failed={summary.get('failed')}")
+        n_segs, n_cross = _pair_segments_and_crossings(out, nets)
+        log.append(f"pair segments={n_segs} crossings={n_cross}")
+        conn = is_connected(out, nets)
+        clean = drc_clean(out, nets)
+        log.append(f"connected={conn}  drc_clean(pair-scoped)={clean}")
+        return name, (routed_ok and n_cross == 0 and conn and clean), log
+    finally:
+        if os.path.exists(out):
+            os.remove(out)
+
+
+def gnd_obstacle_scenario_no_fix(verbose):
+    """Issue #56 board, --no-fix-polarity: every CLK chain ordering needs a
+    crossing, so the pair must FAIL HONESTLY - crossing legs rejected, all
+    legs ripped, nothing committed. DATA (unaffected by the via) routes."""
+    name = "GND-via obstacle (--no-fix-polarity: CLK fails honestly, no shorts)"
+    log = []
+    fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
+    os.close(fd)
+    try:
+        nets = ["/CLK+", "/CLK-", "/DATA+", "/DATA-"]
+        summary, txt = route(GND_BOARD, nets, out, ["--no-fix-polarity"])
+        if verbose:
+            print(txt)
+        if summary is None:
+            return name, False, ["route_diff produced no summary"]
+        outcome_ok = (summary.get("failed_diff_pairs") == ["/CLK"]
+                      and summary.get("routed_diff_pairs") == ["/DATA"])
+        log.append(f"routed={summary.get('routed_diff_pairs')} "
+                   f"failed={summary.get('failed_diff_pairs')}")
+        rejected = ("crosses an earlier leg" in txt) or ("crosses itself" in txt)
+        log.append(f"crossing legs rejected in output: {rejected}")
+        # The honest failure must leave NOTHING behind: zero CLK segments
+        # (every attempt's legs ripped), so no shorts can have been committed
+        clk_segs, clk_cross = _pair_segments_and_crossings(out, ["/CLK+", "/CLK-"])
+        log.append(f"CLK segments left on board={clk_segs} crossings={clk_cross}")
+        data_conn = is_connected(out, ["/DATA+", "/DATA-"])
+        data_clean = drc_clean(out, ["/DATA+", "/DATA-"])
+        log.append(f"DATA connected={data_conn}  drc_clean={data_clean}")
+        return name, (outcome_ok and rejected and clk_segs == 0
+                      and data_conn and data_clean), log
+    finally:
+        if os.path.exists(out):
+            os.remove(out)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Bare-pad / multi-point differential-pair routing test")
@@ -178,6 +276,19 @@ def main():
         for line in log:
             print(f"        {line}")
         results.append((sname, passed))
+
+    # Issue #56 regression (board with a GND stitching via blocking the
+    # R3 -> IC4 channel)
+    if os.path.exists(GND_BOARD):
+        for fn in (gnd_obstacle_scenario_fix_on, gnd_obstacle_scenario_no_fix):
+            sname, passed, log = fn(args.verbose)
+            print(f"\n[{'PASS' if passed else 'FAIL'}] {sname}")
+            for line in log:
+                print(f"        {line}")
+            results.append((sname, passed))
+    else:
+        print(f"\n[FAIL] issue #56 regression board missing: {GND_BOARD}")
+        results.append(("issue #56 regression board missing", False))
 
     print("\n" + "=" * 70)
     n_pass = sum(1 for _, p in results if p)

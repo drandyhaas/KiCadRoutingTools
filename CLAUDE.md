@@ -1,5 +1,12 @@
 # Project Notes for Claude
 
+## Running Python
+
+Invoke Python as `python3` (bare `python` does not exist on macOS and many
+Linux distros). On Windows, if `python3` is missing, fall back to `py -3`
+or `python` — don't retry blindly. Add `-X utf8` when a script prints
+special characters (Ω etc.) to avoid Windows encoding errors.
+
 ## Building the Rust Router
 
 Use `build_router.py` to build the Rust router:
@@ -28,6 +35,17 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pcb.nets` - Dict[int, Net] keyed by net_id
 - `pcb.segments` - List of track segments
 - `pcb.vias` - List of vias
+- `pcb.board_info` - BoardInfo (layers, bounds, stackup)
+
+### BoardInfo / Stackup Attributes
+
+- `pcb.board_info.copper_layers` - List[str] of copper layer names (e.g., ['F.Cu', 'B.Cu'])
+- `pcb.board_info.layers` - Dict[int, str] layer_id -> layer_name
+- `pcb.board_info.board_bounds` - (min_x, min_y, max_x, max_y) or None
+- `pcb.board_info.stackup` - List[StackupLayer], ordered top to bottom
+  (NOT `pcb.stackup`). Empty list if the board has no stackup section.
+- StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),
+  `thickness` (mm), `epsilon_r`, `loss_tangent`, `material`
 
 ### Footprint Attributes
 

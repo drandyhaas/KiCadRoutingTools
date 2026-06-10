@@ -78,7 +78,7 @@ Work through the failure modes most-targeted-first. Do not jump straight to glob
 Produce one command that retries **only the failed nets** with the targeted fixes, and explain each parameter change in one line:
 
 ```bash
-python -X utf8 route.py board_routed.kicad_pcb board_retry.kicad_pcb \
+python3 -X utf8 route.py board_routed.kicad_pcb board_retry.kicad_pcb \
     --nets "SDA" "Net-(U1-Pad8)" \
     --no-bga-zone U9 \
     --max-ripup 10 \

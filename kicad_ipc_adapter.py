@@ -146,6 +146,24 @@ def get_board(kicad: Optional["kipy.KiCad"] = None):
         return None
 
 
+def save_board_snapshot(path: str, kicad: Optional["kipy.KiCad"] = None) -> None:
+    """Write a copy of the live board to *path* for analysis runs.
+
+    Uses kipy Board.save_as(), which maps to SaveCopyOfDocument - the open
+    document keeps its own file association and the user's file is never
+    touched (saving over the editor's open file from a plugin crashed
+    pcbnew under SWIG; the copy semantics avoid that class of problem).
+    Raises on failure - callers fall back to the last saved file.
+    """
+    if kicad is None:
+        kicad = connect()
+    with ipc_lock():
+        board = kicad.get_board()
+        if board is None:
+            raise RuntimeError("no board is open")
+        board.save_as(path, overwrite=True, include_project=False)
+
+
 def ping(kicad: Optional["kipy.KiCad"] = None, timeout: float = 1.0) -> bool:
     """Lightweight liveness check: returns True if KiCad is still reachable.
 

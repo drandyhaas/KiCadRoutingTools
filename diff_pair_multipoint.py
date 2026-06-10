@@ -31,6 +31,47 @@ from polarity_swap import apply_polarity_swap, undo_polarity_swap
 from routing_context import build_diff_pair_obstacles
 
 
+def _segments_properly_cross(a, b, eps: float = 1e-6) -> bool:
+    """True if segments a and b cross at an interior point.
+
+    Shared endpoints and endpoint touches do NOT count: chain legs meet at
+    the same terminal pads, so they legitimately touch there - only a real
+    crossing (the loop-around failure mode of issue #56) is an error.
+    """
+    for (x, y) in ((a.start_x, a.start_y), (a.end_x, a.end_y)):
+        for (u, v) in ((b.start_x, b.start_y), (b.end_x, b.end_y)):
+            if abs(x - u) < eps and abs(y - v) < eps:
+                return False
+
+    def cross(px, py, qx, qy, rx, ry):
+        return (qx - px) * (ry - py) - (qy - py) * (rx - px)
+
+    d1 = cross(b.start_x, b.start_y, b.end_x, b.end_y, a.start_x, a.start_y)
+    d2 = cross(b.start_x, b.start_y, b.end_x, b.end_y, a.end_x, a.end_y)
+    d3 = cross(a.start_x, a.start_y, a.end_x, a.end_y, b.start_x, b.start_y)
+    d4 = cross(a.start_x, a.start_y, a.end_x, a.end_y, b.end_x, b.end_y)
+    return ((d1 > eps) != (d2 > eps)) and ((d3 > eps) != (d4 > eps)) and \
+        min(abs(d1), abs(d2), abs(d3), abs(d4)) > eps
+
+
+def _crosses_committed_legs(new_segments, committed_segments) -> bool:
+    """True if any new-leg segment properly crosses a previously committed
+    leg's segment on the same layer.
+
+    The obstacle map alone cannot prevent this: corridor exemptions at a
+    shared terminal deliberately unblock the previous leg's tracks there so
+    the opposite-side setback can leave, which also lets a wrap-around leg
+    cross them (issue #56 - shorts and self-crossing loops around a
+    termination resistor when an obstacle forces a detour).
+    """
+    for new_seg in new_segments:
+        for old_seg in committed_segments:
+            if new_seg.layer == old_seg.layer and \
+                    _segments_properly_cross(new_seg, old_seg):
+                return True
+    return False
+
+
 def _oriented(terminal: Tuple[Pad, Pad], pair: DiffPairNet) -> Tuple[Pad, Pad]:
     """Return the terminal as (current P pad, current N pad). A polarity pad
     swap flips the pads' net assignments, so the original ordering can be
@@ -260,6 +301,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
 
     centers = [_terminal_center(t) for t in chain]
     leg_results = []
+    committed_segments = []  # all committed legs' segments, for crossing checks
     applied_swaps = []  # polarity pad swaps applied by this attempt's legs
     forced_dir_next = None  # forced source direction for the next leg (opposite
                             # side of the previous leg at the shared terminal)
@@ -334,6 +376,10 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
         elif _pn_tracks_cross(result.get('new_segments', []), pair.p_net_id, pair.n_net_id):
             # Wrapping legs can fold back on themselves - never commit a crossing leg
             failed_reason = "crosses itself"
+        elif _crosses_committed_legs(result.get('new_segments', []), committed_segments):
+            # A wrap-around leg can cross an earlier leg's tracks inside the
+            # shared terminal's corridor exemption (issue #56)
+            failed_reason = "crosses an earlier leg"
         elif result.get('target_base_dir') is None:
             failed_reason = "missing target direction"
 
@@ -358,6 +404,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
         # Commit this leg so the next leg sees it (as obstacle and topology)
         add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
         leg_results.append(result)
+        committed_segments.extend(result.get('new_segments', []))
 
         # Next leg must leave the shared terminal on the opposite side
         used_dir = result['target_base_dir']

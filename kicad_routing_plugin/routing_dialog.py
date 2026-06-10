@@ -369,11 +369,15 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab = self._create_planes_tab()
         self.notebook.AddPage(self.planes_tab, "Planes")
 
-        # Tab 6: Log
+        # Tab 6: Claude (AI skills, issue #40)
+        self.claude_tab = self._create_claude_tab()
+        self.notebook.AddPage(self.claude_tab, "Claude")
+
+        # Tab 7: Log
         log_panel = self._create_log_tab()
         self.notebook.AddPage(log_panel, "Log")
 
-        # Tab 7: About
+        # Tab 8: About
         self.about_tab = self._create_about_tab()
         self.notebook.AddPage(self.about_tab, "About")
 
@@ -799,7 +803,57 @@ class RoutingDialog(wx.Dialog):
 
         layer_scroll.SetSizer(layer_inner)
         layer_box_sizer.Add(layer_scroll, 1, wx.EXPAND)
+
+        self.check_stackup_btn = wx.Button(panel, label="Check Stackup (Claude)")
+        self.check_stackup_btn.SetToolTip(
+            "Run the /recommend-stackup skill: reviews the board's physical stackup, "
+            "flags untouched KiCad defaults (which skew impedance calculations), and "
+            "recommends a fab-realistic stackup. Analysis only - shows a report.")
+        self.check_stackup_btn.Bind(wx.EVT_BUTTON, self._on_check_stackup)
+        layer_box_sizer.Add(self.check_stackup_btn, 0, wx.ALL, 3)
         return layer_box_sizer
+
+    def _on_check_stackup(self, event):
+        """Run /recommend-stackup headless and show the report (issue #40)."""
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+
+        claude_path = find_claude()
+        if claude_path is None:
+            wx.MessageBox(
+                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
+                "and make sure `claude` is on your PATH.",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
+            return
+
+        prompt = (
+            f"/recommend-stackup {os.path.abspath(board)} — analysis only, do not "
+            "modify any files. After the report, end your reply with exactly one "
+            "line of the form RESULT=<copper layer count you recommend> "
+            "(a bare integer), e.g. RESULT=4"
+        )
+        dlg = ClaudeSkillDialog(
+            self, "Claude: check stackup", prompt,
+            claude_path=claude_path,
+            model=self.claude_tab.get_model_value(),
+            effort=self.claude_tab.get_effort_value(),
+            intro=f"Running /recommend-stackup on {os.path.basename(board)} ...\n"
+                  "(local analysis; typically a minute or two)")
+        dlg.ShowModal()
+        value = dlg.result_value
+        dlg.Destroy()
+        if value is not None:
+            board_layers = len(self.pcb_data.board_info.copper_layers)
+            note = ""
+            try:
+                if int(value) != board_layers:
+                    note = (f" (board currently has {board_layers}; change it in "
+                            "Board Setup before impedance-controlled routing)")
+            except ValueError:
+                pass
+            self._append_log(f"Claude recommends {value} copper layers{note}\n")
 
     def _create_basic_options_panel(self, panel):
         """Create the basic options panel for the Basic tab."""
@@ -881,7 +935,14 @@ class RoutingDialog(wx.Dialog):
         power_sizer.Add(wx.StaticText(options_scroll, label="Power Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self.power_nets_ctrl = wx.TextCtrl(options_scroll)
         self.power_nets_ctrl.SetToolTip("Glob patterns for power nets (e.g., *GND* *VCC*)")
-        power_sizer.Add(self.power_nets_ctrl, 1, wx.EXPAND)
+        power_sizer.Add(self.power_nets_ctrl, 1, wx.EXPAND | wx.RIGHT, 5)
+        self.ask_claude_power_btn = wx.Button(options_scroll, label="Ask Claude", style=wx.BU_EXACTFIT)
+        self.ask_claude_power_btn.SetToolTip(
+            "Run the /analyze-power-nets skill: looks up component datasheets to "
+            "identify power nets and recommend per-net track widths, then fills "
+            "the Power Nets and Power Widths fields. Takes a few minutes (web lookups).")
+        self.ask_claude_power_btn.Bind(wx.EVT_BUTTON, self._on_ask_claude_power_nets)
+        power_sizer.Add(self.ask_claude_power_btn, 0)
         options_inner.Add(power_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Power net widths
@@ -916,6 +977,88 @@ class RoutingDialog(wx.Dialog):
         options_scroll.SetSizer(options_inner)
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
         return options_box_sizer
+
+    def _on_ask_claude_power_nets(self, event):
+        """Run /analyze-power-nets headless and fill the Power Nets and
+        Power Widths fields from its recommendation (issue #34)."""
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+
+        claude_path = find_claude()
+        if claude_path is None:
+            wx.MessageBox(
+                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
+                "and make sure `claude` is on your PATH.",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
+            return
+
+        prompt = (
+            f"/analyze-power-nets {os.path.abspath(board)} — analysis only, do not "
+            "modify any files. After the report, end your reply with exactly one "
+            "line of the form RESULT=--power-nets <space-separated glob patterns> "
+            "--power-nets-widths <space-separated widths in mm>, "
+            'e.g. RESULT=--power-nets "*GND*" "*VCC*" --power-nets-widths 0.5 0.4'
+        )
+        dlg = ClaudeSkillDialog(
+            self, "Claude: analyze power nets", prompt,
+            claude_path=claude_path,
+            model=self.claude_tab.get_model_value(),
+            effort=self.claude_tab.get_effort_value(),
+            intro=f"Running /analyze-power-nets on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)")
+        dlg.ShowModal()
+        value = dlg.result_value
+        dlg.Destroy()
+        if value is not None:
+            self._apply_power_nets_recommendation(value)
+
+    def _apply_power_nets_recommendation(self, value):
+        """Validate Claude's RESULT value and fill the power-net fields."""
+        parsed = self._parse_power_nets_result(value)
+        if parsed is None:
+            self._append_log(f"Claude: unusable power-nets recommendation {value!r}\n")
+            return
+        patterns, widths = parsed
+        self.power_nets_ctrl.SetValue(" ".join(patterns))
+        self.power_widths_ctrl.SetValue(" ".join(f"{w:g}" for w in widths))
+        self._append_log(
+            "Claude recommended power nets: "
+            + ", ".join(f"{p} -> {w:g}mm" for p, w in zip(patterns, widths)) + "\n")
+
+    @staticmethod
+    def _parse_power_nets_result(value):
+        """Parse '--power-nets <patterns> --power-nets-widths <widths>'.
+
+        Returns (patterns, widths) or None. Widths must be positive floats,
+        one per pattern (first matching pattern wins, same as the CLI).
+        """
+        import shlex
+        try:
+            tokens = shlex.split(value)
+        except ValueError:
+            return None
+        patterns, widths = [], []
+        bucket = None
+        for token in tokens:
+            if token == "--power-nets":
+                bucket = patterns
+            elif token == "--power-nets-widths":
+                bucket = widths
+            elif token.startswith("--") or bucket is None:
+                bucket = None  # unknown flag: ignore its values
+            else:
+                bucket.append(token)
+        if not patterns or len(patterns) != len(widths):
+            return None
+        try:
+            float_widths = [float(w) for w in widths]
+        except ValueError:
+            return None
+        if any(w <= 0 for w in float_widths):
+            return None
+        return patterns, float_widths
 
     def _create_options_panel(self, panel):
         """Create the advanced options panel (MPS, crossing, length matching, debug)."""
@@ -1197,6 +1340,14 @@ class RoutingDialog(wx.Dialog):
                 'board_edge_clearance': edge_clearance,
             }
 
+        def get_claude_params():
+            # Deferred: the Claude tab is created after the Planes tab,
+            # but this is only called on button click.
+            return {
+                'model': self.claude_tab.get_model_value(),
+                'effort': self.claude_tab.get_effort_value(),
+            }
+
         return PlanesTab(
             self.notebook,
             self.pcb_data,
@@ -1211,6 +1362,18 @@ class RoutingDialog(wx.Dialog):
             # _sync_pcb_data_from_board alone clears the cache but never
             # re-runs the check or refreshes panels.
             sync_pcb_data_callback=self.refresh_from_board,
+            get_claude_params=get_claude_params
+        )
+
+    def _create_claude_tab(self):
+        """Create the Claude tab for running AI skills headless (issue #40)."""
+        from .claude_gui import ClaudeTab
+
+        return ClaudeTab(
+            self.notebook,
+            self.board_filename,
+            log_callback=self._append_log,
+            routing_dialog=self,
         )
 
     def _create_differential_tab(self):
@@ -1263,7 +1426,13 @@ class RoutingDialog(wx.Dialog):
             get_connectivity_check=self._get_connectivity_check_fn,
             get_routing_config=get_routing_config,
             append_log=self._append_log,
-            sync_pcb_data_callback=sync_pcb_data
+            sync_pcb_data_callback=sync_pcb_data,
+            # Deferred: the Claude tab is created after this tab, but the
+            # callback only fires on button click.
+            get_claude_params=lambda: {
+                'model': self.claude_tab.get_model_value(),
+                'effort': self.claude_tab.get_effort_value(),
+            }
         )
         return self.differential_tab
 
@@ -1742,6 +1911,10 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab.net_panel.filter_ctrl.SetValue("")
         self.planes_tab.net_panel.filter_ctrl.SetValue("")
 
+        # Reset Claude tab model/effort to Default
+        self.claude_tab.model_choice.SetSelection(0)
+        self.claude_tab.effort_choice.SetSelection(0)
+
         # Reset component dropdowns to "All"
         if self.net_panel.component_dropdown:
             self.net_panel.component_dropdown.SetSelection(0)
@@ -2150,6 +2323,10 @@ class RoutingDialog(wx.Dialog):
         Returns True if the user accepted and was navigated to the Planes tab
         (so the caller should abort routing); False otherwise.
         """
+        # During an automated Claude plan run the plan sequences its own
+        # route_planes steps - don't interrupt or abort the route step.
+        if getattr(self, '_suppress_plane_offer', False):
+            return False
         # Suggested net -> layer mappings to offer.
         suggestions = [('GND', 'B.Cu'), ('VCC', 'F.Cu')]
 

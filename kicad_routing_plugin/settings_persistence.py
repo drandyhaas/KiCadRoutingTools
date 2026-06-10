@@ -179,6 +179,11 @@ def get_dialog_settings(dialog):
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
 
+        # Claude tab settings (issue #40)
+        'claude_model': dialog.claude_tab.get_model_value(),
+        'claude_effort': dialog.claude_tab.get_effort_value(),
+        'claude_plan': dialog.claude_tab.get_plan_state(),
+
         # Log content
         'log_content': dialog.log_text.GetValue(),
 
@@ -526,6 +531,16 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
     if 'planes_repair_analysis_grid' in settings:
         dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
+
+    # Restore Claude tab model/effort (issue #40). The setters validate
+    # against the current dropdown choices, so a saved model or effort
+    # level that's no longer offered reverts to Default.
+    if 'claude_model' in settings:
+        dialog.claude_tab.set_model_value(settings['claude_model'])
+    if 'claude_effort' in settings:
+        dialog.claude_tab.set_effort_value(settings['claude_effort'])
+    if 'claude_plan' in settings:
+        dialog.claude_tab.restore_plan_state(settings['claude_plan'])
 
     # Restore net selections LAST - after all filters/checkboxes are set
     # This prevents the selections from being cleared by filter change events

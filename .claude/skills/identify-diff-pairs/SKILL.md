@@ -62,7 +62,7 @@ From the impedance, derive the routing flags:
 1. **Confirmed pairs**, grouped by interface, each group with a ready-to-run command:
 
 ```bash
-python -X utf8 route_diff.py board.kicad_pcb board_usb.kicad_pcb \
+python3 -X utf8 route_diff.py board.kicad_pcb board_usb.kicad_pcb \
     --nets "USB_DP" "USB_DM" \
     --impedance 90 --diff-pair-intra-match \
     2>&1 | tee /tmp/route_usb.txt

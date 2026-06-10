@@ -12,9 +12,9 @@ When this skill is invoked with a board file, run a full post-route review and p
 Run all three checkers, capturing output:
 
 ```bash
-python -X utf8 check_drc.py board.kicad_pcb 2>&1 | tee /tmp/review_drc.txt
-python -X utf8 check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connectivity.txt
-python -X utf8 check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
+python3 -X utf8 check_drc.py board.kicad_pcb 2>&1 | tee /tmp/review_drc.txt
+python3 -X utf8 check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connectivity.txt
+python3 -X utf8 check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
 ```
 
 Pass `--clearance` to `check_drc.py` matching the value used for routing if known.

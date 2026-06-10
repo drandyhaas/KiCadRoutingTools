@@ -12,8 +12,8 @@ When this skill is invoked with a KiCad PCB file, review the stackup and recomme
 ```python
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
-for layer in pcb.stackup:
-    print(layer.name, layer.thickness, layer.epsilon_r)
+for layer in pcb.board_info.stackup:  # List[StackupLayer], ordered top to bottom
+    print(layer.name, layer.layer_type, layer.thickness, layer.epsilon_r)
 ```
 
 Judge whether it looks deliberate or default:

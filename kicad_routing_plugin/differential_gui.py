@@ -18,11 +18,50 @@ import routing_defaults as defaults
 from .gui_utils import StdoutRedirector
 
 
+def parse_diff_pairs_result(value):
+    """Parse an /identify-diff-pairs RESULT line (issue #40).
+
+    Format: sections separated by ';', each '<kind>:<comma-separated items>'.
+      confirm: pair base names verified as differential by pin function
+      reject:  base names that name-matching paired but are NOT differential
+      custom:  P|N net-name pairs found by pin function that don't follow
+               P/N naming conventions (not yet representable in the GUI)
+    e.g. 'confirm:/CLK,/DATA;reject:/FOO;custom:/TXP|/TXN'
+
+    Returns (dict with confirm/reject/custom lists, notes).
+    """
+    parsed = {"confirm": [], "reject": [], "custom": []}
+    notes = []
+    for section in str(value).split(";"):
+        section = section.strip()
+        if not section:
+            continue
+        kind, sep, items = section.partition(":")
+        kind = kind.strip().lower()
+        if not sep or kind not in parsed:
+            notes.append(f"diff pairs: unparseable section {section!r}")
+            continue
+        for item in items.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if kind == "custom":
+                p, sep2, n = item.partition("|")
+                if sep2 and p.strip() and n.strip():
+                    parsed["custom"].append((p.strip(), n.strip()))
+                else:
+                    notes.append(f"diff pairs: unparseable custom pair {item!r}")
+            else:
+                parsed[kind].append(item)
+    return parsed, notes
+
+
 class DiffPairSelectionPanel(wx.Panel):
     """Panel for selecting differential pairs to route."""
 
     def __init__(self, parent, pcb_data, instructions=None,
-                 show_hide_checkbox=True, show_component_dropdown=True):
+                 show_hide_checkbox=True, show_component_dropdown=True,
+                 on_ask_claude=None):
         """
         Create a differential pair selection panel.
 
@@ -32,9 +71,12 @@ class DiffPairSelectionPanel(wx.Panel):
             instructions: Optional instruction text
             show_hide_checkbox: Whether to show the hide checkbox
             show_component_dropdown: Whether to show the component dropdown
+            on_ask_claude: Callback for the "Ask Claude" button that verifies
+                pairs by pin function (issue #40); button hidden if None.
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
+        self.on_ask_claude = on_ask_claude
         self.all_pairs = []  # List of (display_name, base_name, p_net_id, n_net_id)
         self._checked_pairs = set()
         self._check_fn = None
@@ -101,6 +143,14 @@ class DiffPairSelectionPanel(wx.Panel):
         unselect_btn.Bind(wx.EVT_BUTTON, self._on_unselect)
         btn_sizer.Add(select_btn, 1, wx.RIGHT, 5)
         btn_sizer.Add(unselect_btn, 1)
+        if self.on_ask_claude is not None:
+            ask_btn = wx.Button(self, label="Ask Claude", style=wx.BU_EXACTFIT)
+            ask_btn.SetToolTip(
+                "Run the /identify-diff-pairs skill: verifies pairs by pin "
+                "function via datasheets, then checks confirmed pairs and "
+                "unchecks name-matching false positives. Takes a few minutes.")
+            ask_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_claude())
+            btn_sizer.Add(ask_btn, 0, wx.LEFT, 5)
         sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         self.SetSizer(sizer)
@@ -320,7 +370,7 @@ class DifferentialTab(wx.Panel):
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, get_connectivity_check=None,
                  get_routing_config=None, append_log=None,
-                 sync_pcb_data_callback=None):
+                 sync_pcb_data_callback=None, get_claude_params=None):
         """
         Create the differential pair routing tab.
 
@@ -333,6 +383,8 @@ class DifferentialTab(wx.Panel):
             get_routing_config: Callback to get full routing config from main dialog
             append_log: Callback to append text to log
             sync_pcb_data_callback: Callback to sync pcb_data from board after routing
+            get_claude_params: Callback returning the Claude tab's
+                {'model', 'effort'} selections for headless runs
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
@@ -342,6 +394,7 @@ class DifferentialTab(wx.Panel):
         self.get_routing_config = get_routing_config
         self.append_log = append_log
         self.sync_pcb_data_callback = sync_pcb_data_callback
+        self.get_claude_params = get_claude_params
         self._routing_thread = None
         self._cancel_requested = False
 
@@ -366,7 +419,8 @@ class DifferentialTab(wx.Panel):
             self, self.pcb_data,
             instructions="Select differential pairs to route...",
             show_hide_checkbox=True,
-            show_component_dropdown=True
+            show_component_dropdown=True,
+            on_ask_claude=self._on_ask_claude_diff_pairs
         )
         pair_box_sizer.Add(self.pair_panel, 1, wx.EXPAND)
 
@@ -514,6 +568,88 @@ class DifferentialTab(wx.Panel):
         main_sizer.Add(right_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(main_sizer)
+
+    def _on_ask_claude_diff_pairs(self):
+        """Run /identify-diff-pairs headless and update the pair selection
+        from its findings (issue #40)."""
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+
+        claude_path = find_claude()
+        if claude_path is None:
+            wx.MessageBox(
+                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
+                "and make sure `claude` is on your PATH.",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
+            return
+
+        prompt = (
+            f"/identify-diff-pairs {os.path.abspath(board)} — analysis only, do not "
+            "modify any files. After the report, end your reply with exactly one "
+            "line of the form RESULT=confirm:<pair base names verified as "
+            "differential by pin function, comma-separated, P/N suffix stripped>"
+            ";reject:<base names that name-matching paired but are NOT differential>"
+            ";custom:<P|N net-name pairs found by pin function that do not follow "
+            "P/N naming conventions>. Omit empty sections; use exact net names, "
+            "e.g. RESULT=confirm:/CLK,/DATA;custom:/TXP|/TXN"
+        )
+        model = effort = None
+        if self.get_claude_params:
+            claude_params = self.get_claude_params()
+            model = claude_params.get('model')
+            effort = claude_params.get('effort')
+        dlg = ClaudeSkillDialog(
+            self, "Claude: identify differential pairs", prompt,
+            claude_path=claude_path, model=model, effort=effort,
+            intro=f"Running /identify-diff-pairs on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)")
+        dlg.ShowModal()
+        value = dlg.result_value
+        dlg.Destroy()
+        if value is not None:
+            self._apply_diff_pairs_recommendation(value)
+
+    def _apply_diff_pairs_recommendation(self, value):
+        """Check confirmed pairs, uncheck rejected ones, report the rest."""
+        parsed, notes = parse_diff_pairs_result(value)
+        for note in notes:
+            if self.append_log:
+                self.append_log(f"Claude: {note}\n")
+
+        display_by_base = {base: display for display, base, _p, _n
+                           in self.pair_panel.all_pairs}
+        confirmed = [b for b in parsed["confirm"] if b in display_by_base]
+        rejected = [b for b in parsed["reject"] if b in display_by_base]
+        unknown = [b for b in parsed["confirm"] + parsed["reject"]
+                   if b not in display_by_base]
+
+        for base in confirmed:
+            self.pair_panel._checked_pairs.add(display_by_base[base])
+        for base in rejected:
+            self.pair_panel._checked_pairs.discard(display_by_base[base])
+        if confirmed or rejected:
+            self.pair_panel._update_pair_list(sync_from_visible=False)
+
+        if self.append_log:
+            if confirmed:
+                self.append_log(f"Claude confirmed diff pairs: {', '.join(confirmed)}\n")
+            if rejected:
+                self.append_log("Claude flagged as NOT differential (unchecked): "
+                                f"{', '.join(rejected)}\n")
+            if unknown:
+                self.append_log(f"Claude named pairs not in the list (ignored): "
+                                f"{', '.join(unknown)}\n")
+            if parsed["custom"]:
+                pairs_str = ", ".join(f"{p}/{n}" for p, n in parsed["custom"])
+                self.append_log(
+                    f"Claude found pairs with unconventional names: {pairs_str} - "
+                    "the GUI and router pair nets by P/N naming, so these can't be "
+                    "routed as pairs yet (rename the nets, or see the explicit-pair "
+                    "support issue)\n")
+            if not any([confirmed, rejected, unknown, parsed["custom"]]):
+                self.append_log(f"Claude: no usable diff-pair findings in {value!r}\n")
 
     def _on_cancel_or_close(self, event):
         """Handle cancel/close button - cancel if routing, otherwise close dialog."""
