@@ -208,3 +208,35 @@ def pad_blocked_cells_array(
     cells[:, 0] = (exg[mask] + pad_gx).astype(np.int32)
     cells[:, 1] = (eyg[mask] + pad_gy).astype(np.int32)
     return cells
+
+
+# Offset-pattern caches for batched rasterization. The patterns are tiny
+# (a few hundred cells) and reused for every segment/via on the board.
+_SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
+_CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
+
+
+def square_offsets(expansion: int) -> "np.ndarray":
+    """(K, 2) int32 offsets covering the full square [-e, e] x [-e, e],
+    in the same (ex outer, ey inner) order as the legacy loops."""
+    offs = _SQUARE_OFFSETS_CACHE.get(expansion)
+    if offs is None:
+        r = np.arange(-expansion, expansion + 1, dtype=np.int32)
+        exg, eyg = np.meshgrid(r, r, indexing="ij")
+        offs = np.column_stack([exg.ravel(), eyg.ravel()]).astype(np.int32)
+        _SQUARE_OFFSETS_CACHE[expansion] = offs
+    return offs
+
+
+def circle_offsets(block_range: int, effective_sq: float) -> "np.ndarray":
+    """(K, 2) int32 offsets with ex^2 + ey^2 <= effective_sq, matching the
+    legacy loops' integer-vs-float comparison and iteration order."""
+    key = (block_range, float(effective_sq))
+    offs = _CIRCLE_OFFSETS_CACHE.get(key)
+    if offs is None:
+        r = np.arange(-block_range, block_range + 1, dtype=np.int32)
+        exg, eyg = np.meshgrid(r, r, indexing="ij")
+        mask = (exg.astype(np.int64) ** 2 + eyg.astype(np.int64) ** 2) <= effective_sq
+        offs = np.column_stack([exg[mask], eyg[mask]]).astype(np.int32)
+        _CIRCLE_OFFSETS_CACHE[key] = offs
+    return offs

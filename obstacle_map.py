@@ -12,7 +12,8 @@ import math
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array
+from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
+    square_offsets, circle_offsets
 from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 from obstacle_costs import add_bga_proximity_costs
@@ -1157,38 +1158,6 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
     return positions
 
 
-# Offset-pattern caches for batched rasterization. The patterns are tiny
-# (a few hundred cells) and reused for every segment/via on the board.
-_SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
-_CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
-
-
-def _square_offsets(expansion: int) -> "np.ndarray":
-    """(K, 2) int32 offsets covering the full square [-e, e] x [-e, e],
-    in the same (ex outer, ey inner) order as the legacy loops."""
-    offs = _SQUARE_OFFSETS_CACHE.get(expansion)
-    if offs is None:
-        r = np.arange(-expansion, expansion + 1, dtype=np.int32)
-        exg, eyg = np.meshgrid(r, r, indexing="ij")
-        offs = np.column_stack([exg.ravel(), eyg.ravel()]).astype(np.int32)
-        _SQUARE_OFFSETS_CACHE[expansion] = offs
-    return offs
-
-
-def _circle_offsets(block_range: int, effective_sq: float) -> "np.ndarray":
-    """(K, 2) int32 offsets with ex^2 + ey^2 <= effective_sq, matching the
-    legacy loops' integer-vs-float comparison and iteration order."""
-    key = (block_range, float(effective_sq))
-    offs = _CIRCLE_OFFSETS_CACHE.get(key)
-    if offs is None:
-        r = np.arange(-block_range, block_range + 1, dtype=np.int32)
-        exg, eyg = np.meshgrid(r, r, indexing="ij")
-        mask = (exg.astype(np.int64) ** 2 + eyg.astype(np.int64) ** 2) <= effective_sq
-        offs = np.column_stack([exg[mask], eyg[mask]]).astype(np.int32)
-        _CIRCLE_OFFSETS_CACHE[key] = offs
-    return offs
-
-
 def _batch_cells_one_layer(obstacles, cells_xy: "np.ndarray", layer_idx: int,
                            blocked_cells=None):
     """Block an (N, 2) array of cells on one layer via the batch API."""
@@ -1240,11 +1209,11 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
     # therefore later removals during rip-up) are unchanged.
     line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
 
-    track_offs = _square_offsets(expansion_grid)
+    track_offs = square_offsets(expansion_grid)
     cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
     _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
-    via_offs = _circle_offsets(via_block_range, effective_via_block_sq)
+    via_offs = circle_offsets(via_block_range, effective_via_block_sq)
     vias = (line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
     _batch_vias(obstacles, vias, blocked_vias)
 
@@ -1275,19 +1244,19 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
             layer_expansion = via_track_expansion_grid[layer_idx]
             effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
             track_block_range = layer_expansion + 1
-            offs = _circle_offsets(track_block_range, effective_track_block_sq)
+            offs = circle_offsets(track_block_range, effective_track_block_sq)
             _batch_cells_one_layer(obstacles, center + offs, layer_idx, blocked_cells)
     else:
         # Single value for all layers (legacy behavior)
         effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
         track_block_range = via_track_expansion_grid + 1
-        offs = _circle_offsets(track_block_range, effective_track_block_sq)
+        offs = circle_offsets(track_block_range, effective_track_block_sq)
         cells = center + offs
         for layer_idx in range(num_layers):
             _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
     # Block cells for via placement
-    via_offs = _circle_offsets(via_via_expansion_grid,
+    via_offs = circle_offsets(via_via_expansion_grid,
                                via_via_expansion_grid * via_via_expansion_grid)
     _batch_vias(obstacles, center + via_offs, blocked_vias)
 
