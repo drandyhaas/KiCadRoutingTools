@@ -569,7 +569,7 @@ class DifferentialTab(wx.Panel):
     def _on_ask_claude_diff_pairs(self):
         """Run /identify-diff-pairs headless and update the pair selection
         from its findings (issue #40)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
 
         claude_path = find_claude()
         if claude_path is None:
@@ -578,12 +578,8 @@ class DifferentialTab(wx.Panel):
                 "and make sure `claude` is on your PATH.",
                 "Claude", wx.OK | wx.ICON_WARNING)
             return
-        board = self.board_filename
-        if not board or not os.path.isfile(board):
-            wx.MessageBox(
-                "Board file not found on disk. Save the board first so the "
-                f"analysis sees the current state.\n\nLooked for: {board}",
-                "Claude", wx.OK | wx.ICON_WARNING)
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
             return
 
         prompt = (

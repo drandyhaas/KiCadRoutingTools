@@ -49,6 +49,50 @@ MODEL_CHOICES = [
 EFFORT_CHOICES = ["Default", "low", "medium", "high", "xhigh", "max"]
 
 
+def board_path_for_analysis(board_filename):
+    """Validate the board file for a headless analysis run.
+
+    The skills read the .kicad_pcb from disk while the user edits the
+    in-memory board, so unsaved changes would be invisible to the analysis.
+    Offers to save the live pcbnew board first (silently skipped when the
+    board is unmodified or we're not running inside pcbnew).
+
+    Returns the absolute board path, or None if the run should not proceed.
+    """
+    board = None
+    try:
+        import pcbnew
+        board = pcbnew.GetBoard()
+    except Exception:
+        pass  # not running inside pcbnew (e.g. tests) - use the file as-is
+    if board is not None:
+        # Always offer to save: the editor's dirty state isn't reliably
+        # exposed to plugins (BOARD.IsModified() tracks an internal item
+        # flag, not unsaved edits), so we can't tell whether the file is
+        # current. Saving an already-saved board is harmless.
+        choice = wx.MessageBox(
+            "The analysis reads the saved .kicad_pcb file.\n\n"
+            "Yes = save the board and continue\n"
+            "No = continue with the last saved file\n",
+            "Claude", wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
+        if choice == wx.CANCEL:
+            return None
+        if choice == wx.YES:
+            try:
+                pcbnew.SaveBoard(board_filename, board)
+            except Exception as e:
+                wx.MessageBox(f"Saving the board failed: {e}",
+                              "Claude", wx.OK | wx.ICON_WARNING)
+                return None
+    if not board_filename or not os.path.isfile(board_filename):
+        wx.MessageBox(
+            "Board file not found on disk. Save the board first so the "
+            f"analysis sees the current state.\n\nLooked for: {board_filename}",
+            "Claude", wx.OK | wx.ICON_WARNING)
+        return None
+    return os.path.abspath(board_filename)
+
+
 def find_claude():
     """Return the path to the claude CLI, or None if not installed."""
     path = shutil.which("claude")
@@ -541,14 +585,7 @@ class ClaudeTab(wx.Panel):
     # ------------------------------------------------------------------ run
 
     def _board_path_or_warn(self):
-        board = self.board_filename
-        if not board or not os.path.isfile(board):
-            wx.MessageBox(
-                "Board file not found on disk. Save the board first so the "
-                f"analysis sees the current state.\n\nLooked for: {board}",
-                "Claude", wx.OK | wx.ICON_WARNING)
-            return None
-        return os.path.abspath(board)
+        return board_path_for_analysis(self.board_filename)
 
     def _start_run(self, prompt, kind, intro):
         """Start a headless run (kind names what the result is for) with shared UI state."""

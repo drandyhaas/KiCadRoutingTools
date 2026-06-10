@@ -717,7 +717,7 @@ class RoutingDialog(wx.Dialog):
 
     def _on_check_stackup(self, event):
         """Run /recommend-stackup headless and show the report (issue #40)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
 
         claude_path = find_claude()
         if claude_path is None:
@@ -726,12 +726,8 @@ class RoutingDialog(wx.Dialog):
                 "and make sure `claude` is on your PATH.",
                 "Claude", wx.OK | wx.ICON_WARNING)
             return
-        board = self.board_filename
-        if not board or not os.path.isfile(board):
-            wx.MessageBox(
-                "Board file not found on disk. Save the board first so the "
-                f"analysis sees the current state.\n\nLooked for: {board}",
-                "Claude", wx.OK | wx.ICON_WARNING)
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
             return
 
         prompt = (
@@ -887,7 +883,7 @@ class RoutingDialog(wx.Dialog):
     def _on_ask_claude_power_nets(self, event):
         """Run /analyze-power-nets headless and fill the Power Nets and
         Power Widths fields from its recommendation (issue #34)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog
+        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
 
         claude_path = find_claude()
         if claude_path is None:
@@ -896,12 +892,8 @@ class RoutingDialog(wx.Dialog):
                 "and make sure `claude` is on your PATH.",
                 "Claude", wx.OK | wx.ICON_WARNING)
             return
-        board = self.board_filename
-        if not board or not os.path.isfile(board):
-            wx.MessageBox(
-                "Board file not found on disk. Save the board first so the "
-                f"analysis sees the current state.\n\nLooked for: {board}",
-                "Claude", wx.OK | wx.ICON_WARNING)
+        board = board_path_for_analysis(self.board_filename)
+        if board is None:
             return
 
         prompt = (
