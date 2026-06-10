@@ -67,15 +67,16 @@ ROOT_EXCLUDE = {
     "tests",
     "docs",
     "kicad_files",  # sample boards: large and unnecessary at runtime
-    # Project / internal notes that aren't shipped to users.
-    "CLAUDE.md",
 }
+
+# CLAUDE.md and .claude/ (the routing skills) ship intentionally so they can be
+# used from the installed plugin later.
 
 # Names skipped anywhere in the tree (VCS, caches, build artifacts). The Rust
 # crate's build dir and the per-platform binaries are stripped here; the right
 # binary is added back under platform-suffix names by install_binaries().
 IGNORE_PATTERNS = shutil.ignore_patterns(
-    ".git", ".github", ".claude", ".gitignore", ".DS_Store",
+    ".git", ".github", ".gitignore", ".DS_Store",
     "__pycache__", "*.pyc", "dist",
     "target",  # rust_router/target/ is the cargo build dir
     "grid_router.so", "grid_router.pyd", "grid_router.abi3.so",

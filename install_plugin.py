@@ -269,6 +269,9 @@ def copy_plugin(source_dir: Path, dest_dir: Path):
     def ignore_patterns(directory, files):
         ignored = []
         for f in files:
+            # Keep .claude/ (routing skills) for use from the installed plugin.
+            if f == '.claude':
+                continue
             # Skip hidden files, cache, and non-essential directories
             if f.startswith('.') or f == '__pycache__' or f.endswith('.pyc'):
                 ignored.append(f)
