@@ -374,6 +374,7 @@ class _Commit:
         self._board = board
         self._net_map = net_map
         self._items: list = []
+        self._updated: list = []
         self._handle = board.begin_commit()
 
     @property
@@ -390,7 +391,14 @@ class _Commit:
     def extend(self, items: Iterable) -> None:
         self._items.extend(items)
 
+    def update(self, item) -> None:
+        """Queue a modification of an EXISTING board item."""
+        if item not in self._updated:
+            self._updated.append(item)
+
     def push(self, message: str) -> None:
+        if self._updated:
+            self._board.update_items(self._updated)
         if self._items:
             self._board.create_items(self._items)
         self._board.push_commit(self._handle, message)
@@ -574,6 +582,176 @@ def existing_zone_keys(board) -> set[tuple[str, str]]:
 
 # --- Apply routing results --------------------------------------------------
 
+
+# --- Pad / stub net swaps and layer modifications ---------------------------
+#
+# write_routed_output applies polarity pad swaps, target swaps, and stub
+# layer modifications to the output FILE; in plugin mode the same changes
+# must be applied to the live board, or the new tracks land beside pads
+# that still carry the old nets (shorts at swapped pads). This mirrors the
+# file writer's order of operations: target swaps -> layer mods -> polarity
+# swaps, all queued on the shared commit via update_items.
+
+def _apply_board_swaps(commit: _Commit, board, results_data: dict, pcb_data) -> int:
+    """Apply swap/modification info from a routing payload to the live board.
+
+    Returns the number of modified items (pads, tracks, vias).
+    """
+    from routing_utils import pos_key
+
+    pad_swaps = results_data.get("pad_swaps") or []
+    target_swaps = results_data.get("target_swap_info") or []
+    se_swaps = results_data.get("single_ended_target_swap_info") or []
+    seg_mods = results_data.get("all_segment_modifications") or []
+    if not (pad_swaps or target_swaps or se_swaps or seg_mods):
+        return 0
+
+    def net_name_for(net_id):
+        net = pcb_data.nets.get(net_id) if pcb_data else None
+        return net.name if net is not None else None
+
+    tracks = list(board.get_tracks())
+    vias = list(board.get_vias())
+    pads = list(board.get_pads())
+
+    def item_net_name(item):
+        return (getattr(item.net, "name", "") or "") if item.net is not None else ""
+
+    def set_net(item, net_name):
+        net = commit.net_map.resolve(net_name)
+        if net is not None:
+            item.net = net
+            commit.update(item)
+
+    def collect_at(positions, old_net_id, layer_name=None):
+        """Tracks/vias of the old net with an endpoint at one of the positions."""
+        old_name = net_name_for(old_net_id)
+        if not positions or old_name is None:
+            return []
+        keys = {pos_key(x, y) for x, y in positions}
+        layer_id = layer_id_for(layer_name) if layer_name else None
+        found = []
+        for t in tracks:
+            if item_net_name(t) != old_name:
+                continue
+            if layer_id is not None and t.layer != layer_id:
+                continue
+            sx, sy = _vec_xy_mm(t.start)
+            ex, ey = _vec_xy_mm(t.end)
+            if pos_key(sx, sy) in keys or pos_key(ex, ey) in keys:
+                found.append(t)
+        for v in vias:
+            if item_net_name(v) != old_name:
+                continue
+            vx, vy = _vec_xy_mm(v.position)
+            if pos_key(vx, vy) in keys:
+                found.append(v)
+        return found
+
+    def find_board_pad(pad_obj):
+        """Locate the kipy pad matching a kicad_parser Pad (position + number)."""
+        for p in pads:
+            px, py = _vec_xy_mm(p.position)
+            if (abs(px - pad_obj.global_x) < 0.01 and
+                    abs(py - pad_obj.global_y) < 0.01 and
+                    str(p.number) == str(pad_obj.pad_number)):
+                return p
+        return None
+
+    modified = 0
+
+    def swap_pad_pair(pad_a, pad_b, label):
+        nonlocal modified
+        ka = find_board_pad(pad_a)
+        kb = find_board_pad(pad_b)
+        if ka is None or kb is None:
+            print(f"  WARNING: could not find {label} pads to swap: "
+                  f"{pad_a.component_ref}:{pad_a.pad_number} <-> "
+                  f"{pad_b.component_ref}:{pad_b.pad_number}")
+            return
+        ka.net, kb.net = kb.net, ka.net
+        commit.update(ka)
+        commit.update(kb)
+        modified += 2
+
+    # 1. Diff pair target swaps (collect all moves first so the two swap
+    #    directions cannot double-swap an item)
+    for swap in target_swaps:
+        moves = []
+        for positions, old_id, new_id, layer in (
+                (swap["p1_p_positions"], swap["p1_p_net_id"], swap["p2_p_net_id"], swap.get("p1_layer")),
+                (swap["p1_n_positions"], swap["p1_n_net_id"], swap["p2_n_net_id"], swap.get("p1_layer")),
+                (swap["p2_p_positions"], swap["p2_p_net_id"], swap["p1_p_net_id"], swap.get("p2_layer")),
+                (swap["p2_n_positions"], swap["p2_n_net_id"], swap["p1_n_net_id"], swap.get("p2_layer"))):
+            new_name = net_name_for(new_id)
+            for item in collect_at(positions, old_id, layer):
+                moves.append((item, new_name))
+        for item, new_name in moves:
+            set_net(item, new_name)
+        modified += len(moves)
+        if swap.get("p1_p_pad") and swap.get("p2_p_pad"):
+            swap_pad_pair(swap["p1_p_pad"], swap["p2_p_pad"], "target-swap P")
+        if swap.get("p1_n_pad") and swap.get("p2_n_pad"):
+            swap_pad_pair(swap["p1_n_pad"], swap["p2_n_pad"], "target-swap N")
+
+    # 2. Single-ended target swaps
+    for swap in se_swaps:
+        moves = []
+        for positions, old_id, new_id in (
+                (swap["n1_positions"], swap["n1_net_id"], swap["n2_net_id"]),
+                (swap["n2_positions"], swap["n2_net_id"], swap["n1_net_id"])):
+            new_name = net_name_for(new_id)
+            for item in collect_at(positions, old_id):
+                moves.append((item, new_name))
+        for item, new_name in moves:
+            set_net(item, new_name)
+        modified += len(moves)
+        if swap.get("n1_pad") and swap.get("n2_pad"):
+            swap_pad_pair(swap["n1_pad"], swap["n2_pad"], "target-swap")
+
+    # 3. Stub layer modifications (prefer net-matched, fall back to
+    #    coordinates only - net IDs may have changed due to swaps)
+    for mod in seg_mods:
+        start_key = pos_key(mod["start"][0], mod["start"][1])
+        end_key = pos_key(mod["end"][0], mod["end"][1])
+        net_name = net_name_for(mod["net_id"])
+        old_layer_id = layer_id_for(mod["old_layer"]) if mod.get("old_layer") else None
+        new_layer_id = layer_id_for(mod["new_layer"])
+
+        def matches(t, require_net):
+            if require_net and item_net_name(t) != net_name:
+                return False
+            if old_layer_id is not None and t.layer != old_layer_id:
+                return False
+            s = pos_key(*_vec_xy_mm(t.start))
+            e = pos_key(*_vec_xy_mm(t.end))
+            return (s, e) == (start_key, end_key) or (s, e) == (end_key, start_key)
+
+        target = next((t for t in tracks if matches(t, True)), None)
+        if target is None:
+            target = next((t for t in tracks if matches(t, False)), None)
+        if target is not None and new_layer_id is not None:
+            target.layer = new_layer_id
+            commit.update(target)
+            modified += 1
+
+    # 4. Polarity fix pad swaps + their stub chains
+    for swap in pad_swaps:
+        swap_pad_pair(swap["pad_p"], swap["pad_n"], "polarity")
+        moves = []
+        for positions, old_id, new_id in (
+                (swap.get("p_stub_positions"), swap["p_net_id"], swap["n_net_id"]),
+                (swap.get("n_stub_positions"), swap["n_net_id"], swap["p_net_id"])):
+            new_name = net_name_for(new_id)
+            for item in collect_at(positions, old_id):
+                moves.append((item, new_name))
+        for item, new_name in moves:
+            set_net(item, new_name)
+        modified += len(moves)
+
+    return modified
+
+
 def apply_routing_results(board, results_data: dict, *,
                           pcb_data=None,
                           add_debug_lines: bool = False,
@@ -584,9 +762,12 @@ def apply_routing_results(board, results_data: dict, *,
     and vias carry into the canonical net names that kipy uses to assign
     `track.net` / `via.net`. Without it every track ends up netless.
 
-    Returns a dict with counts: {"tracks": N, "vias": N, "debug_lines": N}.
+    Returns a dict with counts: {"tracks": N, "vias": N, "debug_lines": N,
+    "swapped_items": N} - the latter counts existing pads/tracks/vias whose
+    nets or layers were modified by polarity/target swaps and stub layer
+    switching.
     """
-    counts = {"tracks": 0, "vias": 0, "debug_lines": 0}
+    counts = {"tracks": 0, "vias": 0, "debug_lines": 0, "swapped_items": 0}
 
     def net_name_for(net_id):
         if pcb_data is None or net_id is None:
@@ -595,6 +776,9 @@ def apply_routing_results(board, results_data: dict, *,
         return net.name if net is not None else None
 
     with begin_commit(board, message) as commit:
+        # Pad/stub net swaps (polarity fixes, target swaps) and stub layer
+        # modifications first - the new tracks were routed assuming them
+        counts["swapped_items"] = _apply_board_swaps(commit, board, results_data, pcb_data)
         # Segments + vias from each net's result
         for result in results_data.get("results", []):
             for seg in result.get("new_segments", []):

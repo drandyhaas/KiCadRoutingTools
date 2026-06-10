@@ -361,6 +361,10 @@ class RepairPlanesOptionsPanel(wx.Panel):
 
     def _on_max_track_width_changed(self, event):
         """Validate max track width >= track width from Basic tab."""
+        # Guard against re-entrancy: see _on_drc_param_changed in swig_gui.py (#30).
+        if getattr(self, '_validating', False):
+            return
+
         if not self._get_track_width:
             event.Skip()
             return
@@ -369,12 +373,17 @@ class RepairPlanesOptionsPanel(wx.Panel):
         max_width = self.max_track_width.GetValue()
 
         if max_width < track_width:
-            wx.MessageBox(
-                f"Max Track Width cannot be less than Track Width ({track_width:.2f} mm)",
+            self._validating = True
+            try:
+                self.max_track_width.SetValue(track_width)
+            finally:
+                self._validating = False
+            wx.CallAfter(
+                wx.MessageBox,
+                f"Max Track Width cannot be less than Track Width ({track_width:.3f} mm)",
                 "Invalid Value",
                 wx.OK | wx.ICON_WARNING
             )
-            self.max_track_width.SetValue(track_width)
         else:
             event.Skip()
 

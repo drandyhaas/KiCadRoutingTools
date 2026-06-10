@@ -72,6 +72,46 @@ def _get_netclass_parameters(class_name, pcb_data=None):
     return out
 
 
+def _project_file_minimums():
+    """Read board-level minimum constraints from the project file.
+
+    Current kipy releases expose no design-rules API, so fall back to the
+    .kicad_pro next to the board: design_settings.rules carries the Board
+    Setup -> Design Rules -> Constraints values in mm.
+    """
+    import json
+    import os
+    try:
+        from kicad_ipc_adapter import get_board_full_path
+        board_path = get_board_full_path()
+    except Exception:
+        return None
+    if not board_path:
+        return None
+    pro_path = os.path.splitext(board_path)[0] + ".kicad_pro"
+    if not os.path.isfile(pro_path):
+        return None
+    try:
+        with open(pro_path, "r", encoding="utf-8") as f:
+            rules = (json.load(f).get("board", {})
+                     .get("design_settings", {}).get("rules", {}))
+    except (OSError, ValueError):
+        return None
+
+    def _val(key, default):
+        v = rules.get(key)
+        return float(v) if isinstance(v, (int, float)) else default
+
+    return {
+        "min_track_width": _val("min_track_width", 0.1),
+        "min_clearance": _val("min_clearance", 0.1),
+        "min_via_size": _val("min_via_diameter", 0.4),
+        "min_via_drill": _val("min_through_hole_diameter", 0.2),
+        "min_hole_to_hole": _val("min_hole_clearance", 0.25),
+        "min_copper_edge_clearance": _val("min_copper_edge_clearance", 0.25),
+    }
+
+
 def _get_board_minimum_constraints():
     """Read board-level minimum constraints via kipy design rules.
 
@@ -82,13 +122,14 @@ def _get_board_minimum_constraints():
     """
     board = _ipc_board()
     if board is None:
-        return None
+        return _project_file_minimums()
     try:
         from kicad_ipc_adapter import ipc_lock
         with ipc_lock():
             dr = board.get_design_rules()
     except Exception:
-        return None
+        # kipy has no design-rules API yet - use the project file instead
+        return _project_file_minimums()
 
     def _mm(*attrs):
         for a in attrs:
@@ -518,13 +559,17 @@ class RoutingDialog(wx.Dialog):
         edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.edge_clearance_check = wx.CheckBox(parent, label="")
         self.edge_clearance_check.SetValue(False)
-        self.edge_clearance_check.SetToolTip("Enable custom edge clearance (unchecked = use track clearance)")
+        self.edge_clearance_check.SetToolTip(
+            "Enable custom edge clearance (unchecked = use the board's minimum "
+            "copper-to-edge constraint when obeying design rules, else none)")
         self.edge_clearance_check.Bind(wx.EVT_CHECKBOX, self._on_edge_clearance_check)
         r = defaults.PARAM_RANGES['board_edge_clearance']
         self.board_edge_clearance = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
         self.board_edge_clearance.SetDigits(r['digits'])
         self.board_edge_clearance.Bind(wx.EVT_SPINCTRLDOUBLE, lambda evt: self._on_drc_param_changed(evt, 'board_edge_clearance'))
-        self.board_edge_clearance.SetToolTip("When disabled, tracks use the Clearance value for board edge spacing")
+        self.board_edge_clearance.SetToolTip(
+            "When disabled, the board's minimum copper-to-edge constraint is used "
+            "(if obeying design rules)")
         self.board_edge_clearance.Enable(False)
         edge_sizer.Add(self.edge_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         edge_sizer.Add(self.board_edge_clearance, 1, wx.EXPAND)
@@ -557,8 +602,26 @@ class RoutingDialog(wx.Dialog):
         if self.obey_drc_check.GetValue():
             self._apply_board_minimums_to_controls()
 
+    def _effective_board_edge_clearance(self):
+        """Board-edge clearance to route with: the dedicated control when its
+        checkbox is enabled; otherwise the board's minimum copper-to-edge
+        constraint when obeying design rules (0 = no edge keepout)."""
+        if self.edge_clearance_check.GetValue():
+            return self.board_edge_clearance.GetValue()
+        if self.obey_drc_check.GetValue():
+            minimums = _get_board_minimum_constraints() or {}
+            return minimums.get('min_copper_edge_clearance') or 0.0
+        return 0.0
+
     def _on_drc_param_changed(self, event, ctrl_name):
         """Validate parameter change against DRC minimums."""
+        # Guard against re-entrancy: correcting the value below triggers another
+        # EVT_SPINCTRLDOUBLE, and showing a modal dialog inside the handler steals
+        # focus from the spin control which fires yet another event. Without this
+        # guard the warning dialog reappears endlessly and the UI deadlocks (#30).
+        if getattr(self, '_drc_validating', False):
+            return
+
         if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
             event.Skip()
             return
@@ -582,15 +645,22 @@ class RoutingDialog(wx.Dialog):
         current = ctrl.GetValue()
 
         if current < minimum:
-            # Show warning and revert to minimum
+            # Correct the value first (suppressing the nested validation event),
+            # then show the warning deferred so no modal dialog runs inside this
+            # handler. By the time it shows, the value is already valid.
+            self._drc_validating = True
+            try:
+                ctrl.SetValue(minimum)
+            finally:
+                self._drc_validating = False
             label = ctrl_name.replace('_', ' ').title()
-            wx.MessageBox(
+            wx.CallAfter(
+                wx.MessageBox,
                 f"{label} cannot be less than {minimum:.3f} mm\n"
                 f"(Board minimum from Design Rules)",
                 "Design Rule Constraint",
                 wx.OK | wx.ICON_WARNING
             )
-            ctrl.SetValue(minimum)
         else:
             event.Skip()
 
@@ -1114,7 +1184,7 @@ class RoutingDialog(wx.Dialog):
         from .planes_gui import PlanesTab
 
         def get_shared_params():
-            edge_clearance = self.board_edge_clearance.GetValue() if self.edge_clearance_check.GetValue() else self.clearance.GetValue()
+            edge_clearance = self._effective_board_edge_clearance()
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -1163,6 +1233,8 @@ class RoutingDialog(wx.Dialog):
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
+                'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
+                'board_edge_clearance': self._effective_board_edge_clearance(),
                 'grid_step': self.grid_step.GetValue(),
                 'via_cost': self.via_cost.GetValue(),
                 'max_iterations': self.max_iterations.GetValue(),
@@ -1846,7 +1918,7 @@ class RoutingDialog(wx.Dialog):
             'crossing_penalty': self.crossing_penalty.GetValue(),
             'routing_clearance_margin': self.routing_clearance_margin.GetValue(),
             'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
-            'board_edge_clearance': self.board_edge_clearance.GetValue() if self.edge_clearance_check.GetValue() else 0.0,
+            'board_edge_clearance': self._effective_board_edge_clearance(),
             'enable_layer_switch': self.enable_layer_switch.GetValue(),
             # Direction
             'direction': ['forward', 'backward'][self.direction_choice.GetSelection() - 1] if self.direction_choice.GetSelection() > 0 else None,
@@ -2531,7 +2603,13 @@ class RoutingDialog(wx.Dialog):
             self.status_text.SetLabel(step_name)
 
     def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
-        """Apply routing results to the open board via the IPC adapter."""
+        """Apply routing results to the open board via the IPC adapter.
+
+        The adapter also applies pad/stub net swaps (target swaps) and stub
+        layer modifications BEFORE adding the new tracks - the routes were
+        created assuming these swaps, so skipping them leaves shorts at
+        swapped pads.
+        """
         from kicad_ipc_adapter import (
             apply_routing_results,
             get_board,

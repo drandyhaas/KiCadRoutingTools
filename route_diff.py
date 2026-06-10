@@ -6,6 +6,8 @@ Usage:
 
 All nets matching the patterns are treated as differential pairs (P/N pairs).
 Nets with _P/_N, P/N, or +/- suffixes will be paired and routed together.
+Nets only pair within the same suffix convention (e.g. CLK+ pairs with CLK-,
+never with an unrelated CLK_N).
 
 Requires the Rust router module. Build it with:
     cd rust_router && cargo build --release
@@ -487,20 +489,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         for pair_name, pair in diff_pair_ids_to_route:
             connector_info = get_diff_pair_connector_regions(pcb_data, pair, config)
             if connector_info:
-                # Block source connector region
-                add_connector_region_via_blocking(
-                    diff_pair_base_obstacles,
-                    connector_info['src_center'][0], connector_info['src_center'][1],
-                    connector_info['src_dir'][0], connector_info['src_dir'][1],
-                    connector_info['src_setback'], connector_info['spacing_mm'], config
-                )
-                # Block target connector region
-                add_connector_region_via_blocking(
-                    diff_pair_base_obstacles,
-                    connector_info['tgt_center'][0], connector_info['tgt_center'][1],
-                    connector_info['tgt_dir'][0], connector_info['tgt_dir'][1],
-                    connector_info['tgt_setback'], connector_info['spacing_mm'], config
-                )
+                for end in ('src', 'tgt'):
+                    dir_x, dir_y = connector_info[f'{end}_dir']
+                    # Synthesized (bare-pad) directions may be flipped by the
+                    # router, so block the connector region on both sides
+                    signs = (1, -1) if connector_info[f'{end}_dir_synthesized'] else (1,)
+                    for sign in signs:
+                        add_connector_region_via_blocking(
+                            diff_pair_base_obstacles,
+                            connector_info[f'{end}_center'][0], connector_info[f'{end}_center'][1],
+                            dir_x * sign, dir_y * sign,
+                            connector_info[f'{end}_setback'], connector_info['spacing_mm'], config
+                        )
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
     all_unrouted_net_ids = sorted(set(get_all_unrouted_net_ids(pcb_data)))
@@ -694,10 +694,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     # Write output file or return results for direct application
     if return_results:
-        # Return results data for direct application (e.g., KiCad plugin)
+        # Return results data for direct application (e.g., KiCad plugin).
+        # pad_swaps / target_swap_info / all_segment_modifications must be
+        # applied to the live board just like write_routed_output applies them
+        # to the output file - otherwise polarity/target swaps leave the routed
+        # tracks pointing at pads that still carry the old net.
         results_data = {
             'results': results,
             'all_swap_vias': all_swap_vias,
+            'pad_swaps': pad_swaps,
+            'target_swap_info': target_swap_info,
+            'all_segment_modifications': all_segment_modifications,
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
         }

@@ -137,11 +137,11 @@ REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI
 PARAM_RANGES = {
-    'track_width': {'min': 0.05, 'max': 25.0, 'inc': 0.05, 'digits': 2},
-    'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
-    'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 2},
-    'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 2},
-    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 2},
+    'track_width': {'min': 0.05, 'max': 25.0, 'inc': 0.05, 'digits': 3},
+    'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 3},
+    'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 3},
+    'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 3},
+    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 3},
     'via_cost': {'min': 1, 'max': 1000},
     'max_iterations': {'min': 1000, 'max': 100000000},
     'heuristic_weight': {'min': 1.0, 'max': 10.0, 'inc': 0.1, 'digits': 1},
@@ -155,8 +155,8 @@ PARAM_RANGES = {
     'track_proximity_distance': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'track_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'routing_clearance_margin': {'min': 0.5, 'max': 2.0, 'inc': 0.1, 'digits': 1},
-    'hole_to_hole_clearance': {'min': 0.0, 'max': 1.0, 'inc': 0.05, 'digits': 2},
-    'board_edge_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'hole_to_hole_clearance': {'min': 0.0, 'max': 1.0, 'inc': 0.05, 'digits': 3},
+    'board_edge_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 3},
     'bga_proximity_radius': {'min': 0.0, 'max': 20.0, 'inc': 0.5, 'digits': 1},
     'bga_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'vertical_attraction_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
@@ -190,7 +190,7 @@ PARAM_RANGES = {
     'plane_max_rip_nets': {'min': 1, 'max': 10},
     'same_net_pad_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.05, 'digits': 2},
     # Repair planes parameters
-    'repair_max_track_width': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
+    'repair_max_track_width': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 3},
     'repair_min_track_width': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},
     'repair_analysis_grid_step': {'min': 0.1, 'max': 2.0, 'inc': 0.1, 'digits': 1},
     # Bus routing parameters

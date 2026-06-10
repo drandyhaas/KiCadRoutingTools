@@ -23,6 +23,7 @@ from kicad_parser import PCBData, Pad
 from routing_config import DiffPairNet, GridRouteConfig
 from routing_utils import pos_key
 from connectivity import find_connected_segment_positions, find_connected_segments
+from pcb_modification import swap_pad_nets_in_pcb_data
 from net_queries import compute_routing_aware_distance, find_containing_or_nearest_bga_zone
 from chip_boundary import (
     ChipBoundary, build_chip_list, identify_chip_for_point,
@@ -1060,18 +1061,7 @@ def _swap_pads(
         net2_id: Original net ID for pad2
     """
     if pad1 and pad2:
-        # Swap net IDs and names
-        pad1.net_id, pad2.net_id = pad2.net_id, pad1.net_id
-        pad1.net_name, pad2.net_name = pad2.net_name, pad1.net_name
-
-        # Update pads_by_net dictionary
-        if net1_id in pcb_data.pads_by_net:
-            pcb_data.pads_by_net[net1_id] = [p for p in pcb_data.pads_by_net[net1_id] if p != pad1]
-        pcb_data.pads_by_net.setdefault(net2_id, []).append(pad1)
-
-        if net2_id in pcb_data.pads_by_net:
-            pcb_data.pads_by_net[net2_id] = [p for p in pcb_data.pads_by_net[net2_id] if p != pad2]
-        pcb_data.pads_by_net.setdefault(net1_id, []).append(pad2)
+        swap_pad_nets_in_pcb_data(pcb_data, pad1, pad2)
 
 
 def apply_single_ended_swap(

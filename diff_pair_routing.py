@@ -15,7 +15,7 @@ from connectivity import (
     get_stub_segments, get_stub_vias, calculate_stub_via_barrel_length
 )
 from obstacle_map import check_line_clearance
-from geometry_utils import simplify_path
+from geometry_utils import simplify_path, segments_intersect_tuple
 # Note: Layer switching is now done upfront in route.py, not during routing
 
 # Import Rust router
@@ -65,6 +65,75 @@ def direction_to_theta_idx(dx: float, dy: float) -> int:
     # Add pi/8 to center each sector around the direction
     theta_idx = int((angle + math.pi/8) / (math.pi/4)) % 8
     return theta_idx
+
+
+def _footprint_pad_centroid(pcb_data: PCBData, net_id: int, x: float, y: float,
+                            tolerance: float = 0.05) -> Optional[Tuple[float, float]]:
+    """Find the pad of net_id at (x, y) and return the centroid of all pads on its footprint."""
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if abs(pad.global_x - x) < tolerance and abs(pad.global_y - y) < tolerance:
+            footprint = pcb_data.footprints.get(pad.component_ref)
+            if footprint and footprint.pads:
+                cx = sum(p.global_x for p in footprint.pads) / len(footprint.pads)
+                cy = sum(p.global_y for p in footprint.pads) / len(footprint.pads)
+                return (cx, cy)
+    return None
+
+
+def get_pair_end_direction(pcb_data: PCBData, p_net_id: int, n_net_id: int,
+                           p_segments: List[Segment], n_segments: List[Segment],
+                           p_x: float, p_y: float, n_x: float, n_y: float,
+                           layer_name: str,
+                           other_center: Optional[Tuple[float, float]] = None
+                           ) -> Tuple[float, float, bool]:
+    """
+    Compute the escape direction for one end of a differential pair.
+
+    Normally this is the average of the P and N stub directions. When both
+    endpoints are bare pads (no stub segments), the stub directions are (0,0)
+    and the setback machinery would degenerate to the pad-pair center, letting
+    the offset P/N tracks cross the partner net's pads. In that case we
+    synthesize a direction perpendicular to the P-N pad axis, pointing away
+    from the owning component's pad centroid (falling back to "toward the
+    other end of the route").
+
+    Returns (dir_x, dir_y, synthesized). The direction is normalized, or (0,0)
+    if no direction could be determined. synthesized is True when the direction
+    came from pad geometry rather than stub segments.
+    """
+    p_dir = get_stub_direction(p_segments, p_x, p_y, layer_name)
+    n_dir = get_stub_direction(n_segments, n_x, n_y, layer_name)
+
+    dir_x = (p_dir[0] + n_dir[0]) / 2
+    dir_y = (p_dir[1] + n_dir[1]) / 2
+    dir_len = math.sqrt(dir_x * dir_x + dir_y * dir_y)
+    if dir_len > 1e-6:
+        return (dir_x / dir_len, dir_y / dir_len, False)
+
+    # Bare pads (or cancelling stub directions): synthesize from pad geometry.
+    axis_x, axis_y = p_x - n_x, p_y - n_y
+    axis_len = math.sqrt(axis_x * axis_x + axis_y * axis_y)
+    if axis_len < 1e-6:
+        return (0.0, 0.0, False)
+    perp_x, perp_y = -axis_y / axis_len, axis_x / axis_len
+
+    center_x, center_y = (p_x + n_x) / 2, (p_y + n_y) / 2
+
+    # Prefer escaping away from the owning component's body (pad centroid)
+    centroid = (_footprint_pad_centroid(pcb_data, p_net_id, p_x, p_y) or
+                _footprint_pad_centroid(pcb_data, n_net_id, n_x, n_y))
+    if centroid:
+        dot = perp_x * (center_x - centroid[0]) + perp_y * (center_y - centroid[1])
+        if abs(dot) > 0.05:
+            return (perp_x, perp_y, True) if dot > 0 else (-perp_x, -perp_y, True)
+
+    # Symmetric component (e.g. 2-pad resistor): escape toward the other end
+    if other_center is not None:
+        dot = perp_x * (other_center[0] - center_x) + perp_y * (other_center[1] - center_y)
+        if abs(dot) > 0.05:
+            return (perp_x, perp_y, True) if dot > 0 else (-perp_x, -perp_y, True)
+
+    return (perp_x, perp_y, True)
 
 
 def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
@@ -278,6 +347,9 @@ def _detect_polarity(simplified_path, coord,
     """
     Detect which side of the centerline P should be on and whether polarity swap is needed.
 
+    Detection only - whether the mismatch is resolved by a pad swap, an
+    opposite-side connector flip, or a skip is decided by the caller.
+
     Args:
         simplified_path: List of (gx, gy, layer) representing simplified centerline
         coord: GridCoord for coordinate conversion
@@ -285,12 +357,11 @@ def _detect_polarity(simplified_path, coord,
         n_src_x, n_src_y: N source position in mm
         p_tgt_x, p_tgt_y: P target position in mm
         n_tgt_x, n_tgt_y: N target position in mm
-        config: Routing config (for fix_polarity flag)
+        config: Routing config
 
     Returns:
-        (p_sign, polarity_fixed, polarity_swap_needed, has_layer_change)
+        (p_sign, polarity_swap_needed, has_layer_change)
         - p_sign: +1 or -1, which perpendicular side P should be offset to
-        - polarity_fixed: True if we'll swap target pads in output
         - polarity_swap_needed: True if source and target polarities differ
         - has_layer_change: True if path has vias (layer changes)
     """
@@ -352,18 +423,10 @@ def _detect_polarity(simplified_path, coord,
             has_layer_change = True
             break
 
-    # Handle polarity fix - mark for pad/stub net swap in output file
-    # We DON'T swap coordinates here - instead we'll swap target pad and stub nets
-    # This preserves the P→P, N→N geometry and fixes polarity at the schematic level
-    polarity_fixed = False
-    if polarity_swap_needed and config.fix_polarity:
-        print(f"  Polarity swap needed - will swap target pad and stub nets in output")
-        polarity_fixed = True
-
     # Always use source polarity
     p_sign = src_p_sign
 
-    return p_sign, polarity_fixed, polarity_swap_needed, has_layer_change
+    return p_sign, polarity_swap_needed, has_layer_change
 
 
 def _calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_sign):
@@ -1069,27 +1132,41 @@ def create_parallel_path_from_float(centerline_path, sign, spacing_mm=0.1, start
 
 def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
                                      config: GridRouteConfig) -> Optional[dict]:
+    """Compute connector region parameters for a differential pair (see by-ids variant)."""
+    return get_diff_pair_connector_regions_by_ids(
+        pcb_data, diff_pair.p_net_id, diff_pair.n_net_id, config)
+
+
+def get_diff_pair_connector_regions_by_ids(pcb_data: PCBData, p_net_id: int, n_net_id: int,
+                                            config: GridRouteConfig,
+                                            endpoints: Optional[Tuple] = None) -> Optional[dict]:
     """
     Compute connector region parameters for a differential pair.
+
+    endpoints: optional (source, target) endpoint tuples to compute regions for
+    a specific multi-point leg instead of the closest P/N endpoint pair.
 
     Returns dict with:
         - src_center: (x, y) center between P and N source stubs
         - src_dir: (dx, dy) normalized direction from stubs toward route
+        - src_dir_synthesized: True if src_dir was derived from pad geometry
+          (bare-pad endpoint); the route may use either +src_dir or -src_dir
         - src_setback: distance from stub center to route start
         - tgt_center: (x, y) center between P and N target stubs
         - tgt_dir: (dx, dy) normalized direction from stubs toward route
+        - tgt_dir_synthesized: True if tgt_dir was derived from pad geometry
         - tgt_setback: distance from stub center to route start
         - spacing_mm: half-spacing between P and N tracks
 
     Returns None if endpoints cannot be determined.
     """
-    p_net_id = diff_pair.p_net_id
-    n_net_id = diff_pair.n_net_id
-
-    # Find endpoints
-    sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
-    if error or not sources or not targets:
-        return None
+    # Find endpoints (or use explicit leg endpoints)
+    if endpoints is not None:
+        sources, targets = [endpoints[0]], [endpoints[1]]
+    else:
+        sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
+        if error or not sources or not targets:
+            return None
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
@@ -1113,33 +1190,22 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
     src_layer_name = layer_names[src[4]]
     tgt_layer_name = layer_names[tgt[4]]
 
-    # Get stub directions at source and target
-    p_src_dir = get_stub_direction(p_segments, p_src_x, p_src_y, src_layer_name)
-    n_src_dir = get_stub_direction(n_segments, n_src_x, n_src_y, src_layer_name)
-    p_tgt_dir = get_stub_direction(p_segments, p_tgt_x, p_tgt_y, tgt_layer_name)
-    n_tgt_dir = get_stub_direction(n_segments, n_tgt_x, n_tgt_y, tgt_layer_name)
-
-    # Average P and N directions at each end
-    src_dir_x = (p_src_dir[0] + n_src_dir[0]) / 2
-    src_dir_y = (p_src_dir[1] + n_src_dir[1]) / 2
-    tgt_dir_x = (p_tgt_dir[0] + n_tgt_dir[0]) / 2
-    tgt_dir_y = (p_tgt_dir[1] + n_tgt_dir[1]) / 2
-
-    # Normalize
-    src_dir_len = math.sqrt(src_dir_x*src_dir_x + src_dir_y*src_dir_y)
-    tgt_dir_len = math.sqrt(tgt_dir_x*tgt_dir_x + tgt_dir_y*tgt_dir_y)
-    if src_dir_len > 0:
-        src_dir_x /= src_dir_len
-        src_dir_y /= src_dir_len
-    if tgt_dir_len > 0:
-        tgt_dir_x /= tgt_dir_len
-        tgt_dir_y /= tgt_dir_len
-
     # Calculate centerline midpoints
     center_src_x = (p_src_x + n_src_x) / 2
     center_src_y = (p_src_y + n_src_y) / 2
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
+
+    # Get escape directions (averaged stub directions, or synthesized from pad
+    # geometry for bare-pad endpoints) - must match _try_route_direction
+    src_dir_x, src_dir_y, src_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_src_x, p_src_y, n_src_x, n_src_y, src_layer_name,
+        other_center=(center_tgt_x, center_tgt_y))
+    tgt_dir_x, tgt_dir_y, tgt_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y, tgt_layer_name,
+        other_center=(center_src_x, center_src_y))
 
     # Calculate setback (default to 4x spacing = 2x total P-N distance)
     if config.diff_pair_centerline_setback is not None:
@@ -1152,9 +1218,11 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
     return {
         'src_center': (center_src_x, center_src_y),
         'src_dir': (src_dir_x, src_dir_y),
+        'src_dir_synthesized': src_dir_synth,
         'src_setback': src_setback,
         'tgt_center': (center_tgt_x, center_tgt_y),
         'tgt_dir': (tgt_dir_x, tgt_dir_y),
+        'tgt_dir_synthesized': tgt_dir_synth,
         'tgt_setback': tgt_setback,
         'spacing_mm': spacing_mm,
     }
@@ -1164,13 +1232,25 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                          coord, layer_names, spacing_mm, p_net_id, n_net_id,
                          max_iterations_override=None, neighbor_stubs=None,
                          preferred_angles=None, direction_label=None, is_backward=False,
-                         prox_h_cost=0):
+                         prox_h_cost=0, flip_source=False, flip_target=False,
+                         forced_source_dir=None, forced_target_dir=None):
     """
     Attempt to route a diff pair in one direction.
 
     Args:
         preferred_angles: Optional (src_candidate, tgt_candidate) to use specific angles
                          from a previous probe instead of trying all combinations.
+        flip_source/flip_target: Force the escape direction at the physical
+                         source/target end to the opposite side (only valid for
+                         bare-pad endpoints with synthesized directions). Used to
+                         resolve polarity mismatches geometrically when polarity
+                         fixing is disabled.
+        forced_source_dir/forced_target_dir: Explicit (dx, dy) escape direction
+                         for the physical source/target end, overriding stub or
+                         synthesized directions. Used by multi-point diff pair
+                         routing to continue a chain out the opposite side of a
+                         terminal already used by a previous leg. A forced end
+                         is never auto-flipped.
 
     Returns (route_data, iterations, blocked_cells, best_probe_combo) where:
         - route_data: dict with route info on success, None on failure
@@ -1217,33 +1297,48 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     src_layer_name = layer_names[src_layer]
     tgt_layer_name = layer_names[tgt_layer]
 
-    # Get stub directions at source and target
-    p_src_dir = get_stub_direction(p_segments, p_src_x, p_src_y, src_layer_name)
-    n_src_dir = get_stub_direction(n_segments, n_src_x, n_src_y, src_layer_name)
-    p_tgt_dir = get_stub_direction(p_segments, p_tgt_x, p_tgt_y, tgt_layer_name)
-    n_tgt_dir = get_stub_direction(n_segments, n_tgt_x, n_tgt_y, tgt_layer_name)
-
-    # Average P and N directions at each end (they should be similar for a diff pair)
-    src_dir_x = (p_src_dir[0] + n_src_dir[0]) / 2
-    src_dir_y = (p_src_dir[1] + n_src_dir[1]) / 2
-    tgt_dir_x = (p_tgt_dir[0] + n_tgt_dir[0]) / 2
-    tgt_dir_y = (p_tgt_dir[1] + n_tgt_dir[1]) / 2
-
-    # Normalize the averaged directions
-    src_dir_len = math.sqrt(src_dir_x*src_dir_x + src_dir_y*src_dir_y)
-    tgt_dir_len = math.sqrt(tgt_dir_x*tgt_dir_x + tgt_dir_y*tgt_dir_y)
-    if src_dir_len > 0:
-        src_dir_x /= src_dir_len
-        src_dir_y /= src_dir_len
-    if tgt_dir_len > 0:
-        tgt_dir_x /= tgt_dir_len
-        tgt_dir_y /= tgt_dir_len
-
     # Calculate centerline midpoints between P and N stubs
     center_src_x = (p_src_x + n_src_x) / 2
     center_src_y = (p_src_y + n_src_y) / 2
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
+
+    # Get escape directions at source and target (averaged stub directions, or
+    # synthesized from pad geometry when the endpoints are bare pads)
+    src_dir_x, src_dir_y, src_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_src_x, p_src_y, n_src_x, n_src_y, src_layer_name,
+        other_center=(center_tgt_x, center_tgt_y))
+    tgt_dir_x, tgt_dir_y, tgt_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y, tgt_layer_name,
+        other_center=(center_src_x, center_src_y))
+
+    # Apply forced directions (physical source/target; this call's src/tgt are
+    # swapped when routing backward). Forced ends are not synthesized and are
+    # never auto-flipped.
+    src_forced = forced_target_dir if is_backward else forced_source_dir
+    tgt_forced = forced_source_dir if is_backward else forced_target_dir
+    if src_forced is not None:
+        src_dir_x, src_dir_y = src_forced
+        src_dir_synth = False
+    if tgt_forced is not None:
+        tgt_dir_x, tgt_dir_y = tgt_forced
+        tgt_dir_synth = False
+
+    # Apply forced direction flips (physical source/target; this call's src/tgt
+    # are swapped when routing backward). Only bare-pad (synthesized) ends can
+    # flip - stub directions are fixed by existing copper.
+    src_flip = flip_target if is_backward else flip_source
+    tgt_flip = flip_source if is_backward else flip_target
+    if src_flip:
+        if not src_dir_synth:
+            return None, 0, [], None
+        src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
+    if tgt_flip:
+        if not tgt_dir_synth:
+            return None, 0, [], None
+        tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
 
     # Calculate setback distance (default to 4x spacing = 2x total P-N distance)
     if config.diff_pair_centerline_setback is not None:
@@ -1266,6 +1361,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
+    if not src_candidates and src_dir_synth and not src_flip:
+        # Synthesized direction blocked - try escaping from the opposite side
+        src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
+        src_candidates = _find_open_positions(
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
+            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+        )
     if not src_candidates:
         blocked = _collect_setback_blocked_cells(
             center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
@@ -1277,6 +1379,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
+    if not tgt_candidates and tgt_dir_synth and not tgt_flip:
+        # Synthesized direction blocked - try escaping from the opposite side
+        tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
+        tgt_candidates = _find_open_positions(
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
+            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+        )
     if not tgt_candidates:
         blocked = _collect_setback_blocked_cells(
             center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
@@ -1294,10 +1403,22 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Double via cost since diff pairs place two vias per layer change
     # via_proximity_cost is a multiplier on via cost in stub/BGA proximity zones (0 = block vias)
     # diff_pair_spacing is the P/N offset from centerline in grid units (for self-intersection prevention)
-    # Use 2*spacing to prevent P/N tracks from crossing when centerline loops
-    diff_pair_spacing_grid = max(1, int(2 * spacing_mm / config.grid_step + 0.5))
+    # Use 2*spacing to prevent P/N tracks from crossing when centerline loops.
+    # Flipped (opposite-side) attempts wrap around their endpoints, so give the
+    # centerline extra self-clearance to keep the offset tracks from crossing
+    # in the hairpin.
+    # Flipped or forced-direction ends (multi-point chain continuations) may
+    # need to wrap around their endpoint to approach from the far side
+    wrapping = (src_flip or tgt_flip or
+                src_forced is not None or tgt_forced is not None)
+    spacing_multiplier = 3 if wrapping else 2
+    diff_pair_spacing_grid = max(1, int(spacing_multiplier * spacing_mm / config.grid_step + 0.5))
     # Convert max_turn_angle from degrees to 45° units
     max_turn_units = int(config.max_turn_angle / 45.0 + 0.5)
+    if wrapping:
+        # Allow a full loop of cumulative turn so the smooth wrap is reachable
+        # (the P/N crossing check rejects bad geometry)
+        max_turn_units = max(max_turn_units, 8)
 
     # Calculate GND via spacing if enabled
     # GND via center = P/N track outer edge + clearance + via_radius
@@ -1359,6 +1480,24 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     # Helper to build route_data dict (wraps module-level function with closure vars)
     def make_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle, gnd_via_dirs=None):
+        rd = _build_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle, gnd_via_dirs)
+        # Record which physical ends have synthesized (flippable) directions,
+        # for the polarity flip retry in route_diff_pair_with_obstacles, and
+        # the base escape directions actually used (after any flips), for
+        # multi-point chain side tracking
+        if is_backward:
+            rd['source_dir_synthesized'] = tgt_dir_synth
+            rd['target_dir_synthesized'] = src_dir_synth
+            rd['source_base_dir'] = (tgt_dir_x, tgt_dir_y)
+            rd['target_base_dir'] = (src_dir_x, src_dir_y)
+        else:
+            rd['source_dir_synthesized'] = src_dir_synth
+            rd['target_dir_synthesized'] = tgt_dir_synth
+            rd['source_base_dir'] = (src_dir_x, src_dir_y)
+            rd['target_base_dir'] = (tgt_dir_x, tgt_dir_y)
+        return rd
+
+    def _build_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle, gnd_via_dirs=None):
         return _make_route_data(
             pose_path, p_src_x, p_src_y, n_src_x, n_src_y,
             p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
@@ -1535,17 +1674,68 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     return None, total_iterations, blocked, None
 
 
+def _routed_length(result: dict) -> float:
+    """Total length of a route result's new segments, for comparing polarity
+    resolution candidates."""
+    return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+               for s in result.get('new_segments', []))
+
+
+def _pn_tracks_cross(new_segments, p_net_id: int, n_net_id: int) -> bool:
+    """Check whether any P segment crosses (or touches) any N segment on the
+    same layer. Used to validate flipped-polarity retry routes, which can wrap
+    around far enough that the offset tracks cross."""
+    p_segs = [s for s in new_segments if s.net_id == p_net_id]
+    n_segs = [s for s in new_segments if s.net_id == n_net_id]
+    for ps in p_segs:
+        for ns in n_segs:
+            if ps.layer != ns.layer:
+                continue
+            if segments_intersect_tuple((ps.start_x, ps.start_y), (ps.end_x, ps.end_y),
+                                        (ns.start_x, ns.start_y), (ns.end_x, ns.end_y)):
+                return True
+    return False
+
+
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap,
                                     base_obstacles: GridObstacleMap = None,
-                                    unrouted_stubs: List[Tuple[float, float]] = None) -> Optional[dict]:
+                                    unrouted_stubs: List[Tuple[float, float]] = None,
+                                    flip_source: bool = False,
+                                    flip_target: bool = False,
+                                    endpoints: Optional[Tuple] = None,
+                                    forced_source_dir: Optional[Tuple[float, float]] = None,
+                                    forced_target_dir: Optional[Tuple[float, float]] = None,
+                                    swap_allowed_ends: Tuple[str, ...] = ('source', 'target'),
+                                    force_swap: bool = False) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
     1. Routes a single centerline path using A* (GridRouter)
     2. Simplifies the path by removing collinear points
     3. Creates P and N paths using perpendicular offsets from centerline
+
+    flip_source/flip_target force the escape direction at one end to the
+    opposite side (bare-pad endpoints only) - used to resolve a polarity
+    mismatch geometrically when polarity fixing is disabled.
+
+    endpoints: optional (source, target) endpoint tuples (same format as
+    get_diff_pair_endpoints returns) to route a specific leg instead of the
+    closest P/N endpoint pair - used by multi-point diff pair routing.
+
+    forced_source_dir/forced_target_dir: explicit escape directions for the
+    physical source/target end (multi-point chain continuation).
+
+    swap_allowed_ends: physical ends ('source'/'target') where a polarity pad
+    swap may be applied. Multi-point legs restrict this to chain-fresh
+    terminals - swapping a terminal that already has a routed leg attached
+    would break that leg. The swap lands at the ROUTING-target end, so the
+    permission is checked against the routing direction. Pass () to forbid
+    swaps entirely.
+
+    force_swap: internal - re-route committing to the pad-swap resolution
+    (used to generate the swap candidate for length comparison).
     """
     p_net_id = diff_pair.p_net_id
     n_net_id = diff_pair.n_net_id
@@ -1558,15 +1748,18 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                 gnd_net_id = net_id
                 break
 
-    # Find endpoints
-    sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
-    if error:
-        print(f"  {error}")
-        return None
+    # Find endpoints (or use explicit leg endpoints for multi-point routing)
+    if endpoints is not None:
+        sources, targets = [endpoints[0]], [endpoints[1]]
+    else:
+        sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
+        if error:
+            print(f"  {error}")
+            return None
 
-    if not sources or not targets:
-        print(f"  No valid source/target endpoints found")
-        return None
+        if not sources or not targets:
+            print(f"  No valid source/target endpoints found")
+            return None
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
@@ -1638,7 +1831,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         coord, layer_names, spacing_mm, p_net_id, n_net_id,
         max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
         direction_label=first_label, is_backward=(first_label == "backward"),
-        prox_h_cost=prox_h_cost
+        prox_h_cost=prox_h_cost,
+        flip_source=flip_source, flip_target=flip_target,
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
     )
 
     # Check if first probe was blocked (all angles failed)
@@ -1675,7 +1870,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             coord, layer_names, spacing_mm, p_net_id, n_net_id,
             max_iterations_override=probe_iterations, neighbor_stubs=unrouted_stubs,
             direction_label=second_label, is_backward=(second_label == "backward"),
-            prox_h_cost=prox_h_cost
+            prox_h_cost=prox_h_cost,
+            flip_source=flip_source, flip_target=flip_target,
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
         )
 
         # Check if second probe was blocked (all angles failed)
@@ -1754,7 +1951,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                 coord, layer_names, spacing_mm, p_net_id, n_net_id,
                 neighbor_stubs=unrouted_stubs, preferred_angles=preferred,
                 direction_label=None, is_backward=(promising_label == "backward"),
-                prox_h_cost=prox_h_cost
+                prox_h_cost=prox_h_cost,
+                flip_source=flip_source, flip_target=flip_target,
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
             )
             total_iterations = first_probe_iters + second_probe_iters + full_iters
 
@@ -1785,7 +1984,9 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                     coord, layer_names, spacing_mm, p_net_id, n_net_id,
                     neighbor_stubs=unrouted_stubs, preferred_angles=fallback_preferred,
                     direction_label=None, is_backward=(fallback_label == "backward"),
-                    prox_h_cost=prox_h_cost
+                    prox_h_cost=prox_h_cost,
+                    flip_source=flip_source, flip_target=flip_target,
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
                 )
                 total_iterations += fallback_full_iters
 
@@ -1860,7 +2061,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                              for gx, gy, layer in simplified_path]
 
     # Detect polarity (which side of centerline P should be on)
-    p_sign, polarity_fixed, polarity_swap_needed, has_layer_change = _detect_polarity(
+    p_sign, polarity_swap_needed, has_layer_change = _detect_polarity(
         simplified_path, coord,
         p_src_x, p_src_y, n_src_x, n_src_y,
         p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
@@ -1868,15 +2069,119 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     )
     n_sign = -p_sign
 
+    # Resolve a polarity mismatch. Two mechanisms:
+    # - pad swap: swap the P/N pad nets at the routing-target end (only when
+    #   polarity fixing is on AND that physical end permits swaps - multi-point
+    #   legs forbid swapping terminals that already have a routed leg)
+    # - connector flip: take the connectors out the opposite side at ONE end
+    #   (bare-pad ends with synthesized directions only; flipping both ends
+    #   would reintroduce the mismatch)
+    # When both mechanisms are available, route all candidates and keep the
+    # shortest - either one can resolve polarity with a needlessly long route
+    # (e.g. a flip that wraps all the way around its own terminal).
+    polarity_fixed = False
+    if polarity_swap_needed:
+        swap_end = 'source' if routing_backwards else 'target'
+        swap_allowed = config.fix_polarity and swap_end in swap_allowed_ends
+        can_flip = (not (flip_source or flip_target) and
+                    (route_data.get('source_dir_synthesized') or
+                     route_data.get('target_dir_synthesized')))
+
+        if force_swap or (swap_allowed and not can_flip):
+            # Commit to the pad swap (no competing flip candidates to compare)
+            print(f"  Polarity swap needed - will swap target pad and stub nets in output")
+            polarity_fixed = True
+        elif not (flip_source or flip_target):
+            spent_iterations = total_iterations
+            candidates = []
+
+            if swap_allowed:
+                # Swap candidate: same centerline, completed with the pad swap
+                swap_result = route_diff_pair_with_obstacles(
+                    pcb_data, diff_pair, config, obstacles, base_obstacles,
+                    unrouted_stubs, endpoints=endpoints,
+                    forced_source_dir=forced_source_dir,
+                    forced_target_dir=forced_target_dir,
+                    swap_allowed_ends=swap_allowed_ends, force_swap=True)
+                if swap_result and not swap_result.get('failed') and not swap_result.get('probe_blocked'):
+                    spent_iterations += swap_result.get('iterations', 0)
+                    candidates.append(('pad swap', swap_result))
+
+            for flip_kwargs, end_name, synth_key in (
+                    ({'flip_source': True}, 'source', 'source_dir_synthesized'),
+                    ({'flip_target': True}, 'target', 'target_dir_synthesized')):
+                if not route_data.get(synth_key):
+                    continue
+                print(f"  Polarity mismatch - trying {end_name} connectors out the opposite side")
+                retry = route_diff_pair_with_obstacles(
+                    pcb_data, diff_pair, config, obstacles, base_obstacles,
+                    unrouted_stubs, endpoints=endpoints,
+                    forced_source_dir=forced_source_dir,
+                    forced_target_dir=forced_target_dir,
+                    swap_allowed_ends=(), **flip_kwargs)
+                if not retry:
+                    continue
+                spent_iterations += retry.get('iterations', 0)
+                if retry.get('failed') or retry.get('probe_blocked'):
+                    continue
+                if retry.get('polarity_swap_needed') and not retry.get('polarity_fixed'):
+                    print(f"  Flipped {end_name} route still has mismatched polarity - rejecting")
+                    continue
+                # The flipped route can wrap around to reach the far side; verify
+                # the offset P/N tracks did not end up crossing anywhere
+                if _pn_tracks_cross(retry.get('new_segments', []), p_net_id, n_net_id):
+                    print(f"  Flipped {end_name} route crosses itself - rejecting")
+                    continue
+                candidates.append((f'flipped {end_name}', retry))
+
+            if candidates:
+                best_name, best = min(candidates, key=lambda c: _routed_length(c[1]))
+                if len(candidates) > 1:
+                    lengths = ", ".join(f"{name}={_routed_length(r):.2f}mm"
+                                        for name, r in candidates)
+                    print(f"  Using {best_name} route ({lengths})")
+                best['iterations'] = spent_iterations
+                return best
+
+            print(f"  WARNING: Polarity mismatch cannot be resolved (pad swap "
+                  f"{'failed' if swap_allowed else 'not allowed'}, no opposite-side "
+                  f"connector option) - skipping diff pair")
+            return {
+                'failed': True,
+                'polarity_skip': True,
+                'iterations': spent_iterations,
+                'blocked_cells_forward': [],
+                'blocked_cells_backward': [],
+            }
+
     # Create P and N paths using perpendicular offsets from centerline
     # Use actual setback directions at endpoints so perpendicular offsets maintain
     # proper spacing along the connector segments (especially when setback angle is used)
     start_stub_dir = (src_actual_dir_x, src_actual_dir_y)
     end_stub_dir = (-tgt_actual_dir_x, -tgt_actual_dir_y)  # Negate because we arrive at target stubs
-    p_float_path = create_parallel_path_float(simplified_path, coord, sign=p_sign, spacing_mm=spacing_mm,
-                                               start_dir=start_stub_dir, end_dir=end_stub_dir)
-    n_float_path = create_parallel_path_float(simplified_path, coord, sign=n_sign, spacing_mm=spacing_mm,
-                                               start_dir=start_stub_dir, end_dir=end_stub_dir)
+
+    # Un-snap the centerline's terminal endpoints to the exact setback
+    # positions: grid snapping can bias an endpoint up to half a grid cell
+    # toward one pad of the pair, skewing the connector fan enough to graze
+    # the near pad's corner (sub-0.01mm clearance violations)
+    centerline_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], layer)
+                        for gx, gy, layer in simplified_path]
+    if config.diff_pair_centerline_setback is not None:
+        setback_dist = config.diff_pair_centerline_setback
+    else:
+        setback_dist = spacing_mm * 4
+    for idx, (cx, cy, adx, ady) in (
+            (0, (center_src_x, center_src_y, src_actual_dir_x, src_actual_dir_y)),
+            (-1, (center_tgt_x, center_tgt_y, tgt_actual_dir_x, tgt_actual_dir_y))):
+        exact = (cx + adx * setback_dist, cy + ady * setback_dist)
+        fx, fy, flayer = centerline_float[idx]
+        if math.hypot(fx - exact[0], fy - exact[1]) <= config.grid_step * 0.75:
+            centerline_float[idx] = (exact[0], exact[1], flayer)
+
+    p_float_path = create_parallel_path_from_float(centerline_float, sign=p_sign, spacing_mm=spacing_mm,
+                                                   start_dir=start_stub_dir, end_dir=end_stub_dir)
+    n_float_path = create_parallel_path_from_float(centerline_float, sign=n_sign, spacing_mm=spacing_mm,
+                                                   start_dir=start_stub_dir, end_dir=end_stub_dir)
 
     # Process via positions
     p_float_path, n_float_path = _process_via_positions(
@@ -2037,6 +2342,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         # GND via data for regeneration after length matching
         'gnd_net_id': gnd_net_id,
         'gnd_via_dirs': gnd_via_dirs,
+        # True when source/target polarities differ (used by the flip retry to
+        # verify a flipped route actually resolved the mismatch)
+        'polarity_swap_needed': polarity_swap_needed,
+        # Physical escape directions used at each end (after any flips), for
+        # multi-point chain side tracking
+        'source_base_dir': route_data.get('source_base_dir'),
+        'target_base_dir': route_data.get('target_base_dir'),
     }
 
     # If polarity was fixed, include info about which target pads need net swaps

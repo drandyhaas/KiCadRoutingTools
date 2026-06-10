@@ -25,6 +25,12 @@ The router recognizes common differential pair naming conventions:
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
 
+Pairing is suffix-style aware: nets only pair when both use the **same**
+convention. For example `/CLK+` pairs with `/CLK-` but never with an unrelated
+`/CLK_N` net, even though both reduce to the base name `/CLK`. This prevents
+boards that mix conventions (e.g. an LVDS input pair `CLK+`/`CLK-` alongside a
+single-ended inverted output `CLK_N`) from producing corrupted pairs.
+
 ## Usage
 
 Use `route_diff.py` for differential pair routing. All nets specified are treated as differential pairs:
@@ -79,6 +85,54 @@ Centerline:       o---o
 The centerline endpoints are positioned:
 - At the midpoint between P and N stub tips
 - Offset by the setback distance in the stub direction
+
+### Bare-Pad Endpoints (No Fanout Stubs)
+
+When a pair connects directly to bare SMD pads (no stub segments, e.g. SOIC
+pins or a termination resistor), there is no stub direction to derive the
+setback from. In that case the router synthesizes an escape direction:
+
+1. Perpendicular to the P-N pad axis
+2. Pointing away from the owning component's pad centroid (so pin-row pads
+   escape away from the chip body)
+3. For symmetric parts (e.g. a 2-pad resistor), pointing toward the other end
+   of the route
+4. If the chosen side is blocked, the opposite side is tried
+
+Additionally, the pair's **own pads** are added as obstacles for the
+centerline (`add_diff_pair_own_pads_as_obstacles`), since the pair's nets are
+otherwise excluded from the obstacle map and the offset P/N tracks could cross
+the partner polarity's pad mid-route. Capsule-shaped corridors from each
+pad-pair center out past the setback position stay open so the route can still
+reach its endpoints and fan out to the pads.
+
+### Multi-Point Differential Pairs
+
+A diff pair cannot tap onto the middle of an existing pair of tracks - the
+tapping leg's P/N tracks would have to cross the existing pair. So pairs with
+3+ pad-pair terminals (e.g. connector -> termination resistor -> IC pins) are
+routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
+
+1. The pair's pads are grouped into (P pad, N pad) terminals by nearest
+   matching (connector pins, IC input pairs, termination resistors).
+2. Terminals are ordered as the shortest open chain. Each terminal has only
+   two usable sides (the +/- directions of its escape axis), so the topology
+   must be a path, not an MST tree. Orderings whose interior terminals have
+   both neighbors on the same side of the escape axis are penalized (they
+   force a wrap-around leg).
+3. Legs are routed sequentially. A continuation leg leaves a shared terminal
+   on the **opposite side** from the leg that arrived - the chain passes
+   "through" the pads. The forced side gets a connector corridor exemption in
+   the obstacle map (own pads AND the previous leg's tracks).
+4. Polarity is resolved per leg: connector flips at the fresh terminal, and -
+   when polarity fixing is enabled - pad swaps at **chain-fresh terminals
+   only** (each leg's far terminal; never a shared terminal, which already
+   has a routed leg attached). Swap and flip candidates compete by routed
+   length. If a chain attempt is ripped out, its pad swaps are undone too.
+5. If a leg fails (unroutable, or its P/N tracks cross), the attempt's legs
+   are ripped out and the next-best chain ordering is tried - the side
+   constraints depend on routing order, so a reversed chain can succeed
+   where the forward one wraps itself into a corner.
 
 ### Pose-Based Centerline Routing
 
@@ -180,7 +234,34 @@ The router also detects if polarity differs between source and target (polarity 
 Polarity: src_p_sign=1, tgt_p_sign=-1, swap_needed=True, has_vias=True
 ```
 
-**Note:** Polarity swaps are automatically fixed by default, which swaps the target pad net assignments (P↔N) so polarity matches. Use `--no-fix-polarity` to disable this behavior.
+**Note:** Polarity swaps are automatically fixed by default, which swaps the target pad net assignments (P↔N) so polarity matches. The swap is applied consistently in three places:
+
+- the in-memory `pcb_data` (pads and stub segments/vias), so post-route cleanup
+  and subsequent routes see the swapped nets - without this, the appendix
+  cleanup would collapse the connectors ending on the swapped pads, leaving
+  gaps between tracks and pads
+- the output file (CLI mode, via `write_routed_output`)
+- the live pcbnew board (plugin mode, via `kicad_routing_plugin/board_swaps.py`)
+
+The swap changes pad net assignments on the **board only** - update the
+schematic to match (the CLI can do this with `--schematic-dir`).
+
+There is a second, purely geometric resolution: re-routing with the
+connectors taken out the **opposite side at one end** (flipping one end flips
+its P/N handedness; flipping both would reintroduce the mismatch). Only
+bare-pad endpoints can flip - stub directions are fixed by existing copper.
+Flipped attempts get a full-loop turn budget since they must wrap around
+their endpoint, and every candidate is validated for P/N track crossings.
+
+With polarity fixing **enabled** (CLI default), the pad-swap and connector-flip
+candidates **compete by routed length** and the shortest clean route wins; if
+only one mechanism succeeds, it is used. (When no end can flip - e.g. both
+ends have stubs - the swap is committed directly without re-routing.)
+
+With `--no-fix-polarity` (the KiCad plugin GUI default), pad swaps never
+happen: only the flip resolution is tried, and if no flip produces a clean
+route the pair is **skipped** with a warning (no crossing tracks are ever
+written).
 
 ## Via Placement
 
@@ -408,6 +489,12 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
 
 ## Limitations
 
-1. **Polarity swap** - Enabled by default; use `--no-fix-polarity` to disable automatic target pad swapping
+1. **Polarity swap** - Enabled by default on the CLI (disabled by default in the plugin GUI); use `--no-fix-polarity` to disable automatic target pad swapping. With fixing disabled, a mismatched pair is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible
 2. **Fixed spacing** - Spacing is constant along the route (no tapering)
-3. **Grid snapping** - Centerline endpoints snap to grid
+3. **Grid snapping** - Centerline endpoints snap to grid for the search; the
+   terminal endpoints of the generated geometry are un-snapped back to the
+   exact setback positions so the connector fan stays centered between the
+   pads (snapping could bias it half a grid cell toward one pad and graze it)
+4. **Multi-point pairs** - Routed as a chain of terminals; mid-track taps are
+   geometrically impossible for a pair, and each terminal supports at most
+   two legs (one per side of its escape axis)

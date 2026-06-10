@@ -693,7 +693,8 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
                                           p_net_id: int, n_net_id: int,
                                           config: GridRouteConfig,
                                           exclude_endpoints: List[Tuple[float, float]] = None,
-                                          extra_clearance: float = 0.0):
+                                          extra_clearance: float = 0.0,
+                                          exclude_cells: Set[Tuple[int, int]] = None):
     """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
 
     This is different from add_net_stubs_as_obstacles which adds OTHER nets' stubs.
@@ -708,6 +709,9 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         config: Routing configuration
         exclude_endpoints: List of (x, y) positions to exclude from blocking (stub connection points)
         extra_clearance: Additional clearance to add
+        exclude_cells: Additional grid cells to exclude from blocking (e.g.
+            connector corridors of a multi-point leg, so a previous leg's
+            tracks at a shared terminal don't block the opposite-side setback)
     """
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -715,7 +719,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
     # Convert exclude endpoints to grid coordinates with some radius
     # Use max track width for exclusion radius
     max_track_width = config.get_max_track_width()
-    exclude_grid_cells = set()
+    exclude_grid_cells = set(exclude_cells) if exclude_cells else set()
     exclude_radius = max(2, coord.to_grid_dist(max_track_width * 2))  # 2x track width radius
     if exclude_endpoints:
         for ex, ey in exclude_endpoints:
@@ -744,6 +748,63 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
             obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
             exclude_grid_cells
         )
+
+
+def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                                         p_net_id: int, n_net_id: int,
+                                         config: GridRouteConfig,
+                                         exempt_capsules: List[Tuple[float, float, float, float, float]] = None,
+                                         extra_clearance: float = 0.0):
+    """Add a diff pair's own pads as obstacles for centerline routing.
+
+    The diff pair's nets are excluded from the base obstacle map so the route can
+    reach its own pads - but that also lets the centerline (and its offset P/N
+    tracks) cross the partner polarity's pads mid-route, creating shorts. This
+    blocks the pair's own pads everywhere EXCEPT inside the given exempt capsules,
+    which carve out the connector corridors at the route endpoints (from the
+    pad-pair center out past the setback position) where the route legitimately
+    approaches and fans out to the pads.
+
+    Args:
+        obstacles: The obstacle map to modify
+        pcb_data: PCB data containing pads
+        p_net_id: Net ID of P net
+        n_net_id: Net ID of N net
+        config: Routing configuration
+        exempt_capsules: List of (x1, y1, x2, y2, radius_mm) capsules in mm where
+            pad blocking is skipped
+        extra_clearance: Additional clearance to add (diff pair half-spacing)
+    """
+    coord = GridCoord(config.grid_step)
+    layer_map = build_layer_map(config.layers)
+
+    # Convert capsules to grid units once
+    capsules_grid = []
+    for (x1, y1, x2, y2, radius_mm) in (exempt_capsules or []):
+        ax, ay = coord.to_grid(x1, y1)
+        bx, by = coord.to_grid(x2, y2)
+        capsules_grid.append((ax, ay, bx, by, radius_mm / config.grid_step))
+
+    def in_exempt_capsule(gx: int, gy: int) -> bool:
+        for (ax, ay, bx, by, radius_grid) in capsules_grid:
+            abx, aby = bx - ax, by - ay
+            apx, apy = gx - ax, gy - ay
+            ab_len_sq = abx * abx + aby * aby
+            if ab_len_sq == 0:
+                t = 0.0
+            else:
+                t = max(0.0, min(1.0, (apx * abx + apy * aby) / ab_len_sq))
+            dx = apx - t * abx
+            dy = apy - t * aby
+            if dx * dx + dy * dy <= radius_grid * radius_grid:
+                return True
+        return False
+
+    for net_id in (p_net_id, n_net_id):
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            _add_pad_obstacle(obstacles, pad, coord, layer_map, config,
+                              extra_clearance=extra_clearance,
+                              skip_cell=in_exempt_capsule)
 
 
 def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,
@@ -1188,7 +1249,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                       extra_clearance: float = 0.0,
                       blocked_cells: List[Set[Tuple[int, int]]] = None,
                       blocked_vias: Set[Tuple[int, int]] = None,
-                      clearance_override: float = None):
+                      clearance_override: float = None,
+                      skip_cell=None):
     """Add a pad as obstacle to the map.
 
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
@@ -1203,6 +1265,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         blocked_cells: Optional per-layer sets to collect blocked cells for visualization
         blocked_vias: Optional set to collect blocked via positions for visualization
         clearance_override: If provided, use this clearance instead of config.clearance
+        skip_cell: Optional (gx, gy) -> bool predicate; cells for which it returns
+            True are left unblocked (used for connector-region exemptions)
     """
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
     half_width = pad.size_x / 2
@@ -1223,8 +1287,17 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # Expand wildcard layers like "*.Cu" to actual routing layers
     expanded_layers = expand_pad_layers(pad.layers, config.layers)
 
+    # Diff pair routing (extra_clearance > 0) generates the P/N tracks as
+    # sub-grid offsets from the centerline, which adds a few um of deviation
+    # on top of grid discretization - use a larger corner buffer so diagonal
+    # passes by round pads cannot shave below the clearance
+    corner_buffer = config.grid_step * 0.75 if extra_clearance > 0 else None
+
     # Use shared utility for consistent pad blocking
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin,
+                                                   config.grid_step, corner_radius, corner_buffer):
+        if skip_cell is not None and skip_cell(cell_gx, cell_gy):
+            continue
         for layer in expanded_layers:
             layer_idx = layer_map.get(layer)
             if layer_idx is not None:
@@ -1235,7 +1308,10 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_margin = config.via_size / 2 + clearance + extra_clearance
-        for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin, config.grid_step, corner_radius):
+        for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin,
+                                                       config.grid_step, corner_radius, corner_buffer):
+            if skip_cell is not None and skip_cell(cell_gx, cell_gy):
+                continue
             obstacles.add_blocked_via(cell_gx, cell_gy)
             if blocked_vias is not None:
                 blocked_vias.add((cell_gx, cell_gy))

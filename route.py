@@ -759,10 +759,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Write output file or return results for direct application
     if return_results:
-        # Return results data for direct application (e.g., KiCad plugin)
+        # Return results data for direct application (e.g., KiCad plugin).
+        # Swap/modification info must be applied to the live board just like
+        # write_routed_output applies it to the output file.
         results_data = {
             'results': results,
             'all_swap_vias': all_swap_vias,
+            'pad_swaps': pad_swaps,
+            'single_ended_target_swap_info': single_ended_target_swap_info,
+            'all_segment_modifications': all_segment_modifications,
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
         }

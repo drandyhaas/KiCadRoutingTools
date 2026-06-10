@@ -461,8 +461,13 @@ class DifferentialTab(wx.Panel):
         options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
 
         self.fix_polarity_check = wx.CheckBox(self, label="Fix polarity swaps")
-        self.fix_polarity_check.SetValue(True)
-        self.fix_polarity_check.SetToolTip("Swap target pad net assignments if polarity swap is needed")
+        self.fix_polarity_check.SetValue(False)
+        self.fix_polarity_check.SetToolTip(
+            "Allow swapping target pad net assignments to fix polarity (board only - "
+            "schematic must be updated to match); the swap competes with routing the "
+            "connectors out the opposite side and the shorter route wins. When "
+            "unchecked, pad swaps never happen - the opposite-side route is used, or "
+            "the pair is skipped if that's not possible")
         options_sizer.Add(self.fix_polarity_check, 0, wx.ALL, 5)
 
         self.gnd_via_check = wx.CheckBox(self, label="Add GND vias")
@@ -631,6 +636,10 @@ class DifferentialTab(wx.Panel):
                 clearance=config.get('clearance', 0.1),
                 via_size=config.get('via_size', 0.3),
                 via_drill=config.get('via_drill', 0.2),
+                hole_to_hole_clearance=config.get('hole_to_hole_clearance',
+                                                  defaults.HOLE_TO_HOLE_CLEARANCE),
+                board_edge_clearance=config.get('board_edge_clearance',
+                                                defaults.BOARD_EDGE_CLEARANCE),
                 grid_step=config.get('grid_step', 0.1),
                 via_cost=config.get('via_cost', 50),
                 max_iterations=config.get('max_iterations', 200000),
@@ -752,7 +761,11 @@ class DifferentialTab(wx.Panel):
 
         results_data has the same shape as the main routing tab
         (results[].new_segments / new_vias / all_swap_vias), so we hand
-        it straight to apply_routing_results.
+        it straight to apply_routing_results - which also applies the
+        pad/stub net swaps (polarity fixes, target swaps) and stub layer
+        modifications BEFORE adding the new tracks: the routes were
+        created assuming these swaps, so skipping them leaves shorts at
+        swapped pads.
         """
         from kicad_ipc_adapter import apply_routing_results, get_board
 

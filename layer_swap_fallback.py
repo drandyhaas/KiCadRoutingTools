@@ -16,7 +16,8 @@ from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
-    add_diff_pair_own_stubs_as_obstacles, add_vias_list_as_obstacles, add_segments_list_as_obstacles
+    add_diff_pair_own_stubs_as_obstacles, add_diff_pair_own_pads_as_obstacles,
+    add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
 from obstacle_costs import (
     add_stub_proximity_costs, merge_track_proximity_costs, compute_track_proximity_for_net
@@ -26,25 +27,85 @@ from polarity_swap import get_canonical_net_id
 
 
 def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
-                                              config, extra_clearance: float):
-    """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
+                                              config, extra_clearance: float,
+                                              exclude_cells=None, exempt_capsules=None):
+    """Add a diff pair's own stubs and pads as obstacles to prevent the centerline
+    (and its offset P/N tracks) from crossing them mid-route.
 
     This is a helper function to avoid duplicating code in multiple places.
+
+    exclude_cells / exempt_capsules: optional connector-corridor exemptions for
+    a specific multi-point leg (grid cells exempted from own-track blocking,
+    and (x1, y1, x2, y2, radius) capsules exempted from own-pad blocking).
+    When exempt_capsules is None the pad corridors are derived from the pair's
+    closest-endpoint connector regions.
     """
     p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
     n_segments = [s for s in pcb_data.segments if s.net_id == n_net_id]
-    if not p_segments and not n_segments:
+
+    if p_segments or n_segments:
+        p_pads = pcb_data.pads_by_net.get(p_net_id, [])
+        n_pads = pcb_data.pads_by_net.get(n_net_id, [])
+        p_stub_ends = find_stub_free_ends(p_segments, p_pads)
+        n_stub_ends = find_stub_free_ends(n_segments, n_pads)
+        stub_endpoints = [(x, y) for x, y, _ in p_stub_ends + n_stub_ends]
+
+        add_diff_pair_own_stubs_as_obstacles(
+            obstacles, pcb_data, p_net_id, n_net_id, config,
+            exclude_endpoints=stub_endpoints, extra_clearance=extra_clearance,
+            exclude_cells=exclude_cells
+        )
+
+    if exempt_capsules is not None:
+        add_diff_pair_own_pads_as_obstacles(
+            obstacles, pcb_data, p_net_id, n_net_id, config,
+            exempt_capsules=exempt_capsules, extra_clearance=extra_clearance)
+    else:
+        add_own_pads_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id, n_net_id,
+                                                config, extra_clearance)
+
+
+def add_own_pads_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
+                                             config, extra_clearance: float):
+    """Add a diff pair's own pads as obstacles, exempting the connector corridors.
+
+    Without this, the centerline route treats the pair's own pads as free space
+    (they are excluded from the base obstacle map so the route can connect to
+    them), which lets the offset P track cross the N pad (and vice versa) and
+    short the pair. The connector corridors - capsules from each pad-pair center
+    out past the setback position - stay open so the route can still reach its
+    endpoints and fan out to the pads.
+    """
+    # Local import to avoid a circular module dependency
+    from diff_pair_routing import get_diff_pair_connector_regions_by_ids
+
+    info = get_diff_pair_connector_regions_by_ids(pcb_data, p_net_id, n_net_id, config)
+    if not info:
         return
 
-    p_pads = pcb_data.pads_by_net.get(p_net_id, [])
-    n_pads = pcb_data.pads_by_net.get(n_net_id, [])
-    p_stub_ends = find_stub_free_ends(p_segments, p_pads)
-    n_stub_ends = find_stub_free_ends(n_segments, n_pads)
-    stub_endpoints = [(x, y) for x, y, _ in p_stub_ends + n_stub_ends]
+    spacing_mm = info['spacing_mm']
+    # Corridor must fit the arriving pair (centerline +/- spacing + track edges)
+    capsule_radius = 2 * spacing_mm
+    capsules = []
+    for center, direction, setback, synthesized in (
+            (info['src_center'], info['src_dir'], info['src_setback'], info['src_dir_synthesized']),
+            (info['tgt_center'], info['tgt_dir'], info['tgt_setback'], info['tgt_dir_synthesized'])):
+        dir_x, dir_y = direction
+        if abs(dir_x) < 1e-6 and abs(dir_y) < 1e-6:
+            # No usable direction - leave this end's pads unblocked (old behavior)
+            return
+        # Extend past the setback so the arrival cells and probe-ahead stay open
+        extent = setback + capsule_radius + 3 * config.grid_step
+        signs = (1, -1) if synthesized else (1,)
+        for sign in signs:
+            capsules.append((center[0], center[1],
+                             center[0] + dir_x * sign * extent,
+                             center[1] + dir_y * sign * extent,
+                             capsule_radius))
 
-    add_diff_pair_own_stubs_as_obstacles(
+    add_diff_pair_own_pads_as_obstacles(
         obstacles, pcb_data, p_net_id, n_net_id, config,
-        exclude_endpoints=stub_endpoints, extra_clearance=extra_clearance
+        exempt_capsules=capsules, extra_clearance=extra_clearance
     )
 
 

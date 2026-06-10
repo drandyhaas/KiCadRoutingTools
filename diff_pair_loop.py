@@ -19,6 +19,7 @@ from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
+from diff_pair_multipoint import get_diff_pair_terminals, route_multipoint_diff_pair
 from routing_context import build_diff_pair_obstacles, restore_ripped_net
 from terminal_colors import RED, GREEN, RESET
 
@@ -106,6 +107,44 @@ def route_diff_pairs(
                   f"track_proximity_cache: {prox_cache_mb:.1f} MB ({len(track_proximity_cache)} nets)")
 
         start_time = time.time()
+
+        # Multi-point pairs (3+ pad-pair terminals) are routed as a chain of
+        # legs - a pair cannot tap mid-track without P/N crossing
+        terminals = get_diff_pair_terminals(pcb_data, pair.p_net_id, pair.n_net_id)
+        if len(terminals) > 2:
+            leg_results, merged = route_multipoint_diff_pair(state, pair, pair_name, terminals)
+            elapsed = time.time() - start_time
+            total_time += elapsed
+            results.extend(leg_results)
+            if merged is not None:
+                total_segs = len(merged['new_segments'])
+                total_legs = len(leg_results)
+                print(f"  SUCCESS: {total_legs} legs, {total_segs} segments, "
+                      f"{merged['iterations']} iterations ({elapsed:.2f}s)")
+                successful += 1
+                total_iterations += merged['iterations']
+                if pair.p_net_id in remaining_net_ids:
+                    remaining_net_ids.remove(pair.p_net_id)
+                if pair.n_net_id in remaining_net_ids:
+                    remaining_net_ids.remove(pair.n_net_id)
+                routed_net_ids.append(pair.p_net_id)
+                routed_net_ids.append(pair.n_net_id)
+                track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
+                track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
+                if merged.get('p_path'):
+                    routed_net_paths[pair.p_net_id] = merged['p_path']
+                if merged.get('n_path'):
+                    routed_net_paths[pair.n_net_id] = merged['n_path']
+                routed_results[pair.p_net_id] = merged
+                routed_results[pair.n_net_id] = merged
+                diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
+                diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+                invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
+                invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
+            else:
+                print(f"  {RED}MULTI-POINT ROUTE FAILED ({len(terminals) - 1} legs needed){RESET}")
+                failed += 1
+            continue
 
         # Build complete obstacle map for diff pair routing
         obstacles, unrouted_stubs = build_diff_pair_obstacles(
@@ -341,12 +380,19 @@ def route_diff_pairs(
             invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
         else:
             iterations = result['iterations'] if result else 0
-            print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
+            polarity_skip = bool(result and result.get('polarity_skip'))
+            if polarity_skip:
+                # Intentionally skipped: polarity mismatch with fixing disabled
+                # and no opposite-side connector option. Rip-up and layer swaps
+                # cannot resolve polarity, so skip the rescue machinery.
+                print(f"  {RED}SKIPPED - polarity swap needed but polarity fixing is disabled{RESET}")
+            else:
+                print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             total_iterations += iterations
 
             # Try rip-up and reroute with progressive N+1
             ripped_up = False
-            if routed_net_paths and result:
+            if not polarity_skip and routed_net_paths and result:
                 # Find the direction that failed faster
                 fwd_iters = result.get('iterations_forward', 0)
                 bwd_iters = result.get('iterations_backward', 0)
@@ -735,7 +781,8 @@ def route_diff_pairs(
                         ripped_up = True
 
             if not ripped_up:
-                print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
+                if not polarity_skip:
+                    print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 failed += 1
 
     return successful, failed, total_time, total_iterations, route_index

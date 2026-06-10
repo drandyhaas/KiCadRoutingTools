@@ -91,7 +91,8 @@ def iter_pad_blocked_cells(
     half_width: float, half_height: float,
     margin: float,
     grid_step: float,
-    corner_radius: float = 0.0
+    corner_radius: float = 0.0,
+    corner_buffer: float = None
 ):
     """
     Generate grid cells that should be blocked for a pad.
@@ -109,10 +110,13 @@ def iter_pad_blocked_cells(
     Yields:
         (gx, gy) tuples for each blocked cell
     """
-    # Add half grid step buffer to account for grid discretization
-    # (a track through a cell could be grid_step/2 closer to the pad than the cell center)
-    # This applies to ALL pad shapes since diagonal approaches can occur with rectangular pads too
-    corner_buffer = grid_step / 2
+    # Buffer for grid discretization in corner/diagonal regions: a track
+    # through a cell could be up to ~grid_step/2 closer to the pad than the
+    # cell center. This applies to ALL pad shapes since diagonal approaches
+    # can occur with rectangular pads too. Callers whose geometry adds further
+    # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
+    if corner_buffer is None:
+        corner_buffer = grid_step / 2
     expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step))
     expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step))
     margin_sq = margin * margin

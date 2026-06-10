@@ -447,6 +447,16 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
                 max_y = max(max_y, py)
         found = True
 
+    # Look for gr_poly on Edge.Cuts (free-form board outlines)
+    for poly in _parse_gr_polys_on_layer(content, "Edge.Cuts"):
+        for px, py in poly:
+            min_x = min(min_x, px)
+            max_x = max(max_x, px)
+            min_y = min(min_y, py)
+            max_y = max(max_y, py)
+        if poly:
+            found = True
+
     if found:
         return (min_x, min_y, max_x, max_y)
     return None
@@ -478,6 +488,11 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         segments.append(((x2, y1), (x2, y2)))
         segments.append(((x2, y2), (x1, y2)))
         segments.append(((x1, y2), (x1, y1)))
+
+    # gr_poly - closed polygon outline, expand to line segments
+    for poly in _parse_gr_polys_on_layer(content, "Edge.Cuts"):
+        for i in range(len(poly)):
+            segments.append((poly[i], poly[(i + 1) % len(poly)]))
 
     return segments
 

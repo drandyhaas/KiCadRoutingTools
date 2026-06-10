@@ -34,7 +34,9 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced. Uses 0° when clearance to the nearest stub is sufficient (≥2× spacing), only angling away when stubs are too close
 - **U-turn prevention** - Prevents differential pair routes from making U-turns (>180° cumulative turn)
 - **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
-- **Automatic polarity swap** - Detects when differential pair P/N polarity differs between source and target pads and automatically swaps target pad net assignments to match. Use `--no-fix-polarity` to disable
+- **Automatic polarity resolution** - Detects when differential pair P/N polarity differs between source and target pads and resolves it by swapping target pad net assignments and/or routing the connectors out the opposite side at one end (bare-pad endpoints only); when both mechanisms can route, the shorter result wins. Swaps are applied consistently in the output file (CLI), the live board (plugin), and in-memory state. Use `--no-fix-polarity` to forbid pad swaps (default in the plugin GUI) - the pair is then skipped with a warning if no opposite-side route exists; crossing tracks are never written
+- **Bare-pad differential pairs** - Routes diff pairs directly between SMD pads with no fanout stubs (e.g., SOIC pins, termination resistors). The escape direction is derived from the pad geometry (perpendicular to the pad axis, away from the component body), and the pair's own pads are treated as obstacles outside the pad-entry corridors so the P/N tracks cannot cross the partner polarity's pad
+- **Multi-point differential pairs** - Pairs with 3+ pad-pair terminals (e.g., connector → termination → IC) are routed as a chain of legs passing "through" each terminal: a continuation leg leaves on the opposite side from the leg that arrived, since a pair cannot tap mid-track without P/N crossing. Alternative chain orderings are tried automatically if one fails
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
 - **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
@@ -386,6 +388,10 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 # Check for DRC violations (default clearance: 0.2mm)
 python check_drc.py kicad_files/output.kicad_pcb
 
+# Cross-check with KiCad's own DRC engine (requires KiCad; --refill-zones avoids
+# bogus zone-clearance errors from stale pours - see tests/README.md for details)
+kicad-cli pcb drc --refill-zones --format json -o drc.json kicad_files/output.kicad_pcb
+
 # Check connectivity (detects unrouted nets, broken routes, and T-junctions)
 python check_connected.py kicad_files/output.kicad_pcb
 
@@ -627,7 +633,7 @@ KiCadRoutingTools/
 Key functions in `net_queries.py`:
 - `identify_power_nets(pcb, patterns, widths)` - Pattern-based power net detection for `--power-nets` CLI option
 - `compute_mps_net_ordering(pcb, net_ids)` - MPS algorithm for optimal net ordering
-- `find_differential_pairs(pcb, patterns)` - Detect P/N pairs from net names
+- `find_differential_pairs(pcb, patterns)` - Detect P/N pairs from net names (suffix-style aware: `+`/`-` nets only pair with each other, never with `_P`/`_N` nets sharing the same base name)
 
 Key functions in `analyze_power_paths.py` (used by `/analyze-power-nets` skill):
 - `analyze_pcb(filepath)` - Load PCB and extract components for analysis
