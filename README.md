@@ -177,7 +177,7 @@ The plugin provides a full graphical interface for all routing features, running
 
 With [Claude Code](https://claude.ai/claude-code) installed, the routing dialog gains AI assistance throughout (the plugin spawns `claude` headless, streams a live transcript, and fills GUI controls from the results):
 
-- **Claude tab** - *Plan Routing with Claude* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Model and effort dropdowns control every AI run and persist with the dialog settings.
+- **Claude tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Model and effort dropdowns control every AI run and persist with the dialog settings.
 - **Per-field "Ask Claude" buttons** - power nets/widths (Basic tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
 
 The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration). Datasheet-based skills use web lookups and take a few minutes; every run shows a live transcript with cancel.

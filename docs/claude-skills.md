@@ -22,7 +22,7 @@ transcript, and parses a machine-readable `RESULT=` last line back into controls
 
 | Where | Button | Skill | What it fills / shows |
 |-------|--------|-------|------------------------|
-| Claude tab | **Plan Routing with Claude** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
+| Claude tab | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
 | Claude tab | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
 | Claude tab | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
 | Basic tab (Layers) | **Check Stackup (Claude)** | `/recommend-stackup` | Stackup report; recommended layer count logged |

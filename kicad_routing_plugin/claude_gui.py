@@ -399,7 +399,7 @@ class ClaudeTab(wx.Panel):
         ctrl_sizer.Add(sel_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         # Planning: the headline action (bold) with its Cancel right under it
-        self.plan_btn = wx.Button(self, label="Plan Routing with Claude")
+        self.plan_btn = wx.Button(self, label="Plan Routing")
         self.plan_btn.SetFont(self.plan_btn.GetFont().Bold())
         self.plan_btn.SetToolTip(
             "Run the /plan-pcb-routing skill headless on the current board. The "
@@ -510,6 +510,34 @@ class ClaudeTab(wx.Panel):
         else:
             self.effort_choice.SetSelection(0)
 
+    # ---------------------------------------------------------- persistence
+
+    def get_plan_state(self):
+        """Transcript + plan list state for settings persistence."""
+        return {
+            'output': self.output_ctrl.GetValue(),
+            'steps': self._plan_steps,
+            'items': [self.plan_list.GetString(i)
+                      for i in range(self.plan_list.GetCount())],
+            'checked': list(self.plan_list.GetCheckedItems()),
+        }
+
+    def restore_plan_state(self, state):
+        """Restore a previously saved transcript and plan list."""
+        if not isinstance(state, dict):
+            return
+        if state.get('output'):
+            self.output_ctrl.SetValue(state['output'])
+        steps = state.get('steps') or []
+        items = state.get('items') or []
+        if steps and len(items) == len(steps):
+            self._plan_steps = steps
+            self.plan_list.Set(items)
+            self.plan_list.SetCheckedItems(
+                [i for i in state.get('checked', []) if 0 <= i < len(steps)])
+            self.run_plan_btn.Enable(self.routing_dialog is not None
+                                     and self._claude_path is not None)
+
     # ------------------------------------------------------------------ run
 
     def _board_path_or_warn(self):
@@ -531,7 +559,16 @@ class ClaudeTab(wx.Panel):
         self.run_plan_btn.Disable()
         self.cancel_btn.Enable()
         self.parsed_ctrl.SetValue("")
-        self.output_ctrl.SetValue(intro + "\n\n")
+        # The transcript and step list persist across runs and dialog reopens;
+        # only a fresh plan run clears them. Other runs append.
+        if kind == "plan":
+            self._plan_steps = []
+            self.plan_list.Set([])
+            self.output_ctrl.SetValue(intro + "\n\n")
+        else:
+            if self.output_ctrl.GetValue().strip():
+                self.output_ctrl.AppendText("\n" + "=" * 60 + "\n\n")
+            self.output_ctrl.AppendText(intro + "\n\n")
         self._elapsed_seconds = 0
         self.elapsed_label.SetLabel("0s")
         self._elapsed_timer.Start(1000)

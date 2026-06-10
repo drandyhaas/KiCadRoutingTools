@@ -182,6 +182,7 @@ def get_dialog_settings(dialog):
         # Claude tab settings (issue #40)
         'claude_model': dialog.claude_tab.get_model_value(),
         'claude_effort': dialog.claude_tab.get_effort_value(),
+        'claude_plan': dialog.claude_tab.get_plan_state(),
 
         # Log content
         'log_content': dialog.log_text.GetValue(),
@@ -534,6 +535,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.claude_tab.set_model_value(settings['claude_model'])
     if 'claude_effort' in settings:
         dialog.claude_tab.set_effort_value(settings['claude_effort'])
+    if 'claude_plan' in settings:
+        dialog.claude_tab.restore_plan_state(settings['claude_plan'])
 
     # Restore net selections LAST - after all filters/checkboxes are set
     # This prevents the selections from being cleared by filter change events
