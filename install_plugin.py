@@ -278,13 +278,6 @@ def copy_plugin(source_dir: Path, dest_dir: Path):
             # Skip kicad_files (sample PCBs)
             elif f == 'kicad_files':
                 ignored.append(f)
-            # Skip CLI wrappers whose filenames collide with same-named
-            # packages (bga_fanout/, qfn_fanout/). KiCad imports top-level .py
-            # files in the plugin dir by path, so a shipped wrapper makes
-            # `from bga_fanout import main` re-import itself -> circular import.
-            # The packages they wrap still ship and are what the GUI imports.
-            elif f in ('bga_fanout.py', 'qfn_fanout.py'):
-                ignored.append(f)
         return ignored
 
     print(f"  Copying to {dest_dir}")
