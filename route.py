@@ -682,6 +682,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'net_id': net_id,
                     'failed_pads': failed_pads_info
                 })
+    # A multipoint net with unconnected tap pads is not fully routed: count
+    # it as failed, not successful (its first connection routed, so it was
+    # counted successful when the main loop completed)
+    successful -= len(failed_multipoint)
+    failed += len(failed_multipoint)
+
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
