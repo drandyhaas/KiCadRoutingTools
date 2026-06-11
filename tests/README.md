@@ -255,6 +255,18 @@ python3 tests/test_multipoint_diff_route.py
 python3 tests/test_multipoint_diff_route.py -v
 ```
 
+### run_doc_examples.py - Python API Documentation Examples
+
+Extracts every ` ```python ` block from `docs/python-api.md` and the
+`docs/api-*.md` reference pages and runs each complete example against the
+boards in `kicad_files/`, so the API documentation can't silently drift from
+the code. Signature listings and intentionally incomplete fragments are
+skipped automatically; ~30s total.
+
+```bash
+python3 tests/run_doc_examples.py
+```
+
 ## Verifying With KiCad's Own DRC (manual, not part of the tests)
 
 The tests use the project's `check_drc.py` so they run without KiCad installed.

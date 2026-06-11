@@ -21,6 +21,11 @@ This builds the Rust module, copies the library to the correct location, and ver
 
 ## KiCad Parser Usage
 
+Full user-facing API docs (parser, writer, modification, config, net
+analysis, impedance) live in `docs/python-api.md` and the `docs/api-*.md`
+pages — keep them in sync when changing these modules. The doc examples are
+verified by `tests/run_doc_examples.py`. Quick reference:
+
 The project uses `kicad_parser` module to parse KiCad PCB files:
 
 ```python

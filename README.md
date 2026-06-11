@@ -154,6 +154,9 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 **Option C: Manual Command Line (For scripting and automation)**
 
 ```bash
+# Place components evenly within board boundary (before routing)
+python place.py my_board.kicad_pcb
+
 # Route all nets
 python route.py my_board.kicad_pcb
 
@@ -488,6 +491,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | Document | Description |
 |----------|-------------|
 | [Routing Architecture](docs/routing-architecture.md) | Module structure, obstacle maps, A* algorithm |
+| [Python API](docs/python-api.md) | Using the modules as a library: parser, writer, modification, config, net analysis, impedance — with runnable examples |
 | [Configuration](docs/configuration.md) | Command-line options, GridRouteConfig parameters |
 | [Differential Pairs](docs/differential-pairs.md) | P/N pairing, polarity swaps, via handling |
 | [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
@@ -503,6 +507,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [Claude Skills](docs/claude-skills.md) | All eight AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
+| [Placement](placement/README.md) | Component placement tool |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
@@ -510,6 +515,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 
 ```
 KiCadRoutingTools/
+├── place.py                  # Main CLI - component placement
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
 ├── route_planes.py           # Main CLI - power/ground plane via connections
@@ -608,6 +614,11 @@ KiCadRoutingTools/
 │   ├── about_tab.py          # About tab with version info
 │   ├── gui_utils.py          # Shared GUI utilities
 │   └── settings_persistence.py  # Save/restore dialog settings between sessions
+├── placement/               # Component placement
+│   ├── engine.py            # Core placement algorithm
+│   ├── parser.py            # Courtyard boundary extraction
+│   ├── writer.py            # Footprint position modification
+│   └── utility.py           # Shared placement utilities
 ├── install_plugin.py         # Plugin installer script
 ├── docs/                     # Documentation
 └── .claude/skills/           # Claude Code skills
@@ -621,6 +632,10 @@ KiCadRoutingTools/
 ```
 
 ## Module Overview
+
+One-line summaries below; the [Python API documentation](docs/python-api.md)
+has full per-module references (signatures, dataclass fields, gotchas) with
+runnable examples.
 
 ### Core Routing
 

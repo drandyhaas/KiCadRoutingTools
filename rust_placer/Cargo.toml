@@ -1,0 +1,16 @@
+[package]
+name = "placement_scorer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "placement_scorer"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

@@ -2,6 +2,8 @@
 
 This document describes the internal architecture of the KiCad Grid Router, including module structure, obstacle maps, and the A* pathfinding algorithm.
 
+For per-module API references (function signatures, dataclass fields, usage examples) see the [Python API documentation](python-api.md).
+
 ## Module Structure
 
 The router is organized into focused modules with clear separation of concerns:
