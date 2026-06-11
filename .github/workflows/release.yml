@@ -65,7 +65,7 @@ jobs:
             extra_rustflags: ''
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -73,7 +73,7 @@ jobs:
           targets: ${{ matrix.cargo_target }}
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -100,7 +100,7 @@ jobs:
         run: cp "${{ matrix.artifact_src }}" "${{ matrix.artifact_dst }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_dst }}
           path: ${{ matrix.artifact_dst }}
@@ -114,10 +114,10 @@ jobs:
     # can produce a downloadable zip for inspection. metadata.json is only
     # committed/PR'd on tag pushes (see the release job below).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all built binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -138,7 +138,7 @@ jobs:
         run: ls -la dist
 
       - name: Upload PCM zips + metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pcm-package
           path: |
@@ -156,7 +156,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download all built binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -165,7 +165,7 @@ jobs:
         run: ls -la artifacts
 
       - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # Attach: raw binaries, PCM zips, and the patched metadata.json
           # (so a maintainer can grab the exact metadata.json that matches

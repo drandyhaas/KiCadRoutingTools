@@ -532,7 +532,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Check which proximity zones the stub free ends are in for precise heuristic estimate
     src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
@@ -548,7 +548,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         if tgt_in_bga: zones.append("tgt:bga")
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
@@ -804,7 +804,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Check which proximity zones the stub free ends are in for precise heuristic estimate
     src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
@@ -822,9 +822,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Calculate bus attraction parameters
     bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
-    bus_attraction_bonus = int(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
+    bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
@@ -870,7 +870,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         print(f"    GridRouter targets: {forward_targets[:3]}{'...' if len(forward_targets) > 3 else ''}")
         if use_single_direction:
             print(f"    Bus routing: single-direction mode (start from clustered endpoints)")
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _route_main_connection(
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
         router, obstacles, config, forward_sources, forward_targets, track_margin,
         pcb_data, net_id, print_prefix="", direction_labels=direction_labels,
         single_direction=use_single_direction
@@ -989,6 +989,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 net_id=net_id
             )
             new_segments.append(seg)
+
+    if necked_down:
+        # Both endpoints are pads: neck the start side too
+        new_segments = _apply_neckdown_widths(new_segments, config, net_id, obstacles,
+                                              coord, layer_names, track_margin, neck_start=True)
 
     return {
         'new_segments': new_segments,
@@ -1152,6 +1157,34 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                            pcb_data, net_id, print_prefix="",
                            direction_labels=("forward", "backward"), single_direction=False,
                            waypoints=None):
+    """Route sources->targets; wide routes that fail retry narrow (issue #72).
+
+    Same return shape as _route_connection_at_margin plus a trailing
+    necked_down flag: when a wide power route cannot fit, it is retried at
+    the layer's default width and the caller applies neck-down widths to
+    the resulting segments (_apply_neckdown_widths).
+    """
+    result = _route_connection_at_margin(
+        router, obstacles, config, sources, targets, track_margin,
+        pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
+    if result[0] is not None or track_margin == 0 or not config.power_tap_neckdown:
+        return result + (False,)
+    print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
+    retry = _route_connection_at_margin(
+        router, obstacles, config, sources, targets, 0,
+        pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
+    if retry[0] is None:
+        # Keep the WIDE attempt's frontier for rip-up analysis: blockers found
+        # by the narrow frontier only help a narrow route, but ripped nets
+        # re-route at their own wide width and can fail entirely
+        return (result[0], result[1] + retry[1]) + result[2:] + (False,)
+    return (retry[0], result[1] + retry[1]) + retry[2:] + (True,)
+
+
+def _route_connection_at_margin(router, obstacles, config, sources, targets, track_margin,
+                                pcb_data, net_id, print_prefix="",
+                                direction_labels=("forward", "backward"), single_direction=False,
+                                waypoints=None):
     """Route sources->targets, steering through the guide corridor (issue #7).
 
     A drop-in replacement for _probe_route_with_frontier with the SAME return
@@ -1367,7 +1400,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Determine direction order (always deterministic)
     if config.direction_order in ("backwards", "backward"):
@@ -1385,7 +1418,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         first_label, second_label = "forward", "backward"
 
     # Create visual router
-    router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                           turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
@@ -1427,7 +1460,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         print(f"No route found after {total_iterations} iterations ({first_label}), trying {second_label}...")
 
         # Try second direction
-        router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+        router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                           turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
@@ -1726,7 +1759,7 @@ def route_multipoint_main(
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Check which proximity zones the stub free ends are in for precise heuristic estimate
     src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
@@ -1743,7 +1776,7 @@ def route_multipoint_main(
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
     # Route farthest pair with probe routing (same as single-ended)
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
@@ -1762,7 +1795,7 @@ def route_multipoint_main(
 
     # Use probe routing helper, steered through this edge's bucket of corridor
     # waypoints (the tap edges follow their own buckets in route_multipoint_taps).
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _route_main_connection(
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
         router, obstacles, config, sources, targets, track_margin,
         pcb_data, net_id, print_prefix="  ", direction_labels=("forward", "backward"),
         waypoints=waypoint_buckets.get(frozenset((idx_a, idx_b)), [])
@@ -1794,6 +1827,10 @@ def route_multipoint_main(
         (pad_b[3], pad_b[4], layer_names[pad_b[2]]),  # end_original
         through_hole_positions
     )
+    if necked_down:
+        # Both endpoints are pads: neck the start side too
+        segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
+                                          coord, layer_names, track_margin, neck_start=True)
 
     print(f"  Phase 1 routed in {total_iterations} iterations, {len(segments)} segments")
 
@@ -1946,9 +1983,9 @@ def route_multipoint_taps(
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
@@ -2100,7 +2137,7 @@ def route_multipoint_taps(
         # Use probe routing helper to detect stuck directions early
         tap_start_time = time.time()
 
-        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _ = _route_main_connection(
+        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _, necked_down = _route_main_connection(
             router, obstacles, config, sources, targets, track_margin,
             pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
             waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
@@ -2145,6 +2182,9 @@ def route_multipoint_taps(
             (tgt_x, tgt_y, path_end_layer),  # end_original (target pad on actual reached layer)
             through_hole_positions
         )
+        if necked_down:
+            segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
+                                              coord, layer_names, track_margin)
         all_segments.extend(segments)
         all_vias.extend(vias)
 
@@ -2310,3 +2350,182 @@ def _path_to_segments_vias(
             segments.append(seg)
 
     return segments, vias
+
+
+def _seg_length(seg) -> float:
+    return math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y)
+
+
+def _split_segment_at(seg, dist_from_end: float):
+    """Split a segment at dist_from_end mm before its end point.
+
+    Returns (near_part, far_part) where far_part is the dist_from_end-long
+    piece touching seg's end. Returns (None, seg) if the segment is shorter
+    than dist_from_end.
+    """
+    length = _seg_length(seg)
+    if length <= dist_from_end:
+        return None, seg
+    t = 1.0 - dist_from_end / length
+    mx = seg.start_x + (seg.end_x - seg.start_x) * t
+    my = seg.start_y + (seg.end_y - seg.start_y) * t
+    near = Segment(start_x=seg.start_x, start_y=seg.start_y, end_x=mx, end_y=my,
+                   width=seg.width, layer=seg.layer, net_id=seg.net_id)
+    far = Segment(start_x=mx, start_y=my, end_x=seg.end_x, end_y=seg.end_y,
+                  width=seg.width, layer=seg.layer, net_id=seg.net_id)
+    return near, far
+
+
+def _segment_fits_wide(seg, obstacles, coord: GridCoord, layer_idx: int, margin: int) -> bool:
+    """True if every grid cell along the segment clears the wide-track margin."""
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+        if obstacles.is_blocked_with_margin(gx, gy, layer_idx, margin):
+            return False
+    return True
+
+
+def _flip_segments(segments):
+    """Reverse a connected segment run end-to-end (order and direction)."""
+    return [Segment(start_x=s.end_x, start_y=s.end_y, end_x=s.start_x, end_y=s.start_y,
+                    width=s.width, layer=s.layer, net_id=s.net_id)
+            for s in reversed(segments)]
+
+
+def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
+               layer_map: Dict[str, int], track_margin: int):
+    """Narrow the last neckdown_length mm of the run (the pad is at the list
+    END); beyond that, keep the wide width only where the wide clearance
+    fits. Never re-widens an already-narrow segment (so a second pass from
+    the other end preserves the first pass's neck)."""
+    def fits(s):
+        return _segment_fits_wide(s, obstacles, coord, layer_map.get(s.layer, 0), track_margin)
+
+    out = []  # built in reverse (pad-first)
+    cum = 0.0
+    for seg in reversed(segments):
+        narrow_w = config.get_track_width(seg.layer)
+        length = _seg_length(seg)
+        if seg.width <= narrow_w:
+            out.append(seg)
+        elif cum >= config.neckdown_length:
+            if not fits(seg):
+                seg.width = narrow_w
+            out.append(seg)
+        elif cum + length > config.neckdown_length:
+            # Straddles the neck boundary: split there (the far piece,
+            # touching the pad side, is neckdown_length - cum long)
+            near, far = _split_segment_at(seg, config.neckdown_length - cum)
+            far.width = narrow_w
+            out.append(far)
+            if not fits(near):
+                near.width = narrow_w
+            out.append(near)
+        else:
+            seg.width = narrow_w
+            out.append(seg)
+        cum += length
+    out.reverse()
+    return out
+
+
+def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
+                           obstacles, coord: GridCoord, layer_names: List[str],
+                           track_margin: int, neck_start: bool = False):
+    """Assign widths to a neck-down route (issue #72).
+
+    The path was routed at the layer's default width because the power width
+    did not fit. Segments within config.neckdown_length of the target pad
+    (the END of the list; also the start when neck_start is set, for routes
+    that end on pads at both ends) stay narrow; farther segments return to
+    the power width wherever the wide clearance fits, with an optional
+    stepped taper at each narrow->wide transition.
+
+    Returns a new segment list (segments may be split for the taper).
+    """
+    layer_map = {name: i for i, name in enumerate(layer_names)}
+    out = _neck_pass(segments, config, obstacles, coord, layer_map, track_margin)
+    if neck_start:
+        out = _flip_segments(_neck_pass(_flip_segments(out), config, obstacles,
+                                        coord, layer_map, track_margin))
+    wide_flags = [s.width > config.get_track_width(s.layer) for s in out]
+
+    # Suppress short wide islands (a wide run between narrow pinches that is
+    # barely longer than its tapers just adds notch noise)
+    min_island = 2 * config.neckdown_taper_length
+    i = 0
+    while i < len(out):
+        if not wide_flags[i]:
+            i += 1
+            continue
+        j = i
+        run_len = 0.0
+        while j < len(out) and wide_flags[j]:
+            run_len += _seg_length(out[j])
+            j += 1
+        is_island = i > 0 and j < len(out)  # narrow (or pad) on both sides
+        if is_island and run_len <= min_island:
+            for k in range(i, j):
+                out[k].width = config.get_track_width(out[k].layer)
+                wide_flags[k] = False
+        i = j
+
+    if config.neckdown_taper_length <= 0:
+        return out
+
+    # Stepped taper wherever a wide segment meets a narrow one on the same
+    # layer: carve the wide segment's adjoining end into width steps
+    TAPER_STEPS = 4
+
+    def _taper_pieces(seg, narrow_end: str):
+        """Split seg into [body + taper steps]; narrow_end is 'start' or 'end'."""
+        narrow_w = config.get_track_width(seg.layer)
+        wide_w = seg.width
+        taper_len = min(config.neckdown_taper_length, _seg_length(seg) / 3)
+        if taper_len <= 0:
+            return [seg]
+        flipped = narrow_end == 'start'
+        if flipped:  # work as if the narrow side is at the end
+            seg = Segment(start_x=seg.end_x, start_y=seg.end_y,
+                          end_x=seg.start_x, end_y=seg.start_y,
+                          width=seg.width, layer=seg.layer, net_id=seg.net_id)
+        body, taper = _split_segment_at(seg, taper_len)
+        if body is None:
+            return [seg]
+        pieces = [body]
+        step_len = taper_len / TAPER_STEPS
+        remaining = taper
+        for s in range(TAPER_STEPS):
+            if s < TAPER_STEPS - 1 and _seg_length(remaining) > step_len:
+                piece, remaining = _split_segment_at(remaining, _seg_length(remaining) - step_len)
+            else:
+                piece, remaining = remaining, None
+            piece.width = wide_w + (narrow_w - wide_w) * (s + 1) / (TAPER_STEPS + 1)
+            pieces.append(piece)
+            if remaining is None:
+                break
+        if flipped:  # restore original direction and order
+            pieces = [Segment(start_x=p.end_x, start_y=p.end_y,
+                              end_x=p.start_x, end_y=p.start_y,
+                              width=p.width, layer=p.layer, net_id=p.net_id)
+                      for p in reversed(pieces)]
+        return pieces
+
+    tapered = []
+    for i, seg in enumerate(out):
+        if not wide_flags[i]:
+            tapered.append(seg)
+            continue
+        narrow_after = (i + 1 < len(out) and not wide_flags[i + 1]
+                        and out[i + 1].layer == seg.layer)
+        narrow_before = (i > 0 and not wide_flags[i - 1]
+                         and out[i - 1].layer == seg.layer)
+        pieces = [seg]
+        if narrow_after:
+            pieces = _taper_pieces(seg, 'end')
+        if narrow_before:
+            head = _taper_pieces(pieces[0], 'start')
+            pieces = head + pieces[1:]
+        tapered.extend(pieces)
+    return tapered

@@ -16,6 +16,10 @@ Skills that look up datasheets (`/analyze-power-nets`, `/find-high-speed-nets`, 
 
 ## Plugin GUI Integration
 
+<p align="center">
+  <img src="claude_tab.png" alt="Claude tab: planned steps, controls, and live transcript" width="700">
+</p>
+
 All eight skills are reachable from the plugin's routing dialog (the GUI spawns
 `claude` headless with the working directory set to the plugin root, streams a live
 transcript, and parses a machine-readable `RESULT=` last line back into controls):

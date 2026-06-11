@@ -27,6 +27,43 @@ except ImportError:
     GridObstacleMap = None
 
 
+_PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
+
+# Bitmap dedupe allocates one bool per cell in the rows' bounding box; cap the
+# allocation (200M bools = 200MB) and fall back to sorting for outliers.
+_BITMAP_DEDUPE_MAX_CELLS = 200_000_000
+
+
+def _unique_rows(arr: np.ndarray) -> np.ndarray:
+    """Row-deduplicate an int32 (N,2) or (N,3) cell array.
+
+    Equivalent to np.unique(arr, axis=0) except for row order, which callers
+    must not rely on (these are unordered cell sets). np.unique(axis=0) sorts
+    rows as void records, which dominated routing time at fine grid steps;
+    marking cells in a bounding-box bitmap dedupes without sorting at all.
+    """
+    mins = arr.min(axis=0)
+    rel = arr - mins  # stays int32; ravel_multi_index widens internally
+    dims = (rel.max(axis=0) + 1).astype(np.int64)
+    total = int(np.prod(dims))
+    if total > _BITMAP_DEDUPE_MAX_CELLS:
+        # Sparse outlier (huge extent): pack rows into scalar int64 keys so
+        # np.unique sorts scalars instead of void records.
+        a = arr.astype(np.int64)
+        key = ((a[:, 0] + _PACK_OFFSET) << 21) | (a[:, 1] + _PACK_OFFSET)
+        if a.shape[1] == 3:
+            key = (key << 8) | a[:, 2]
+        _, idx = np.unique(key, return_index=True)
+        return arr[idx]
+    seen = np.zeros(total, dtype=bool)
+    seen[np.ravel_multi_index(rel.T, dims)] = True
+    uniq = np.flatnonzero(seen)
+    out = np.empty((len(uniq), arr.shape[1]), dtype=arr.dtype)
+    for i, col in enumerate(np.unravel_index(uniq, dims)):
+        out[:, i] = col + mins[i]
+    return out
+
+
 @dataclass
 class NetObstacleData:
     """Cached obstacle data for a single net.
@@ -112,12 +149,12 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Concatenate and deduplicate (the Rust map refcounts batch adds, so
     # each cell must appear once per net - same as the old set semantics)
     if blocked_cells_set:
-        blocked_cells_arr = np.unique(np.concatenate(blocked_cells_set), axis=0)
+        blocked_cells_arr = _unique_rows(np.concatenate(blocked_cells_set))
     else:
         blocked_cells_arr = np.empty((0, 3), dtype=np.int32)
 
     if blocked_vias_set:
-        blocked_vias_arr = np.unique(np.concatenate(blocked_vias_set), axis=0)
+        blocked_vias_arr = _unique_rows(np.concatenate(blocked_vias_set))
     else:
         blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
 

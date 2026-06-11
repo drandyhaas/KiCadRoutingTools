@@ -49,6 +49,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
 - **Impedance-controlled routing** - Specify target impedance (e.g., 50Ω single-ended, 100Ω differential) and track widths are automatically calculated per layer from the board stackup. Uses IPC-2141 formulas for microstrip (outer layers) and stripline (inner layers). Widths adjust automatically when switching layers via vias to maintain target impedance
 - **Power net routing** - Route power nets (GND, VCC, etc.) with wider tracks than signal nets. Specify patterns and corresponding widths (e.g., `--power-nets "*GND*" "*VCC*" --power-nets-widths 0.4 0.5`). First matching pattern determines width for each net. Obstacle clearances automatically adjust for wider power traces. Power net widths are never smaller than the base track width
+- **Power route neck-down** - When a wide power route cannot fit (e.g. escaping a fine-pitch pad), it is automatically retried at the layer's default track width: narrow within `--neckdown-length` (default 2.5mm) of the pads, returning to the power width beyond that wherever clearance allows, with a stepped width taper at each transition (`--neckdown-taper-length`, default 0.5mm). Disable with `--no-power-tap-neckdown`
 - **Net class support** - The KiCad plugin reads net class parameters (track width, via size, clearance) from the board and uses them automatically. Nets can be organized by net class in separate tabs for easier selection. When routing nets from different classes, obstacle clearances properly account for the larger clearance requirements (e.g., routing "Wide" class nets with 0.4mm clearance near "Default" class pads)
 - **AI-powered power net analysis** - Use the `/analyze-power-nets` skill to identify power nets and recommend track widths. The skill uses WebSearch to look up component datasheets, classifies components by their role (power source, current sink, pass-through, shunt), traces current paths, and generates ready-to-use `--power-nets` configurations. See [Power Net Analysis](docs/power-nets.md) for details
 - **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first (or, with `--same-net-pad-clearance >= 0`, forces vias outside same-net pads with the given edge-to-edge clearance), then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
@@ -738,10 +739,15 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 # Power net routing (wider tracks for power/ground)
 --power-nets "*GND*" "*VCC*"  # Glob patterns for power nets
 --power-nets-widths 0.4 0.5   # Widths in mm for each pattern (must match --power-nets length)
+--neckdown-length 2.5         # Narrow track length (mm) from the pads when a failed wide power
+                              # route is retried at the default width (neck-down)
+--neckdown-taper-length 0.5   # Narrow-to-wide width taper length in mm (0 = abrupt)
+--no-power-tap-neckdown       # Disable the neck-down retry of failed wide power routes
 
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
---via-cost 50           # Via penalty (grid steps)
+--via-cost 50           # Via penalty in 0.1mm grid steps (50 = 5mm of path; all cost knobs
+                        # are mm-calibrated, so behavior is independent of --grid-step)
 --max-iterations 200000      # A* iteration limit
 --max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
 --heuristic-weight 1.9       # A* greediness (>1 = faster)
@@ -1009,6 +1015,9 @@ Features:
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
 - No design rules by region/area support
+- Fine grid steps (e.g. 0.05mm) can leave sub-cell pad-clearance DRC encroachments
+  (obstacle expansion floors where pad clearance needs ceiling) - see
+  [issue #70](https://github.com/drandyhaas/KiCadRoutingTools/issues/70)
 
 ## License
 

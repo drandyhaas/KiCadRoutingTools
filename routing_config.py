@@ -6,6 +6,12 @@ import math
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass, field
 
+# Cost knobs (proximity costs, via_cost, attraction bonuses) are calibrated at
+# this grid step: GridRouteConfig.cell_cost / via_cost_units scale them so the
+# cost per mm of path is the same at any --grid-step, and identical to
+# historical behavior at 0.1mm.
+REFERENCE_GRID_STEP = 0.1  # mm
+
 
 @dataclass
 class DiffPairNet:
@@ -62,6 +68,13 @@ class GridRouteConfig:
     hole_to_hole_clearance: float = 0.2  # mm - minimum clearance between drill holes (edge to edge)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
+    # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
+    # retry it at the layer's default track width. The narrow neck extends
+    # neckdown_length mm from the target pad; beyond that the track returns
+    # to the power width wherever the wide clearance fits.
+    power_tap_neckdown: bool = True
+    neckdown_length: float = 2.5  # mm of narrow track from the target pad
+    neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
     vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
@@ -182,6 +195,31 @@ class GridRouteConfig:
             prefs.append(i % 2)
         return prefs
 
+    def cell_cost(self, cost_mm: float) -> int:
+        """Per-cell cost units for costs that accumulate per visited cell
+        (proximity penalties, attraction bonuses).
+
+        Cost knobs are calibrated at REFERENCE_GRID_STEP: the per-cell value
+        scales with grid_step so the accumulated cost per mm of path is
+        independent of --grid-step (a finer grid visits proportionally more
+        cells). At 0.1mm this reproduces the historical values exactly.
+        """
+        return int(cost_mm * 1000 / REFERENCE_GRID_STEP * (self.grid_step / REFERENCE_GRID_STEP))
+
+    def scaled_cell_units(self, units: float) -> int:
+        """Grid-invariant scaling for per-cell cost knobs given in raw cost
+        units calibrated at REFERENCE_GRID_STEP (e.g. bus_attraction_bonus)."""
+        return int(units * (self.grid_step / REFERENCE_GRID_STEP))
+
+    def via_cost_units(self) -> int:
+        """Per-via penalty in cost units.
+
+        The via_cost knob is in grid steps at REFERENCE_GRID_STEP (default 50
+        = 5mm of path); the value scales with 1/grid_step so a via costs the
+        same mm-equivalent detour at any --grid-step.
+        """
+        return int(self.via_cost * 1000 * (REFERENCE_GRID_STEP / self.grid_step))
+
     def get_proximity_heuristic_cost(self) -> int:
         """Get the maximum proximity heuristic cost for the Rust router.
 
@@ -205,7 +243,7 @@ class GridRouteConfig:
             # Default factor 0.02 is conservative to avoid overestimating for paths
             # that don't go through proximity zones. Tuned for ~5mm typical radius.
             estimated_cost = total_weight * self.proximity_heuristic_factor
-            return int(estimated_cost * 1000 / self.grid_step)
+            return self.cell_cost(estimated_cost)
         return 0
 
     def get_proximity_heuristic_for_zones(self, src_in_stub: bool, src_in_bga: bool,
@@ -239,7 +277,7 @@ class GridRouteConfig:
 
         if total_weight > 0:
             estimated_cost = total_weight * self.proximity_heuristic_factor
-            return int(estimated_cost * 1000 / self.grid_step)
+            return self.cell_cost(estimated_cost)
         return 0
 
 

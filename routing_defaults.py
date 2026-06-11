@@ -23,6 +23,8 @@ TRACK_PROXIMITY_COST = 0.0
 
 # Distance parameters
 STUB_PROXIMITY_RADIUS = 2.0  # mm
+NECKDOWN_LENGTH = 2.5  # mm of narrow track from the pad on neck-down routes (issue #72)
+NECKDOWN_TAPER_LENGTH = 0.5  # mm narrow->wide width taper (0 = abrupt)
 TRACK_PROXIMITY_DISTANCE = 2.0  # mm
 BGA_PROXIMITY_RADIUS = 7.0  # mm
 BGA_PROXIMITY_COST = 0.2
@@ -151,6 +153,8 @@ PARAM_RANGES = {
     'max_ripup': {'min': 0, 'max': 50},
     'stub_proximity_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'neckdown_length': {'min': 0.0, 'max': 50.0, 'inc': 0.5, 'digits': 1},
+    'neckdown_taper_length': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'via_proximity_cost': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
     'track_proximity_distance': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'track_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},

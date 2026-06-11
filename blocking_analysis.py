@@ -23,12 +23,30 @@ Usage:
 
 from typing import List, Tuple, Dict, Set, Optional
 from dataclasses import dataclass
-from collections import defaultdict
+
+import numpy as np
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map
+from routing_utils import build_layer_map, square_offsets, circle_offsets
 from bresenham_utils import walk_line
+
+_PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
+_COORD_MASK = (1 << 21) - 1
+
+
+def _pack_cells(gxy: "np.ndarray", layer) -> "np.ndarray":
+    """Pack (N,2) grid coords + layer (scalar or (N,) array) into int64 keys."""
+    key = ((gxy[:, 0].astype(np.int64) + _PACK_OFFSET) << 21) | \
+          (gxy[:, 1].astype(np.int64) + _PACK_OFFSET)
+    return (key << 8) | layer
+
+
+def _unpack_xy(keys: "np.ndarray") -> Tuple["np.ndarray", "np.ndarray"]:
+    """Recover (gx, gy) arrays from packed int64 cell keys."""
+    gx = (keys >> 29) - _PACK_OFFSET
+    gy = ((keys >> 8) & _COORD_MASK) - _PACK_OFFSET
+    return gx, gy
 
 
 def invalidate_obstacle_cache(cache: Dict, net_id: int) -> None:
@@ -62,11 +80,12 @@ def compute_net_obstacle_cells(
     path: Optional[List[Tuple[int, int, int]]],
     config: GridRouteConfig,
     extra_clearance: float = 0.0,
-) -> Tuple[Set[Tuple[int, int, int]], Set[Tuple[int, int, int]]]:
+) -> Tuple["np.ndarray", "np.ndarray"]:
     """
     Compute all obstacle cells for a net (tracks and vias).
 
-    Returns (track_cells, via_cells) where each cell is (gx, gy, layer).
+    Returns (track_keys, via_keys): sorted unique int64 arrays of packed
+    (gx, gy, layer) cell keys (see _pack_cells).
     """
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -79,28 +98,28 @@ def compute_net_obstacle_cells(
     via_expansion_grid = max(1, coord.to_grid_dist(
         config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
 
-    track_cells = set()
-    via_cells = set()
+    track_offs = square_offsets(expansion_grid)
+    via_offs = circle_offsets(via_expansion_grid, via_expansion_grid * via_expansion_grid)
+    all_layers = np.arange(num_layers, dtype=np.int64)
+
+    track_parts: List["np.ndarray"] = []
+    via_parts: List["np.ndarray"] = []
+    via_centers: List[Tuple[int, int]] = []
+
+    def add_track_line(gx1, gy1, gx2, gy2, layer_idx):
+        line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
+        cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
+        track_parts.append(_pack_cells(cells, layer_idx))
 
     # Add cells from routed path
     if path:
         for i in range(len(path) - 1):
             gx1, gy1, layer1 = path[i]
             gx2, gy2, layer2 = path[i + 1]
-
             if layer1 != layer2:
-                # Via - blocks all layers
-                for ex in range(-via_expansion_grid, via_expansion_grid + 1):
-                    for ey in range(-via_expansion_grid, via_expansion_grid + 1):
-                        if ex*ex + ey*ey <= via_expansion_grid * via_expansion_grid:
-                            for layer_idx in range(num_layers):
-                                via_cells.add((gx1 + ex, gy1 + ey, layer_idx))
+                via_centers.append((gx1, gy1))  # via blocks all layers
             else:
-                # Track segment
-                for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-                    for ex in range(-expansion_grid, expansion_grid + 1):
-                        for ey in range(-expansion_grid, expansion_grid + 1):
-                            track_cells.add((gx + ex, gy + ey, layer1))
+                add_track_line(gx1, gy1, gx2, gy2, layer1)
 
     # Add cells from original stubs
     for seg in pcb_data.segments:
@@ -109,27 +128,25 @@ def compute_net_obstacle_cells(
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+        add_track_line(gx1, gy1, gx2, gy2, layer_idx)
 
-        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    track_cells.add((gx + ex, gy + ey, layer_idx))
-
-    # Add cells from existing vias
+    # Add cells from existing vias (block all layers)
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        gx, gy = coord.to_grid(via.x, via.y)
-        for ex in range(-via_expansion_grid, via_expansion_grid + 1):
-            for ey in range(-via_expansion_grid, via_expansion_grid + 1):
-                if ex*ex + ey*ey <= via_expansion_grid * via_expansion_grid:
-                    for layer_idx in range(num_layers):
-                        via_cells.add((gx + ex, gy + ey, layer_idx))
+        via_centers.append(coord.to_grid(via.x, via.y))
 
-    return track_cells, via_cells
+    if via_centers:
+        centers = np.array(via_centers, dtype=np.int32)
+        cells = (centers[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
+        layerless = _pack_cells(cells, 0)
+        via_parts.append((layerless[:, None] | all_layers[None, :]).ravel())
+
+    track_keys = np.unique(np.concatenate(track_parts)) if track_parts else np.empty(0, dtype=np.int64)
+    via_keys = np.unique(np.concatenate(via_parts)) if via_parts else np.empty(0, dtype=np.int64)
+    return track_keys, via_keys
 
 
 def analyze_frontier_blocking(
@@ -166,7 +183,8 @@ def analyze_frontier_blocking(
         return []
 
     exclude_net_ids = exclude_net_ids or set()
-    blocked_set = set(blocked_cells)
+    blocked_arr = np.asarray(list(blocked_cells), dtype=np.int64)
+    blocked_keys = np.unique(_pack_cells(blocked_arr[:, :2], blocked_arr[:, 2]))
 
     # Compute source/target grid coords and proximity threshold
     coord = GridCoord(config.grid_step)
@@ -179,9 +197,9 @@ def analyze_frontier_blocking(
     if source_xy is not None:
         source_gx, source_gy = coord.to_grid(source_xy[0], source_xy[1])
 
-    # First pass: compute obstacle cells for each net and track which nets block each cell
-    cell_to_blockers: Dict[Tuple[int, int, int], Set[int]] = defaultdict(set)
-    net_blocking_data = {}  # net_id -> (track_cells, via_cells, blocking_track, blocking_via, blocking_total)
+    # First pass: compute obstacle cells for each net and intersect with the
+    # blocked frontier (all arrays are sorted unique packed keys)
+    net_blocking_data = {}  # net_id -> (blocking_track, blocking_via, blocking_total)
 
     # Use provided cache or create local one
     local_cache = obstacle_cache if obstacle_cache is not None else {}
@@ -194,48 +212,49 @@ def analyze_frontier_blocking(
         # Cache key includes extra_clearance since it affects expansion radius
         cache_key = (net_id, extra_clearance)
         if cache_key in local_cache:
-            track_cells, via_cells = local_cache[cache_key]
+            track_keys, via_keys = local_cache[cache_key]
         else:
-            track_cells, via_cells = compute_net_obstacle_cells(
+            track_keys, via_keys = compute_net_obstacle_cells(
                 pcb_data, net_id, path, config, extra_clearance
             )
             # Store in cache for future calls
-            local_cache[cache_key] = (track_cells, via_cells)
-
-        all_cells = track_cells | via_cells
+            local_cache[cache_key] = (track_keys, via_keys)
 
         # Count how many blocked frontier cells this net is responsible for
-        blocking_track = blocked_set & track_cells
-        blocking_via = blocked_set & via_cells
-        blocking_total = blocked_set & all_cells
+        blocking_track = np.intersect1d(blocked_keys, track_keys, assume_unique=True)
+        blocking_via = np.intersect1d(blocked_keys, via_keys, assume_unique=True)
+        blocking_total = np.union1d(blocking_track, blocking_via)
 
         if len(blocking_total) > 0:
-            net_blocking_data[net_id] = (track_cells, via_cells, blocking_track, blocking_via, blocking_total)
-            # Track which nets block each cell
-            for cell in blocking_total:
-                cell_to_blockers[cell].add(net_id)
+            net_blocking_data[net_id] = (blocking_track, blocking_via, blocking_total)
+
+    # Cells blocked by exactly one net (each net contributes each cell once)
+    if net_blocking_data:
+        all_blocking = np.concatenate([d[2] for d in net_blocking_data.values()])
+        cells, counts = np.unique(all_blocking, return_counts=True)
+        solo_cells = cells[counts == 1]
+    else:
+        solo_cells = np.empty(0, dtype=np.int64)
 
     # Second pass: count unique blocking and near-source/target blocking
     results = []
-    for net_id, (track_cells, via_cells, blocking_track, blocking_via, blocking_total) in net_blocking_data.items():
+    for net_id, (blocking_track, blocking_via, blocking_total) in net_blocking_data.items():
         net = pcb_data.nets.get(net_id)
         net_name = net.name if net else f"Net {net_id}"
 
         # Count cells where this net is the ONLY blocker
-        unique_count = sum(1 for cell in blocking_total if len(cell_to_blockers[cell]) == 1)
+        unique_count = int(np.isin(blocking_total, solo_cells, assume_unique=True).sum())
 
         # Count cells near target and source
         near_target_count = 0
         near_source_count = 0
-        for gx, gy, _ in blocking_total:
-            if target_gx is not None:
-                dist_sq = (gx - target_gx) ** 2 + (gy - target_gy) ** 2
-                if dist_sq <= near_radius_grid ** 2:
-                    near_target_count += 1
-            if source_gx is not None:
-                dist_sq = (gx - source_gx) ** 2 + (gy - source_gy) ** 2
-                if dist_sq <= near_radius_grid ** 2:
-                    near_source_count += 1
+        gx, gy = _unpack_xy(blocking_total)
+        if target_gx is not None:
+            near_target_count = int(((gx - target_gx) ** 2 + (gy - target_gy) ** 2
+                                     <= near_radius_grid ** 2).sum())
+        if source_gx is not None:
+            near_source_count = int(((gx - source_gx) ** 2 + (gy - source_gy) ** 2
+                                     <= near_radius_grid ** 2).sum())
 
         details = f"{len(blocking_track)} track, {len(blocking_via)} via cells on frontier"
         results.append(BlockingInfo(

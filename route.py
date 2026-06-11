@@ -102,6 +102,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 impedance: Optional[float] = None,
                 power_nets: Optional[List[str]] = None,
                 power_nets_widths: Optional[List[float]] = None,
+                power_tap_neckdown: bool = True,
+                neckdown_length: float = 2.5,
+                neckdown_taper_length: float = 0.5,
                 clearance: float = 0.1,
                 via_size: float = 0.3,
                 via_drill: float = 0.2,
@@ -190,7 +193,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_size: Via outer diameter in mm (default: 0.3)
         via_drill: Via drill size in mm (default: 0.2)
         grid_step: Grid resolution in mm (default: 0.1)
-        via_cost: Penalty for placing a via in grid steps (default: 50)
+        via_cost: Penalty for placing a via in 0.1mm grid steps (default: 50 = 5mm; mm-equivalent at any grid_step)
         max_iterations: Max A* iterations before giving up (default: 200000)
         heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.9)
         stub_proximity_radius: Radius around stubs to penalize in mm (default: 2.0)
@@ -296,6 +299,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory, layer_costs=layer_costs
     )
+    config_kwargs['power_tap_neckdown'] = power_tap_neckdown
+    config_kwargs['neckdown_length'] = neckdown_length
+    config_kwargs['neckdown_taper_length'] = neckdown_taper_length
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
     if layer_widths:
@@ -682,6 +688,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'net_id': net_id,
                     'failed_pads': failed_pads_info
                 })
+    # Derive final counts from what is actually routed rather than the loop
+    # counters: a multipoint net with unconnected tap pads is not fully
+    # routed, and a net ripped during Phase 3 whose re-route failed never
+    # reaches the failure counter even though it has no route
+    attempted = successful + failed
+    failed = len(failed_single) + len(failed_multipoint)
+    successful = attempted - failed
+
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
@@ -880,12 +894,21 @@ For differential pair routing, use route_diff.py:
                         help="Glob patterns for power nets (e.g., '*GND*' '*VCC*'). Must pair with --power-nets-widths.")
     parser.add_argument("--power-nets-widths", nargs="*", type=float, default=[],
                         help="Track widths in mm for each power-net pattern (must match --power-nets length)")
+    parser.add_argument("--no-power-tap-neckdown", action="store_true",
+                        help="Disable neck-down retry of failed power-net tap edges (issue #72): by default a "
+                             "wide tap that cannot fit is re-routed at the layer's default width near the pad")
+    parser.add_argument("--neckdown-length", type=float, default=defaults.NECKDOWN_LENGTH,
+                        help="Length in mm of narrow track from the target pad on neck-down tap routes; the track "
+                             "returns to the power width beyond this where clearance allows (default: 2.5)")
+    parser.add_argument("--neckdown-taper-length", type=float, default=defaults.NECKDOWN_TAPER_LENGTH,
+                        help="Length in mm of the stepped narrow-to-wide width taper on neck-down tap routes "
+                             "(0 = abrupt width change, default: 0.5)")
 
     # Router algorithm parameters
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help=f"Grid resolution in mm (default: {defaults.GRID_STEP})")
     parser.add_argument("--via-cost", type=int, default=defaults.VIA_COST,
-                        help=f"Penalty for placing a via in grid steps (default: {defaults.VIA_COST})")
+                        help=f"Penalty for placing a via, in 0.1mm grid steps (default: {defaults.VIA_COST} = 5mm of path; mm-equivalent at any --grid-step)")
     parser.add_argument("--via-proximity-cost", type=int, default=defaults.VIA_PROXIMITY_COST,
                         help=f"Via cost multiplier in stub/BGA proximity zones (default: {defaults.VIA_PROXIMITY_COST}, 0=block vias)")
     parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,
@@ -1112,6 +1135,9 @@ For differential pair routing, use route_diff.py:
                 impedance=args.impedance,
                 power_nets=args.power_nets,
                 power_nets_widths=args.power_nets_widths,
+                power_tap_neckdown=not args.no_power_tap_neckdown,
+                neckdown_length=args.neckdown_length,
+                neckdown_taper_length=args.neckdown_taper_length,
                 clearance=args.clearance,
                 via_size=args.via_size,
                 via_drill=args.via_drill,

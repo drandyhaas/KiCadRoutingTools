@@ -1433,12 +1433,12 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # prox_h_cost is now passed as a parameter (checked before endpoint exemptions are set)
 
     pose_router = PoseRouter(
-        via_cost=config.via_cost * 1000 * 2,
+        via_cost=config.via_cost_units() * 2,
         h_weight=config.heuristic_weight,
         turn_cost=turn_cost,
         min_radius_grid=min_radius_grid,

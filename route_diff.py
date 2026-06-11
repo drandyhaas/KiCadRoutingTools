@@ -840,7 +840,7 @@ Examples:
     parser.add_argument("--grid-step", type=float, default=0.1,
                         help="Grid resolution in mm (default: 0.1)")
     parser.add_argument("--via-cost", type=int, default=50,
-                        help="Penalty for placing a via in grid steps (default: 50, doubled for diff pairs)")
+                        help="Penalty for placing a via, in 0.1mm grid steps (default: 50 = 5mm of path, doubled for diff pairs; mm-equivalent at any --grid-step)")
     parser.add_argument("--via-proximity-cost", type=int, default=10,
                         help="Via cost multiplier in stub/BGA proximity zones (default: 10, 0=block vias)")
     parser.add_argument("--max-iterations", type=int, default=200000,

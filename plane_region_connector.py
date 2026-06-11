@@ -919,7 +919,7 @@ def route_disconnected_regions(
 
     # Create a single reusable router for all MST edges
     plane_router = GridRouter(
-        via_cost=config.via_cost * 1000,
+        via_cost=config.via_cost_units(),
         h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost,
         via_proximity_cost=0,
@@ -1106,7 +1106,7 @@ def build_base_obstacles(
 
     # Add proximity costs around other nets' vias (on all layers)
     proximity_radius_grid = coord.to_grid_dist(proximity_radius)
-    proximity_cost_grid = int(proximity_cost * 1000 / config.grid_step)
+    proximity_cost_grid = config.cell_cost(proximity_cost)
 
     all_other_vias = []
     for via in pcb_data.vias:
@@ -1356,7 +1356,7 @@ def route_plane_connection_wide(
     # Create router if not provided
     if router is None:
         router = GridRouter(
-            via_cost=config.via_cost * 1000,
+            via_cost=config.via_cost_units(),
             h_weight=config.heuristic_weight,
             turn_cost=config.turn_cost,
             via_proximity_cost=0,

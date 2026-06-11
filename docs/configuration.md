@@ -55,6 +55,9 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 |--------|---------|-------------|
 | `--power-nets` | - | Glob patterns for power nets (e.g., `"*GND*" "*VCC*"`) |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern (must match `--power-nets` length) |
+| `--neckdown-length` | 2.5 | Narrow track length in mm from the pads when a failed wide power route is retried at the default width (neck-down) |
+| `--neckdown-taper-length` | 0.5 | Narrow-to-wide width taper length in mm (0 = abrupt) |
+| `--no-power-tap-neckdown` | off | Disable the neck-down retry of failed wide power routes |
 
 ```bash
 # Route with wider tracks for power nets
@@ -72,7 +75,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--via-cost` | 50 | Via penalty in grid steps (effectively doubled for diff pairs since two vias are placed) |
+| `--via-cost` | 50 | Via penalty in 0.1mm grid steps, i.e. 50 = 5mm of path; mm-equivalent at any `--grid-step` (effectively doubled for diff pairs since two vias are placed) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
 | `--max-probe-iterations` | 5000 | Quick probe per direction to detect stuck routes |
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
@@ -345,12 +348,15 @@ class GridRouteConfig:
     via_size: float = 0.5         # mm via outer diameter
     via_drill: float = 0.3        # mm via drill
     power_net_widths: Dict[int, float] = {}  # net_id -> width for power nets
+    power_tap_neckdown: bool = True   # retry failed wide power routes at default width
+    neckdown_length: float = 2.5      # mm of narrow track from the pads on necked routes
+    neckdown_taper_length: float = 0.5  # mm narrow->wide width taper (0 = abrupt)
 
     # Grid
     grid_step: float = 0.1        # mm grid resolution
 
     # A* algorithm
-    via_cost: int = 50            # grid steps penalty per via (diff pairs place 2 vias)
+    via_cost: int = 50            # via penalty in 0.1mm grid steps = 5mm of path (diff pairs place 2 vias)
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
     heuristic_weight: float = 1.9
@@ -432,6 +438,10 @@ The `via_cost` parameter controls how much the router penalizes layer changes:
 | 75-100 | Few vias, longer paths |
 
 For BGA escape routing, lower values (10-25) work well since vias are necessary.
+
+All cost knobs (via cost, proximity costs, attraction bonuses) are calibrated at a 0.1mm
+reference grid and scale internally so the cost per mm of path is the same at any
+`--grid-step` - changing the grid resolution does not change what the router optimizes for.
 
 ### Heuristic Weight
 

@@ -33,6 +33,24 @@ Patterns are matched in order - first matching pattern determines the width. Obs
 
 **Note:** Power net widths are automatically enforced to be at least `--track-width`. This prevents accidentally specifying power widths smaller than signal widths.
 
+## Neck-Down for Failed Power Routes
+
+A wide power track sometimes cannot fit where it matters most - escaping a fine-pitch pad,
+or threading a congested region. When a power route (a 2-pad route, a multipoint main
+connection, or a tap edge) fails at its power width, the router automatically retries it at
+the layer's default track width and applies neck-down widths to the result:
+
+- Segments within `--neckdown-length` (default 2.5mm) of a pad endpoint stay at the default
+  width - the standard neck-down practice for fanout on fine-pitch parts.
+- Farther segments return to the power width wherever the wide clearance actually fits;
+  a mid-route pinch stays narrow while open stretches go wide.
+- Each narrow/wide transition gets a stepped width taper (`--neckdown-taper-length`,
+  default 0.5mm, 4 steps; set 0 for an abrupt width change).
+
+Disable the feature with `--no-power-tap-neckdown` (CLI) or the "Power route neck-down"
+checkbox under the Power Widths field in the plugin. The narrowed sections are short pad
+escapes, so the current-carrying impact matches a hand-routed neck-down.
+
 ## AI-Powered Power Net Analysis
 
 Use the `/analyze-power-nets` Claude Code skill for AI-powered datasheet lookup and component analysis. This is the recommended approach as it catches mislabeled power pins and provides current-based track width recommendations.
