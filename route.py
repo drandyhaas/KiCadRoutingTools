@@ -190,7 +190,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_size: Via outer diameter in mm (default: 0.3)
         via_drill: Via drill size in mm (default: 0.2)
         grid_step: Grid resolution in mm (default: 0.1)
-        via_cost: Penalty for placing a via in grid steps (default: 50)
+        via_cost: Penalty for placing a via in 0.1mm grid steps (default: 50 = 5mm; mm-equivalent at any grid_step)
         max_iterations: Max A* iterations before giving up (default: 200000)
         heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.9)
         stub_proximity_radius: Radius around stubs to penalize in mm (default: 2.0)
@@ -885,7 +885,7 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help=f"Grid resolution in mm (default: {defaults.GRID_STEP})")
     parser.add_argument("--via-cost", type=int, default=defaults.VIA_COST,
-                        help=f"Penalty for placing a via in grid steps (default: {defaults.VIA_COST})")
+                        help=f"Penalty for placing a via, in 0.1mm grid steps (default: {defaults.VIA_COST} = 5mm of path; mm-equivalent at any --grid-step)")
     parser.add_argument("--via-proximity-cost", type=int, default=defaults.VIA_PROXIMITY_COST,
                         help=f"Via cost multiplier in stub/BGA proximity zones (default: {defaults.VIA_PROXIMITY_COST}, 0=block vias)")
     parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,

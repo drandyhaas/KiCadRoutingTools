@@ -741,7 +741,8 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 
 # Algorithm
 --grid-step 0.1         # Grid resolution (mm)
---via-cost 50           # Via penalty (grid steps)
+--via-cost 50           # Via penalty in 0.1mm grid steps (50 = 5mm of path; all cost knobs
+                        # are mm-calibrated, so behavior is independent of --grid-step)
 --max-iterations 200000      # A* iteration limit
 --max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
 --heuristic-weight 1.9       # A* greediness (>1 = faster)

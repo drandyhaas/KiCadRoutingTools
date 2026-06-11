@@ -68,7 +68,7 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
 
     coord = GridCoord(config.grid_step)
     stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
-    stub_cost_grid = int(config.stub_proximity_cost * 1000 / config.grid_step)
+    stub_cost_grid = config.cell_cost(config.stub_proximity_cost)
     block_vias = (config.via_proximity_cost == 0)
 
     # Convert stub positions to grid coordinates
@@ -95,7 +95,7 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
 
     coord = GridCoord(config.grid_step)
     radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
-    cost_grid = int(config.bga_proximity_cost * 1000 / config.grid_step)
+    cost_grid = config.cell_cost(config.bga_proximity_cost)
 
     for zone in config.bga_exclusion_zones:
         min_x, min_y, max_x, max_y = zone[:4]
@@ -145,7 +145,7 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
 
     coord = GridCoord(config.grid_step)
     radius_grid = coord.to_grid_dist(config.track_proximity_distance)
-    cost_grid = int(config.track_proximity_cost * 1000 / config.grid_step)
+    cost_grid = config.cell_cost(config.track_proximity_cost)
 
     # Get pre-computed offset table (cached)
     offsets = _get_proximity_offsets(radius_grid, cost_grid)
@@ -341,7 +341,7 @@ def compute_ripped_route_costs(saved_result: dict, config: GridRouteConfig,
 
     coord = GridCoord(config.grid_step)
     radius_grid = coord.to_grid_dist(config.ripped_route_avoidance_radius)
-    cost_grid = int(config.ripped_route_avoidance_cost * 1000 / config.grid_step)
+    cost_grid = config.cell_cost(config.ripped_route_avoidance_cost)
 
     # Get pre-computed offset table (cached)
     offsets = _get_proximity_offsets(radius_grid, cost_grid)

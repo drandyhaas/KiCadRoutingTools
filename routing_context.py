@@ -72,7 +72,7 @@ def merge_ripped_route_costs(obstacles, ripped_route_layer_costs: Dict[int, np.n
     if ripped_route_via_positions:
         coord = GridCoord(config.grid_step)
         radius_grid = coord.to_grid_dist(config.ripped_route_avoidance_radius)
-        cost_grid = int(config.ripped_route_avoidance_cost * 1000 / config.grid_step)
+        cost_grid = config.cell_cost(config.ripped_route_avoidance_cost)
 
         all_via_positions = []
         for via_list in ripped_route_via_positions.values():

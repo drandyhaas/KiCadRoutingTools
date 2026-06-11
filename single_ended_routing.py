@@ -532,7 +532,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Check which proximity zones the stub free ends are in for precise heuristic estimate
     src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
@@ -548,7 +548,7 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         if tgt_in_bga: zones.append("tgt:bga")
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
@@ -804,7 +804,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Check which proximity zones the stub free ends are in for precise heuristic estimate
     src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
@@ -822,9 +822,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Calculate bus attraction parameters
     bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
-    bus_attraction_bonus = int(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
+    bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
@@ -1367,7 +1367,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Determine direction order (always deterministic)
     if config.direction_order in ("backwards", "backward"):
@@ -1385,7 +1385,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         first_label, second_label = "forward", "backward"
 
     # Create visual router
-    router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                           turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
@@ -1427,7 +1427,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
         print(f"No route found after {total_iterations} iterations ({first_label}), trying {second_label}...")
 
         # Try second direction
-        router = VisualRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+        router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                           turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
@@ -1726,7 +1726,7 @@ def route_multipoint_main(
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     # Check which proximity zones the stub free ends are in for precise heuristic estimate
     src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in prox_check_sources)
@@ -1743,7 +1743,7 @@ def route_multipoint_main(
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
     # Route farthest pair with probe routing (same as single-ended)
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
@@ -1946,9 +1946,9 @@ def route_multipoint_taps(
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
-    attraction_bonus = int(config.vertical_attraction_cost * 1000 / config.grid_step) if config.vertical_attraction_cost > 0 else 0
+    attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
-    router = GridRouter(via_cost=config.via_cost * 1000, h_weight=config.heuristic_weight,
+    router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,

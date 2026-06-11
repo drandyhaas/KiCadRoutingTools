@@ -419,7 +419,7 @@ def route_via_to_pad(
     # Create or reuse router
     if router is None:
         router = GridRouter(
-            via_cost=config.via_cost * 1000,
+            via_cost=config.via_cost_units(),
             h_weight=config.heuristic_weight,
             turn_cost=config.turn_cost,
             via_proximity_cost=0,
@@ -605,7 +605,7 @@ def build_plane_base_obstacles(
 
     # Add proximity costs around other nets' vias
     proximity_radius_grid = coord.to_grid_dist(proximity_radius)
-    proximity_cost_grid = int(proximity_cost * 1000 / config.grid_step)
+    proximity_cost_grid = config.cell_cost(proximity_cost)
 
     all_other_vias_grid = []
     for via_positions in other_nets_vias.values():
@@ -712,7 +712,7 @@ def route_plane_connection(
     # Create or reuse router
     if router is None:
         router = GridRouter(
-            via_cost=config.via_cost * 1000,
+            via_cost=config.via_cost_units(),
             h_weight=config.heuristic_weight,
             turn_cost=config.turn_cost,
             via_proximity_cost=0,
@@ -896,7 +896,7 @@ def _generate_multinet_layer_zones(
 
         # Create router once per MST iteration (reused across all nets/edges)
         plane_router = GridRouter(
-            via_cost=config.via_cost * 1000,
+            via_cost=config.via_cost_units(),
             h_weight=config.heuristic_weight,
             turn_cost=config.turn_cost,
             via_proximity_cost=0,
@@ -1371,7 +1371,7 @@ def create_plane(
 
     # Create reusable router for via-to-pad routing
     via_pad_router = GridRouter(
-        via_cost=config.via_cost * 1000,
+        via_cost=config.via_cost_units(),
         h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost,
         via_proximity_cost=0,
