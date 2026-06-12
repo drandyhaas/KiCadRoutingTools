@@ -74,7 +74,12 @@ non-interactively and record everything.
     - `check_drc.py <final> 2>&1 | tee drc.log` (default clearance; note flags)
     - `check_connected.py <final> 2>&1 | tee connectivity.log`
     - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
-12. Budget: ~45 min wall-clock for the whole board. NEVER end your turn while
+12. Budget: ~45 min wall-clock for the whole board, and a HARD 20-minute cap
+    per command: if a single tool invocation passes 20 min — even with its log
+    still growing — kill it, record the elapsed time + command as a runtime
+    finding, and continue with the previous step's output. Aggressive params
+    (--max-iterations 1000000 with --max-ripup 10 at fine grids) can grind
+    for hours; that is a finding, not progress. NEVER end your turn while
     a routing command is still running — you will be terminated and the run
     orphaned. Run commands in the FOREGROUND (timeout up to 600000 ms). If a
     command exceeds the 10-min foreground cap, keep waiting in foreground:
