@@ -567,9 +567,32 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--grid-step` | 0.1 | Routing grid step (mm) |
 | `--analysis-grid-step` | 0.5 | Grid step for connectivity analysis (coarser = faster) |
 | `--max-iterations` | 200000 | Maximum A* iterations per route attempt |
+| `--repair-pads` / `--no-repair-pads` | on | Also repair pad-level plane connection failures (see below) |
+| `--max-search-radius` | 10.0 | Max radius to search for a via position during pad repair (mm) |
 | `--dry-run` | off | Analyze without writing output |
 | `--verbose`, `-v` | off | Print detailed debug messages |
 | `--debug-lines` | off | Add debug lines on User.4 layer showing route paths |
+
+### Pad-Level Repair (`--repair-pads`, default on)
+
+`route_planes.py` can leave a tail of pads it could not via down to the plane
+(congested SMD neighborhoods). Before the region repair, the tool finds pads
+of each plane net with no geometric connection to the plane — no same-net
+via or segment touching the pad's copper (including vias landed inside the
+pad), and the pad not sitting directly on a zone layer — and retries each
+with a stitching via + short trace. The retry uses the same parameter
+escalation as `route_planes.py`: the run parameters first, then scoped fine
+parameters (grid 0.05mm, clearance 0.15mm, track = min(pad min dimension,
+0.15mm)) when the pad is fine-pitch (a same-component neighbor pad within
+0.65mm, or pad min dimension below 0.35mm). Obstacle maps for each retry are
+built on a small window around the pad, so fine grids stay cheap on large
+boards. Per-pad outcomes are printed, and pads that still fail are listed in
+the summary. Use `--no-repair-pads` to only reconnect zone islands.
+
+`route_planes.py` itself applies the same fine-parameter retry to fine-pitch
+pads whose tap fails during the initial run (issue #104), so the repair pass
+typically only sees pads that survived that retry or boards routed by other
+tools.
 
 ### How It Works
 

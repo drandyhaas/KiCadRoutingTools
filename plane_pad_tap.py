@@ -183,6 +183,7 @@ def try_tap_pad(
     extra_vias: Optional[List[Dict]] = None,
     extra_segments: Optional[List[Dict]] = None,
     verbose: bool = False,
+    routing_clearance_cushion: bool = False,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
 
@@ -229,8 +230,17 @@ def try_tap_pad(
         same_net_pad_clearance=same_net_pad_clearance)
     routing_obs = None
     if pad_layer:
+        # Optional half-grid clearance cushion: build_routing_obstacle_map
+        # blocks cells by center distance, so routed traces can end up a
+        # fraction of a grid step (~0.015mm at 0.05 grid) closer to other
+        # copper than the configured clearance. Used for the fine-parameter
+        # retry, where the clearance is checked with zero margin.
+        routing_config = config
+        if routing_clearance_cushion:
+            routing_config = replace(
+                config, clearance=config.clearance + config.grid_step / 2)
         routing_obs = build_routing_obstacle_map(
-            local, config, net_id, pad_layer,
+            local, routing_config, net_id, pad_layer,
             skip_pad_blocking=False, verbose=False)
 
     coord = GridCoord(config.grid_step)
@@ -295,6 +305,7 @@ def tap_pad_with_escalation(
     extra_segments: Optional[List[Dict]] = None,
     verbose: bool = False,
     try_default: bool = True,
+    fine_for_all: bool = False,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -302,6 +313,11 @@ def tap_pad_with_escalation(
     try_default=False when they are already known to fail); if that fails and
     the pad is fine-pitch, retry with grid 0.05 / clearance 0.15 /
     track = min(pad min dimension, 0.15) and a smaller via search radius.
+
+    fine_for_all=True drops the fine-pitch gate and escalates every failed
+    pad (used by the route_disconnected_planes repair pass, where only a
+    handful of last-resort pads remain and small pads in congested
+    fine-pitch neighborhoods also benefit from the fine parameters).
     """
     if try_default:
         result = try_tap_pad(
@@ -312,13 +328,14 @@ def tap_pad_with_escalation(
             result.params_label = 'default'
             return result
 
-    if pad_is_fine_pitch(pad, pcb_data):
+    if fine_for_all or pad_is_fine_pitch(pad, pcb_data):
         fine_config = make_fine_tap_config(config, pad)
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, fine_config,
             min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
             via_size, via_drill, same_net_pad_clearance,
-            pending_pads, extra_vias, extra_segments, verbose)
+            pending_pads, extra_vias, extra_segments, verbose,
+            routing_clearance_cushion=True)
         if result.success:
             result.params_label = 'fine'
             return result

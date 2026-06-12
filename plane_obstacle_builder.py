@@ -174,14 +174,20 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
         seg_adj.setdefault(k1, set()).add(k2)
         seg_adj.setdefault(k2, set()).add(k1)
 
+    def via_layers(v) -> List[str]:
+        """Copper layers a via connects. A through via is written with
+        (layers F.Cu B.Cu) in KiCad but spans every copper layer."""
+        if not v.layers or ('F.Cu' in v.layers and 'B.Cu' in v.layers):
+            return all_cu
+        return v.layers
+
     # Via vertical jumps keyed by pos_key -> set of layers.
     via_at: Dict[Tuple, set] = {}
     for v in pcb_data.vias:
         if v.net_id != net_id:
             continue
         k = pkey(v.x, v.y)
-        layers = v.layers if v.layers else all_cu
-        via_at.setdefault(k, set()).update(layers)
+        via_at.setdefault(k, set()).update(via_layers(v))
 
     # Pads at each position - through-hole pads bridge all copper layers.
     pad_at: Dict[Tuple, set] = {}
@@ -207,7 +213,7 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
         if v.net_id != net_id:
             continue
         if _point_in_pad_copper(pad, v.x, v.y, extra=v.size / 2):
-            for vl in (v.layers if v.layers else all_cu):
+            for vl in via_layers(v):
                 state = (pkey(v.x, v.y), vl)
                 if state not in visited:
                     visited.add(state)

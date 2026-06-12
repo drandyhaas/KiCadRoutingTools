@@ -301,7 +301,8 @@ def route_planes(
                         max_search_radius=max_search_radius,
                         via_size=via_size,
                         via_drill=via_drill,
-                        verbose=verbose
+                        verbose=verbose,
+                        fine_for_all=True  # last-resort repair: escalate every failed pad
                     )
                     if result.success:
                         total_pads_repaired += 1
