@@ -154,8 +154,8 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 **Option C: Manual Command Line (For scripting and automation)**
 
 ```bash
-# Place components evenly within board boundary (before routing)
-python place.py my_board.kicad_pcb
+# Optionally optimize an existing placement for routability (before routing)
+python place_optimize.py my_board.kicad_pcb --max-displacement 3
 
 # Route all nets
 python route.py my_board.kicad_pcb
@@ -506,7 +506,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [Claude Skills](docs/claude-skills.md) | All eight AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
-| [Placement](placement/README.md) | Component placement tool |
+| [Placement](placement/README.md) | Placement optimization for routability |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
@@ -514,7 +514,8 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 
 ```
 KiCadRoutingTools/
-├── place.py                  # Main CLI - component placement
+├── place_optimize.py         # Main CLI - placement optimization (quench)
+├── place_route_loop.py       # Main CLI - router-in-the-loop placement repair
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
 ├── route_planes.py           # Main CLI - power/ground plane via connections

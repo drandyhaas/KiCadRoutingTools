@@ -315,8 +315,10 @@ completion are the quality metrics.
    of routing time), not by the proxy alone.
 
 **Practical upshot:** ship the quench as a *repair* tool for rough/generated
-placements (`place.py` output, imported or auto-generated layouts), not as a
-polish pass on careful hand placements. The next-step experiments are (a)
+placements (imported or auto-generated layouts), not as a polish pass on
+careful hand placements. (Based on these results, the from-scratch
+constructive placer — `place.py` and the `rust_placer` scoring crate — was
+subsequently removed from the repo; it survives in git history.) The next-step experiments are (a)
 router-in-the-loop candidate ranking, since single routes are cheap, and
 (b) a proxy that models *escape/fanout room* around high-pin-count parts
 explicitly rather than via the generic halo.
