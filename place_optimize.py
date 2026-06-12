@@ -67,6 +67,13 @@ Examples:
     parser.add_argument("--edge-weight", type=float, default=2.0,
                         help="Quadratic penalty weight for edge-margin "
                              "shortfall (default: 2.0)")
+    parser.add_argument("--ignore-nets", nargs="+", default=None,
+                        metavar="NET",
+                        help="Net name patterns to exclude from airwire "
+                             "scoring (e.g. plane-routed power nets)")
+    parser.add_argument("--lock", nargs="+", default=None, metavar="REF",
+                        help="Additional reference patterns to lock in place "
+                             "(e.g. connectors)")
     parser.add_argument("--no-rotate", action="store_true",
                         help="Disable rotation moves")
     parser.add_argument("--no-swap", action="store_true",
@@ -104,6 +111,8 @@ Examples:
         allow_rotations=not args.no_rotate,
         allow_swaps=not args.no_swap,
         max_passes=args.max_passes,
+        ignore_nets=args.ignore_nets,
+        lock_refs=args.lock,
         verbose=args.verbose,
     )
 

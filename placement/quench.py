@@ -160,7 +160,9 @@ class QuenchState:
                  crossing_penalty: float,
                  halo_base: float, halo_coef: float, halo_weight: float,
                  edge_halo: float, edge_weight: float,
-                 grid_step: float, length_weight: float = 1.0):
+                 grid_step: float, length_weight: float = 1.0,
+                 ignore_net_ids: Optional[Set[int]] = None,
+                 extra_locked_refs: Optional[Set[str]] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -177,7 +179,10 @@ class QuenchState:
         self.grid_step = grid_step
 
         courtyards = extract_courtyard_bboxes(pcb_file)
-        locked_refs = extract_locked_refs(pcb_file)
+        locked_refs = set(extract_locked_refs(pcb_file))
+        if extra_locked_refs:
+            locked_refs |= extra_locked_refs
+        ignore = ignore_net_ids or set()
 
         self.parts: Dict[str, _Part] = {}
         for ref, fp in pcb_data.footprints.items():
@@ -185,6 +190,9 @@ class QuenchState:
                 continue
             self.parts[ref] = _Part(ref, fp, courtyards, ref in locked_refs,
                                     halo_base, halo_coef)
+            # Ignored nets (e.g. plane-routed power) don't contribute airwires
+            self.parts[ref].nets = [n for n in self.parts[ref].nets
+                                    if n not in ignore]
 
         # net -> refs touching it
         self.net_refs: Dict[int, Set[str]] = {}
@@ -349,15 +357,35 @@ def quench(pcb_data: PCBData, pcb_file: str,
            allow_rotations: bool = True,
            allow_swaps: bool = True,
            max_passes: int = 10,
+           ignore_nets: Optional[List[str]] = None,
+           lock_refs: Optional[List[str]] = None,
            verbose: bool = False) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
     Returns a list of placement dicts (reference/new_x/new_y/new_rotation)
     for every movable part, whether or not it moved.
     """
+    ignore_net_ids: Set[int] = set()
+    if ignore_nets:
+        import fnmatch
+        for net_id, net in pcb_data.nets.items():
+            if any(fnmatch.fnmatch(net.name, pat) for pat in ignore_nets):
+                ignore_net_ids.add(net_id)
+        print(f"Ignoring {len(ignore_net_ids)} nets for airwire scoring")
+
+    extra_locked: Set[str] = set()
+    if lock_refs:
+        import fnmatch
+        for ref in pcb_data.footprints:
+            if any(fnmatch.fnmatch(ref, pat) for pat in lock_refs):
+                extra_locked.add(ref)
+        print(f"Locked via --lock: {', '.join(sorted(extra_locked))}")
+
     state = QuenchState(pcb_data, pcb_file, clearance, board_edge_clearance,
                         crossing_penalty, halo_base, halo_coef, halo_weight,
-                        edge_halo, edge_weight, grid_step, length_weight)
+                        edge_halo, edge_weight, grid_step, length_weight,
+                        ignore_net_ids=ignore_net_ids,
+                        extra_locked_refs=extra_locked)
 
     before = state.total_cost()
     print(f"Initial: length={before['length']:.1f}mm "

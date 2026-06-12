@@ -321,6 +321,45 @@ router-in-the-loop candidate ranking, since single routes are cheap, and
 (b) a proxy that models *escape/fanout room* around high-pin-count parts
 explicitly rather than via the generic halo.
 
+### Second board: kit-dev-coldfire-xilinx_5213 (160 parts, 4 layers)
+
+Setup: `tests/test_kit_route.py` signal-stage arguments; connectors/headers
+locked via `--lock`; plane-routed nets excluded from airwire scoring via
+`--ignore-nets GND +3.3V` (both options added for this experiment). All
+quench runs use the crossing-focused weights (`--length-weight 0.3
+--crossing-penalty 30`).
+
+| variant | single-ended | multipoint | vias | router iterations | route time |
+|---|---|---|---|---|---|
+| hand (KiCad demo) | 204/207 (3 fail) | 227/227 | 346 | 122 M | 45 s |
+| quench, 3 mm cap, modest halo | 205/207 (2 fail) | 235/236 (1 fail) | 346 | **24.6 M** | 13 s |
+| quench, 5 mm cap, modest halo | 204/207 (3 fail) | 223/227 (4 fail) | 331 | 22.4 M | 10 s |
+| quench, 10 mm cap, strong halo | **192/207 (15 fail)** | 222/226 (4 fail) | 334 | 235 M | 97 s |
+
+**Dose–response is the story.** At a 3 mm displacement cap the quench matches
+the hand placement's completion while cutting router effort **5×** (122 M →
+24.6 M iterations) — on this denser board the crossing reduction (−11%)
+translates into real router savings, unlike on interf_u. At 5 mm it's
+marginally worse on completion but keeps the effort win. At 10 mm with strong
+halos, 149 of 150 movable parts moved and the placement collapsed: 12 of the
+15 new failures were `/xilinx/XIL_D*` — the quench had destroyed the data-bus
+corridor between the Xilinx and the MCU, exactly the macro structure the
+crossing/length/halo proxies cannot see. (Failed-net identities vary between
+runs near the noise floor; the iteration counts are the robust signal.)
+
+Refined conclusions:
+
+- `--max-displacement` is the dominant safety knob: small caps keep the
+  human's macro structure (bus corridors, cluster geometry) intact by
+  construction, which is the entire value of seeding from a human placement.
+  ~3 mm was the sweet spot on both boards tested.
+- The big halos backfire on dense boards: with `--halo-coef 0.5` the
+  144-pin Xilinx demands a 6.5 mm halo that a dense board cannot satisfy, so
+  the halo gradient dominates everything and scatters the layout. Modest
+  halos (`--halo-coef 0.15`) only fire where parts are genuinely cramped.
+- Lock connectors (`--lock`) and exclude plane-routed power nets
+  (`--ignore-nets`) — both matter for honest objectives on real boards.
+
 ## References and further reading
 
 ### PCB-specific placement research
