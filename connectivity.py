@@ -888,94 +888,108 @@ def get_multipoint_net_pads(
                     pad_info.append((gx, gy, 0, pad.global_x, pad.global_y, pad))
         return pad_info if len(pad_info) >= 3 else None
 
-    # Case 2: Check for 3+ disconnected segment groups
-    if len(net_segments) >= 2:
-        groups = find_connected_groups(net_segments, vias=net_vias)
-        if len(groups) >= 3:
-            # Find stub free ends for each group (endpoints not touching pads)
-            endpoint_info = []
-            for group in groups:
-                free_ends = find_stub_free_ends(group, net_pads)
-                if free_ends:
-                    # Use the first free end from each group
-                    x, y, layer = free_ends[0]
-                    layer_idx = layer_map.get(layer)
-                    if layer_idx is not None:
-                        # Create a simple object to hold endpoint info
-                        endpoint_info.append((
-                            coord.to_grid(x, y)[0],
-                            coord.to_grid(x, y)[1],
-                            layer_idx,
-                            x,
-                            y,
-                            _make_endpoint_stub(x, y, layer)
-                        ))
-            if len(endpoint_info) >= 3:
-                return endpoint_info
-            # Fall through to Case 3: free stub ends alone didn't establish a
-            # multi-point net. Segment groups can terminate entirely at pads
-            # (no dangling free ends) while other pads remain fully unconnected
-            # to any copper - those still need tap routing. Returning None here
-            # would mis-classify such nets as single-ended and falsely report
-            # the whole net routed after connecting just one pair.
-
-    # Case 3: Segment group(s) + unconnected pads totaling 3+ endpoints
-    # This handles the case where some pads have fanout stubs and others don't
+    # Cases 2+3 unified (issue #8 root cause): when the net already has copper
+    # (fanout stubs, a previous pass's partial routes), the endpoint set must
+    # cover EVERY copper island and EVERY pad with no copper:
+    #   - one representative endpoint per connected segment group: its first
+    #     free end, or - when a group terminates entirely at pads and has no
+    #     dangling ends - a pad on the group / any segment endpoint, so
+    #     islands are never silently skipped;
+    #   - every pad not connected to any group (point-on-segment test against
+    #     each group's copper, not just endpoint coincidence).
+    # The old Case 2 returned only group free ends whenever there were >= 3
+    # groups, dropping pads with no copper entirely: a 23-pad +3V3 net was
+    # detected as "6 pads", routed, and reported fully connected while 11
+    # pads had no copper at all.
     if len(net_segments) >= 1:
         groups = find_connected_groups(net_segments, vias=net_vias)
 
-        # Find pads NOT connected to any segment group
-        seg_points = set()
-        for seg in net_segments:
-            seg_points.add((round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)))
-            seg_points.add((round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS)))
+        def _pad_layers(pad):
+            return expand_pad_layers(pad.layers, config.layers)
 
+        def _pad_on_group(pad, group) -> bool:
+            """Pad centre on/near any segment of the group (mid-segment too).
+
+            Conservative: claims connection only when group copper provably
+            reaches well inside the pad area (segment half-width plus a
+            quarter of the pad's smaller dimension). Under-claiming just adds
+            a redundant endpoint the router connects in a few iterations;
+            over-claiming recreates the phantom-success bug.
+            """
+            px, py = pad.global_x, pad.global_y
+            pad_layers = _pad_layers(pad)
+            reach_pad = min(pad.size_x, pad.size_y) / 4 if (pad.size_x and pad.size_y) else 0.05
+            for seg in group:
+                if seg.layer not in pad_layers and pad.drill == 0:
+                    continue
+                dx = seg.end_x - seg.start_x
+                dy = seg.end_y - seg.start_y
+                seg_len_sq = dx * dx + dy * dy
+                if seg_len_sq < 1e-8:
+                    cx, cy = seg.start_x, seg.start_y
+                else:
+                    t = ((px - seg.start_x) * dx + (py - seg.start_y) * dy) / seg_len_sq
+                    t = max(0.0, min(1.0, t))
+                    cx = seg.start_x + t * dx
+                    cy = seg.start_y + t * dy
+                dist = math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
+                if dist <= seg.width / 2 + reach_pad:
+                    return True
+            return False
+
+        def _append_pad(endpoint_info, pad):
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            for layer in _pad_layers(pad):
+                layer_idx = layer_map.get(layer)
+                if layer_idx is not None:
+                    endpoint_info.append((gx, gy, layer_idx, pad.global_x, pad.global_y, pad))
+                    return
+            if config.layers:
+                endpoint_info.append((gx, gy, 0, pad.global_x, pad.global_y, pad))
+
+        # Partition pads into per-group connected sets and the unconnected rest
+        pads_on_group = [[] for _ in groups]
         unconnected_pads = []
         for pad in net_pads:
-            pad_pos = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
-            connected = False
-            for sp in seg_points:
-                if abs(pad_pos[0] - sp[0]) < 0.05 and abs(pad_pos[1] - sp[1]) < 0.05:
-                    connected = True
+            for gi, group in enumerate(groups):
+                if _pad_on_group(pad, group):
+                    pads_on_group[gi].append(pad)
                     break
-            if not connected:
+            else:
                 unconnected_pads.append(pad)
 
-        # Total endpoints = segment groups (via free ends) + unconnected pads
-        total_endpoints = len(groups) + len(unconnected_pads)
-        if total_endpoints >= 3:
-            endpoint_info = []
+        endpoint_info = []
+        for gi, group in enumerate(groups):
+            free_ends = find_stub_free_ends(group, net_pads)
+            if free_ends:
+                x, y, layer = free_ends[0]
+                layer_idx = layer_map.get(layer)
+                if layer_idx is not None:
+                    endpoint_info.append((
+                        coord.to_grid(x, y)[0],
+                        coord.to_grid(x, y)[1],
+                        layer_idx,
+                        x,
+                        y,
+                        _make_endpoint_stub(x, y, layer)
+                    ))
+                    continue
+            # No usable free end: represent the island by one of its pads,
+            # else by any segment endpoint, so it still gets tied in.
+            if pads_on_group[gi]:
+                _append_pad(endpoint_info, pads_on_group[gi][0])
+            else:
+                seg = group[0]
+                layer_idx = layer_map.get(seg.layer)
+                if layer_idx is not None:
+                    gx, gy = coord.to_grid(seg.start_x, seg.start_y)
+                    endpoint_info.append((gx, gy, layer_idx, seg.start_x, seg.start_y,
+                                          _make_endpoint_stub(seg.start_x, seg.start_y, seg.layer)))
 
-            # Add stub free ends from each segment group
-            for group in groups:
-                free_ends = find_stub_free_ends(group, net_pads)
-                if free_ends:
-                    x, y, layer = free_ends[0]
-                    layer_idx = layer_map.get(layer)
-                    if layer_idx is not None:
-                        endpoint_info.append((
-                            coord.to_grid(x, y)[0],
-                            coord.to_grid(x, y)[1],
-                            layer_idx,
-                            x,
-                            y,
-                            _make_endpoint_stub(x, y, layer)
-                        ))
+        for pad in unconnected_pads:
+            _append_pad(endpoint_info, pad)
 
-            # Add unconnected pads
-            for pad in unconnected_pads:
-                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                expanded_layers = expand_pad_layers(pad.layers, config.layers)
-                for layer in expanded_layers:
-                    layer_idx = layer_map.get(layer)
-                    if layer_idx is not None:
-                        endpoint_info.append((gx, gy, layer_idx, pad.global_x, pad.global_y, pad))
-                        break  # Only one entry per physical pad for MST
-                else:
-                    if config.layers:
-                        endpoint_info.append((gx, gy, 0, pad.global_x, pad.global_y, pad))
-
-            return endpoint_info if len(endpoint_info) >= 3 else None
+        return endpoint_info if len(endpoint_info) >= 3 else None
 
     return None
 
