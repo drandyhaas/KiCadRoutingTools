@@ -414,11 +414,37 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         if gx_flat is None:
             continue
 
+        # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
+        # Cells deep inside a hole (>= the relevant clearance from the hole edge)
+        # are routable; cells in the ring, or in the hole but within clearance of
+        # its edge (where the ring copper is close), stay blocked (issue #95).
+        track_exempt = set()
+        via_exempt = set()
+        for hole in (ko.get('holes') or []):
+            hgx, hgy, hinside, hedge = _rasterize_polygon(hole, coord, margin)
+            if hgx is None:
+                continue
+            for x, y in zip(hgx[hinside & (hedge >= track_clear)],
+                            hgy[hinside & (hedge >= track_clear)]):
+                track_exempt.add((int(x), int(y)))
+            for x, y in zip(hgx[hinside & (hedge >= via_clear)],
+                            hgy[hinside & (hedge >= via_clear)]):
+                via_exempt.add((int(x), int(y)))
+
+        def _drop_exempt(mask, exempt):
+            if not exempt:
+                return mask
+            keep = np.fromiter(
+                ((int(x), int(y)) not in exempt for x, y in zip(gx_flat, gy_flat)),
+                dtype=bool, count=gx_flat.size)
+            return mask & keep
+
         if block_tracks:
             _block_cells_on_layers(obstacles, gx_flat, gy_flat,
-                                   inside | (edge_dist < track_clear), layer_idxs)
+                                   _drop_exempt(inside | (edge_dist < track_clear), track_exempt),
+                                   layer_idxs)
         if block_vias:
-            via_mask = inside | (edge_dist < via_clear)
+            via_mask = _drop_exempt(inside | (edge_dist < via_clear), via_exempt)
             if via_mask.any():
                 obstacles.add_blocked_vias_batch(
                     np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))

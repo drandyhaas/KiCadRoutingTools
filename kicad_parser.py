@@ -1384,25 +1384,35 @@ def extract_keepouts(content: str) -> List[dict]:
         lm = re.search(r'\(layers\s+([^)]+)\)', zc) or re.search(r'\(layer\s+("[^"]+")\)', zc)
         layers = set(re.findall(r'"([^"]+)"', lm.group(1))) if lm else set()
 
-        # Polygon (same parsing as filled zones)
-        pts_start = zc.find('(pts')
-        if pts_start < 0:
+        # Outline polygons. A rule area can have several (polygon (pts ...))
+        # blocks: the first is the outer outline, any further ones are HOLES
+        # (even-odd fill). An edge-keepout ring is the board rectangle with an
+        # inset hole; parsing only the first polygon collapses the ring to its
+        # bounding box and bans the whole board (issue #95). Capture them all.
+        polys = []
+        search = 0
+        while True:
+            p_start = zc.find('(polygon', search)
+            if p_start < 0:
+                break
+            pc = 0
+            p_end = p_start
+            for i in range(p_start, len(zc)):
+                if zc[i] == '(':
+                    pc += 1
+                elif zc[i] == ')':
+                    pc -= 1
+                    if pc == 0:
+                        p_end = i
+                        break
+            pts = [(float(a), float(b)) for a, b in
+                   re.findall(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', zc[p_start:p_end + 1])]
+            if len(pts) >= 3:
+                polys.append(pts)
+            search = p_end + 1
+        if not polys:
             continue
-        pc = 0
-        pts_end = pts_start
-        for i in range(pts_start, len(zc)):
-            if zc[i] == '(':
-                pc += 1
-            elif zc[i] == ')':
-                pc -= 1
-                if pc == 0:
-                    pts_end = i
-                    break
-        polygon = [(float(a), float(b)) for a, b in
-                   re.findall(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', zc[pts_start:pts_end + 1])]
-        if len(polygon) < 3:
-            continue
-        keepouts.append({'polygon': polygon, 'layers': layers,
+        keepouts.append({'polygon': polys[0], 'holes': polys[1:], 'layers': layers,
                          'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed})
     return keepouts
 
