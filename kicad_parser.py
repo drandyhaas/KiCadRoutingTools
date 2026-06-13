@@ -259,7 +259,11 @@ def extract_layers(content: str) -> BoardInfo:
             layer_name = m.group(2)
             layer_type = m.group(3)
             layers[layer_id] = layer_name
-            if layer_type == 'signal' and '.Cu' in layer_name:
+            # Any copper layer counts, whatever its declared use. KiCad types
+            # plane layers 'power' (and sometimes 'mixed'/'jumper'); restricting
+            # to 'signal' dropped real layers, making a 4-layer board look
+            # 2-layer (issue #76).
+            if '.Cu' in layer_name and layer_type in ('signal', 'power', 'mixed', 'jumper'):
                 copper_layers.append(layer_name)
 
     # Extract board bounds from Edge.Cuts
@@ -399,6 +403,14 @@ def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
     return segments
 
 
+# Regex gap that matches anything EXCEPT the start of another graphic element,
+# so a lazy match can't run past the current element to a later (layer "...")
+# token. A plain `.*?` gap let a silk/fab gr_* element match across element
+# boundaries to a later Edge.Cuts token, consuming the real edge elements in
+# between (issue #77). Shared by the Edge.Cuts and guide-corridor readers.
+_GR_ELEMENT_GAP = r'(?:(?!\(gr_)[\s\S])*?'
+
+
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
     """Extract board outline bounds from Edge.Cuts layer."""
     min_x = min_y = float('inf')
@@ -406,7 +418,7 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
     found = False
 
     # Look for gr_rect on Edge.Cuts (multi-line format)
-    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(rect_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         min_x = min(min_x, x1, x2)
@@ -416,7 +428,7 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
         found = True
 
     # Look for gr_line on Edge.Cuts (multi-line format)
-    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(line_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         min_x = min(min_x, x1, x2)
@@ -426,7 +438,7 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
         found = True
 
     # Look for gr_arc on Edge.Cuts (multi-line format)
-    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(arc_pattern, content, re.DOTALL):
         sx, sy = float(m.group(1)), float(m.group(2))
         mx, my = float(m.group(3)), float(m.group(4))
@@ -460,13 +472,13 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
     segments = []
 
     # gr_line
-    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(line_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         segments.append(((x1, y1), (x2, y2)))
 
     # gr_arc - approximate as polyline
-    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(arc_pattern, content, re.DOTALL):
         sx, sy = float(m.group(1)), float(m.group(2))
         mx, my = float(m.group(3)), float(m.group(4))
@@ -474,7 +486,7 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         segments.extend(_arc_to_segments((sx, sy), (mx, my), (ex, ey)))
 
     # gr_rect - expand to 4 line segments
-    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(rect_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         segments.append(((x1, y1), (x2, y1)))
@@ -488,12 +500,6 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
             segments.append((poly[i], poly[(i + 1) % len(poly)]))
 
     return segments
-
-
-# Regex gap that matches anything EXCEPT the start of another graphic element,
-# so a lazy match can't run past the current element to a later (layer "...")
-# token. Shared by the gr_line/gr_poly/gr_rect readers below.
-_GR_ELEMENT_GAP = r'(?:(?!\(gr_)[\s\S])*?'
 
 
 def _parse_gr_polys_on_layer(content: str, layer: str) -> List[List[Tuple[float, float]]]:
@@ -970,8 +976,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
         fp_layer = layer_match.group(1) if layer_match else "F.Cu"
 
-        # Extract reference
+        # Extract reference. KiCad 8+ uses (property "Reference" "R1"); KiCad
+        # 6/7 use (fp_text reference "R1" ...). Without the fallback every 6/7
+        # footprint got reference "?" and collapsed onto one dict key, so a
+        # whole board parsed as a single footprint (issue #78).
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+        if not ref_match:
+            ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
         reference = ref_match.group(1) if ref_match else "?"
 
         # Extract value (component part number or value)
@@ -1071,9 +1082,15 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             pintype_match = re.search(r'\(pintype\s+"([^"]*)"\)', pad_text)
             pintype = pintype_match.group(1) if pintype_match else ""
 
-            # Extract drill size for through-hole pads
-            drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
-            drill_size = float(drill_match.group(1)) if drill_match else 0.0
+            # Extract drill size for through-hole pads. Oval/slot drills are
+            # (drill oval w h); take max(w, h) so the pad keeps drill>0 (TH)
+            # semantics instead of being misread as SMD (issue #106).
+            oval_match = re.search(r'\(drill\s+oval\s+([\d.]+)\s+([\d.]+)', pad_text)
+            if oval_match:
+                drill_size = max(float(oval_match.group(1)), float(oval_match.group(2)))
+            else:
+                drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
+                drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
             # Extract roundrect_rratio for roundrect pads
             rratio_match = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', pad_text)
