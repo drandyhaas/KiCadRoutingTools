@@ -479,6 +479,39 @@ def validate_stub_endpoint_proximity(stub_p: StubInfo, stub_n: StubInfo, dest_la
     return True, ""
 
 
+def swap_would_orphan_smd_pad(pcb_data: PCBData, stub: StubInfo,
+                              dest_layer: str) -> Tuple[bool, str]:
+    """Check whether switching `stub` to dest_layer disconnects an SMD pad.
+
+    SMD pads exist on exactly one copper layer. The legacy logic assumed
+    stubs not on F.Cu "already have a via from pad to stub layer"
+    (needs_pad_via_for_switch) - true for through-hole pads and for the
+    F.Cu-pad case where apply adds a pad via, but false for a pad MOUNTED
+    on another layer: switching its stub away leaves the routes floating
+    over the pad with no via (issue #83, bitaxe B.Cu BM1366 fanout).
+
+    Returns (would_orphan, reason).
+    """
+    if stub.has_pad_via:
+        return False, ""
+    if stub.layer == 'F.Cu':
+        return False, ""  # apply_stub_layer_switch adds a pad via for F.Cu
+    for pad in pcb_data.pads_by_net.get(stub.net_id, []):
+        if (abs(pad.global_x - stub.pad_x) < STUB_POSITION_TOLERANCE and
+                abs(pad.global_y - stub.pad_y) < STUB_POSITION_TOLERANCE):
+            if pad.drill > 0:
+                return False, ""  # through-hole pad spans all layers
+            pad_copper = [l for l in (pad.layers or []) if l.endswith('.Cu')]
+            if '*.Cu' in (pad.layers or []):
+                return False, ""
+            if stub.layer in pad_copper and dest_layer not in pad_copper:
+                return True, (f"SMD pad {pad.component_ref}.{pad.pad_number} is on "
+                              f"{stub.layer} only - switching its stub to "
+                              f"{dest_layer} would disconnect it (no via at pad)")
+            return False, ""
+    return False, ""  # no pad at the recorded position - other checks decide
+
+
 def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                   all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
                   pcb_data: PCBData, config: GridRouteConfig,
@@ -506,6 +539,12 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     Returns:
         (is_valid, error_message)
     """
+    # Check 0: never orphan an SMD pad mounted on the stub's layer (issue #83)
+    for stub in (stub_p, stub_n):
+        orphans, orphan_reason = swap_would_orphan_smd_pad(pcb_data, stub, dest_layer)
+        if orphans:
+            return False, orphan_reason
+
     # Check 1: No overlap with other stubs on dest layer
     overlap_valid, overlap_reason = validate_stub_no_overlap(
         stub_p, stub_n, dest_layer, all_stubs_by_layer, pcb_data, swap_partner_name
@@ -776,6 +815,11 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     Returns:
         (is_valid, error_message)
     """
+    # Check 0: never orphan an SMD pad mounted on the stub's layer (issue #83)
+    orphans, orphan_reason = swap_would_orphan_smd_pad(pcb_data, stub, dest_layer)
+    if orphans:
+        return False, orphan_reason
+
     # Check 1: No overlap with other stubs on dest layer
     overlap_valid, overlap_reason = validate_single_stub_no_overlap(
         stub, dest_layer, all_stubs_by_layer, pcb_data, swap_partner_name, swap_partner_net_ids
