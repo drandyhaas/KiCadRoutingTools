@@ -92,6 +92,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
 
 
+def _write_passthrough_output(input_file: str, output_file: str) -> None:
+    """Write the output as an unchanged copy of the input (issue #86).
+
+    When routing produced nothing - no valid nets, or everything already
+    connected - the result is still representable: the board is unchanged.
+    Pipelines that chain output->input then keep working instead of dying on
+    a missing file. Skipped when output is the input (in-place).
+    """
+    import shutil
+    if not output_file or os.path.abspath(output_file) == os.path.abspath(input_file):
+        return
+    shutil.copyfile(input_file, output_file)
+    print(f"Wrote unchanged copy to {output_file} (nothing to route)")
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -351,6 +366,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("No valid nets to route!")
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+        _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
     net_ids, _ = filter_already_routed(pcb_data, net_ids, config)
@@ -358,6 +374,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("All nets are already fully connected - nothing to route!")
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+        _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output

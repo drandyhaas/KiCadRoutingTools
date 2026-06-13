@@ -865,7 +865,12 @@ def get_multipoint_net_pads(
     layer_map = build_layer_map(config.layers)
 
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    # Unnumbered pads (pad_number == "") are paste/thermal artifacts that KiCad
+    # does not netlist individually; they must not become routing targets or
+    # they show up as failed pads with component_ref '?' (issue #94). They are
+    # still copper, so they keep blocking via pcb_data.pads_by_net elsewhere.
+    net_pads = [p for p in pcb_data.pads_by_net.get(net_id, [])
+                if (p.pad_number or '').strip() != '']
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
     # Case 1: No segments and 3+ pads
