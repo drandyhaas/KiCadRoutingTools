@@ -1,18 +1,5 @@
 [
   {
-    "set": "replacement",
-    "repo": "antmicro/lpddr4-testbed",
-    "path": "lpddr4-testbed.kicad_pcb",
-    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set2/antmicro__lpddr4-testbed__lpddr4-testbed.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/antmicro/lpddr4-testbed/main/lpddr4-testbed.kicad_pcb",
-    "github_url": "https://github.com/antmicro/lpddr4-testbed",
-    "version": 20241229,
-    "size_kb": 5275,
-    "layers_est": 6,
-    "packages": "BGA,LPDDR4,diff-pairs,high-speed",
-    "note": "Antmicro LPDDR4 memory testbed; dense high-speed DDR routing (replaces dropped 6-layer spirit_cm5)"
-  },
-  {
     "set": "set2",
     "repo": "emard/ulx3s",
     "path": "ulx3s.kicad_pcb",

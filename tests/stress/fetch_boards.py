@@ -29,6 +29,7 @@ REPOS = [
     ("tillitis/tillitis-key1", "security key"),
     ("Ottercast/OtterCastAmp", "amplifier board"),
     ("psychogenic/riffpga", "FPGA board"),
+    ("antmicro/lpddr4-testbed", "6-layer BGA LPDDR4 - set-1 replacement for dropped spirit_cm5"),
 ]
 
 OUT = STRESS / "sources/github"

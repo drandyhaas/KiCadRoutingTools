@@ -12,7 +12,6 @@ mkdir -p "$STRESS/boards_unrouted_set2" "$STRESS/boards_set2"
 
 # name|source-filename-fragment|dest-dir
 MAP=(
-  "lpddr4_testbed|antmicro__lpddr4-testbed__|$STRESS/boards_unrouted"
   "ulx3s|emard__ulx3s__|$STRESS/boards_unrouted_set2"
   "cparti_fpga|AAWO__CPArti|$STRESS/boards_unrouted_set2"
   "butterstick|gregdavill__butterstick__|$STRESS/boards_unrouted_set2"

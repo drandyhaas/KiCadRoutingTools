@@ -87,26 +87,33 @@ truth for a manufacturable board; large gaps are router-improvement findings.
 Wired into RUNBOOK step 11b; output goes into the results JSON `comparison` /
 `suggestions` fields.
 
-## Set 2 corpus
+## Two 15-board sets
 
-A second corpus of 15 newer KiCad boards (+ a 6-layer replacement for the
-dropped `spirit_cm5`) lives under `$STRESS_DIR/sources/github_set2/` with a
-`manifest.json`. It adds FPGA/BGA boards (ulx3s, butterstick, cynthion, schoko,
-CPArti), DDR4/DDR5 test beds (antmicro), USB diff-pair boards (usb-sniffer,
-free-dap), QFN/QFP carriers (tinytapeout, caravel, system76, nitrokey), and
-simple keyboards (crkbd, sofle, lily58). Prepare it with:
+Both corpora are exactly **15 boards**:
+
+- **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
+  `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
+  (antmicro/lpddr4-testbed, 6-layer BGA LPDDR4). Boards live in
+  `boards_unrouted/`; results in `results/`; run-1 baseline in `results_baseline/`.
+- **Set 2** — 15 newer boards listed in `manifest_set2.json`, downloaded to
+  `$STRESS_DIR/sources/github_set2/`. FPGA/BGA (ulx3s, butterstick, cynthion,
+  schoko, CPArti), DDR4/DDR5 test beds (antmicro), USB diff-pair boards
+  (usb-sniffer, free-dap), QFN/QFP carriers (tinytapeout, caravel, system76,
+  nitrokey), simple keyboards (crkbd, sofle, lily58). Boards live in
+  `boards_unrouted_set2/`; results kept separate in `results_set2/`.
+
+Prepare set 2 (KiCad Python; loads each board once):
 
 ```bash
-$KIPY ... # via the driver, which loads each board once:
 bash prep_set2.sh    # -> boards_set2/ (normalized routed + .kicad_pro)
                      #    boards_unrouted_set2/ (stripped, to route)
-                     #    lpddr4_testbed replacement -> boards/ + boards_unrouted/
 ```
 
-`prep_set2.py <src> <routed_dst> <stripped_dst>` (KiCad Python) normalizes the
-routed reference and strips routing in a single load. Set-2 results are kept
-separate in `$STRESS_DIR/results_set2/`. ulx3s has no net classes anywhere, so
-derive its params by `measure_routing.py` on its routed reference.
+`prep_set2.py <src> <routed_dst> <stripped_dst>` normalizes the routed reference
+and strips routing in a single load. The `lpddr4_testbed` replacement is a SET-1
+board: prep it the same way into `boards/` + `boards_unrouted/`. ulx3s has no net
+classes anywhere, so derive its params via `measure_routing.py` on its routed
+reference.
 
 ## Parser workarounds baked into strip_routing.py
 
