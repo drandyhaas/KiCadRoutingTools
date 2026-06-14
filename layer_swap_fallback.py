@@ -135,7 +135,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
         and lists of vias/modifications applied (for tracking).
     """
     from stub_layer_switching import (get_stub_info, apply_stub_layer_switch,
-        validate_swap, collect_stubs_by_layer, collect_stub_endpoints_by_layer)
+        validate_swap, collect_stubs_by_layer, collect_stub_endpoints_by_layer,
+        check_segments_overlap)
     from diff_pair_routing import get_diff_pair_endpoints, route_diff_pair_with_obstacles
 
     # Get current endpoint info
@@ -217,6 +218,19 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
 
             if not valid:
                 print(f"    {side} swap to {candidate_layer}: {reason}")
+                continue
+
+            # validate_swap only sees diff-pair stubs, not already-ROUTED copper.
+            # On a congested board a pair routed earlier (e.g. via MPS ordering)
+            # can already occupy the fallback layer; swapping onto it would create
+            # a short - and because a failed swap is not reverted, that shorting
+            # stub is left behind in the output. Reject the candidate if the
+            # swapped stub would overlap any other net's copper already on it.
+            own_nets = {pair.p_net_id, pair.n_net_id, lookup_p_net_id, lookup_n_net_id}
+            dest_copper = [s for s in pcb_data.segments
+                           if s.layer == candidate_layer and s.net_id not in own_nets]
+            if check_segments_overlap(p_stub.segments + n_stub.segments, dest_copper):
+                print(f"    {side} swap to {candidate_layer}: overlaps existing copper on {candidate_layer}")
                 continue
 
             # Apply the swap
