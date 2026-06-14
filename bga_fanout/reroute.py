@@ -28,6 +28,194 @@ from bga_fanout.geometry import (
 )
 from bga_fanout.escape import get_alternate_channels_for_pad
 
+# Pad-aware obstacle checking (reuses obstacle_map.py) - imported lazily where
+# needed to avoid a hard dependency / import cycle at module import time.
+from obstacle_map import check_line_clearance
+
+
+def segments_clear_of_pads(segments: List[Dict],
+                           layer: str,
+                           obstacles,
+                           cfg,
+                           layer_map: Dict[str, int]) -> bool:
+    """Return True if every segment is clear of foreign-pad/track/via obstacles.
+
+    Each segment is a dict with 'start' and 'end' (x, y) tuples. The check is
+    done on `layer` using the shared obstacle map (which already encodes
+    foreign pads, existing copper and vias; through-hole pads block all layers).
+
+    If obstacles/cfg/layer_map are not provided (None), this is a no-op that
+    returns True so callers keep their previous behavior.
+    """
+    if obstacles is None or cfg is None or layer_map is None:
+        return True
+    layer_idx = layer_map.get(layer)
+    if layer_idx is None:
+        return True
+    for seg in segments:
+        (x1, y1) = seg['start']
+        (x2, y2) = seg['end']
+        if not check_line_clearance(obstacles, x1, y1, x2, y2, layer_idx, cfg):
+            return False
+    return True
+
+
+def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16) -> bool:
+    """True if the segment passes through pad's bounding box (sampled)."""
+    hx = pad.size_x / 2.0
+    hy = pad.size_y / 2.0
+    px, py = pad.global_x, pad.global_y
+    for t in range(samples + 1):
+        f = t / samples
+        x = x1 + (x2 - x1) * f
+        y = y1 + (y2 - y1) * f
+        if abs(x - px) <= hx and abs(y - py) <= hy:
+            return True
+    return False
+
+
+def segments_clear_of_foreign_pads(segments: List[Dict], layer: str, net_id: int,
+                                   foreign_pads, layer_map: Dict[str, int]) -> bool:
+    """True if no segment (on `layer`) crosses a foreign pad on another net."""
+    if not foreign_pads:
+        return True
+    for seg in segments:
+        (x1, y1) = seg['start']
+        (x2, y2) = seg['end']
+        for pad in foreign_pads:
+            if pad.net_id == net_id:
+                continue
+            th = pad.drill > 0
+            if not th and layer not in (pad.layers or []):
+                continue
+            if _seg_hits_pad(x1, y1, x2, y2, pad):
+                return False
+    return True
+
+
+def route_segments(route: 'FanoutRoute') -> List[Dict]:
+    """Enumerate the geometric segments of a route (pad -> ... -> jog_end).
+
+    Mirrors generate_tracks_from_routes' geometry so the obstacle check sees the
+    same copper that will be written. Returns a list of {'start','end'} dicts.
+    """
+    segs: List[Dict] = []
+
+    def add(a, b):
+        if a is None or b is None:
+            return
+        if abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9:
+            return
+        segs.append({'start': a, 'end': b})
+
+    if getattr(route, 'neighbor_connection', False):
+        add(route.pad_pos, route.exit_pos)
+        return segs
+
+    if route.channel_point:
+        # Half-edge inner pad tent shape
+        add(route.pad_pos, route.channel_point)
+        if route.channel_point2:
+            add(route.channel_point, route.channel_point2)
+            add(route.channel_point2, route.stub_end)
+        else:
+            add(route.channel_point, route.stub_end)
+        add(route.stub_end, route.exit_pos)
+    else:
+        add(route.pad_pos, route.stub_end)
+        if route.pre_channel_jog:
+            add(route.stub_end, route.pre_channel_jog)
+            add(route.pre_channel_jog, route.exit_pos)
+        else:
+            add(route.stub_end, route.exit_pos)
+
+    # Jog at exit
+    if route.jog_end:
+        if route.jog_extension:
+            add(route.exit_pos, route.jog_extension)
+            add(route.jog_extension, route.jog_end)
+        else:
+            add(route.exit_pos, route.jog_end)
+
+    return segs
+
+
+def _route_jog_clears_pads(route: 'FanoutRoute', obstacles, cfg,
+                           layer_map: Dict[str, int], foreign_pads) -> bool:
+    """True if dropping the exit jog tail makes the route pad-clear.
+
+    The 45 jog past the BGA exit is decorative (it does not affect
+    connectivity). When the ONLY pad crossing is in that tail, we can drop it
+    instead of moving/removing the whole route.
+    """
+    if route.jog_end is None:
+        return False  # nothing to drop
+    saved_end, saved_ext = route.jog_end, route.jog_extension
+    route.jog_end = None
+    route.jog_extension = None
+    try:
+        # Use the raw pad-overlap check (true short), consistent with the repair
+        # trigger - we only need the actual overlap gone, not full clearance.
+        segs = route_segments(route)
+        clear = segments_clear_of_foreign_pads(segs, route.layer, route.net_id,
+                                               foreign_pads, layer_map)
+    finally:
+        if not clear:
+            route.jog_end, route.jog_extension = saved_end, saved_ext
+    return clear
+
+
+def route_clear_of_foreign_pads(route: 'FanoutRoute',
+                                foreign_pads, layer_map: Dict[str, int]) -> bool:
+    """Geometric guard: True if no route segment crosses a foreign pad.
+
+    `foreign_pads` is a precomputed list of pads belonging to OTHER components
+    (not the BGA being fanned). This catches foreign pads that share a net with
+    a BGA ball - those are excluded from the shared obstacle map (their net is a
+    fanned net) yet a DIFFERENT net's stub must still not cross them. A pad is
+    only a blocker for a route on a different net. Through-hole pads block all
+    layers; SMD pads block only their own copper layers.
+    """
+    if not foreign_pads:
+        return True
+    layer = route.layer
+    for seg in route_segments(route):
+        (x1, y1) = seg['start']
+        (x2, y2) = seg['end']
+        for pad in foreign_pads:
+            if pad.net_id == route.net_id:
+                continue  # same net - allowed to touch
+            th = pad.drill > 0
+            if not th and layer not in (pad.layers or []):
+                continue
+            if _seg_hits_pad(x1, y1, x2, y2, pad):
+                return False
+    return True
+
+
+def route_clear_of_pads(route: 'FanoutRoute',
+                        obstacles,
+                        cfg,
+                        layer_map: Dict[str, int],
+                        foreign_pads=None) -> bool:
+    """Return True if the whole route is clear of foreign pads/copper/vias.
+
+    Checks every segment of the route on the route's own layer using the shared
+    obstacle map. A through-hole obstacle blocks all layers (already encoded in
+    the map). When `foreign_pads` is given, also applies a precise geometric
+    guard against foreign-component pads (catches foreign pads excluded from the
+    shared map because they share a net with a fanned BGA ball). No-op (True) if
+    obstacles/cfg/layer_map are None.
+    """
+    if obstacles is None or cfg is None or layer_map is None:
+        return True
+    if not segments_clear_of_pads(route_segments(route), route.layer,
+                                  obstacles, cfg, layer_map):
+        return False
+    if foreign_pads is not None and not route_clear_of_foreign_pads(route, foreign_pads, layer_map):
+        return False
+    return True
+
 
 def try_reroute_single_ended(route: 'FanoutRoute',
                               alternate_channel: Channel,
@@ -38,7 +226,11 @@ def try_reroute_single_ended(route: 'FanoutRoute',
                               available_layers: List[str],
                               track_width: float,
                               clearance: float,
-                              no_inner_top_layer: bool = False) -> Optional[Tuple['FanoutRoute', str]]:
+                              no_inner_top_layer: bool = False,
+                              obstacles=None,
+                              cfg=None,
+                              layer_map: Dict[str, int] = None,
+                              foreign_pads=None) -> Optional[Tuple['FanoutRoute', str]]:
     """
     Try rerouting a single-ended signal through an alternate channel.
 
@@ -98,6 +290,13 @@ def try_reroute_single_ended(route: 'FanoutRoute',
                 break
 
         if not has_collision:
+            # Reject candidate only if it would actually short a foreign pad
+            # (raw overlap, matching the DRC/checker). The clearance-padded map
+            # is intentionally NOT used as a hard reject here: doing so diverts
+            # legally-spaced candidates and cascades into worse layer choices.
+            if not segments_clear_of_foreign_pads(new_segments, layer, route.net_id,
+                                                  foreign_pads, layer_map):
+                continue
             # Found a collision-free route
             new_route = FanoutRoute(
                 pad=route.pad,
@@ -195,7 +394,11 @@ def try_jogged_route(route: 'FanoutRoute',
                      track_width: float,
                      clearance: float,
                      jog_length: float = None,
-                     no_inner_top_layer: bool = False) -> Optional[Tuple['FanoutRoute', str, List[Dict]]]:
+                     no_inner_top_layer: bool = False,
+                     obstacles=None,
+                     cfg=None,
+                     layer_map: Dict[str, int] = None,
+                     foreign_pads=None) -> Optional[Tuple['FanoutRoute', str, List[Dict]]]:
     """
     Try rerouting a signal through a farther channel using a jogged path.
 
@@ -282,6 +485,18 @@ def try_jogged_route(route: 'FanoutRoute',
                 break
 
         if not has_collision:
+            # Reject candidate if any segment (incl. exit jog) crosses a foreign
+            # pad / existing copper / via on this layer.
+            jog_end_check, _ = calculate_jog_end(
+                exit_pos, route.escape_dir, layer, available_layers, jog_length,
+                is_diff_pair=route.pair_id is not None,
+                is_outside_track=False, pair_spacing=0
+            )
+            check_segs = new_segments + [{'start': exit_pos, 'end': jog_end_check}]
+            # Reject only a true foreign-pad short (see try_reroute_single_ended).
+            if not segments_clear_of_foreign_pads(check_segs, layer, route.net_id,
+                                                  foreign_pads, layer_map):
+                continue
             # Calculate jog_end for the exit
             jog_end, _ = calculate_jog_end(
                 exit_pos,
@@ -423,7 +638,11 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                        channels: List[Channel] = None,
                        exit_margin: float = 0.5,
                        net_names: Dict[int, str] = None,
-                       no_inner_top_layer: bool = False) -> Tuple[int, List[str]]:
+                       no_inner_top_layer: bool = False,
+                       obstacles=None,
+                       cfg=None,
+                       layer_map: Dict[str, int] = None,
+                       foreign_pads=None) -> Tuple[int, List[str]]:
     """Try to resolve collisions by reassigning layers for colliding pairs.
 
     First tries layer reassignment. If that fails for single-ended signals,
@@ -524,7 +743,8 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         result = try_reroute_single_ended(
                             route, alt_channel, grid, exit_margin,
                             tracks, existing_tracks, available_layers,
-                            track_width, clearance, no_inner_top_layer
+                            track_width, clearance, no_inner_top_layer,
+                            None, None, None, None
                         )
                         if result:
                             new_route, new_layer = result
@@ -589,7 +809,8 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         result = try_jogged_route(
                             to_jog, farther_ch, grid, exit_margin,
                             tracks, existing_tracks, available_layers,
-                            track_width, clearance, None, no_inner_top_layer
+                            track_width, clearance, None, no_inner_top_layer,
+                            None, None, None, None
                         )
                         if result:
                             new_jogged_route, new_layer, new_jogged_tracks = result
@@ -630,7 +851,8 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                                 partner_result = try_jogged_route(
                                     partner, partner_ch, grid, exit_margin,
                                     tracks + new_jogged_tracks, existing_tracks, [new_layer],
-                                    track_width, clearance, None, no_inner_top_layer
+                                    track_width, clearance, None, no_inner_top_layer,
+                                    None, None, None, None
                                 )
                                 if partner_result is None:
                                     continue
@@ -675,7 +897,8 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                                 retry_result = try_reroute_single_ended(
                                     route, route.channel, grid, exit_margin,
                                     tracks, existing_tracks, available_layers,
-                                    track_width, clearance, no_inner_top_layer
+                                    track_width, clearance, no_inner_top_layer,
+                                    None, None, None, None
                                 )
                                 if retry_result:
                                     new_route, retry_layer = retry_result
@@ -722,3 +945,248 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
         print(f"  Rerouted {rerouted} signals to alternate channels")
 
     return reassigned + rerouted, failed_nets
+
+
+def _rebuild_track_for_route(tracks: List[Dict], route: 'FanoutRoute',
+                             track_width: float) -> None:
+    """Replace this route's tracks in `tracks` with freshly generated segments.
+
+    Removes existing track dicts for the route's net_id and re-adds segments
+    derived from the (possibly modified) route geometry on its current layer.
+    """
+    net_id = route.net_id
+    old = [i for i, t in enumerate(tracks) if t.get('net_id') == net_id]
+    for idx in sorted(old, reverse=True):
+        tracks.pop(idx)
+    for seg in route_segments(route):
+        tracks.append(create_track(seg['start'], seg['end'], track_width,
+                                   route.layer, net_id, route.pair_id))
+
+
+def _tracks_collision_free(segments: List[Dict], layer: str, net_id: int,
+                           pair_id, tracks: List[Dict],
+                           existing_tracks: List[Dict],
+                           min_spacing: float) -> bool:
+    """True if `segments` on `layer` clear all other-net tracks (new + existing)."""
+    all_other = [t for t in tracks if t.get('net_id') != net_id] + (existing_tracks or [])
+    for seg in segments:
+        for other in all_other:
+            if other['layer'] != layer:
+                continue
+            if other.get('net_id') == net_id:
+                continue
+            if pair_id and other.get('pair_id') == pair_id:
+                continue
+            if check_segment_collision(seg['start'], seg['end'],
+                                       other['start'], other['end'], min_spacing):
+                return False
+    return True
+
+
+def repair_pad_crossings(routes: List[FanoutRoute], tracks: List[Dict],
+                         available_layers: List[str], track_width: float,
+                         clearance: float, diff_pair_spacing: float,
+                         existing_tracks: List[Dict],
+                         grid: BGAGrid, channels: List[Channel],
+                         exit_margin: float, net_names: Dict[int, str],
+                         no_inner_top_layer: bool,
+                         obstacles, cfg, layer_map: Dict[str, int],
+                         foreign_pads=None) -> Tuple[int, List[str]]:
+    """Reroute fanout routes whose copper crosses a foreign pad/track/via.
+
+    Reuses the obstacle map: a route is "bad" if route_clear_of_pads is False.
+    Resolution order, reusing the existing jog/reroute machinery:
+      1. Move the route (and its diff-pair partner, kept on the same layer) to a
+         layer where it is both pad-clear and track-collision-free.
+      2. Single-ended only: try an alternate channel, then a jogged farther
+         channel (both helpers already reject pad-crossing candidates).
+    Routes that can't be made clear are removed and reported as failed.
+
+    Returns (num_repaired, list_of_failed_net_names).
+    """
+    if obstacles is None or cfg is None or layer_map is None:
+        return 0, []
+    if existing_tracks is None:
+        existing_tracks = []
+    if net_names is None:
+        net_names = {}
+
+    min_spacing = track_width + clearance
+    repaired = 0
+    failed_nets: List[str] = []
+
+    candidate_layers = available_layers
+    if no_inner_top_layer and len(available_layers) > 1:
+        candidate_layers = available_layers[1:]
+
+    # Group bad routes; handle each diff pair once (both legs together).
+    # TRIGGER on a true short (raw pad-overlap) only, matching the DRC/checker
+    # semantics. The clearance-padded obstacle map is used only to pick clean
+    # ALTERNATIVES (jog/reroute candidate avoidance) - using it as the trigger
+    # would drop legally-spaced routes that merely sit within clearance of a pad.
+    bad = [r for r in routes if not route_clear_of_foreign_pads(r, foreign_pads, layer_map)]
+    handled_pairs: Set[str] = set()
+
+    for route in list(bad):
+        if route not in routes:
+            continue  # already removed (e.g. as a partner)
+        pair_id = route.pair_id
+
+        # ---- Diff pair: try to move both legs to a clean shared layer ----
+        if pair_id is not None:
+            if pair_id in handled_pairs:
+                continue
+            handled_pairs.add(pair_id)
+            legs = [r for r in routes if r.pair_id == pair_id]
+            orig_layer = route.layer
+
+            # 0. Cheapest fix: drop the decorative exit jog on any leg whose only
+            #    crossing is that tail. If that clears the whole pair, done.
+            for leg in legs:
+                if not route_clear_of_foreign_pads(leg, foreign_pads, layer_map):
+                    _route_jog_clears_pads(leg, obstacles, cfg, layer_map, foreign_pads)
+            if all(route_clear_of_foreign_pads(leg, foreign_pads, layer_map)
+                   for leg in legs):
+                for leg in legs:
+                    _rebuild_track_for_route(tracks, leg, track_width)
+                repaired += 1
+                print(f"    Pad-aware: trimmed exit jog on diff pair {pair_id}")
+                continue
+
+            # Rank candidate layers: prefer those that also satisfy full
+            # clearance against the shared obstacle map (cleaner, fewer DRC
+            # nits), then fall back to layers that merely remove the true pad
+            # short and are track-collision-free.
+            def _pair_layer_ok(layer, strict):
+                for leg in legs:
+                    segs = route_segments(leg)
+                    if not segments_clear_of_foreign_pads(segs, layer, leg.net_id,
+                                                          foreign_pads, layer_map):
+                        return False
+                    if strict and not segments_clear_of_pads(segs, layer, obstacles,
+                                                             cfg, layer_map):
+                        return False
+                    if not _tracks_collision_free(segs, layer, leg.net_id, pair_id,
+                                                  tracks, existing_tracks, min_spacing):
+                        return False
+                return True
+
+            moved = False
+            for strict in (True, False):
+                for layer in candidate_layers:
+                    if layer == orig_layer:
+                        continue
+                    if _pair_layer_ok(layer, strict):
+                        for leg in legs:
+                            leg.layer = layer
+                            _rebuild_track_for_route(tracks, leg, track_width)
+                        moved = True
+                        repaired += 1
+                        print(f"    Pad-aware: moved diff pair {pair_id} to {layer}")
+                        break
+                if moved:
+                    break
+            if not moved:
+                for leg in legs:
+                    name = net_names.get(leg.net_id, f"net_{leg.net_id}")
+                    if name not in failed_nets:
+                        failed_nets.append(name)
+                    if leg in routes:
+                        routes.remove(leg)
+                    old = [i for i, t in enumerate(tracks) if t.get('net_id') == leg.net_id]
+                    for idx in sorted(old, reverse=True):
+                        tracks.pop(idx)
+                print(f"    Pad-aware FAILED: diff pair {pair_id} crosses a pad on all layers")
+            continue
+
+        # ---- Single-ended route ----
+        net_id = route.net_id
+        resolved = False
+
+        # 0. Cheapest fix: drop the decorative exit jog if that clears it.
+        if _route_jog_clears_pads(route, obstacles, cfg, layer_map, foreign_pads):
+            _rebuild_track_for_route(tracks, route, track_width)
+            repaired += 1
+            print(f"    Pad-aware: trimmed exit jog on {net_names.get(net_id, net_id)}")
+            continue
+
+        # 1. Layer swap on the same geometry. Prefer a layer that is also fully
+        #    clearance-clean against the shared obstacle map, else fall back to
+        #    one that just removes the true pad short + is collision-free.
+        orig_layer = route.layer
+        for strict in (True, False):
+            for layer in candidate_layers:
+                if layer == orig_layer:
+                    continue
+                segs = route_segments(route)
+                if not segments_clear_of_foreign_pads(segs, layer, net_id,
+                                                      foreign_pads, layer_map):
+                    continue
+                if strict and not segments_clear_of_pads(segs, layer, obstacles,
+                                                         cfg, layer_map):
+                    continue
+                if not _tracks_collision_free(segs, layer, net_id, None,
+                                              tracks, existing_tracks, min_spacing):
+                    continue
+                route.layer = layer
+                _rebuild_track_for_route(tracks, route, track_width)
+                resolved = True
+                repaired += 1
+                print(f"    Pad-aware: moved {net_names.get(net_id, net_id)} to {layer}")
+                break
+            if resolved:
+                break
+
+        # 2. Alternate channel (pad-aware helper).
+        if not resolved and route.channel is not None:
+            alt_channels = get_alternate_channels_for_pad(
+                route.pad_pos[0], route.pad_pos[1],
+                route.channel, route.escape_dir, channels)
+            for alt_channel in alt_channels:
+                result = try_reroute_single_ended(
+                    route, alt_channel, grid, exit_margin,
+                    tracks, existing_tracks, available_layers,
+                    track_width, clearance, no_inner_top_layer,
+                    obstacles, cfg, layer_map, foreign_pads)
+                if result:
+                    new_route, new_layer = result
+                    routes[routes.index(route)] = new_route
+                    route = new_route
+                    _rebuild_track_for_route(tracks, route, track_width)
+                    resolved = True
+                    repaired += 1
+                    print(f"    Pad-aware: rerouted {net_names.get(net_id, net_id)} "
+                          f"to alternate channel on {new_layer}")
+                    break
+
+        # 3. Jogged farther channel (pad-aware helper).
+        if not resolved and route.channel is not None:
+            farther_ch = get_farther_channel(route, channels, grid)
+            if farther_ch is not None:
+                result = try_jogged_route(
+                    route, farther_ch, grid, exit_margin,
+                    tracks, existing_tracks, available_layers,
+                    track_width, clearance, None, no_inner_top_layer,
+                    obstacles, cfg, layer_map, foreign_pads)
+                if result:
+                    new_route, new_layer, _ = result
+                    routes[routes.index(route)] = new_route
+                    route = new_route
+                    _rebuild_track_for_route(tracks, route, track_width)
+                    resolved = True
+                    repaired += 1
+                    print(f"    Pad-aware: jogged {net_names.get(net_id, net_id)} "
+                          f"to farther channel on {new_layer}")
+
+        # 4. Give up - remove and report.
+        if not resolved:
+            name = net_names.get(net_id, f"net_{net_id}")
+            failed_nets.append(name)
+            if route in routes:
+                routes.remove(route)
+            old = [i for i, t in enumerate(tracks) if t.get('net_id') == net_id]
+            for idx in sorted(old, reverse=True):
+                tracks.pop(idx)
+            print(f"    Pad-aware FAILED: {name} crosses a pad, no clear path")
+
+    return repaired, failed_nets

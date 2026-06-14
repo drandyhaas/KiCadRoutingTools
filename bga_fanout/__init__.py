@@ -49,7 +49,14 @@ from bga_fanout.escape import (
     find_diff_pair_escape,
     assign_pair_escapes,
 )
-from bga_fanout.reroute import find_existing_fanouts, resolve_collisions
+from bga_fanout.reroute import (
+    find_existing_fanouts,
+    resolve_collisions,
+    repair_pad_crossings,
+    route_clear_of_foreign_pads,
+)
+from obstacle_map import build_base_obstacle_map, build_layer_map
+from routing_config import GridRouteConfig
 from bga_fanout.collision import check_segment_collision
 from bga_fanout.diff_pair import find_differential_pairs
 from bga_fanout.tracks import (
@@ -1582,6 +1589,53 @@ def generate_bga_fanout(footprint: Footprint,
     elif use_adjacent_channels_v:
         print(f"  Using adjacent-channel routing for vertical escape (half_pair_spacing {half_pair_spacing:.3f}mm > max_offset_v {max_offset_v:.3f}mm)")
 
+    # Build a shared obstacle map (reuses obstacle_map.py) so fanout stubs avoid
+    # foreign component pads, existing copper, and vias. All fanned-out net_ids
+    # are passed as nets_to_route so their OWN pads/copper are NOT obstacles
+    # (a stub legitimately starts on its own ball), while every foreign pad,
+    # track and via IS an obstacle. extra_clearance=track_width/2 keeps the
+    # stub's edge (not just its centerline) off pads. Through-hole pads block
+    # all layers; SMD pads block their layer.
+    fanned_net_ids: Set[int] = set()
+    for pad in footprint.pads:
+        if not pad.net_name or pad.net_id == 0:
+            continue
+        if pad.net_name.lower().startswith('unconnected-'):
+            continue
+        if net_filter and not matches_net_filter(pad.net_name, net_filter):
+            continue
+        if check_for_previous and pad.net_id in fanned_out_nets:
+            continue
+        fanned_net_ids.add(pad.net_id)
+
+    obstacle_cfg = GridRouteConfig(
+        layers=list(layers),
+        track_width=track_width,
+        clearance=clearance,
+        via_size=via_size,
+        via_drill=via_drill,
+    )
+    obstacle_layer_map = build_layer_map(obstacle_cfg.layers)
+    print(f"  Building pad-aware obstacle map ({len(fanned_net_ids)} fanned nets excluded)...")
+    obstacles = build_base_obstacle_map(
+        pcb_data, obstacle_cfg,
+        nets_to_route=list(fanned_net_ids),
+        extra_clearance=track_width / 2,
+    )
+
+    # Foreign-component pads on copper layers. These supplement the shared map:
+    # a foreign pad that shares a net with a BGA ball is dropped from the map
+    # (its net is a fanned net) yet a DIFFERENT net's stub must still not cross
+    # it (e.g. C83.1 on Net-(C82-Pad1) vs the MIPI_D1_N stub). The per-route
+    # checks skip pads on the route's own net, so same-net taps stay legal.
+    bga_ref = footprint.reference
+    copper_layer_set = set(obstacle_cfg.layers)
+    foreign_pads = [
+        p for fp in pcb_data.footprints.values() if fp.reference != bga_ref
+        for p in fp.pads
+        if p.drill > 0 or any(l in copper_layer_set for l in (p.layers or []))
+    ]
+
     # Build routes - process differential pairs together
     def _run_pass(force_secondary_pairs):
         """Run one full route-build + collision-resolution pass.
@@ -1721,7 +1775,8 @@ def generate_bga_fanout(footprint: Footprint,
             # Build net_id -> net_name mapping for error reporting
             net_id_to_name = {r.net_id: r.pad.net_name for r in routes if r.pad.net_name}
             reassigned, failed_nets = resolve_collisions(routes, tracks, layers, track_width, clearance, diff_pair_gap,
-                                            existing_tracks, grid, channels, exit_margin, net_id_to_name, no_inner_top_layer)
+                                            existing_tracks, grid, channels, exit_margin, net_id_to_name, no_inner_top_layer,
+                                            obstacles, obstacle_cfg, obstacle_layer_map, foreign_pads)
 
             if failed_nets:
                 print(f"\n  ERROR: Failed to route {len(failed_nets)} net(s):")
@@ -1743,6 +1798,11 @@ def generate_bga_fanout(footprint: Footprint,
             rebalanced_count = rebalance_layers(routes, tracks, existing_tracks, layers, min_spacing)
             if rebalanced_count > 0:
                 print(f"  Rebalanced {rebalanced_count} routes for even layer distribution")
+
+        # NOTE: pad-aware repair runs ONCE on the selected best result (after the
+        # orthogonal re-escape retry loop below), not per-pass: repairing inside
+        # a pass would perturb that pass's Z-Z short count and steer the retry
+        # loop into worse layer choices.
 
         # Stats by layer
         layer_counts = defaultdict(int)
@@ -1796,7 +1856,32 @@ def generate_bga_fanout(footprint: Footprint,
             break  # nothing new to flip; further retries won't help
         forced_pairs |= zz_involved
 
-    tracks, vias_to_add, vias_to_remove, failed_nets, _routes = best_result
+    tracks, vias_to_add, vias_to_remove, failed_nets, best_routes = best_result
+
+    # Pad-aware repair pass (runs ONCE on the chosen best result). Reroutes any
+    # fanout stub whose copper crosses a foreign component pad - the obstacle map
+    # / foreign-pad list catch crossings the channel-based fanout would otherwise
+    # short across (e.g. MIPI_D1 stubs over C83.1). Reuses the same jog/reroute
+    # machinery as collision resolution.
+    failed_nets = list(failed_nets)
+    n_bad = sum(1 for r in best_routes
+                if not route_clear_of_foreign_pads(r, foreign_pads, obstacle_layer_map))
+    if n_bad > 0:
+        print(f"  Pad-aware check: {n_bad} route(s) cross a foreign pad; repairing...")
+        existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
+        net_id_to_name_all = {r.net_id: r.pad.net_name for r in best_routes if r.pad.net_name}
+        pad_repaired, pad_failed = repair_pad_crossings(
+            best_routes, tracks, layers, track_width, clearance, diff_pair_gap,
+            existing_tracks, grid, channels, exit_margin, net_id_to_name_all,
+            no_inner_top_layer, obstacles, obstacle_cfg, obstacle_layer_map, foreign_pads)
+        if pad_repaired:
+            print(f"  Pad-aware: repaired {pad_repaired} route(s)")
+        if pad_failed:
+            for nm in pad_failed:
+                if nm not in failed_nets:
+                    failed_nets.append(nm)
+            print(f"  Pad-aware: removed {len(pad_failed)} unroutable net(s): {pad_failed}")
+
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
