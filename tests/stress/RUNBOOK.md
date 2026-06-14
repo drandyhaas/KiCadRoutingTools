@@ -4,6 +4,18 @@ You are stress-testing the KiCadRoutingTools autorouter on one real-world
 open-source board. Follow the plan-pcb-routing skill methodology
 non-interactively and record everything.
 
+## Orchestration (parent driving several boards at once)
+
+If you are the PARENT running multiple board agents in parallel (not a single
+board agent), do NOT rely solely on completion notifications — they can be
+dropped or arrive stale/duplicated. POLL liveness about every 5 minutes:
+`ls results_<set>/*.json` (which boards have written results) and
+`pgrep -fl "route.py|bga_fanout|route_planes|route_diff|qfn_fanout"` (what is
+actually still running). If a board has neither a result nor a live process, its
+agent died silently or its notification was lost — relaunch it. Use this poll
+(not the notification stream) as the source of truth for refilling the
+concurrency slots and for deciding when the set is complete.
+
 ## Paths
 
 - Tools repo (READ-ONLY — never write/modify anything here):

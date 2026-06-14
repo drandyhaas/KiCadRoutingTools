@@ -51,6 +51,10 @@ Operational limits (learned the hard way):
 - Background subagents are killed after ~600 s with no streamed output, so run
   any command expected to exceed ~5 min in the background and poll it in
   short, separate steps rather than one long blocking call.
+- When orchestrating several boards in parallel, poll liveness ~every 5 min
+  (`ls results_<set>/*.json` + `pgrep -fl route.py`) — completion notifications
+  can be dropped or arrive stale, so treat the poll as the source of truth and
+  relaunch any board with neither a result nor a live process.
 
 ## Routing-constraint validation (what params to route with)
 
