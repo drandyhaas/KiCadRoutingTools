@@ -44,6 +44,7 @@ def get_dialog_settings(dialog):
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
+        'rip_existing_nets': dialog.rip_existing_nets_ctrl.GetValue(),
         'layer_costs': dialog.layer_costs_ctrl.GetValue(),
 
         # Advanced parameters
@@ -257,6 +258,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.power_widths_ctrl.SetValue(settings['power_widths'])
     if 'no_bga_zones' in settings:
         dialog.no_bga_zones_ctrl.SetValue(settings['no_bga_zones'])
+    if 'rip_existing_nets' in settings:
+        dialog.rip_existing_nets_ctrl.SetValue(settings['rip_existing_nets'])
     if 'layer_costs' in settings:
         dialog.layer_costs_ctrl.SetValue(settings['layer_costs'])
 
