@@ -117,7 +117,11 @@ For each distinct finding:
    excerpt, and severity (router-correctness > parser-robustness >
    route-quality > workflow-friction).
 3. **Present all drafts to the user and get approval BEFORE creating any
-   issue.** File only approved ones with `gh issue create`.
+   issue.** File only approved ones with `gh issue create`, and **always apply
+   a label** (`--label`): `bug` for correctness/robustness/DRC defects,
+   `enhancement` for new features or route-quality improvements (`documentation`
+   / `question` when apt). When commenting on or reopening an existing issue,
+   add a label too if it has none.
 
 Known findings already on record (do not re-file — search/comment, or reopen if
 closed-and-refound, per the state rule above).
