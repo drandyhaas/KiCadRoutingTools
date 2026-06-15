@@ -21,9 +21,14 @@ The router recognizes common differential pair naming conventions:
 | Convention | Example P | Example N |
 |------------|-----------|-----------|
 | `_P` / `_N` suffix | `LVDS_CLK_P` | `LVDS_CLK_N` |
-| `_t` / `_c` suffix | `DQS0_t_A` | `DQS0_c_A` |
+| `_t` / `_c` suffix (case-insensitive) | `DQS0_t_A`, `CK_T` | `DQS0_c_A`, `CK_C` |
+| `_tX` / `_cX` (no-separator channel) | `DQS0_TA` | `DQS0_CA` |
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
+| `DP` / `DM`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DPLUS` | `USB_DM`, `USB_DMINUS` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
+
+KiCad auto-named nets such as `Net-(U12-USB_D+)` / `Net-(U12-USB_D-)` are
+recognized too: the wrapping `Net-(…)` is peeled before the suffix is matched.
 
 Pairing is suffix-style aware: nets only pair when both use the **same**
 convention. For example `/CLK+` pairs with `/CLK-` but never with an unrelated

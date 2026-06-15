@@ -79,8 +79,13 @@ name. Recognized suffix conventions:
 | `_P` / `_N` | `LVDS0_P`, `LVDS0_N` |
 | `P` / `N` (no underscore) | `CLKP`, `CLKN` |
 | `+` / `-` | `USB+`, `USB-` |
-| `_t` / `_c` (DDR true/complement) | `DQS0_t`, `DQS0_c` |
+| `_t` / `_c` (DDR true/complement, case-insensitive) | `DQS0_t`, `DQS0_c`, `CK_T`, `CK_C` |
 | `_t_X` / `_c_X` (with channel suffix) | `DQS0_t_A`, `DQS0_c_A` |
+| `_tX` / `_cX` (no-separator channel) | `DQS0_TA`, `DQS0_CA` |
+| `DP` / `DM`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DM` |
+
+KiCad's `Net-(<ref>-<pin>)` auto-names are unwrapped first, so a buried suffix
+like `Net-(U12-USB_D+)` / `Net-(U12-USB_D-)` still pairs.
 
 Nets only pair **within the same suffix style**: `CLK+` will never pair with
 an unrelated `CLK_N`. Only complete pairs (both sides found) are returned;

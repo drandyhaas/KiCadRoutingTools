@@ -141,39 +141,31 @@ def print_design_rules(pcb_path):
 
 
 def find_differential_pairs(pcb_data):
-    """Find differential pairs based on common naming conventions."""
+    """Find differential pairs based on common naming conventions.
+
+    Delegates to net_queries.extract_diff_pair_base so this report and the
+    route_diff/fanout engines recognize the exact same conventions (issue #91:
+    DDR _t/_c case + no-separator channels, USB DP/DM and DPLUS/DMINUS).
+    """
+    from net_queries import extract_diff_pair_base
+
     net_names = [n.name for n in pcb_data.nets.values() if n.name]
 
-    diff_patterns = [
-        ('_P', '_N'),      # USB, PCIe, generic
-        ('_p', '_n'),      # lowercase variant
-        ('+', '-'),        # Some designs
-        ('_DP', '_DN'),    # USB data
-        ('_D+', '_D-'),    # USB alternate
-        ('_TX+', '_TX-'),  # Ethernet TX
-        ('_RX+', '_RX-'),  # Ethernet RX
-        ('_TXP', '_TXN'),  # High-speed serial
-        ('_RXP', '_RXN'),  # High-speed serial
-        ('_t', '_c'),      # DDR DQS (true/complement)
-        ('_T', '_C'),      # DDR DQS uppercase
-    ]
+    # Key by (base, style) so a net only pairs within its own convention.
+    halves = {}  # (base, style) -> {True: pos_name, False: neg_name}
+    for name in net_names:
+        result = extract_diff_pair_base(name)
+        if result is None:
+            continue
+        base, is_pos, style = result
+        halves.setdefault((base, style), {})[is_pos] = name
 
     found_pairs = []
-    used_nets = set()
+    for (base, style), sides in halves.items():
+        if True in sides and False in sides:
+            found_pairs.append((sides[True], sides[False]))
 
-    for name in sorted(net_names):
-        if name in used_nets:
-            continue
-        for pos, neg in diff_patterns:
-            if name.endswith(pos):
-                base = name[:-len(pos)]
-                pair_name = base + neg
-                if pair_name in net_names and pair_name not in used_nets:
-                    found_pairs.append((name, pair_name))
-                    used_nets.add(name)
-                    used_nets.add(pair_name)
-                    break
-
+    found_pairs.sort()
     return found_pairs
 
 
