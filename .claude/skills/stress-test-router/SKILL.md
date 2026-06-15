@@ -102,9 +102,16 @@ stubs, wall time, issue count. Flag:
 
 For each distinct finding:
 
-1. Search for an existing issue first:
-   `gh issue list --search "<keywords>" --state all` — skip duplicates
-   (comment on the existing issue instead if there's new evidence).
+1. Search for an existing issue first
+   (`gh issue list --search "<keywords>" --state all`), then act by **state**:
+   - **Open, same root cause** → don't re-file; add a comment with the new
+     evidence (affected boards + numbers + run date).
+   - **Closed and the bug RECURRED** → **reopen it** (`gh issue reopen <n>`) and
+     add an updated comment with the fresh evidence. A refound closed issue means
+     the fix regressed or was insufficient — reopen, never file a duplicate.
+   - **Closed but only an *adjacent* new bug** (the original fix still holds) →
+     file a NEW issue (or comment on the closed one) and say so explicitly.
+   - **No match** → draft a new issue (step 2).
 2. Draft: title, affected boards, reproduction command (exact tool
    invocation against the corpus board), observed vs expected, relevant log
    excerpt, and severity (router-correctness > parser-robustness >
@@ -112,8 +119,10 @@ For each distinct finding:
 3. **Present all drafts to the user and get approval BEFORE creating any
    issue.** File only approved ones with `gh issue create`.
 
-Known findings already on record (do not re-file — search/comment instead).
-Now FIXED (re-file only as a regression, with a repro): power-type copper
+Known findings already on record (do not re-file — search/comment, or reopen if
+closed-and-refound, per the state rule above).
+Now FIXED (if refound, REOPEN with a repro/evidence comment — do NOT file a new
+one): power-type copper
 layers dropped (#76), Edge.Cuts regex cross-match (#77), KiCad 6/7
 fp_text-reference collapse (#78), oval/slot drills read as SMD (#106),
 multipoint `route_multipoint_main` UnboundLocalError on free-end-less nets.
