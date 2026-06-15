@@ -29,16 +29,61 @@ Robust signals:
 - LOST (relaunch): no results JSON AND `pgrep -f "runs_<set>/<board>"` empty AND
   run dir idle ~15+ min (well past the 20-min/command cap).
 
+### Driving the run (concrete recipe that survives context resets)
+
+Mechanism that has worked well for the full 30-board corpus (15 set-1 +
+15 set-2):
+
+- ONE background subagent per board (the harness `Agent` tool with
+  `run_in_background: true`). Each agent's prompt names the board, its SET,
+  and the four set-specific paths (input / run dir / original / results
+  JSON), and tells it to read this RUNBOOK first. Keep at most **4 in
+  flight** (the documented concurrency cap; see Rule 1).
+- DERIVE state from disk, never from tracked agent IDs — agent IDs are lost
+  when the parent's context is summarized, but disk is authoritative. A
+  board is DONE if its results JSON exists, RUNNING if
+  `pgrep -f "runs[_set2]/<board>"` matches, else TODO. A tiny status script
+  that classifies all 30 this way (and prints `free slots = 4 - running`)
+  lets any fresh parent instance pick the run back up cold. Put it in the
+  job tmp dir, not the repo.
+- REFILL on each completion notification (and as a backstop, on the ~5-min
+  poll): recompute DONE/RUNNING/TODO from disk and launch enough new board
+  agents to bring RUNNING back up to 4, pulling from the TODO list.
+- ORDER the queue to keep ~2 heavy + 2 light boards in flight at once (heavy
+  = dense 4-layer / many pads / BGA fanout; light = small 2-layer). Four
+  heavy boards at once is the worst case for the 4 GB-per-job RAM cap.
+- The PARENT may end its turn between refills — background subagents are
+  harness-tracked and you are re-invoked on completion. This is the opposite
+  of the per-board rule (Rule 12): a *board agent* must never end its turn
+  while its own routing command runs.
+
+### Clean restart (re-run the whole corpus from scratch)
+
+Don't delete prior results — archive them. Move `results/`, `results_set2/`,
+`runs/`, `runs_set2/` to `*_archive_<timestamp>/`, then recreate the four as
+empty dirs. The originals (`boards/`, `boards_set2/`) and the stripped
+inputs (`boards_unrouted/`, `boards_unrouted_set2/`) are never touched. Also
+sweep stray top-level `runs_*T0*` temp files. After that, the status script
+reports 0/30 DONE and the recipe above drives the rest.
+
 ## Paths
+
+Two corpora share this harness; pick the SET's paths and stay consistent
+within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
+
 
 - Tools repo (READ-ONLY — never write/modify anything here):
   `/Users/andy/Documents/KiCadRoutingTools`
 - Skill to follow:
   `/Users/andy/Documents/KiCadRoutingTools/.claude/skills/plan-pcb-routing/SKILL.md`
-- Input board: `~/Documents/kicad_stress_test/boards_unrouted/<BOARD>.kicad_pcb`
-- Your working dir (create it): `~/Documents/kicad_stress_test/runs/<BOARD>/`
+- Input board: `~/Documents/kicad_stress_test/boards_unrouted<SET>/<BOARD>.kicad_pcb`
+- Your working dir (create it): `~/Documents/kicad_stress_test/runs<SET>/<BOARD>/`
   ALL outputs, intermediates, and logs go here (NOT /tmp — parallel runs collide).
-- Final results JSON: `~/Documents/kicad_stress_test/results/<BOARD>.json`
+- Original (compare + ground-truth DRC): `~/Documents/kicad_stress_test/boards<SET>/<BOARD>.kicad_pcb`
+- Final results JSON: `~/Documents/kicad_stress_test/results<SET>/<BOARD>.json`
+
+  (set 1 → `boards_unrouted/`, `runs/`, `boards/`, `results/`;
+   set 2 → `boards_unrouted_set2/`, `runs_set2/`, `boards_set2/`, `results_set2/`)
 
 ## Rules
 
