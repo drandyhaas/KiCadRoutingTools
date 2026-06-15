@@ -77,8 +77,8 @@ machine before):
 To drive by hand instead, spawn one general-purpose subagent per board without a
 fresh results JSON, keeping ~4 in flight and refilling off `stress_status.sh`:
 
-> Read $STRESS_DIR/RUNBOOK.md (fall back to tests/stress/RUNBOOK.md) and
-> execute it for BOARD=<name> (<one-line complexity hint>). Follow the runbook
+> Read tests/stress/RUNBOOK.md (in the tools repo — the single source of truth)
+> and execute it for BOARD=<name> (<one-line complexity hint>). Follow the runbook
 > exactly: analyze per the plan-pcb-routing skill, route with the repo's tools,
 > verify, and write $STRESS_DIR/results[_set2]/<name>.json. Never modify the
 > tools repo.
