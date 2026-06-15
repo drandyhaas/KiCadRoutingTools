@@ -398,10 +398,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_stubs_by_layer = {}
     stub_endpoints_by_layer = {}
     if enable_layer_switch and diff_pair_ids_to_route_set:
+        # Probe obstacle map so a bare-pad target swap can fan onto an OPEN
+        # launch layer rather than blindly the source layer (issue #121: lpddr4
+        # DQ_S0's target was fanned to B.Cu, which is 100% blocked by a connector
+        # pad wall, while the inner layers right there were empty).
+        _swap_probe_clearance = (config.track_width + config.diff_pair_gap) / 2
+        swap_probe_obstacles = build_base_obstacle_map(
+            pcb_data, config, [nid for _, nid in net_ids], _swap_probe_clearance)
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
-            all_swap_segments=all_swap_segments
+            all_swap_segments=all_swap_segments, probe_obstacles=swap_probe_obstacles
         )
 
     # Add stub swap vias to pcb_data so routing and length matching see them as obstacles

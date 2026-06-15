@@ -172,10 +172,11 @@ class GridRouteConfig:
         Returns costs scaled by 1000 (1000 = 1.0x, 1500 = 1.5x penalty).
         If layer_costs is empty or shorter than layers list, uses 1000 (1.0x) for missing layers.
         """
+        layer_costs = self.layer_costs or []  # may be None when set explicitly
         costs = []
         for i in range(len(self.layers)):
-            if i < len(self.layer_costs):
-                costs.append(int(self.layer_costs[i] * 1000))
+            if i < len(layer_costs):
+                costs.append(int(layer_costs[i] * 1000))
             else:
                 costs.append(1000)  # Default 1.0x
         return costs

@@ -134,7 +134,8 @@ def apply_diff_pair_layer_swaps(
     all_segment_modifications: List,
     all_swap_vias: List,
     verbose: bool = False,
-    all_swap_segments: Optional[List] = None
+    all_swap_segments: Optional[List] = None,
+    probe_obstacles=None
 ) -> Tuple[int, Dict, Dict]:
     """
     Apply upfront layer swap optimization for diff pairs.
@@ -627,29 +628,44 @@ def apply_diff_pair_layer_swaps(
                 # right way for the launcher.
                 src_cx = (sources[0][5] + sources[0][7]) / 2
                 src_cy = (sources[0][6] + sources[0][8]) / 2
+                # Fan onto the most-open layer around the target (non-plane first)
+                # rather than blindly src_layer, which can be fully blocked by a
+                # connector pad wall while inner layers are open (issue #121).
+                fan_layer = src_layer
+                if probe_obstacles is not None:
+                    from layer_swap_fallback import rank_fallback_layers
+                    tgt_cx = (p_tgt_x + n_tgt_x) / 2
+                    tgt_cy = (p_tgt_y + n_tgt_y) / 2
+                    ranked = rank_fallback_layers(
+                        config, pcb_data, probe_obstacles, tgt_cx, tgt_cy, tgt_layer)
+                    if ranked:
+                        fan_layer = ranked[0]
+                        if fan_layer != src_layer:
+                            print(f"    Bare-pad target launch layer: {fan_layer} "
+                                  f"(most open; src is {src_layer})")
                 via_p, stub_p = apply_bare_pad_target_via(
-                    pcb_data, pair.p_net_id, p_tgt_x, p_tgt_y, src_layer,
+                    pcb_data, pair.p_net_id, p_tgt_x, p_tgt_y, fan_layer,
                     src_cx, src_cy, config)
                 via_n, stub_n = apply_bare_pad_target_via(
-                    pcb_data, pair.n_net_id, n_tgt_x, n_tgt_y, src_layer,
+                    pcb_data, pair.n_net_id, n_tgt_x, n_tgt_y, fan_layer,
                     src_cx, src_cy, config)
                 all_swap_vias.extend([via_p, via_n])
                 all_swap_segments.extend([stub_p, stub_n])
 
-                # Register the new inner-layer stubs so later swap validation sees them.
-                if src_layer not in all_stubs_by_layer:
-                    all_stubs_by_layer[src_layer] = []
-                all_stubs_by_layer[src_layer].append((pair_name, [stub_p, stub_n]))
-                if src_layer not in stub_endpoints_by_layer:
-                    stub_endpoints_by_layer[src_layer] = []
-                stub_endpoints_by_layer[src_layer].append(
+                # Register the new stubs (on fan_layer) so later swap validation sees them.
+                if fan_layer not in all_stubs_by_layer:
+                    all_stubs_by_layer[fan_layer] = []
+                all_stubs_by_layer[fan_layer].append((pair_name, [stub_p, stub_n]))
+                if fan_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[fan_layer] = []
+                stub_endpoints_by_layer[fan_layer].append(
                     (pair_name, [(stub_p.end_x, stub_p.end_y), (stub_n.end_x, stub_n.end_y)])
                 )
 
                 applied_swaps.add(pair_name)
                 solo_switch_count += 1
                 total_layer_swaps += 1
-                print(f"  Bare-pad target swap: {pair_name} ({tgt_layer} pad -> {src_layer} stub), added 2 pad via(s)")
+                print(f"  Bare-pad target swap: {pair_name} ({tgt_layer} pad -> {fan_layer} stub), added 2 pad via(s)")
                 continue
 
             missing = []
