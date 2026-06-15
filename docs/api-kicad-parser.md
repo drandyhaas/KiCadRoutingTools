@@ -269,8 +269,13 @@ auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.5)
 ```
 
 Classification uses the footprint name first, then pad arrangement (grid vs
-perimeter) and pad shapes. The exclusion zones feed
-`GridRouteConfig.bga_exclusion_zones` to keep vias out from under BGAs.
+perimeter) and pad shapes. The geometry path only declares `BGA` for a genuine
+ball/pin matrix: >=16 pads, near-uniform pad size, and >=3 rows *and* >=3
+columns each holding several pads. That last test rejects wide-pitch
+through-hole headers (e.g. a 2-row `RPi_Pico_SMD_TH`) and connector arrays,
+which are otherwise uniform-size but only one or two columns wide (issue #82).
+The exclusion zones feed `GridRouteConfig.bga_exclusion_zones` to keep vias out
+from under BGAs.
 
 ```python
 from kicad_parser import (parse_kicad_pcb, find_components_by_type,

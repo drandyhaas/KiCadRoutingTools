@@ -2251,11 +2251,19 @@ def get_nets_to_route(pcb_data: PCBData,
 
 def _is_ball_grid(pads) -> bool:
     """Gate for geometry-based BGA classification: only a genuine ball/pin grid
-    qualifies — enough pads and near-uniform pad size. Guards against
-    keyswitches, SMD diode pairs, thermal-via exposed pads, and connector
-    arrays being classified as BGAs and walled off behind exclusion zones
-    (issue #82). BGA/PGA balls are identical; the false positives all mix pad
-    sizes (switch pins + stabilizer holes, EP via grid + perimeter pads).
+    qualifies — enough pads, near-uniform pad size, AND a true 2-D matrix.
+    Guards against keyswitches, SMD diode pairs, thermal-via exposed pads, and
+    connector arrays being classified as BGAs and walled off behind exclusion
+    zones (issue #82). BGA/PGA balls are identical; the size-mix false positives
+    (switch pins + stabilizer holes, EP via grid + perimeter pads) fail the
+    uniform-size test.
+
+    The matrix test additionally rejects wide-pitch through-hole *headers* —
+    e.g. the 2-row RPi_Pico_SMD_TH, which is uniform-size but only two columns
+    wide (issue #82, set-2 reopen). A real array fills >=3 rows AND >=3 columns
+    with several pads each; a 2-row header's columns are deep but it has only
+    two of them, and a 1-/2-row header's rows hold just 1-2 pads. Pad-local
+    coordinates are used so the test is independent of placement rotation.
     """
     if len(pads) < 16:
         return False
@@ -2263,7 +2271,24 @@ def _is_ball_grid(pads) -> bool:
     for p in pads:
         key = (round(p.size_x, 2), round(p.size_y, 2))
         size_counts[key] = size_counts.get(key, 0) + 1
-    return max(size_counts.values()) >= 0.9 * len(pads)
+    dominant_size, dominant_n = max(size_counts.items(), key=lambda kv: kv[1])
+    if dominant_n < 0.9 * len(pads):
+        return False
+
+    # Among the uniform pads, count rows/columns that hold >=3 pads. A genuine
+    # ball/pin array populates several of each; a pin header does not.
+    uniform = [p for p in pads
+               if (round(p.size_x, 2), round(p.size_y, 2)) == dominant_size]
+    row_counts = {}
+    col_counts = {}
+    for p in uniform:
+        ry = round(p.local_y, 2)
+        rx = round(p.local_x, 2)
+        row_counts[ry] = row_counts.get(ry, 0) + 1
+        col_counts[rx] = col_counts.get(rx, 0) + 1
+    populated_rows = sum(1 for n in row_counts.values() if n >= 3)
+    populated_cols = sum(1 for n in col_counts.values() if n >= 3)
+    return populated_rows >= 3 and populated_cols >= 3
 
 
 def detect_package_type(footprint: Footprint) -> str:
