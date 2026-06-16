@@ -599,6 +599,75 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
             nm = net.name if net else f"net {v.net_id}"
             return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
                            f"{nm} via (gap {d - via_r - v.size/2:.3f}mm)")
+    # Foreign pads on any copper layer - the barrel passes through all of them
+    # (e.g. a bare-pad/launch via dropped next to a connector's adjacent pin).
+    for pnid, plist in pcb_data.pads_by_net.items():
+        if pnid in exclude:
+            continue
+        for pad in plist:
+            if not any(l.endswith('.Cu') for l in (pad.layers or [])):
+                continue
+            if abs(pad.global_x - pad_x) > 2.0 or abs(pad.global_y - pad_y) > 2.0:
+                continue
+            dx = max(abs(pad_x - pad.global_x) - pad.size_x / 2, 0.0)
+            dy = max(abs(pad_y - pad.global_y) - pad.size_y / 2, 0.0)
+            d = math.hypot(dx, dy)
+            if d < via_r + config.clearance:
+                net = pcb_data.nets.get(pnid)
+                nm = net.name if net else f"net {pnid}"
+                return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
+                               f"{nm} pad {pad.component_ref}.{pad.pad_number} (gap {d:.3f}mm)")
+    return True, ""
+
+
+def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id: int,
+                               pcb_data: PCBData, config: GridRouteConfig,
+                               exclude_net_ids: Set[int]) -> Tuple[bool, str]:
+    """Check stub segments moved onto dest_layer clear other-net pads on that layer.
+
+    The validators already test stub-vs-segment overlap on the destination layer,
+    but a stub swapped onto a layer can also land within clearance of another
+    net's PAD living on that layer (issue #123: a serdes escape stub swapped from
+    F.Cu to B.Cu grazed an adjacent diff partner's B.Cu AC-coupling cap pad). SMD
+    pads only block their own layer, so this only bites on the swap's destination
+    layer. Own net and the swap partner's nets are excluded.
+
+    Returns (clear, reason).
+    """
+    exclude = set(exclude_net_ids) | {net_id}
+    clear_dist = config.track_width / 2 + config.clearance
+    step = max(config.grid_step / 2, 0.02)
+    for seg in segments:
+        x1, y1, x2, y2 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
+        seg_len = math.hypot(x2 - x1, y2 - y1)
+        n = max(2, int(seg_len / step) + 1)
+        bminx, bmaxx = min(x1, x2) - 1.5, max(x1, x2) + 1.5
+        bminy, bmaxy = min(y1, y2) - 1.5, max(y1, y2) + 1.5
+        for pnid, plist in pcb_data.pads_by_net.items():
+            if pnid in exclude:
+                continue
+            for pad in plist:
+                layers = pad.layers or []
+                if dest_layer not in layers and '*.Cu' not in layers:
+                    continue
+                if not (bminx <= pad.global_x <= bmaxx and bminy <= pad.global_y <= bmaxy):
+                    continue
+                hx, hy = pad.size_x / 2, pad.size_y / 2
+                # min distance from the (sampled) segment to the pad rectangle
+                best = float('inf')
+                for i in range(n + 1):
+                    t = i / n
+                    qx, qy = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+                    dx = max(abs(qx - pad.global_x) - hx, 0.0)
+                    dy = max(abs(qy - pad.global_y) - hy, 0.0)
+                    d = math.hypot(dx, dy)
+                    if d < best:
+                        best = d
+                if best < clear_dist:
+                    net = pcb_data.nets.get(pnid)
+                    nm = net.name if net else f"net {pnid}"
+                    return False, (f"stub on {dest_layer} would graze {nm} pad "
+                                   f"{pad.component_ref}.{pad.pad_number} (gap {best:.3f}mm)")
     return True, ""
 
 
@@ -668,6 +737,15 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                 stub.pad_x, stub.pad_y, stub.net_id, pcb_data, config, via_exclude)
             if not via_clear:
                 return False, via_reason
+
+    # Check 5: the stub copper moved onto dest_layer must clear other-net pads
+    # living on that layer (issue #123: escape stub swapped onto a cap pad's
+    # layer grazed the pad).
+    for stub in (stub_p, stub_n):
+        pad_clear, pad_reason = stub_clear_of_foreign_pads(
+            stub.segments, dest_layer, stub.net_id, pcb_data, config, via_exclude)
+        if not pad_clear:
+            return False, pad_reason
 
     return True, ""
 
@@ -943,6 +1021,14 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
             set(swap_partner_net_ids or set()))
         if not via_clear:
             return False, via_reason
+
+    # Check 4: stub copper moved onto dest_layer must clear other-net pads on
+    # that layer (issue #123: escape stub swapped onto a cap pad's layer).
+    pad_clear, pad_reason = stub_clear_of_foreign_pads(
+        stub.segments, dest_layer, stub.net_id, pcb_data, config,
+        set(swap_partner_net_ids or set()))
+    if not pad_clear:
+        return False, pad_reason
 
     return True, ""
 
