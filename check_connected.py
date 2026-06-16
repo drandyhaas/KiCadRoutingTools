@@ -183,6 +183,26 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
     return len({find(i) for i in range(len(pads))}) == 1
 
 
+def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
+    """True if (px, py) lies within `pad`'s copper outline (+margin).
+
+    Handles pad rotation; circle/oval by radius, everything else as a rectangle
+    (roundrect corners are treated as square, which is fine for a via-in-pad
+    membership test). Used to credit an offset via-in-pad as connected (#89)."""
+    dx = px - pad.global_x
+    dy = py - pad.global_y
+    rot = math.radians(pad.rotation or 0.0)
+    c, s = math.cos(-rot), math.sin(-rot)
+    lx = dx * c - dy * s
+    ly = dx * s + dy * c
+    hx = pad.size_x / 2 + margin
+    hy = pad.size_y / 2 + margin
+    if pad.shape == 'circle':
+        r = pad.size_x / 2 + margin
+        return lx * lx + ly * ly <= r * r
+    return abs(lx) <= hx and abs(ly) <= hy
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
@@ -267,6 +287,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         uf.union(start_id, end_id)
 
     # Add vias - they connect all layers at one location
+    via_repr_id = {}        # via_idx -> a representative point id (layers all unioned)
+    via_copper_layers = {}  # via_idx -> set of copper layers the via spans
     for via_idx, via in enumerate(vias):
         if via.layers:
             if 'F.Cu' in via.layers and 'B.Cu' in via.layers:
@@ -286,6 +308,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         # Connect all via layers together
         for vid in via_ids[1:]:
             uf.union(via_ids[0], vid)
+        if via_ids:
+            via_repr_id[via_idx] = via_ids[0]
+            via_copper_layers[via_idx] = {l for l in via_layers if l.endswith('.Cu')}
 
     # Add pads (use a reasonable default size for pads)
     # Through-hole pads span multiple layers and should connect them (like vias)
@@ -385,6 +410,28 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 dy = pad.global_y - other.global_y
                 if dx * dx + dy * dy <= reach * reach:
                     uf.union(pad_repr_id[idx], pad_repr_id[jdx])
+
+    # A via dropped *inside* an SMD pad's copper connects that pad even when the
+    # via centre is offset from the pad centre — e.g. a via-in-pad at the end of
+    # a 0.6×1.95 mm plane pad sits >0.15 mm from the centre, so the tight
+    # centre-to-centre proximity test above misses it and the pad reads as
+    # unconnected despite a physical via in it (issue #89 via-in-pad subcase).
+    # Union a via to a pad whenever the via centre lies within the pad outline
+    # and they share a copper layer.
+    if via_repr_id and pad_repr_id:
+        via_pos_index = SpatialIndex(cell_size=1.0)
+        for via_idx in via_repr_id:
+            v = vias[via_idx]
+            via_pos_index.add(v.x, v.y, '_via', via_idx, getattr(v, 'size', 0.6))
+        for pad_idx in pad_repr_id:
+            pad = pads[pad_idx]
+            reach = max(pad.size_x, pad.size_y) / 2 + tolerance
+            for vx, vy, via_idx, _ in via_pos_index.query_nearby(
+                    pad.global_x, pad.global_y, '_via', reach):
+                if not (via_copper_layers[via_idx] & pad_copper_layers[pad_idx]):
+                    continue
+                if _point_in_pad(vx, vy, pad, margin=tolerance):
+                    uf.union(pad_repr_id[pad_idx], via_repr_id[via_idx])
 
     # Build spatial index for segments
     seg_index = SegmentIndex(cell_size=1.0)
