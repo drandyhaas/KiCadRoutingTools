@@ -1930,6 +1930,42 @@ def generate_bga_fanout(footprint: Footprint,
                     failed_nets.append(nm)
             print(f"  Pad-aware: removed {len(pad_failed)} unroutable net(s): {pad_failed}")
 
+    # Via-barrel vs foreign-track clearance (issue #123). A fanout via is a
+    # through-hole spanning every copper layer, so the track-vs-track layer
+    # assignment can't keep it clear of another net's escape track on an inner
+    # layer. When the via/track are too large for the BGA pitch the inter-via
+    # channel is narrower than track + 2*clearance and the via copper overlaps a
+    # neighbour's track (e.g. ottercast_audio 0.5mm via / 0.2mm track on 0.65mm
+    # pitch -> 77 VIA-SEGMENT shorts). Rather than silently emit the short, drop
+    # those balls and report them unescaped; a smaller --via-size/--track-width/
+    # --clearance retry escapes them cleanly (0.3/0.1 -> 0 VIA-SEGMENT). A small
+    # tolerance keeps sub-grid rounding (#70) from triggering spurious drops.
+    from geometry_utils import point_to_segment_distance
+    via_net_name = {r.net_id: r.pad.net_name for r in best_routes if r.pad.net_name}
+    via_clear_tol = 0.02
+    via_drop_ids = set()
+    for via in vias_to_add:
+        vr = via['size'] / 2
+        for t in tracks:
+            if t['net_id'] == via['net_id']:
+                continue
+            d = point_to_segment_distance(via['x'], via['y'],
+                                          t['start'][0], t['start'][1],
+                                          t['end'][0], t['end'][1])
+            if d < vr + clearance + t['width'] / 2 - via_clear_tol:
+                via_drop_ids.add(via['net_id'])
+                break
+    if via_drop_ids:
+        tracks[:] = [t for t in tracks if t['net_id'] not in via_drop_ids]
+        vias_to_add[:] = [v for v in vias_to_add if v['net_id'] not in via_drop_ids]
+        for nid in via_drop_ids:
+            nm = via_net_name.get(nid)
+            if nm and nm not in failed_nets:
+                failed_nets.append(nm)
+        print(f"  Via-clearance: dropped {len(via_drop_ids)} ball(s) whose via "
+              f"would short a foreign track (issue #123); retry with smaller "
+              f"--via-size / --track-width / --clearance")
+
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
