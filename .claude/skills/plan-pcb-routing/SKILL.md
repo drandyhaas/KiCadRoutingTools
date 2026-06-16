@@ -134,9 +134,15 @@ Inner pins beyond depth 2 cannot escape without fanout routing through channels 
 **Escape layers (multi-layer boards):** `bga_fanout.py` defaults to `--layers F.Cu B.Cu`
 only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
 `--layers F.Cu In1.Cu In2.Cu B.Cu` — otherwise deep balls have nowhere to escape to
-and those nets are silently dropped from the fanout (you'll see "Available layers:
-[F.Cu, B.Cu]" and a low escaped-net count). `qfn_fanout.py` is perimeter-only and
+and those nets are dropped from the fanout. `qfn_fanout.py` is perimeter-only and
 doesn't take escape layers.
+
+**Always check the fanout escaped all requested balls.** `bga_fanout.py` ends with
+`JSON_SUMMARY: {"component", "requested", "escaped", "failed", "unescaped_nets", ...}`.
+A dropped ball is **removed from the output** and later fails signal routing as "no
+rippable blockers", so it must be caught here. If `failed > 0`, retry the fanout with
+more layers and/or a smaller `--clearance` (see "Escape clearance" below) before
+moving on — do not start signal routing while balls are still dropped.
 
 Report to user:
 - List of components that may need fanout
@@ -184,10 +190,21 @@ Use the printed flags as-is:
   from the working floor**, NOT the net-class `via_diameter`. Emitting the net-class
   via everywhere is #115 — it's a max-like default, far too big for fine-pitch
   escape (e.g. a 0.4 mm QFN/BGA needs the small working via the original used).
-- **Fine-pitch escape:** when a 0.4–0.5 mm QFN/QFP/BGA won't escape at the net-class
-  clearance, drop `--clearance` toward the **manufacturing floor** (never below it).
-  Because the floor is the rule the human board already passes DRC against, tightening
-  to it board-wide is manufacturable; you do NOT need region/rule-area settings.
+- **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
+  inter-ball channel is too narrow to fit a track at the net-class clearance on
+  more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls
+  at `--clearance 0.2` (the ~0.45 mm gap between 0.35 mm balls can't fit a 0.2 mm
+  track at 0.2 mm clearance) — the same board escapes **all** balls at the 0.1 mm
+  floor. So don't gate on pitch: gate on whether balls actually dropped.
+  `bga_fanout.py` ends with a `JSON_SUMMARY: {...}` line giving
+  `requested`/`escaped`/`failed`/`unescaped_nets`. **After every fanout, parse it;
+  if `failed > 0` (escaped < requested), re-run the fanout with `--clearance` at
+  the manufacturing floor** (never below it — the floor is the rule the human
+  board passes DRC against, so tightening board-wide is manufacturable and needs
+  no rule-area settings). If still short, also try the smaller **fine-pitch escape
+  via** (below) and/or a narrower `--track-width` toward the floor. Do not proceed
+  to signal routing with `failed > 0` unexpected — those balls are dropped from the
+  output and will fail later as "no rippable blockers".
 - **Fine-pitch escape VIA (4+ layer):** the 0.45 mm standard via can't dog-bone /
   via-in-pad sub-~0.5 mm-pitch BGA/QFN balls. For *those parts only*, pass the
   smaller **fine-pitch escape via** that `--design-rules` prints (`fine-pitch
@@ -374,6 +391,14 @@ python3 -X utf8 bga_fanout.py board.kicad_pcb \
     --layers F.Cu In1.Cu In2.Cu B.Cu \
     --output board_step1.kicad_pcb \
     2>&1 | tee /tmp/step1_fanout.txt
+
+**Then check the `JSON_SUMMARY` line: if `failed > 0`, balls were dropped — retry
+before continuing.** First confirm all copper layers are passed; then re-run with
+`--clearance` at the manufacturing floor (e.g. `--clearance 0.1`), which fixes the
+common case (an 0.8 mm-pitch BGA can't fit a track between balls at 0.2 mm). If still
+short, add the fine-pitch escape via and/or a smaller `--track-width`. Only proceed
+to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood and
+accepted).
 
 ### Step 2: Route All Signal Nets (excluding plane nets)
 Routes all remaining unrouted nets EXCEPT the nets that get planes in the

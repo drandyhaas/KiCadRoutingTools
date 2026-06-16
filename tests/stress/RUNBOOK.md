@@ -155,6 +155,15 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    silently dropped (only the ~2 outer layers' worth of nets fan out — this
    capped ottercast_audio at ~23%). qfn_fanout.py is perimeter-only and
    doesn't need this.
+   ESCAPE COMPLETENESS (issue #122): bga_fanout.py ends with
+   `JSON_SUMMARY: {"requested","escaped","failed","unescaped_nets",...}`.
+   ALWAYS parse it. If `failed > 0`, balls were DROPPED (removed from output;
+   they resurface later as signal "no rippable blockers"). Retry the fanout with
+   `--clearance` at the manufacturing floor (from --design-rules, e.g. 0.1) —
+   this is the common cause regardless of pitch: an 0.8 mm-pitch BGA drops balls
+   at --clearance 0.2 (a 0.2 mm track won't fit the ~0.45 mm inter-ball gap) but
+   escapes all of them at 0.1. If still short, add the fine-pitch escape via /
+   smaller --track-width. Do not start signal routing while balls are dropped.
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap from --design-rules; use
    --no-gnd-vias). CRITICAL: a pair whose pads are on a BGA/PGA being fanned

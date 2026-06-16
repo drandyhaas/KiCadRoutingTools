@@ -1993,6 +1993,33 @@ def main():
     else:
         print("\nNo fanout tracks generated")
 
+    # Structured summary so downstream tooling (plan-pcb-routing skill, stress
+    # harness) can reliably detect when not all requested balls escaped - and
+    # retry at a tighter clearance - instead of scraping per-net FAILED lines.
+    # `requested` = balls actually attempted (escaped + dropped); skipped power
+    # balls and already-fanned nets are not counted. (issue #122)
+    import json as _json
+    escaped_net_ids = {t['net_id'] for t in tracks if t.get('net_id') is not None}
+    unescaped = sorted(set(_failed_nets))
+    escaped = len(escaped_net_ids)
+    requested = escaped + len(unescaped)
+    if unescaped:
+        print(f"\n  {len(unescaped)} of {requested} requested ball(s) could NOT be "
+              f"escaped at --clearance {args.clearance}mm / --track-width "
+              f"{args.track_width}mm and were DROPPED from the output. Retry the "
+              f"fanout with a smaller --clearance (toward the manufacturing floor).")
+    summary = {
+        'component': args.component,
+        'requested': requested,
+        'escaped': escaped,
+        'failed': len(unescaped),
+        'unescaped_nets': unescaped,
+        'clearance': args.clearance,
+        'track_width': args.track_width,
+        'layers': list(args.layers) if args.layers else None,
+    }
+    print(f"JSON_SUMMARY: {_json.dumps(summary)}")
+
     return 0
 
 

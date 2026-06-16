@@ -69,6 +69,16 @@ machine before):
   `route_diff.py` has the same F.Cu/B.Cu default and the same trap: pass the
   full copper-layer list or pairs are silently stranded (issue #116,
   butterstick 8/40 -> 22/40).
+- **Check the fanout `JSON_SUMMARY` and retry on dropped balls (issue #122).**
+  `bga_fanout.py` ends with `JSON_SUMMARY: {"requested","escaped","failed",
+  "unescaped_nets",...}`. Dropped balls are removed from the output and resurface
+  later as signal-route "no rippable blockers" failures, dominating the shortfall.
+  If `failed > 0`, **re-run the fanout with `--clearance` at the manufacturing
+  floor** (the design-rules step prints it, e.g. 0.1) — this is the common cause,
+  not pitch: even an 0.8 mm-pitch BGA drops balls at `--clearance 0.2` (a 0.2 mm
+  track won't fit the ~0.45 mm inter-ball gap) but escapes all of them at 0.1.
+  If still short, add the fine-pitch escape via / smaller `--track-width`. Don't
+  start signal routing with balls still dropped.
 - Track liveness from disk (results JSON + run-dir activity) via
   `stress_status.sh` — NOT the notification stream, which drops and duplicates.
 
