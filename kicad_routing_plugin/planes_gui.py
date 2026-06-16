@@ -413,6 +413,14 @@ class RepairPlanesOptionsPanel(wx.Panel):
         track_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
         sizer.Add(track_sizer, 0, wx.EXPAND)
 
+        # Repair pad connections (on by default; matches the CLI --repair-pads).
+        self.repair_pads = wx.CheckBox(self, label="Repair pad connections")
+        self.repair_pads.SetValue(True)
+        self.repair_pads.SetToolTip(
+            "Also tap pads that aren't connected to their plane (pad-level repair). "
+            "Uncheck to only connect disconnected zone regions (CLI --no-repair-pads).")
+        sizer.Add(self.repair_pads, 0, wx.LEFT | wx.TOP, 5)
+
         # Info text
         info = wx.StaticText(self, label="Leave nets/layers empty to auto-detect existing zones.")
         info.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -425,6 +433,7 @@ class RepairPlanesOptionsPanel(wx.Panel):
         return {
             'max_track_width': self.max_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
+            'repair_pads': self.repair_pads.GetValue(),
         }
 
     def _on_max_track_width_changed(self, event):
@@ -1020,6 +1029,7 @@ class PlanesTab(wx.Panel):
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
                 max_iterations=config.get('max_iterations', defaults.MAX_ITERATIONS),
                 routing_layers=all_layers,
+                repair_pads=config.get('repair_pads', True),
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 pcb_data=self.pcb_data,
                 return_results=True,

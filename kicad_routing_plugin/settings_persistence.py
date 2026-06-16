@@ -183,6 +183,7 @@ def get_dialog_settings(dialog):
         # Repair mode options
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
+        'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
 
         # Claude tab settings (issue #40)
         'claude_model': dialog.claude_tab.get_model_value(),
@@ -542,6 +543,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
     if 'planes_repair_analysis_grid' in settings:
         dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
+    if 'planes_repair_pads' in settings:
+        dialog.planes_tab.repair_options.repair_pads.SetValue(settings['planes_repair_pads'])
 
     # Restore Claude tab model/effort (issue #40). The setters validate
     # against the current dropdown choices, so a saved model or effort
