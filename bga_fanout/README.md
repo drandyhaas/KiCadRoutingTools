@@ -11,6 +11,7 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 - **Adjacent same-net optimization** - Connects neighboring pads on same net directly
 - **Existing fanout detection** - Skips pads that already have fanouts
 - **Via management** - Adds vias only for SMD pads on non-top layers (through-hole pads connect all layers)
+- **Under-pad escape for dense arrays** - An alternate engine (`--escape-method underpad`) that escapes fully-populated BGAs the channel router can't (see [Escape methods](#escape-methods))
 
 ## Usage
 
@@ -68,6 +69,43 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--rebalance-escape` | Rebalance escape directions | False |
 | `--check-for-previous` | Skip existing fanouts | False |
 | `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
+| `--escape-method` | `channel` (default) or `underpad` (dense arrays) | channel |
+
+## Escape methods
+
+`--escape-method` selects the fanout engine:
+
+- **`channel`** (default) - the 45°-stub + channel router. Each ball jogs to a
+  routing channel between the ball rows and runs out to the boundary. Full
+  differential-pair support. Best for sparse/medium BGAs and signal-grouped escapes.
+
+- **`underpad`** - a grid escape for **dense, fully-populated arrays** (issue
+  #122). The channel router confines every layer to the gaps *between* ball
+  rows, so on a fully-populated array a few channels over-subscribe and the
+  deepest balls can't escape (e.g. ulx3s 22×22 dropped ~23 balls). The under-pad
+  method instead drops a **via in each signal ball's pad** and routes it
+  *straight under the pad field* on an inner layer (SMD pads only block their own
+  layer), jogging into a between-ball channel only to dodge a via. Near-edge
+  balls escape via-less on the BGA's own layer, keeping the rim clear so the
+  deeper balls can run underneath. Balls are routed deepest-first (inside-out).
+
+  Notes / when to use it:
+  - Use it when `channel` reports dropped balls (`failed > 0`) on a dense array.
+  - **Power/plane nets are skipped** - they tap their plane through a via, not a
+    lateral escape. (Plane the power nets first, or exclude them with `--nets`.)
+  - Diff pairs are routed as **single-ended** (the pair geometry isn't preserved).
+  - Use a **small via and track** for the pitch - the escape needs one clean
+    track between adjacent via-in-pads, roughly `via ≤ pitch − 2·track − 2·clearance`.
+    For 0.8 mm pitch, `--via-size 0.35 --track-width 0.12 --clearance 0.1` works well.
+  - Works for top- **and** bottom-side (B.Cu) BGAs - the via-less edge escape
+    runs on the BGA's own layer.
+
+```bash
+# Dense BGA that the channel router can't fully escape
+python bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
+    --layers F.Cu In1.Cu In2.Cu B.Cu \
+    --escape-method underpad --via-size 0.35 --track-width 0.12 --clearance 0.1
+```
 
 ## Module Structure
 
@@ -79,6 +117,7 @@ bga_fanout/
 ├── reroute.py           # Collision resolution and rerouting
 ├── layer_balance.py     # Layer rebalancing for even distribution
 ├── layer_assignment.py  # Layer assignment for collision avoidance
+├── underpad.py          # Under-pad grid escape engine (dense arrays, #122)
 ├── tracks.py            # Track generation and collision detection
 ├── geometry.py          # 45° stub and jog calculations
 ├── collision.py         # Low-level collision detection utilities

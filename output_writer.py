@@ -34,7 +34,8 @@ def write_routed_output(
     exclusion_zone_lines: List = None,
     boundary_debug_labels: List = None,
     skip_routing: bool = False,
-    add_teardrops: bool = False
+    add_teardrops: bool = False,
+    all_swap_segments: List = None
 ) -> bool:
     """
     Write the routed PCB output file.
@@ -98,7 +99,8 @@ def write_routed_output(
     content = _apply_polarity_swaps(content, pad_swaps, pcb_data, net_id_to_name if kicad_v10 else None)
 
     # Generate routing text (new segments and vias)
-    routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None)
+    routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None,
+                                          all_swap_segments=all_swap_segments)
 
     # Add debug paths if enabled
     if debug_lines:
@@ -273,7 +275,8 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
 
 
 def _generate_routing_text(results: List[Dict], all_swap_vias: List,
-                           net_id_to_name: Dict = None) -> str:
+                           net_id_to_name: Dict = None,
+                           all_swap_segments: List = None) -> str:
     """Generate routing text for new segments and vias."""
     routing_text = ""
 
@@ -302,6 +305,15 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 via.x, via.y, via.size, via.drill,
                 via.layers, via.net_id, getattr(via, 'free', False),
                 net_name=_net_name(via.net_id)
+            ) + "\n"
+
+    # Add stub segments synthesized by bare-pad target swaps
+    if all_swap_segments:
+        print(f"Adding {len(all_swap_segments)} stub segment(s) from bare-pad target swaps")
+        for seg in all_swap_segments:
+            routing_text += generate_segment_sexpr(
+                (seg.start_x, seg.start_y), (seg.end_x, seg.end_y),
+                seg.width, seg.layer, seg.net_id, net_name=_net_name(seg.net_id)
             ) + "\n"
 
     return routing_text

@@ -144,6 +144,65 @@ def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: 
     return dist_sq <= tolerance * tolerance
 
 
+def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: float = 0.05) -> bool:
+    """True if every pad of the net touches the others through overlapping
+    copper alone (no track needed).
+
+    Castellated modules represent each pin as a through-hole pad plus an SMD
+    pad at the same spot; such a net has pads but no segments yet is fully
+    connected, so it must not be reported as unrouted (issue #92).
+    """
+    if len(pads) < 2:
+        return True
+    parent = list(range(len(pads)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def shares_copper(pi, pj):
+        if pi.drill > 0 or pj.drill > 0:
+            return True  # through-hole spans all copper layers
+        li = set(expand_pad_layers(pi.layers, copper_layers))
+        lj = set(expand_pad_layers(pj.layers, copper_layers))
+        return bool(li & lj)
+
+    for i in range(len(pads)):
+        for j in range(i + 1, len(pads)):
+            pi, pj = pads[i], pads[j]
+            if not shares_copper(pi, pj):
+                continue
+            reach = (max(pi.size_x, pi.size_y) / 2
+                     + max(pj.size_x, pj.size_y) / 2 + tolerance)
+            dx = pi.global_x - pj.global_x
+            dy = pi.global_y - pj.global_y
+            if dx * dx + dy * dy <= reach * reach:
+                parent[find(i)] = find(j)
+    return len({find(i) for i in range(len(pads))}) == 1
+
+
+def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
+    """True if (px, py) lies within `pad`'s copper outline (+margin).
+
+    Handles pad rotation; circle/oval by radius, everything else as a rectangle
+    (roundrect corners are treated as square, which is fine for a via-in-pad
+    membership test). Used to credit an offset via-in-pad as connected (#89)."""
+    dx = px - pad.global_x
+    dy = py - pad.global_y
+    rot = math.radians(pad.rotation or 0.0)
+    c, s = math.cos(-rot), math.sin(-rot)
+    lx = dx * c - dy * s
+    ly = dx * s + dy * c
+    hx = pad.size_x / 2 + margin
+    hy = pad.size_y / 2 + margin
+    if pad.shape == 'circle':
+        r = pad.size_x / 2 + margin
+        return lx * lx + ly * ly <= r * r
+    return abs(lx) <= hx and abs(ly) <= hy
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
@@ -228,6 +287,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         uf.union(start_id, end_id)
 
     # Add vias - they connect all layers at one location
+    via_repr_id = {}        # via_idx -> a representative point id (layers all unioned)
+    via_copper_layers = {}  # via_idx -> set of copper layers the via spans
     for via_idx, via in enumerate(vias):
         if via.layers:
             if 'F.Cu' in via.layers and 'B.Cu' in via.layers:
@@ -247,16 +308,22 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         # Connect all via layers together
         for vid in via_ids[1:]:
             uf.union(via_ids[0], vid)
+        if via_ids:
+            via_repr_id[via_idx] = via_ids[0]
+            via_copper_layers[via_idx] = {l for l in via_layers if l.endswith('.Cu')}
 
     # Add pads (use a reasonable default size for pads)
     # Through-hole pads span multiple layers and should connect them (like vias)
     pad_ids = []
     pad_locations = []
     copper_layers = set(all_copper_layers)
+    pad_repr_id = {}      # pad_idx -> a representative point id (its layers are all unioned)
+    pad_copper_layers = {}  # pad_idx -> set of copper layers the pad actually occupies
     for pad_idx, pad in enumerate(pads):
         # Expand wildcard layers like "*.Cu" to actual copper layers
         expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
         this_pad_ids = []  # Track all layer points for this pad
+        this_pad_layers = set()
         for layer in expanded_layers:
             if layer not in copper_layers:
                 continue
@@ -266,10 +333,14 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             pad_ids.append(point_id)
             pad_locations.append((pad.global_x, pad.global_y, layer, pad.component_ref))
             this_pad_ids.append(point_id)
+            this_pad_layers.add(layer)
             point_id += 1
         # Connect all layers of this pad together (through-hole pads act like vias)
         for pid in this_pad_ids[1:]:
             uf.union(this_pad_ids[0], pid)
+        if this_pad_ids:
+            pad_repr_id[pad_idx] = this_pad_ids[0]
+            pad_copper_layers[pad_idx] = this_pad_layers
 
     # Connect points through zones (power planes)
     # All points on the same layer that are inside the same zone are connected
@@ -307,6 +378,60 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_tolerance = max(max(size1, size2) / 4, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
                 uf.union(id1, id2)
+
+    # Same-net pads whose copper physically overlaps are connected even when
+    # their centres sit further apart than the tight point tolerance above —
+    # e.g. a large exposed-pad EP and the thermal-via pads scattered near its
+    # corners (issue #108). Mirror the generous sum-of-half-extents overlap
+    # test from _net_pads_connected_by_overlap onto the connectivity graph.
+    if len(pad_repr_id) > 1:
+        pad_reach = {idx: max(pads[idx].size_x, pads[idx].size_y) / 2
+                     for idx in pad_repr_id}
+        max_pad_reach = max(pad_reach.values())
+        pad_center_index = SpatialIndex(cell_size=1.0)
+        for idx in pad_repr_id:
+            pad = pads[idx]
+            pad_center_index.add(pad.global_x, pad.global_y, 'pad', idx, pad_reach[idx])
+        for idx in pad_repr_id:
+            pad = pads[idx]
+            query_radius = pad_reach[idx] + max_pad_reach + tolerance
+            for x2, y2, jdx, _ in pad_center_index.query_nearby(
+                    pad.global_x, pad.global_y, 'pad', query_radius):
+                if jdx <= idx:  # Avoid duplicate checks / self
+                    continue
+                other = pads[jdx]
+                # Copper only shares a layer when both pads occupy it (a
+                # drilled pad spans every copper layer, like a via).
+                if other.drill <= 0 and pad.drill <= 0:
+                    if not (pad_copper_layers[idx] & pad_copper_layers[jdx]):
+                        continue
+                reach = pad_reach[idx] + pad_reach[jdx] + tolerance
+                dx = pad.global_x - other.global_x
+                dy = pad.global_y - other.global_y
+                if dx * dx + dy * dy <= reach * reach:
+                    uf.union(pad_repr_id[idx], pad_repr_id[jdx])
+
+    # A via dropped *inside* an SMD pad's copper connects that pad even when the
+    # via centre is offset from the pad centre — e.g. a via-in-pad at the end of
+    # a 0.6×1.95 mm plane pad sits >0.15 mm from the centre, so the tight
+    # centre-to-centre proximity test above misses it and the pad reads as
+    # unconnected despite a physical via in it (issue #89 via-in-pad subcase).
+    # Union a via to a pad whenever the via centre lies within the pad outline
+    # and they share a copper layer.
+    if via_repr_id and pad_repr_id:
+        via_pos_index = SpatialIndex(cell_size=1.0)
+        for via_idx in via_repr_id:
+            v = vias[via_idx]
+            via_pos_index.add(v.x, v.y, '_via', via_idx, getattr(v, 'size', 0.6))
+        for pad_idx in pad_repr_id:
+            pad = pads[pad_idx]
+            reach = max(pad.size_x, pad.size_y) / 2 + tolerance
+            for vx, vy, via_idx, _ in via_pos_index.query_nearby(
+                    pad.global_x, pad.global_y, '_via', reach):
+                if not (via_copper_layers[via_idx] & pad_copper_layers[pad_idx]):
+                    continue
+                if _point_in_pad(vx, vy, pad, margin=tolerance):
+                    uf.union(pad_repr_id[pad_idx], via_repr_id[via_idx])
 
     # Build spatial index for segments
     seg_index = SegmentIndex(cell_size=1.0)
@@ -571,9 +696,14 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     # Find unrouted nets (pads but no segments) unless routed_only
     unrouted_nets = []
     if not routed_only:
+        copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
         for net_id, net_info in pcb_data.nets.items():
-            # Skip power nets (GND, VCC, etc.) - they're often connected via zones
-            if net_info.name in ('', 'GND', 'VCC', '+5V', '+3V3', '+3.3V'):
+            # Net 0 (empty name) is the unconnected catch-all, not a real net.
+            # Do NOT skip power nets by name (issue #92): a power net is only
+            # "fine when unrouted" if a zone actually covers it, which the
+            # has_zones check below decides. urchin's +3V3 had no plane on this
+            # board and was wrongly hidden by the old hardcoded name list.
+            if not net_info.name:
                 continue
             # Filter by component if specified
             if component_net_ids is not None and net_id not in component_net_ids:
@@ -586,6 +716,10 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             has_segments = net_id in segments_by_net
             has_zones = net_id in zones_by_net
             if has_pads and not has_segments and not has_zones:
+                # A net whose pads all overlap (e.g. a castellated module's
+                # co-located TH+SMD pad pairs) is already connected (issue #92).
+                if _net_pads_connected_by_overlap(pads_by_net[net_id], copper_layers):
+                    continue
                 unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
 
     if not quiet:

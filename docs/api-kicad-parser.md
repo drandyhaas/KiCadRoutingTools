@@ -107,7 +107,7 @@ section. Used for accurate length/time matching.
 | `net_id` | int | Net ID (0 = unconnected) |
 | `net_name` | str | Net name (`''` if unconnected) |
 | `rotation` | float | Total rotation in degrees (pad + footprint), normalized to [0, 360) |
-| `drill` | float | Drill diameter (0 for SMD, > 0 for through-hole) |
+| `drill` | float | Drill diameter (0 for SMD, > 0 for through-hole). Oval/slot drills (`(drill oval w h)`) report `max(w, h)` so they keep `> 0` / through-hole semantics. |
 | `pinfunction` | str | Pin function from the schematic (`'TX'`, `'~RESET'`) |
 | `pintype` | str | Pin electrical type (`'passive'`, `'input'`, `'power_in'`) |
 | `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
@@ -173,7 +173,7 @@ they always describe board-space dimensions.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `layers` | Dict[int, str] | Layer ID → name for all layers |
-| `copper_layers` | List[str] | Copper layer names, top to bottom |
+| `copper_layers` | List[str] | Copper layer names, top to bottom. Includes every `.Cu` layer regardless of declared use-type (`signal`, `power`, `mixed`, `jumper`) — KiCad often types plane layers `power`. |
 | `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts, or `None` |
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular) |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
@@ -269,8 +269,13 @@ auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.5)
 ```
 
 Classification uses the footprint name first, then pad arrangement (grid vs
-perimeter) and pad shapes. The exclusion zones feed
-`GridRouteConfig.bga_exclusion_zones` to keep vias out from under BGAs.
+perimeter) and pad shapes. The geometry path only declares `BGA` for a genuine
+ball/pin matrix: >=16 pads, near-uniform pad size, and >=3 rows *and* >=3
+columns each holding several pads. That last test rejects wide-pitch
+through-hole headers (e.g. a 2-row `RPi_Pico_SMD_TH`) and connector arrays,
+which are otherwise uniform-size but only one or two columns wide (issue #82).
+The exclusion zones feed `GridRouteConfig.bga_exclusion_zones` to keep vias out
+from under BGAs.
 
 ```python
 from kicad_parser import (parse_kicad_pcb, find_components_by_type,

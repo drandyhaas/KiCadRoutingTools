@@ -44,6 +44,7 @@ def get_dialog_settings(dialog):
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
+        'rip_existing_nets': dialog.rip_existing_nets_ctrl.GetValue(),
         'layer_costs': dialog.layer_costs_ctrl.GetValue(),
 
         # Advanced parameters
@@ -161,6 +162,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_rebalance': dialog.fanout_tab.bga_options.rebalance_escape.GetValue(),
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
+        'fanout_bga_underpad': dialog.fanout_tab.bga_options.underpad_escape.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
 
         # Planes tab settings
@@ -181,6 +183,7 @@ def get_dialog_settings(dialog):
         # Repair mode options
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
+        'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
 
         # Claude tab settings (issue #40)
         'claude_model': dialog.claude_tab.get_model_value(),
@@ -261,6 +264,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.power_widths_ctrl.SetValue(settings['power_widths'])
     if 'no_bga_zones' in settings:
         dialog.no_bga_zones_ctrl.SetValue(settings['no_bga_zones'])
+    if 'rip_existing_nets' in settings:
+        dialog.rip_existing_nets_ctrl.SetValue(settings['rip_existing_nets'])
     if 'layer_costs' in settings:
         dialog.layer_costs_ctrl.SetValue(settings['layer_costs'])
 
@@ -499,6 +504,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.check_previous.SetValue(settings['fanout_bga_check_previous'])
     if 'fanout_bga_no_inner_top' in settings:
         dialog.fanout_tab.bga_options.no_inner_top.SetValue(settings['fanout_bga_no_inner_top'])
+    if 'fanout_bga_underpad' in settings:
+        dialog.fanout_tab.bga_options.underpad_escape.SetValue(settings['fanout_bga_underpad'])
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
 
@@ -540,6 +547,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
     if 'planes_repair_analysis_grid' in settings:
         dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
+    if 'planes_repair_pads' in settings:
+        dialog.planes_tab.repair_options.repair_pads.SetValue(settings['planes_repair_pads'])
 
     # Restore Claude tab model/effort (issue #40). The setters validate
     # against the current dropdown choices, so a saved model or effort

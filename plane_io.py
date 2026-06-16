@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import PCBData
+from kicad_parser import PCBData, parse_kicad_pcb
 from kicad_writer import generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen, add_teardrops_to_pads
 
 
@@ -294,9 +294,19 @@ def write_plane_output(
     if zones_to_replace:
         content = filter_zones_from_content(content, zones_to_replace)
 
-    # Filter out excluded nets if specified
+    # Filter out excluded nets if specified.
+    # Issue #88.1: on KiCad 10 boards, segments/vias reference nets by NAME
+    # ((net "GND")) rather than numeric id, so filtering by id alone silently
+    # leaves ripped nets' copper in the output - which then shorts against the
+    # plane vias placed in the cleared spots. When a net_id->name map is
+    # available, also exclude by name so KiCad 10 ripped nets are truly removed.
     if exclude_net_ids:
-        content = filter_nets_from_content(content, exclude_net_ids)
+        exclude_names = None
+        if net_id_to_name:
+            exclude_names = [net_id_to_name[nid] for nid in exclude_net_ids
+                             if nid in net_id_to_name]
+        content = filter_nets_from_content(content, exclude_net_ids,
+                                           net_names_to_exclude=exclude_names)
 
     # Build routing text
     elements = []
@@ -341,3 +351,151 @@ def write_plane_output(
         f.write(new_content)
 
     return True
+
+
+def _pt_seg_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Squared distance from point (px,py) to segment (x1,y1)-(x2,y2)."""
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0 and dy == 0:
+        return (px - x1) ** 2 + (py - y1) ** 2
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    cx, cy = x1 + t * dx, y1 + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
+
+
+def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]],
+                              tol: float = 2e-3) -> Tuple[str, int]:
+    """Remove `(via ...)` elements whose `(at x y)` matches any of `positions`.
+
+    Used to drop plane stitching vias that would short against restored signal
+    copper (issue #88). Matching is positional with a small tolerance because
+    vias are written with fixed 6-decimal precision.
+    """
+    if not positions:
+        return content, 0
+    lines = content.split('\n')
+    result_lines: List[str] = []
+    removed = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped == '(via' or stripped.startswith('(via '):
+            element_lines = [line]
+            open_parens = line.count('(') - line.count(')')
+            while open_parens > 0 and i + 1 < len(lines):
+                i += 1
+                element_lines.append(lines[i])
+                open_parens += lines[i].count('(') - lines[i].count(')')
+            element_text = '\n'.join(element_lines)
+            m = re.search(r'\(at\s+(-?[\d.]+)\s+(-?[\d.]+)', element_text)
+            drop = False
+            if m:
+                vx, vy = float(m.group(1)), float(m.group(2))
+                for px, py in positions:
+                    if abs(vx - px) < tol and abs(vy - py) < tol:
+                        drop = True
+                        break
+            if drop:
+                removed += 1
+                i += 1
+                continue
+            result_lines.extend(element_lines)
+        else:
+            result_lines.append(line)
+        i += 1
+    return '\n'.join(result_lines), removed
+
+
+def restore_failed_reroute_nets(
+    input_file: str,
+    output_file: str,
+    broken_net_ids: List[int],
+    plane_vias: List[Dict],
+    net_id_to_name: Optional[Dict[int, str]],
+    via_size: float,
+    clearance: float,
+) -> Tuple[List[int], int]:
+    """Issue #88: restore the ORIGINAL trace of ripped nets that failed to
+    re-route, so they are never left disconnected (strictly worse than the
+    input board).
+
+    The pristine geometry is re-read from ``input_file`` because ``pcb_data``
+    has the ripped nets removed in memory. Plane stitching vias that were placed
+    in the cleared spots are removed where they would short against the restored
+    copper, so the net is genuinely reconnected (as in the input) rather than
+    shorted to the plane.
+
+    Returns ``(restored_net_ids, plane_vias_removed)``.
+    """
+    orig = parse_kicad_pcb(input_file)
+
+    restored_segs: List[Dict] = []
+    restored_vias: List[Dict] = []
+    restored_net_ids: List[int] = []
+    for nid in broken_net_ids:
+        segs = [s for s in orig.segments if s.net_id == nid]
+        vias = [v for v in orig.vias if v.net_id == nid]
+        if not segs and not vias:
+            continue  # nothing was ever routed for this net; can't restore
+        restored_net_ids.append(nid)
+        for s in segs:
+            restored_segs.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
+                                  'width': s.width, 'layer': s.layer, 'net_id': nid})
+        for v in vias:
+            restored_vias.append({'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill,
+                                  'layers': v.layers, 'net_id': nid})
+
+    if not restored_net_ids:
+        return [], 0
+
+    # A plane via that lands within (via_r + own_radius + clearance) of restored
+    # copper is an electrical short between the signal net and the plane net.
+    # Such vias must be removed so restoring the trace reconnects rather than
+    # shorts. Plane vias span all layers, so segments on any layer are tested.
+    via_r = via_size / 2.0
+    remove_positions: List[Tuple[float, float]] = []
+    for pv in plane_vias:
+        pvx, pvy = pv['x'], pv['y']
+        collides = False
+        for rv in restored_vias:
+            thresh = via_r + rv['size'] / 2.0 + clearance
+            if (pvx - rv['x']) ** 2 + (pvy - rv['y']) ** 2 < thresh * thresh:
+                collides = True
+                break
+        if not collides:
+            for rs in restored_segs:
+                thresh = via_r + rs['width'] / 2.0 + clearance
+                if _pt_seg_dist_sq(pvx, pvy, rs['start'][0], rs['start'][1],
+                                   rs['end'][0], rs['end'][1]) < thresh * thresh:
+                    collides = True
+                    break
+        if collides:
+            remove_positions.append((pvx, pvy))
+
+    with open(output_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    content, vias_removed = _remove_vias_at_positions(content, remove_positions)
+
+    elements: List[str] = []
+    for v in restored_vias:
+        nm = net_id_to_name.get(v['net_id']) if net_id_to_name else None
+        elements.append(generate_via_sexpr(v['x'], v['y'], v['size'], v['drill'],
+                                           v['layers'], v['net_id'], net_name=nm))
+    for s in restored_segs:
+        nm = net_id_to_name.get(s['net_id']) if net_id_to_name else None
+        elements.append(generate_segment_sexpr(s['start'], s['end'], s['width'],
+                                               s['layer'], s['net_id'], net_name=nm))
+
+    if elements:
+        routing_text = '\n'.join(elements)
+        last_paren = content.rfind(')')
+        if last_paren != -1:
+            content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    return restored_net_ids, vias_removed

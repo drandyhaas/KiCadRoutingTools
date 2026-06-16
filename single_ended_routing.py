@@ -1716,46 +1716,23 @@ def route_multipoint_main(
     waypoint_buckets = assign_waypoints_to_mst_edges(
         getattr(config, 'corridor_waypoints', None) or [], pad_grid, mst_edges)
 
-    # Route the longest MST edge first
-    idx_a, idx_b, longest_len = mst_edges[0]
-
-    print(f"  Multi-point net Phase 1: routing longest MST edge (pads {idx_a} and {idx_b}, length={longest_len:.2f}mm)")
-
-    # Build source/target for farthest pair
-    pad_a = pad_info[idx_a]
-    pad_b = pad_info[idx_b]
-
-    # For through-hole pads, create sources/targets on ALL layers (router can reach any layer)
-    # This avoids unnecessary vias when connecting to through-hole pads
-    pad_a_obj = pad_a[5] if len(pad_a) > 5 else None
-    pad_b_obj = pad_b[5] if len(pad_b) > 5 else None
-
-    if pad_a_obj and hasattr(pad_a_obj, 'layers') and '*.Cu' in pad_a_obj.layers:
-        # Through-hole pad - can connect on any copper layer
-        sources = [(pad_a[0], pad_a[1], layer_idx) for layer_idx in range(len(layer_names))]
-    else:
-        sources = [(pad_a[0], pad_a[1], pad_a[2])]  # (gx, gy, layer_idx)
-
-    if pad_b_obj and hasattr(pad_b_obj, 'layers') and '*.Cu' in pad_b_obj.layers:
-        # Through-hole pad - can connect on any copper layer
-        targets = [(pad_b[0], pad_b[1], layer_idx) for layer_idx in range(len(layer_names))]
-    else:
-        targets = [(pad_b[0], pad_b[1], pad_b[2])]
-
-    # Mark source/target cells
-    for gx, gy, layer in sources + targets:
-        obstacles.add_source_target_cell(gx, gy, layer)
-
     # Get stub free ends for proximity zone checking (consistent with route_net)
     free_end_sources, free_end_targets, _ = get_net_endpoints(pcb_data, net_id, config, use_stub_free_ends=True)
+    # Fallback to the net's pad grid positions when there are no stub free ends
+    # (a multipoint net with no prior copper, e.g. a fresh all-pad power net).
+    # The old code referenced undefined locals `sources`/`targets` here, which
+    # crashed route_multipoint_main with UnboundLocalError on exactly those
+    # nets (stress test: confirmed on 5+ boards). pad_info rows are
+    # (gx, gy, layer_idx, orig_x, orig_y, endpoint_obj).
+    pad_prox = [(info[0], info[1], info[2]) for info in pad_info]
     if free_end_sources:
         prox_check_sources = [(s[0], s[1], s[2]) for s in free_end_sources]
     else:
-        prox_check_sources = sources  # Fallback to pad positions
+        prox_check_sources = pad_prox
     if free_end_targets:
         prox_check_targets = [(t[0], t[1], t[2]) for t in free_end_targets]
     else:
-        prox_check_targets = targets  # Fallback to pad positions
+        prox_check_targets = pad_prox
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
@@ -1793,24 +1770,83 @@ def route_multipoint_main(
     extra_half_width = (net_track_width - layer_track_width) / 2
     track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
 
-    # Use probe routing helper, steered through this edge's bucket of corridor
-    # waypoints (the tap edges follow their own buckets in route_multipoint_taps).
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
-        router, obstacles, config, sources, targets, track_margin,
-        pcb_data, net_id, print_prefix="  ", direction_labels=("forward", "backward"),
-        waypoints=waypoint_buckets.get(frozenset((idx_a, idx_b)), [])
-    )
+    # Route the main edge: try MST edges longest-first until one routes.
+    # Issue #101: one boxed pad must not abandon the whole net - the old code
+    # gave up entirely when the single longest edge failed, zeroing 55-pad
+    # power nets whose other 54 pads had clear connections. A failed edge now
+    # falls through to the next candidate; Phase 3 later handles every
+    # remaining edge individually with honest failed-pad reporting.
+    max_main_attempts = min(len(mst_edges), 8)
+    path = None
+    total_iterations = 0
+    cumulative_iterations = 0
+    last_failure = None
+    routed_edge_pos = None
+    for attempt in range(max_main_attempts):
+        idx_a, idx_b, edge_len = mst_edges[attempt]
+        label = ("routing longest MST edge" if attempt == 0
+                 else f"retrying with next MST edge ({attempt + 1}/{max_main_attempts})")
+        print(f"  Multi-point net Phase 1: {label} (pads {idx_a} and {idx_b}, length={edge_len:.2f}mm)")
 
-    if path is None:
-        print(f"  Failed to route farthest pair after {total_iterations} iterations")
-        return {
+        # Build source/target for this pad pair
+        pad_a = pad_info[idx_a]
+        pad_b = pad_info[idx_b]
+
+        # For through-hole pads, create sources/targets on ALL layers (router
+        # can reach any layer) - avoids unnecessary vias
+        pad_a_obj = pad_a[5] if len(pad_a) > 5 else None
+        pad_b_obj = pad_b[5] if len(pad_b) > 5 else None
+
+        if pad_a_obj and hasattr(pad_a_obj, 'layers') and '*.Cu' in pad_a_obj.layers:
+            sources = [(pad_a[0], pad_a[1], layer_idx) for layer_idx in range(len(layer_names))]
+        else:
+            sources = [(pad_a[0], pad_a[1], pad_a[2])]  # (gx, gy, layer_idx)
+
+        if pad_b_obj and hasattr(pad_b_obj, 'layers') and '*.Cu' in pad_b_obj.layers:
+            targets = [(pad_b[0], pad_b[1], layer_idx) for layer_idx in range(len(layer_names))]
+        else:
+            targets = [(pad_b[0], pad_b[1], pad_b[2])]
+
+        # Mark source/target cells (same-net pad cells; safe to accumulate)
+        for gx, gy, layer in sources + targets:
+            obstacles.add_source_target_cell(gx, gy, layer)
+
+        # Use probe routing helper, steered through this edge's bucket of
+        # corridor waypoints (tap edges follow their own buckets later).
+        path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
+            router, obstacles, config, sources, targets, track_margin,
+            pcb_data, net_id, print_prefix="  ", direction_labels=("forward", "backward"),
+            waypoints=waypoint_buckets.get(frozenset((idx_a, idx_b)), [])
+        )
+        cumulative_iterations += total_iterations
+
+        if path is not None:
+            routed_edge_pos = attempt
+            break
+
+        print(f"  Phase 1 edge (pads {idx_a},{idx_b}) failed after {total_iterations} iterations"
+              + (" - trying next MST edge" if attempt + 1 < max_main_attempts else ""))
+        last_failure = {
             'failed': True,
-            'iterations': total_iterations,
             'blocked_cells_forward': forward_blocked,
             'blocked_cells_backward': backward_blocked,
             'iterations_forward': fwd_iters,
             'iterations_backward': bwd_iters,
         }
+
+    if path is None:
+        print(f"  Failed to route a main edge after {cumulative_iterations} iterations "
+              f"({max_main_attempts} edge(s) tried)")
+        failure = dict(last_failure or {'failed': True})
+        failure['iterations'] = cumulative_iterations
+        return failure
+
+    # Phase 3 assumes mst_edges[0] is the edge Phase 1 routed - move the
+    # successful edge to the front when a fallback edge won.
+    if routed_edge_pos:
+        mst_edges = ([mst_edges[routed_edge_pos]] + mst_edges[:routed_edge_pos]
+                     + mst_edges[routed_edge_pos + 1:])
+    total_iterations = cumulative_iterations
 
     # If path was found in reverse direction, swap pad_a/pad_b for segment generation
     if reversed_path:
@@ -2009,7 +2045,8 @@ def route_multipoint_taps(
     edges_routed = 0
     failed_edges = set()  # Track edges that failed to route
     failed_edge_blocking = {}  # Track blocking info for failed edges: edge_key -> (blocked_cells, tgt_xy)
-    max_passes = len(remaining_edges) * 2  # Safety limit
+    fallback_attempted = set()  # Pads attempted directly after their MST edge chain failed
+    max_passes = len(remaining_edges) * 2 + len(pad_info)  # Safety limit
 
     for pass_num in range(max_passes):
         if len(routed_indices) == len(pad_info):
@@ -2035,6 +2072,32 @@ def route_multipoint_taps(
             elif b_routed and not a_routed:
                 edge_to_route = (idx_b, idx_a, length)  # Route from b to a
                 break
+
+        if edge_to_route is None:
+            # Fallback: a failed MST edge orphans its entire downstream
+            # subtree - those pads' edges are never eligible because their
+            # source side never becomes routed. Since tap routing launches
+            # from ALL existing copper anyway (the MST edge is only an
+            # ordering), attempt each orphaned pad directly once. Even when
+            # the attempt fails, its blocked frontier feeds the Phase 3
+            # rip-up analysis with the pads' ACTUAL blockers (issues
+            # #101/#103: previously a walled-off region produced no frontier
+            # data at all, so nothing was ever ripped).
+            best = None
+            for i in range(len(pad_info)):
+                if i in routed_indices or pad_components.get(i, i) in routed_components:
+                    continue
+                if i in fallback_attempted:
+                    continue
+                xi, yi = pad_info[i][3], pad_info[i][4]
+                for j in routed_indices:
+                    d = abs(xi - pad_info[j][3]) + abs(yi - pad_info[j][4])
+                    if best is None or d < best[2]:
+                        best = (j, i, d)
+            if best is not None:
+                fallback_attempted.add(best[1])
+                edge_to_route = best
+                print(f"    Fallback: attempting orphaned pad {best[1]} directly from connected copper")
 
         if edge_to_route is None:
             # Count effectively unrouted pads (not in routed_indices AND not in a routed component)

@@ -251,6 +251,15 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
+    # Auto-derive the net name map on KiCad 10 boards (issue #80) - see
+    # add_tracks_and_vias_to_pcb for rationale.
+    if net_id_to_name is None:
+        from kicad_parser import detect_kicad_version, extract_nets, KICAD_10_MIN_VERSION
+        version = detect_kicad_version(content)
+        if version >= KICAD_10_MIN_VERSION:
+            nets, _ = extract_nets(content, version)
+            net_id_to_name = {nid: n.name for nid, n in nets.items()}
+
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
 
@@ -312,6 +321,17 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     """
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # KiCad 10 boards reference nets by name; writing numeric (net N) refs into
+    # them produces a mixed-style file (issue #80). If the caller didn't supply
+    # the mapping, derive it from the file the same way the parser does (the
+    # synthetic ids match any caller that got its ids from parsing this file).
+    if net_id_to_name is None:
+        from kicad_parser import detect_kicad_version, extract_nets, KICAD_10_MIN_VERSION
+        version = detect_kicad_version(content)
+        if version >= KICAD_10_MIN_VERSION:
+            nets, _ = extract_nets(content, version)
+            net_id_to_name = {nid: n.name for nid, n in nets.items()}
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)

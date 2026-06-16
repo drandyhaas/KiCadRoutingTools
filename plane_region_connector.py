@@ -604,7 +604,8 @@ def find_open_space_point(
     base_obstacles: GridObstacleMap,
     plane_layer_idx: int,
     coord: GridCoord,
-    search_radius: float = 5.0
+    search_radius: float = 5.0,
+    bounds: Optional[Tuple[float, float, float, float]] = None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the most open space near a region's anchors - a point with maximum clearance from obstacles.
@@ -636,6 +637,15 @@ def find_open_space_point(
     for dx in range(-search_radius_grid, search_radius_grid + 1):
         for dy in range(-search_radius_grid, search_radius_grid + 1):
             gx, gy = center_gx + dx, center_gy + dy
+
+            # Skip cells outside the board (bounds = board area minus edge
+            # clearance). Empty space beyond the outline scores maximum clearance,
+            # so without this the "most open" point lands off-board, placing the
+            # open-space via and its route outside the edge (issue #119).
+            if bounds is not None:
+                fx, fy = coord.to_float(gx, gy)
+                if not (bounds[0] <= fx <= bounds[2] and bounds[1] <= fy <= bounds[3]):
+                    continue
 
             # Skip if this cell is blocked
             if base_obstacles.is_blocked(gx, gy, plane_layer_idx):
@@ -691,7 +701,8 @@ def _try_route_between_regions(
     max_iterations: int,
     coord: GridCoord,
     verbose: bool = False,
-    router: Optional[GridRouter] = None
+    router: Optional[GridRouter] = None,
+    bounds: Optional[Tuple[float, float, float, float]] = None,
 ) -> Tuple[Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]], float, Optional[Tuple[float, float]]]:
     """
     Try to route between two regions, attempting multiple track widths.
@@ -767,8 +778,8 @@ def _try_route_between_regions(
     if result is None:
         # Can't route even at min width - try open-space fallback
         _t0 = _time.time()
-        open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord)
-        open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord)
+        open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord, bounds=bounds)
+        open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord, bounds=bounds)
         _dt_open = _time.time() - _t0
         _attempt_details.append(f"open-search {_dt_open:.2f}s")
         _total_route_time += _dt_open
@@ -942,6 +953,7 @@ def route_disconnected_regions(
             plane_layer_idx=plane_layer_idx,
             routing_layers=routing_layers,
             config=config,
+            bounds=zone_bounds,
             net_vias=net_vias,
             max_track_width=max_track_width,
             min_track_width=min_track_width,

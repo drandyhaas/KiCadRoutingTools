@@ -55,6 +55,13 @@ from plane_zone_geometry import (
     find_polygon_groups,
     sample_route_for_voronoi
 )
+from plane_pad_tap import (
+    pad_is_fine_pitch,
+    tap_pad_with_escalation,
+    FINE_TAP_GRID_STEP,
+    FINE_TAP_CLEARANCE,
+    FINE_TAP_TRACK_WIDTH
+)
 from terminal_colors import GREEN, RED, RESET
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
@@ -188,6 +195,25 @@ def find_via_position(
     # Try pad center first - if not blocked, use it (no routing needed)
     if not obstacles.is_via_blocked(pad_gx, pad_gy):
         return (pad.global_x, pad.global_y)
+
+    # Then try other positions WITHIN the pad's own copper (still via-in-pad, no
+    # trace needed): the exact centre can be blocked by nearby other-net copper
+    # while another spot inside the pad is clear. Recovers boxed-in plane pads
+    # (BGA balls, decoupling caps) with no room to tap externally, especially
+    # with the smaller fine-pitch via (issue #99). Self-gating: when via-in-pad
+    # is disabled the whole pad area is blocked in the obstacle map.
+    pad_half_w_grid = max(1, coord.to_grid_dist(pad.size_x / 2))
+    pad_half_h_grid = max(1, coord.to_grid_dist(pad.size_y / 2))
+    for r in range(1, max(pad_half_w_grid, pad_half_h_grid) + 1):
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if abs(dx) != r and abs(dy) != r:
+                    continue  # ring edge only
+                if abs(dx) > pad_half_w_grid or abs(dy) > pad_half_h_grid:
+                    continue  # outside pad boundary
+                gx, gy = pad_gx + dx, pad_gy + dy
+                if not obstacles.is_via_blocked(gx, gy):
+                    return coord.to_float(gx, gy)
 
     # Spiral search outward
     max_radius_grid = coord.to_grid_dist(max_search_radius)
@@ -821,24 +847,51 @@ def _generate_multinet_layer_zones(
                 vias_by_net[via.net_id].append(via_pos)
                 vias_by_net_set[via.net_id].add(via_pos)
 
-    # Check for nets with no vias
-    nets_with_vias = []
+    # Connection points from pads that physically tie into the plane on this
+    # layer: through-hole pads (every copper layer) and SMD pads whose layer is
+    # this one. A net can be fully connected to the plane through these alone,
+    # with zero stitching vias -- the zone must STILL be poured in that case
+    # (issue #114: an all-through-hole ground net got 0 seeds and its zone was
+    # silently skipped, leaving the net functionally unrouted).
+    pads_on_layer_by_net: Dict[int, List[Tuple[float, float]]] = {}
     for net_name in nets_on_layer:
         net_id = net_name_to_id.get(net_name)
-        if net_id:
-            via_count = len(vias_by_net.get(net_id, []))
-            if via_count == 0:
-                print(f"  Warning: Net '{net_name}' has no vias on layer {layer}, skipping zone")
-            else:
-                nets_with_vias.append(net_name)
-                print(f"  Net '{net_name}': {via_count} vias")
+        if net_id is None:
+            continue
+        pts = []
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            on_layer = (pad.drill and pad.drill > 0) or (layer in pad.layers)
+            if on_layer:
+                pts.append((pad.global_x, pad.global_y))
+        pads_on_layer_by_net[net_id] = pts
 
-    if len(nets_with_vias) < 2:
-        # Only one net has vias, use full board rectangle
-        if nets_with_vias:
-            net_name = nets_with_vias[0]
+    # A net earns a zone if it has ANY connection point on this layer -- a via
+    # or a pad. nets_with_vias still drives the via-to-via MST routing below;
+    # nets_with_seeds (vias OR pads) drives whether a zone is created at all.
+    nets_with_vias = []
+    nets_with_seeds = []
+    for net_name in nets_on_layer:
+        net_id = net_name_to_id.get(net_name)
+        if not net_id:
+            continue
+        via_count = len(vias_by_net.get(net_id, []))
+        pad_count = len(pads_on_layer_by_net.get(net_id, []))
+        if via_count == 0 and pad_count == 0:
+            print(f"  Warning: Net '{net_name}' has no vias or pads on layer {layer}, skipping zone")
+            continue
+        nets_with_seeds.append(net_name)
+        if via_count > 0:
+            nets_with_vias.append(net_name)
+            print(f"  Net '{net_name}': {via_count} vias")
+        else:
+            print(f"  Net '{net_name}': no vias, {pad_count} pad(s) on {layer} (pad-seeded zone)")
+
+    if len(nets_with_seeds) < 2:
+        # Only one net has connections on this layer: use full board rectangle.
+        if nets_with_seeds:
+            net_name = nets_with_seeds[0]
             net_id = net_name_to_id[net_name]
-            print(f"  Only '{net_name}' has vias, using full board rectangle")
+            print(f"  Only '{net_name}' has connections, using full board rectangle")
             zone_sexpr = generate_zone_sexpr(
                 net_id=net_id,
                 net_name=net_name,
@@ -998,6 +1051,117 @@ def _generate_multinet_layer_zones(
         if best_result[0] > 0:
             print(f"  Best result: {best_result[0]} failed edge(s)")
 
+    # #107: connect each net's through-hole pads to its plane region. A TH pad ties
+    # into the plane on every layer, but the Voronoi seeds are only vias + routed-MST
+    # samples, and a Voronoi cell is owned by whichever net has the nearest seed. A TH
+    # pad with no nearby same-net seed therefore lands inside ANOTHER net's cell: the
+    # local plane copper is the wrong net and the pad is silently disconnected as an
+    # island. For each such ORPHANED pad we route a corridor on the plane layer to the
+    # nearest same-net seed (avoiding other nets, exactly like the MST routing) and add
+    # the corridor's samples as seeds, so the pad's region becomes contiguous with the
+    # net's main region. (We deliberately do NOT add TH pads to the via MST: that
+    # reorganizes the via-to-via topology and badly regresses large nets like GND.)
+    if augmented_vias_by_net is not None:
+        # Snapshot all seeds for orphan detection (Voronoi owner == nearest seed). Also
+        # snapshot each net's own anchor points (its main region) as corridor targets.
+        all_seed_pts = []  # (x, y, net_id)
+        net_anchor_pts: Dict[int, List[Tuple[float, float]]] = {}
+        for snid, slist in augmented_vias_by_net.items():
+            net_anchor_pts[snid] = list(slist)
+            for sx, sy in slist:
+                all_seed_pts.append((sx, sy, snid))
+
+        def _nearest_seed_net(px: float, py: float) -> Optional[int]:
+            best_net, best_d = None, None
+            for sx, sy, snid in all_seed_pts:
+                d = (sx - px) ** 2 + (sy - py) ** 2
+                if best_d is None or d < best_d:
+                    best_d, best_net = d, snid
+            return best_net
+
+        corridor_router = GridRouter(
+            via_cost=config.via_cost_units(),
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
+
+        th_connected = 0
+        th_fallback = 0
+        fallback_pad_refs: List[str] = []
+        for nm_on_layer in nets_on_layer:
+            nid = net_name_to_id.get(nm_on_layer)
+            if nid is None:
+                continue
+            seeds = augmented_vias_by_net.setdefault(nid, [])
+            seen = {(round(x, 3), round(y, 3)) for x, y in seeds}
+            anchors = net_anchor_pts.get(nid, [])
+            for pad in pcb_data.pads_by_net.get(nid, []):
+                if not (pad.drill and pad.drill > 0):
+                    continue
+                px, py = pad.global_x, pad.global_y
+                # Already inside its own net's cell? Then the plane already covers it.
+                if _nearest_seed_net(px, py) == nid:
+                    continue
+                # Orphaned: route a corridor to the nearest same-net anchor (main region).
+                route_path = None
+                if anchors:
+                    tx, ty = min(anchors, key=lambda t: (t[0] - px) ** 2 + (t[1] - py) ** 2)
+                    other_nets_vias = {
+                        onid: ov for onid, ov in augmented_vias_by_net.items() if onid != nid
+                    }
+                    route_path = route_plane_connection(
+                        via_a=(px, py), via_b=(tx, ty), plane_layer=layer, net_id=nid,
+                        other_nets_vias=other_nets_vias, config=config, pcb_data=pcb_data,
+                        proximity_radius=plane_proximity_radius, proximity_cost=plane_proximity_cost,
+                        track_via_clearance=plane_track_via_clearance,
+                        max_iterations=plane_max_iterations, verbose=verbose,
+                        previous_routes=None, base_obstacles=None, router=corridor_router
+                    )
+                if route_path:
+                    connection_routes.append((nid, layer, route_path))
+                    for sx, sy in sample_route_for_voronoi(route_path, sample_interval=voronoi_seed_interval):
+                        k = (round(sx, 3), round(sy, 3))
+                        if k not in seen:
+                            seeds.append((sx, sy))
+                            seen.add(k)
+                    th_connected += 1
+                else:
+                    # Corridor routing failed: at least point-seed the pad so its own
+                    # immediate cell is its net (better than landing in another net).
+                    k = (round(px, 3), round(py, 3))
+                    if k not in seen:
+                        seeds.append((px, py))
+                        seen.add(k)
+                    th_fallback += 1
+                    fallback_pad_refs.append(f"{pad.component_ref}.{pad.pad_number}")
+        if th_connected or th_fallback:
+            msg = f"  #107: routed corridors for {th_connected} orphaned TH pad(s)"
+            if th_fallback:
+                msg += (f"; {th_fallback} could not be reached on the plane layer "
+                        f"and fell back to point-seed ({', '.join(fallback_pad_refs)})")
+            print(msg)
+
+    # #114: a net with no stitching vias gets no MST and therefore no Voronoi
+    # seeds from the routing above. Seed it directly from its pads on this layer
+    # (through-hole + SMD-on-layer) so it still receives a Voronoi-partitioned
+    # zone. Via-bearing nets are left to the #107 corridor logic above so their
+    # via topology is not perturbed.
+    if augmented_vias_by_net is not None:
+        for net_name in nets_with_seeds:
+            net_id = net_name_to_id.get(net_name)
+            if net_id is None or vias_by_net.get(net_id):
+                continue
+            seeds = augmented_vias_by_net.setdefault(net_id, [])
+            seen = {(round(x, 3), round(y, 3)) for x, y in seeds}
+            for px, py in pads_on_layer_by_net.get(net_id, []):
+                k = (round(px, 3), round(py, 3))
+                if k not in seen:
+                    seeds.append((px, py))
+                    seen.add(k)
+
     # Compute final Voronoi zones
     total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
     print(f"  Computing final Voronoi zones with {total_seeds} seed points")
@@ -1012,7 +1176,7 @@ def _generate_multinet_layer_zones(
     except ValueError as e:
         print(f"  Error computing zone boundaries: {e}")
         print(f"  Falling back to full board rectangle for first net")
-        net_name = nets_with_vias[0]
+        net_name = nets_with_seeds[0]
         net_id = net_name_to_id[net_name]
         zone_sexpr = generate_zone_sexpr(
             net_id=net_id,
@@ -1080,6 +1244,94 @@ def _generate_multinet_layer_zones(
     return zone_sexprs, debug_line_sexprs, zone_data_list
 
 
+def _geometric_plane_verification(
+    output_file: str,
+    net_ids: List[int],
+    net_names: List[str],
+    plane_layers: List[str],
+    ripped_net_ids: List[int],
+) -> Dict[int, Dict]:
+    """Geometric truth check of plane connectivity (issues #89 and #107).
+
+    Re-parses the written output and, for each plane net, uses
+    check_net_connectivity to count how many of the net's pads are actually
+    joined to that net's plane copper. This catches two classes of failure the
+    via-placement counters miss:
+
+      * #89: a stitching via was placed/reused but is not electrically joined
+        to the net's zone (so the via-placement success counter overcounts).
+      * #107: on a multi-net Voronoi layer, a through-hole pad sits inside the
+        OTHER net's Voronoi cell, so it never gets a via and is never counted,
+        yet its own net's zone does not cover it -> geometrically disconnected.
+
+    Returns a dict mapping net_id -> {name, layer, total, connected, failed,
+    disconnected_pads}. Returns {} (and prints a warning) if the check could
+    not be run, so callers fall back to the via-placement counters.
+    """
+    try:
+        from check_connected import check_net_connectivity
+        out_pcb = parse_kicad_pcb(output_file)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"WARNING: geometric plane verification could not run ({e}); "
+              f"reported counts are via-placement estimates only.")
+        return {}
+
+    segs_by_net: Dict[int, List] = {}
+    for s in out_pcb.segments:
+        segs_by_net.setdefault(s.net_id, []).append(s)
+    vias_by_net: Dict[int, List] = {}
+    for v in out_pcb.vias:
+        vias_by_net.setdefault(v.net_id, []).append(v)
+    zones_by_net: Dict[int, List] = {}
+    for z in out_pcb.zones:
+        zones_by_net.setdefault(z.net_id, []).append(z)
+
+    ripped_set = set(ripped_net_ids or [])
+    results: Dict[int, Dict] = {}
+    for net_id, net_name, plane_layer in zip(net_ids, net_names, plane_layers):
+        if net_id in results:
+            continue  # already verified (same net listed twice)
+        pads = out_pcb.pads_by_net.get(net_id, [])
+        r = check_net_connectivity(
+            net_id,
+            segs_by_net.get(net_id, []),
+            vias_by_net.get(net_id, []),
+            pads,
+            zones_by_net.get(net_id, []))
+        disconnected = r.get('disconnected_pads', []) or []
+        total = len(pads)
+        failed = len(disconnected)
+        results[net_id] = {
+            'name': net_name,
+            'layer': plane_layer,
+            'total': total,
+            'connected': total - failed,
+            'failed': failed,
+            'disconnected_pads': disconnected,
+        }
+
+    # Report the geometric truth so the summary matches reality.
+    print(f"\n{'='*60}")
+    print("GEOMETRIC VERIFICATION (re-parsed output)")
+    print(f"{'='*60}")
+    for net_id, info in results.items():
+        status = GREEN if info['failed'] == 0 else RED
+        print(f"  {status}{info['name']}: {info['connected']}/{info['total']} "
+              f"pads connected to plane on {info['layer']}{RESET}")
+        if info['failed']:
+            # Attribute each geometrically-failed pad with net + location so
+            # silently-skipped pads (#107) and unjoined vias (#89) are visible.
+            for loc in info['disconnected_pads']:
+                # disconnected_pads entries are (x, y, layer, component_ref)
+                try:
+                    px, py, player, pref = loc[0], loc[1], loc[2], loc[3]
+                    print(f"      {RED}unconnected pad {pref} on '{info['name']}' "
+                          f"at ({px:.2f}, {py:.2f}) [{player}]{RESET}")
+                except (TypeError, ValueError, IndexError):
+                    print(f"      {RED}unconnected pad on '{info['name']}': {loc}{RESET}")
+    return results
+
+
 def _write_output_and_reroute(
     input_file: str,
     output_file: str,
@@ -1102,7 +1354,8 @@ def _write_output_and_reroute(
     verbose: bool,
     power_nets: Optional[List[str]] = None,
     power_nets_widths: Optional[List[float]] = None,
-    add_teardrops: bool = False
+    add_teardrops: bool = False,
+    no_bga_zone: bool = False
 ) -> bool:
     """
     Write output file and optionally reroute ripped nets.
@@ -1144,6 +1397,14 @@ def _write_output_and_reroute(
                 if not routing_layers:
                     routing_layers = ['F.Cu', 'B.Cu']
                 all_copper_layers = list(set(all_layers + plane_layers))
+                # Issue #88.2: the reroute must use parameters compatible with
+                # the original signal-routing run, or nets that only routed with
+                # relaxed settings get silently dropped from the output. In
+                # particular BGA auto-exclusion zones (on by default in
+                # batch_route) can re-block escapes the original run permitted
+                # with --no-bga-zone. disable_bga_zones=[] disables all BGA
+                # zones; grid_step/clearance are forwarded from this run.
+                disable_bga = [] if no_bga_zone else None
                 routed, failed, route_time = batch_route(
                     input_file=output_file,
                     output_file=output_file,
@@ -1158,15 +1419,105 @@ def _write_output_and_reroute(
                     verbose=verbose,
                     minimal_obstacle_cache=True,
                     power_nets=power_nets,
-                    power_nets_widths=power_nets_widths
+                    power_nets_widths=power_nets_widths,
+                    disable_bga_zones=disable_bga
                 )
                 print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
+
+                # Issue #88: a ripped net that fails to re-route must NEVER be
+                # left disconnected -- that is strictly worse than the input
+                # board. Geometrically verify each ripped net in the written
+                # output; for any that is still broken, RESTORE its original
+                # trace (and drop the plane via(s) that would short against it)
+                # so the net returns to exactly its pre-rip connected state.
+                try:
+                    from check_connected import check_net_connectivity
+                    from plane_io import restore_failed_reroute_nets
+                    out_pcb = parse_kicad_pcb(output_file)
+                    rsegs: Dict[int, List] = {}
+                    for s in out_pcb.segments:
+                        rsegs.setdefault(s.net_id, []).append(s)
+                    rvias: Dict[int, List] = {}
+                    for v in out_pcb.vias:
+                        rvias.setdefault(v.net_id, []).append(v)
+                    rzones: Dict[int, List] = {}
+                    for z in out_pcb.zones:
+                        rzones.setdefault(z.net_id, []).append(z)
+                    still_broken: List[int] = []
+                    for rid in all_ripped_net_ids:
+                        res = check_net_connectivity(
+                            rid, rsegs.get(rid, []), rvias.get(rid, []),
+                            out_pcb.pads_by_net.get(rid, []), rzones.get(rid, []))
+                        if not res.get('connected', False):
+                            still_broken.append(rid)
+                    if still_broken:
+                        restored_ids, vias_removed = restore_failed_reroute_nets(
+                            input_file=input_file,
+                            output_file=output_file,
+                            broken_net_ids=still_broken,
+                            plane_vias=all_new_vias,
+                            net_id_to_name=kicad_v10_names,
+                            via_size=via_size,
+                            clearance=clearance,
+                        )
+                        if restored_ids:
+                            names = [pcb_data.nets[r].name if r in pcb_data.nets
+                                     else f"net_{r}" for r in restored_ids]
+                            print(f"Issue #88: {len(restored_ids)} ripped net(s) failed to "
+                                  f"re-route; RESTORED their original trace (removed "
+                                  f"{vias_removed} colliding plane via(s)) rather than leave "
+                                  f"them disconnected:")
+                            print(f"  {', '.join(names)}")
+                        unrestorable = [r for r in still_broken if r not in restored_ids]
+                        if unrestorable:
+                            names = [pcb_data.nets[r].name if r in pcb_data.nets
+                                     else f"net_{r}" for r in unrestorable]
+                            print(f"WARNING: {len(unrestorable)} ripped net(s) remain "
+                                  f"disconnected (no original trace to restore): "
+                                  f"{', '.join(names)}")
+                except Exception as e:
+                    print(f"  (post-reroute restore step skipped: {e})")
             finally:
                 sys.setrecursionlimit(old_recursion_limit)
         else:
-            print(f"WARNING: {len(all_ripped_net_ids)} net(s) were removed from output and need re-routing!")
-            if ripped_net_names:
-                print(f"  Ripped nets: {', '.join(ripped_net_names)}")
+            # Verify which ripped nets are actually broken in the written
+            # output before warning (issue #104 item 4): on KiCad 10 boards
+            # the net filter only matches numeric-id net refs, so "ripped"
+            # nets can remain fully routed in the output - warning about
+            # those would trigger pointless re-route rounds in automated
+            # workflows.
+            broken_names = list(ripped_net_names)
+            try:
+                from check_connected import check_net_connectivity
+                out_pcb = parse_kicad_pcb(output_file)
+                segs_by_net: Dict[int, List] = {}
+                for s in out_pcb.segments:
+                    segs_by_net.setdefault(s.net_id, []).append(s)
+                vias_by_net: Dict[int, List] = {}
+                for v in out_pcb.vias:
+                    vias_by_net.setdefault(v.net_id, []).append(v)
+                zones_by_net: Dict[int, List] = {}
+                for z in out_pcb.zones:
+                    zones_by_net.setdefault(z.net_id, []).append(z)
+                broken_names = []
+                for rid in all_ripped_net_ids:
+                    result = check_net_connectivity(
+                        rid,
+                        segs_by_net.get(rid, []),
+                        vias_by_net.get(rid, []),
+                        out_pcb.pads_by_net.get(rid, []),
+                        zones_by_net.get(rid, []))
+                    if not result.get('connected', False):
+                        net = pcb_data.nets.get(rid)
+                        broken_names.append(net.name if net else f"net_{rid}")
+            except Exception:
+                pass  # verification failed - fall back to warning about all ripped nets
+            if broken_names:
+                print(f"WARNING: {len(broken_names)} net(s) were removed from output and need re-routing!")
+                print(f"  Ripped nets: {', '.join(broken_names)}")
+            else:
+                print(f"Note: {len(all_ripped_net_ids)} net(s) were ripped during via placement "
+                      f"but remain fully connected in the output; no re-routing needed.")
 
     return True
 
@@ -1209,6 +1560,7 @@ def create_plane(
     return_results: bool = False,
     same_net_pad_clearance: float = defaults.SAME_NET_PAD_CLEARANCE,
     skip_existing_zones: bool = False,
+    no_bga_zone: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1529,6 +1881,10 @@ def create_plane(
         if pads_needing_vias:
             print(f"\nConnecting {len(pads_needing_vias)} pads to {plane_layer} plane:")
 
+        # Index into failed_pad_infos where this net's failures start (for
+        # the fine-pitch retry pass below).
+        net_failed_start = len(failed_pad_infos)
+
         for pad_idx, pad_info in enumerate(pads_needing_vias):
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
@@ -1742,7 +2098,13 @@ def create_plane(
                     verbose=verbose,
                     find_via_position_fn=find_via_position,
                     route_via_to_pad_fn=route_via_to_pad,
-                    pending_pads=pending_pads
+                    pending_pads=pending_pads,
+                    # Issue #88.1: pass all plane copper placed this run so a
+                    # failed rip-up restores only collision-free ripped copper.
+                    plane_vias=all_new_vias + new_vias,
+                    plane_segments=all_new_segments + new_segments,
+                    via_size=via_size,
+                    clearance=clearance,
                 )
 
                 if result.success:
@@ -1777,7 +2139,11 @@ def create_plane(
                     for rid in result.ripped_net_ids:
                         if rid not in ripped_net_ids:
                             ripped_net_ids.append(rid)
-                    # Empty ripped_net_ids means nets were restored after failure
+                    # Issue #88.1: result.ripped_net_ids is now non-empty when a
+                    # net was left ripped (not restored) because restoring it
+                    # would short onto plane copper. Those nets are excluded from
+                    # output and re-routed; restored (collision-free) nets are
+                    # absent from the list as before.
                     print(f"{RED}FAILED{RESET}")
 
             elif placement_success:
@@ -1840,6 +2206,73 @@ def create_plane(
                 print(f"{RED}FAILED - no valid position{RESET}")
                 failed_pads += 1
                 failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
+
+        # Step 9.5: Fine-pitch retry pass (issue #104). Pads whose tap failed
+        # at the run parameters get one scoped retry with fine parameters
+        # (grid 0.05 / clearance 0.15 / track <= 0.15, verified on
+        # castor_pollux) if they are fine-pitch: a same-component neighbor
+        # pad within 0.65mm or pad min dimension < 0.35mm. Obstacle maps for
+        # the retry are built on a small window around the pad, so the fine
+        # grid stays cheap even on large boards.
+        net_failed = failed_pad_infos[net_failed_start:]
+        fine_candidates = [e for e in net_failed
+                           if pad_is_fine_pitch(e[3]['pad'], pcb_data)]
+        if fine_candidates:
+            print(f"\nRetrying {len(fine_candidates)} failed fine-pitch pad(s) with scoped "
+                  f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance "
+                  f"{FINE_TAP_CLEARANCE}mm, track <= {FINE_TAP_TRACK_WIDTH}mm):")
+            recovered_entries = []
+            for entry in fine_candidates:
+                pad_info = entry[3]
+                pad = pad_info['pad']
+                pad_layer = pad_info.get('pad_layer')
+                current_pad_key = (pad.global_x, pad.global_y)
+                if current_pad_key in processed_pad_ids:
+                    continue
+                pending_pads = [
+                    pp for pp in base_pending_pads
+                    if (pp['pad'].global_x, pp['pad'].global_y) != current_pad_key
+                    and (pp['pad'].global_x, pp['pad'].global_y) not in processed_pad_ids
+                ]
+                print(f"  Pad {pad.component_ref}.{pad.pad_number} (fine retry)...", end=" ", flush=True)
+                result = tap_pad_with_escalation(
+                    pad, pad_layer, net_id, pcb_data, config,
+                    max_search_radius, via_size, via_drill,
+                    same_net_pad_clearance=same_net_pad_clearance,
+                    pending_pads=pending_pads,
+                    extra_vias=new_vias,
+                    extra_segments=new_segments,
+                    verbose=verbose,
+                    try_default=False,  # run params already failed for this pad
+                )
+                if result.success:
+                    if result.via is not None:
+                        new_vias.append(result.via)
+                        vias_placed += 1
+                        available_vias.append((result.via['x'], result.via['y']))
+                        via_index.add(result.via['x'], result.via['y'])
+                        block_via_position(obstacles, result.via['x'], result.via['y'],
+                                           coord, hole_to_hole_clearance, via_drill)
+                    else:
+                        vias_reused += 1
+                    if result.segments:
+                        new_segments.extend(result.segments)
+                        traces_added += len(result.segments)
+                    processed_pad_ids.add(current_pad_key)
+                    failed_pads -= 1
+                    recovered_entries.append(entry)
+                    if result.via is not None:
+                        print(f"{GREEN}placed via at ({result.via['x']:.2f}, {result.via['y']:.2f}), "
+                              f"{len(result.segments)} trace segment(s){RESET}")
+                    else:
+                        print(f"{GREEN}reused via at ({result.reused_via_pos[0]:.2f}, "
+                              f"{result.reused_via_pos[1]:.2f}), {len(result.segments)} trace segment(s){RESET}")
+                else:
+                    print(f"{RED}STILL FAILED{RESET}")
+            for entry in recovered_entries:
+                failed_pad_infos.remove(entry)
+            if recovered_entries:
+                print(f"  Fine-pitch retry recovered {len(recovered_entries)}/{len(fine_candidates)} pad(s)")
 
         # Step 10: Generate zone for this net (if needed)
         # For multi-net layers, defer zone generation until all nets are processed
@@ -1965,6 +2398,7 @@ def create_plane(
                 ripped_names.append(net.name if net else f"net_{rid}")
             print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
+    geo_results: Dict[int, Dict] = {}
     if dry_run:
         print("\nDry run - no output file written")
     else:
@@ -1990,8 +2424,25 @@ def create_plane(
             verbose=verbose,
             power_nets=power_nets,
             power_nets_widths=power_nets_widths,
-            add_teardrops=add_teardrops
+            add_teardrops=add_teardrops,
+            no_bga_zone=no_bga_zone
         )
+
+        # Geometric truth check (issues #89 and #107): the via-placement
+        # counters above count a pad "done" when a via is placed/reused, but
+        # that via may not be electrically joined to the net's plane (#89), and
+        # multi-net Voronoi layers can silently skip TH pads that land in the
+        # other net's cell (#107). Re-parse the written output and report how
+        # many pads are actually connected so the summary matches geometry.
+        geo_results = _geometric_plane_verification(
+            output_file, net_ids, net_names, plane_layers, all_ripped_net_ids)
+        if geo_results:
+            geo_failed = sum(info['failed'] for info in geo_results.values())
+            if geo_failed != total_failed_pads:
+                print(f"\n  NOTE: via-placement counters reported "
+                      f"{total_failed_pads} failed pad(s), but geometric check "
+                      f"found {geo_failed} pad(s) not connected to their plane "
+                      f"(see per-net breakdown above).")
 
     if return_results:
         return (total_vias_placed, total_traces_added, total_pads_needing_vias,
@@ -2055,6 +2506,10 @@ Examples:
                         help="Maximum number of blocker nets to rip up (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
+    parser.add_argument("--no-bga-zone", action="store_true",
+                        help="Disable BGA auto-exclusion zones when re-routing ripped nets "
+                             "(issue #88.2). Use when the original signal routing used "
+                             "--no-bga-zones, so the reroute uses compatible parameters.")
     parser.add_argument("--power-nets", nargs="+", default=None,
                         help="Glob patterns for power nets to route with wider tracks (e.g., '*GND*' '*VCC*')")
     parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,
@@ -2187,6 +2642,7 @@ Examples:
         add_teardrops=args.add_teardrops,
         same_net_pad_clearance=args.same_net_pad_clearance,
         skip_existing_zones=args.skip_existing_zones,
+        no_bga_zone=args.no_bga_zone,
     )
 
     # Add GND return vias if requested

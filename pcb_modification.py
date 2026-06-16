@@ -456,17 +456,26 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
         return False
 
     def point_near_any_via(px, py, vias_list):
-        """Check if point is within via_size/4 of any via in list."""
+        """Check if point lands on any via's copper (within via radius)."""
         for vx, vy, via_size in vias_list:
-            tolerance = via_size / 4
+            # The via's copper extends size/2 from centre; a segment ending
+            # anywhere on it is connected. The old size/4 test misjudged
+            # edge landings as dead ends and collapsed live connections.
+            tolerance = via_size / 2 + 0.05
             if math.sqrt((px - vx)**2 + (py - vy)**2) < tolerance:
                 return True
         return False
 
     def point_near_any_pad(px, py, pads_list):
-        """Check if point is within pad_size/4 of any pad in list."""
+        """Check if point lands on any pad's copper (within max half-extent)."""
         for pad_x, pad_y, pad_size in pads_list:
-            tolerance = pad_size / 4
+            # pad_size is max(size_x, size_y); copper reaches size/2 from
+            # centre along the long axis. The old size/4 test judged a tap
+            # landing near the end of an elongated pad (0.8 mm from a 1.6 mm
+            # pad's centre) as a dead end and collapsed the live connection
+            # to 0.001 mm. Over-keeping is harmless (an orphan stub at
+            # worst); over-collapsing breaks connectivity.
+            tolerance = pad_size / 2 + 0.05
             if math.sqrt((px - pad_x)**2 + (py - pad_y)**2) < tolerance:
                 return True
         return False

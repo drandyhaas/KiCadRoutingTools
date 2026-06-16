@@ -57,6 +57,10 @@ class RoutingState:
     rip_and_retry_history: Set[Tuple] = field(default_factory=set)
     ripup_success_pairs: Set[str] = field(default_factory=set)
     rerouted_pairs: Set[str] = field(default_factory=set)
+    # Diff-pair nets whose far-apart (uncoupled) terminal pads were peeled off the
+    # coupled chain and must be connected single-ended afterward (issue #121).
+    # net_id -> net_name.
+    diff_pair_single_ended_nets: Dict[int, str] = field(default_factory=dict)
 
     # Environment
     all_unrouted_net_ids: Set[int] = field(default_factory=set)

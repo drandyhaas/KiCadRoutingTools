@@ -109,6 +109,73 @@ def add_own_pads_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, 
     )
 
 
+def _point_in_polygon(x: float, y: float, poly) -> bool:
+    """Ray-cast point-in-polygon test for a list of (x, y) vertices."""
+    inside = False
+    n = len(poly)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i][0], poly[i][1]
+        xj, yj = poly[j][0], poly[j][1]
+        if ((yi > y) != (yj > y)) and \
+           (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _layer_is_plane_at(pcb_data, layer_name: str, x: float, y: float) -> bool:
+    """True if a filled copper zone (power/GND plane) on layer_name covers (x, y).
+
+    Routing on a plane layer is allowed (the zone re-pours with a void around the
+    new trace), but it slots the reference plane, so the launch-layer fallback
+    prefers non-plane layers first (issue #121)."""
+    for zone in getattr(pcb_data, 'zones', []) or []:
+        zlayers = zone.layers if getattr(zone, 'layers', None) else [getattr(zone, 'layer', None)]
+        if layer_name not in zlayers:
+            continue
+        poly = getattr(zone, 'polygon', None)
+        if poly and _point_in_polygon(x, y, poly):
+            return True
+    return False
+
+
+def rank_fallback_layers(config, pcb_data, obstacles, center_x: float, center_y: float,
+                         current_layer: str, probe_radius_mm: float = 1.5) -> list:
+    """Order candidate launch layers for the layer-swap fallback, best first.
+
+    A terminal whose own layer is fully blocked can launch by via-ing the pair
+    down to another layer; pick the layer that is most open around the terminal,
+    preferring non-plane (signal) layers over plane layers (issue #121). Returns
+    layer names excluding current_layer.
+    """
+    from routing_config import GridCoord
+    coord = GridCoord(config.grid_step)
+    r = max(1, int(probe_radius_mm / config.grid_step))
+    ranked = []
+    for li, layer_name in enumerate(config.layers):
+        if layer_name == current_layer:
+            continue
+        total = blocked = 0
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if dx * dx + dy * dy > r * r:
+                    continue
+                gx, gy = coord.to_grid(center_x + dx * config.grid_step,
+                                       center_y + dy * config.grid_step)
+                total += 1
+                if obstacles.is_blocked(gx, gy, li):
+                    blocked += 1
+        frac = blocked / total if total else 1.0
+        is_plane = _layer_is_plane_at(pcb_data, layer_name, center_x, center_y)
+        ranked.append((is_plane, frac, layer_name))
+    # Non-plane first, then most-open (lowest blocked fraction)
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    return [name for _, _, name in ranked]
+
+
 def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             fwd_cells: list, bwd_cells: list,
                             diff_pair_base_obstacles, base_obstacles,
@@ -135,7 +202,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
         and lists of vias/modifications applied (for tracking).
     """
     from stub_layer_switching import (get_stub_info, apply_stub_layer_switch,
-        validate_swap, collect_stubs_by_layer, collect_stub_endpoints_by_layer)
+        validate_swap, collect_stubs_by_layer, collect_stub_endpoints_by_layer,
+        check_segments_overlap)
     from diff_pair_routing import get_diff_pair_endpoints, route_diff_pair_with_obstacles
 
     # Get current endpoint info
@@ -191,8 +259,16 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                         lookup_n_net_id = ppair.n_net_id
                         break
 
-        # Try each candidate layer
-        for candidate_layer in config.layers:
+        # Try candidate layers ordered by how open they are around this terminal,
+        # preferring non-plane (signal) layers over plane layers (issue #121).
+        # The terminal's own layer may be fully blocked (dense pad row, congested
+        # outer layer) while an inner layer is wide open - via the pair P/N down
+        # there instead of failing to launch.
+        term_cx = (endpoints[0][5] + endpoints[0][7]) / 2
+        term_cy = (endpoints[0][6] + endpoints[0][8]) / 2
+        candidate_layers = rank_fallback_layers(
+            config, pcb_data, diff_pair_base_obstacles, term_cx, term_cy, current_layer)
+        for candidate_layer in candidate_layers:
             if candidate_layer == current_layer:
                 continue
 
@@ -217,6 +293,19 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
 
             if not valid:
                 print(f"    {side} swap to {candidate_layer}: {reason}")
+                continue
+
+            # validate_swap only sees diff-pair stubs, not already-ROUTED copper.
+            # On a congested board a pair routed earlier (e.g. via MPS ordering)
+            # can already occupy the fallback layer; swapping onto it would create
+            # a short - and because a failed swap is not reverted, that shorting
+            # stub is left behind in the output. Reject the candidate if the
+            # swapped stub would overlap any other net's copper already on it.
+            own_nets = {pair.p_net_id, pair.n_net_id, lookup_p_net_id, lookup_n_net_id}
+            dest_copper = [s for s in pcb_data.segments
+                           if s.layer == candidate_layer and s.net_id not in own_nets]
+            if check_segments_overlap(p_stub.segments + n_stub.segments, dest_copper):
+                print(f"    {side} swap to {candidate_layer}: overlaps existing copper on {candidate_layer}")
                 continue
 
             # Apply the swap

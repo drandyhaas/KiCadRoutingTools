@@ -135,6 +135,67 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     return obstacles
 
 
+# Cap the size of the (points, edges) float64 broadcast temporaries used by the
+# polygon kernels below. Without chunking, a many-vertex board outline times a
+# fine grid wants gigabytes in one allocation (issue #81: 432-vertex keyboard
+# outline x 2M cells = ~7 GB) and OOMs the machine before routing starts.
+_POLY_CHUNK_BYTES = 32 * 1024 * 1024
+
+
+def _poly_chunk_rows(n_edges: int) -> int:
+    """Number of points per chunk so one (chunk, n_edges) float64 fits the cap."""
+    return max(1024, _POLY_CHUNK_BYTES // (8 * max(n_edges, 1)))
+
+
+def _points_inside_polygon(px, py, x1, y1, x2, y2):
+    """Even-odd ray cast of points against polygon edges, chunked over points.
+
+    px/py: (N,) point coords in mm. x1/y1/x2/y2: (E,) edge endpoint arrays.
+    Returns (N,) bool.
+    """
+    n = px.shape[0]
+    inside = np.empty(n, dtype=bool)
+    safe_dy = np.where(y2 - y1 == 0, 1.0, y2 - y1)
+    chunk = _poly_chunk_rows(x1.shape[0])
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        px_col = px[s:e, np.newaxis]
+        py_col = py[s:e, np.newaxis]
+        cond_y = (y1 > py_col) != (y2 > py_col)
+        x_intercept = (x2 - x1) * (py_col - y1) / safe_dy + x1
+        inside[s:e] = (np.sum(cond_y & (px_col < x_intercept), axis=1) % 2) == 1
+    return inside
+
+
+def _points_edge_distance(px, py, x1, y1, x2, y2):
+    """Min distance from each point to any polygon edge, chunked over points.
+
+    px/py: (N,) point coords in mm. x1/y1/x2/y2: (E,) edge endpoint arrays.
+    Returns (N,) float64 distances (vertex distance for zero-length edges).
+    """
+    n = px.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    dx_e, dy_e = x2 - x1, y2 - y1
+    seg_len_sq = dx_e * dx_e + dy_e * dy_e
+    safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
+    degen = seg_len_sq < 1e-10
+    any_degen = bool(degen.any())
+    chunk = _poly_chunk_rows(x1.shape[0])
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        px_col = px[s:e, np.newaxis]
+        py_col = py[s:e, np.newaxis]
+        t = np.clip(((px_col - x1) * dx_e + (py_col - y1) * dy_e) / safe_len_sq, 0.0, 1.0)
+        closest_x = x1 + t * dx_e
+        closest_y = y1 + t * dy_e
+        dist_sq = (px_col - closest_x) ** 2 + (py_col - closest_y) ** 2
+        if any_degen:
+            degen_dist_sq = (px_col - x1) ** 2 + (py_col - y1) ** 2
+            dist_sq = np.where(degen, degen_dist_sq, dist_sq)
+        out[s:e] = np.sqrt(np.min(dist_sq, axis=1))
+    return out
+
+
 def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
     """Rasterize a closed polygon over its grid bounding box (expanded by `margin` mm).
 
@@ -151,10 +212,10 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
     if len(poly_points) < 3:
         return None, None, None, None
     poly = np.array(poly_points, dtype=np.float64)
-    x1 = poly[:, 0][np.newaxis, :]
-    y1 = poly[:, 1][np.newaxis, :]
-    x2 = np.roll(poly[:, 0], -1)[np.newaxis, :]
-    y2 = np.roll(poly[:, 1], -1)[np.newaxis, :]
+    x1 = poly[:, 0]
+    y1 = poly[:, 1]
+    x2 = np.roll(poly[:, 0], -1)
+    y2 = np.roll(poly[:, 1], -1)
 
     cmin_x, cmax_x = poly[:, 0].min() - margin, poly[:, 0].max() + margin
     cmin_y, cmax_y = poly[:, 1].min() - margin, poly[:, 1].max() + margin
@@ -168,24 +229,13 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
     gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
     gx_flat = gx_grid.ravel()
     gy_flat = gy_grid.ravel()
-    px_col = (gx_flat.astype(np.float64) * coord.grid_step)[:, np.newaxis]
-    py_col = (gy_flat.astype(np.float64) * coord.grid_step)[:, np.newaxis]
+    px = gx_flat.astype(np.float64) * coord.grid_step
+    py = gy_flat.astype(np.float64) * coord.grid_step
 
-    # Even-odd ray cast: is the cell centre inside the polygon?
-    cond_y = (y1 > py_col) != (y2 > py_col)
-    safe_dy = np.where(y2 - y1 == 0, 1.0, y2 - y1)
-    x_intercept = (x2 - x1) * (py_col - y1) / safe_dy + x1
-    inside = (np.sum(cond_y & (px_col < x_intercept), axis=1) % 2) == 1
-
-    # Distance from each cell centre to the nearest polygon edge (vertex distance
-    # for degenerate zero-length edges, via the clamped projection parameter t).
-    dx_e, dy_e = x2 - x1, y2 - y1
-    seg_len_sq = dx_e * dx_e + dy_e * dy_e
-    safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
-    t = np.clip(((px_col - x1) * dx_e + (py_col - y1) * dy_e) / safe_len_sq, 0.0, 1.0)
-    closest_x = x1 + t * dx_e
-    closest_y = y1 + t * dy_e
-    edge_dist = np.sqrt(np.min((px_col - closest_x) ** 2 + (py_col - closest_y) ** 2, axis=1))
+    # Both kernels are chunked over points to bound the (points, edges)
+    # broadcast temporaries (issue #81).
+    inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
+    edge_dist = _points_edge_distance(px, py, x1, y1, x2, y2)
 
     return gx_flat, gy_flat, inside, edge_dist
 
@@ -364,14 +414,36 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         if gx_flat is None:
             continue
 
+        track_mask = inside | (edge_dist < track_clear)
+        via_mask = inside | (edge_dist < via_clear)
+
+        # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
+        # Cells deep inside a hole (>= the relevant clearance from the hole
+        # edge) are routable; cells in the ring, or in the hole but within
+        # clearance of the ring copper, stay blocked (issue #95). Evaluated
+        # vectorized on the OUTER cell array - the earlier per-cell Python set +
+        # generator was O(cells*holes) and dominated every obstacle-map build
+        # (76s of an 86s plane pad-repair on glasgow's whole-board ring keepout).
+        holes = ko.get('holes') or []
+        if holes:
+            px = gx_flat.astype(np.float64) * coord.grid_step
+            py = gy_flat.astype(np.float64) * coord.grid_step
+            for hole in holes:
+                hp = np.asarray(hole, dtype=np.float64)
+                if hp.shape[0] < 3:
+                    continue
+                hx1, hy1 = hp[:, 0], hp[:, 1]
+                hx2, hy2 = np.roll(hp[:, 0], -1), np.roll(hp[:, 1], -1)
+                h_inside = _points_inside_polygon(px, py, hx1, hy1, hx2, hy2)
+                h_edge = _points_edge_distance(px, py, hx1, hy1, hx2, hy2)
+                track_mask &= ~(h_inside & (h_edge >= track_clear))
+                via_mask &= ~(h_inside & (h_edge >= via_clear))
+
         if block_tracks:
-            _block_cells_on_layers(obstacles, gx_flat, gy_flat,
-                                   inside | (edge_dist < track_clear), layer_idxs)
-        if block_vias:
-            via_mask = inside | (edge_dist < via_clear)
-            if via_mask.any():
-                obstacles.add_blocked_vias_batch(
-                    np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
+            _block_cells_on_layers(obstacles, gx_flat, gy_flat, track_mask, layer_idxs)
+        if block_vias and via_mask.any():
+            obstacles.add_blocked_vias_batch(
+                np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
 
 
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -520,36 +592,14 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[
 
     # Build polygon edge arrays: each edge is (x1, y1) -> (x2, y2)
     poly_arr = np.array(polygon, dtype=np.float64)  # shape (n_edges, 2)
-    n_edges = len(polygon)
     x1 = poly_arr[:, 0]  # (n_edges,)
     y1 = poly_arr[:, 1]
     x2 = np.roll(poly_arr[:, 0], -1)  # next vertex
     y2 = np.roll(poly_arr[:, 1], -1)
 
-    # --- Vectorized point-in-polygon (ray casting) ---
-    # For each point (px, py) and each edge (y1, y2, x1, x2):
-    # crossing if ((yi > y) != (yj > y)) and (x < (xj-xi)*(y-yi)/(yj-yi) + xi)
-    # Shape: points are (N,), edges are (E,), broadcast to (N, E)
-    py_col = py[:, np.newaxis]  # (N, 1)
-    px_col = px[:, np.newaxis]  # (N, 1)
-
-    # Edge coords broadcast to (1, E)
-    y1_row = y1[np.newaxis, :]
-    y2_row = y2[np.newaxis, :]
-    x1_row = x1[np.newaxis, :]
-    x2_row = x2[np.newaxis, :]
-
-    # Crossing condition
-    cond_y = (y1_row > py_col) != (y2_row > py_col)  # (N, E)
-    # x threshold for the crossing
-    dy = y2_row - y1_row
-    # Avoid division by zero (dy==0 means horizontal edge, which cond_y already excludes)
-    safe_dy = np.where(dy == 0, 1.0, dy)
-    x_intercept = (x2_row - x1_row) * (py_col - y1_row) / safe_dy + x1_row
-    cond_x = px_col < x_intercept
-
-    crossings = np.sum(cond_y & cond_x, axis=1)  # (N,)
-    inside = (crossings % 2) == 1  # (N,) bool
+    # Point-in-polygon ray cast, chunked over points so the (points, edges)
+    # broadcast temporaries stay bounded (issue #81).
+    inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
 
     # --- Vectorized point-to-polygon-edge distance ---
     # For inside points, compute min distance to any edge
@@ -567,38 +617,12 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[
             obstacles.add_blocked_cells_batch(np.hstack([out_cells, layer_col]))
         obstacles.add_blocked_vias_batch(out_cells)
 
-    # Compute edge distances for inside points
+    # Compute edge distances for inside points (chunked kernel, issue #81)
     if inside_idx.size > 0:
         in_px = px[inside_idx]  # (M,)
         in_py = py[inside_idx]
 
-        # For each inside point and each edge, compute point-to-segment distance
-        # Points: (M, 1), Edges: (1, E) -> broadcast (M, E)
-        in_px_col = in_px[:, np.newaxis]
-        in_py_col = in_py[:, np.newaxis]
-
-        # Edge vectors
-        dx_e = x2_row - x1_row  # (1, E)
-        dy_e = y2_row - y1_row  # (1, E)
-        seg_len_sq = dx_e * dx_e + dy_e * dy_e  # (1, E)
-
-        # Project point onto line, clamp to [0, 1]
-        safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
-        t = ((in_px_col - x1_row) * dx_e + (in_py_col - y1_row) * dy_e) / safe_len_sq
-        t = np.clip(t, 0.0, 1.0)  # (M, E)
-
-        # Closest point on segment
-        closest_x = x1_row + t * dx_e
-        closest_y = y1_row + t * dy_e
-
-        # Distance to closest point
-        dist_sq = (in_px_col - closest_x) ** 2 + (in_py_col - closest_y) ** 2  # (M, E)
-        # Handle degenerate segments
-        degen = seg_len_sq < 1e-10  # (1, E)
-        degen_dist_sq = (in_px_col - x1_row) ** 2 + (in_py_col - y1_row) ** 2
-        dist_sq = np.where(degen, degen_dist_sq, dist_sq)
-
-        min_dist = np.sqrt(np.min(dist_sq, axis=1))  # (M,)
+        min_dist = _points_edge_distance(in_px, in_py, x1, y1, x2, y2)  # (M,)
 
         in_gx = gx_flat[inside_idx]
         in_gy = gy_flat[inside_idx]

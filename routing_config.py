@@ -53,6 +53,12 @@ class GridRouteConfig:
     # Differential pair routing parameters
     diff_pair_gap: float = 0.101  # mm - gap between P and N traces (center-to-center = track_width + gap)
     diff_pair_centerline_setback: float = None  # mm - distance in front of stubs to start centerline route (None = 2 * spacing)
+    # In a multi-point pair, a "terminal" whose P and N pads are farther apart
+    # than diff_pair_uncouple_factor * (track_width + diff_pair_gap) is not a
+    # coupled differential connection (e.g. spread-out test points). If the full
+    # coupled chain can't be routed, such terminals are peeled off and their pads
+    # routed single-ended (P->P, N->N) instead (issue #121).
+    diff_pair_uncouple_factor: float = 6.0  # multiples of pair spacing (track+gap)
     min_turning_radius: float = 0.2  # mm - minimum turning radius for pose-based routing
     fix_polarity: bool = True  # Swap target pad nets if polarity swap needed
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
@@ -172,10 +178,11 @@ class GridRouteConfig:
         Returns costs scaled by 1000 (1000 = 1.0x, 1500 = 1.5x penalty).
         If layer_costs is empty or shorter than layers list, uses 1000 (1.0x) for missing layers.
         """
+        layer_costs = self.layer_costs or []  # may be None when set explicitly
         costs = []
         for i in range(len(self.layers)):
-            if i < len(self.layer_costs):
-                costs.append(int(self.layer_costs[i] * 1000))
+            if i < len(layer_costs):
+                costs.append(int(layer_costs[i] * 1000))
             else:
                 costs.append(1000)  # Default 1.0x
         return costs

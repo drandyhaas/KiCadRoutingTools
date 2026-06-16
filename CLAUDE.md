@@ -19,6 +19,44 @@ This builds the Rust module, copies the library to the correct location, and ver
 
 **Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`.
 
+## Keep CLI and GUI routing in sync
+
+There are two front-ends to the same routing engine, and a fix to one is
+**not** automatically a fix to the other:
+
+- **CLI scripts** — `route.py`, `route_diff.py`, `route_planes.py`,
+  `route_disconnected_planes.py`, `bga_fanout.py`, etc. Their `main()`
+  parses args and calls the shared engine functions (`batch_route`,
+  `batch_route_diff_pairs`, `create_plane`, `generate_bga_fanout`, ...).
+- **GUI plugin** — `kicad_routing_plugin/` (`swig_gui.py`,
+  `differential_gui.py`, `planes_gui.py`, `fanout_gui.py`) calls those
+  **same shared functions directly** (with `return_results=True`,
+  `dry_run=True`/`output_file=""`), building `PCBData` from the live
+  pcbnew board via `build_pcb_data_from_board` rather than parsing a file.
+
+Because both call the shared engine, fixes **inside** those functions are
+picked up by both for free. The gaps appear at the edges:
+
+- **A fix in a CLI `main()` only** (argparse, defaults, output writing,
+  post-processing) is invisible to the GUI — the GUI re-implements that
+  layer. Put shared logic in the engine function, not in `main()`.
+- **A new engine parameter / flag** must be threaded through *both* the
+  argparse layer *and* every GUI call site (plus its config dict, the
+  options panel, and `settings_persistence.py`). A new `batch_route`
+  kwarg that only `route.py` passes silently does nothing in the GUI.
+- **A changed default** must match in both places — the GUI sets its own
+  values from UI controls and does not inherit argparse defaults.
+- **Parser/obstacle/writer fixes** in shared low-level modules are used by
+  both, *except* file-text-parsing fixes in `parse_kicad_pcb`: the GUI
+  builds `PCBData` from pcbnew instead, so `build_pcb_data_from_board`
+  must be kept at parity with the text parser separately.
+
+**Rule of thumb:** whenever you change routing behavior via the CLI, check
+whether the corresponding GUI call site (and its options panel) needs the
+same change — and vice versa. When adding a flag, grep the
+`kicad_routing_plugin/` call sites for the function you changed and wire it
+through there too.
+
 ## KiCad Parser Usage
 
 Full user-facing API docs (parser, writer, modification, config, net

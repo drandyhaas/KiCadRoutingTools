@@ -25,7 +25,8 @@ from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from diff_pair_routing import (
     route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross
 )
-from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair
+from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_fallback_layers
+from stub_layer_switching import apply_bare_pad_target_via
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from polarity_swap import apply_polarity_swap, undo_polarity_swap
 from routing_context import build_diff_pair_obstacles
@@ -111,6 +112,142 @@ def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
 def _terminal_center(terminal: Tuple[Pad, Pad]) -> Tuple[float, float]:
     pp, nn = terminal
     return ((pp.global_x + nn.global_x) / 2, (pp.global_y + nn.global_y) / 2)
+
+
+def terminal_separation(terminal: Tuple[Pad, Pad]) -> float:
+    """P-to-N pad distance (mm) of a terminal."""
+    pp, nn = terminal
+    return math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
+
+
+def classify_terminals(terminals: List[Tuple[Pad, Pad]], config: GridRouteConfig
+                       ) -> Tuple[List[Tuple[Pad, Pad]], List[Tuple[Pad, Pad]]]:
+    """Split terminals into (coupled, uncoupled).
+
+    A terminal is coupled when its P and N pads are close enough to launch a real
+    differential pair; uncoupled when they are too far apart to be a coupled
+    connection (e.g. test points on opposite sides of a part). Threshold =
+    diff_pair_uncouple_factor * (track_width + diff_pair_gap) (issue #121)."""
+    threshold = config.diff_pair_uncouple_factor * (config.track_width + config.diff_pair_gap)
+    coupled, uncoupled = [], []
+    for t in terminals:
+        (coupled if terminal_separation(t) <= threshold else uncoupled).append(t)
+    return coupled, uncoupled
+
+
+def _blocked_fraction(config, obstacles, cx, cy, layer_idx, radius_mm=1.5):
+    """Fraction of a disk around (cx, cy) that is blocked on layer_idx."""
+    coord = GridCoord(config.grid_step)
+    r = max(1, int(radius_mm / config.grid_step))
+    total = blocked = 0
+    for dx in range(-r, r + 1):
+        for dy in range(-r, r + 1):
+            if dx * dx + dy * dy > r * r:
+                continue
+            gx, gy = coord.to_grid(cx + dx * config.grid_step, cy + dy * config.grid_step)
+            total += 1
+            if obstacles.is_blocked(gx, gy, layer_idx):
+                blocked += 1
+    return blocked / total if total else 1.0
+
+
+def _fake_pad(ref_pad: Pad, x: float, y: float, layer: str) -> Pad:
+    """A stand-in pad at (x, y) on `layer` carrying ref_pad's net, used as a leg
+    launch point after a terminal is relocated to an open layer (issue #121)."""
+    return Pad(
+        component_ref=ref_pad.component_ref, pad_number=ref_pad.pad_number,
+        global_x=x, global_y=y, local_x=x, local_y=y,
+        size_x=ref_pad.size_x, size_y=ref_pad.size_y, shape=ref_pad.shape,
+        layers=[layer], net_id=ref_pad.net_id, net_name=ref_pad.net_name)
+
+
+def _candidate_relocation_layers(state, terminals, obstacles, max_layers=3):
+    """Rank shared target layers for relocating blocked terminals: a layer is a
+    candidate if it is clearly more open than at least one terminal's own layer.
+    Non-plane (signal) layers first, then by worst-case openness across the
+    blocked terminals; planes last (routing them slots the reference). (#121)"""
+    config = state.config
+    pcb_data = state.pcb_data
+    centers = [_terminal_center(t) for t in terminals]
+    own_fracs = [_blocked_fraction(config, obstacles, cx, cy,
+                                   config.layers.index(_pad_layer(t[0], config)))
+                 for t, (cx, cy) in zip(terminals, centers)]
+    if not any(f >= 0.45 for f in own_fracs):
+        return []  # nothing is meaningfully blocked
+    ranked = []
+    for li, layer in enumerate(config.layers):
+        fracs = [_blocked_fraction(config, obstacles, cx, cy, li) for cx, cy in centers]
+        worst = max(fracs)
+        # Useful only if it actually unblocks a blocked terminal.
+        helps = any(own >= 0.45 and fracs[k] < own - 0.15 and fracs[k] < 0.4
+                    for k, own in enumerate(own_fracs))
+        if not helps:
+            continue
+        is_plane = any(_layer_is_plane_for(pcb_data, layer, cx, cy) for cx, cy in centers)
+        ranked.append((is_plane, worst, layer))
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    return [layer for _, _, layer in ranked[:max_layers]]
+
+
+def _layer_is_plane_for(pcb_data, layer_name, x, y):
+    from layer_swap_fallback import _layer_is_plane_at
+    return _layer_is_plane_at(pcb_data, layer_name, x, y)
+
+
+def _relocate_blocked_terminals(state, pair: DiffPairNet, terminals, obstacles, target_layer):
+    """Relocate every terminal whose own (pad) layer is too blocked to launch a
+    coupled pair onto `target_layer` (when target_layer is open there): drop a
+    via on each pad to switch layers and grow a short stub (apply_bare_pad_target_via);
+    the leg launches from the stub's free end. Reuses the layer-switch endpoint
+    mechanism (issue #121, the user's "drop a via, call the stub an endpoint").
+
+    Returns (new_terminals, fans): new_terminals has relocated terminals replaced
+    by stub-end stand-in pads; fans is a list of (via, stub) added to pcb_data
+    (attach to the route on success, remove on failure)."""
+    config = state.config
+    pcb_data = state.pcb_data
+    centers = [_terminal_center(t) for t in terminals]
+    tgt_idx = config.layers.index(target_layer)
+    new_terminals = list(terminals)
+    fans = []
+    for i, (pp, nn) in enumerate(terminals):
+        cx, cy = centers[i]
+        pad_layer = _pad_layer(pp, config)
+        if pad_layer == target_layer:
+            continue
+        frac = _blocked_fraction(config, obstacles, cx, cy, config.layers.index(pad_layer))
+        tgt_frac = _blocked_fraction(config, obstacles, cx, cy, tgt_idx)
+        # Only relocate a genuinely-blocked terminal onto a clearly-open target.
+        if frac < 0.45 or tgt_frac > frac - 0.15 or tgt_frac > 0.4:
+            continue
+        # Aim the new stubs toward the rest of the chain (away from this part).
+        others = [centers[j] for j in range(len(centers)) if j != i] or [(cx, cy)]
+        ax = sum(c[0] for c in others) / len(others)
+        ay = sum(c[1] for c in others) / len(others)
+        via_p, stub_p = apply_bare_pad_target_via(pcb_data, pp.net_id, pp.global_x, pp.global_y, target_layer, ax, ay, config)
+        via_n, stub_n = apply_bare_pad_target_via(pcb_data, nn.net_id, nn.global_x, nn.global_y, target_layer, ax, ay, config)
+        fans += [(via_p, stub_p), (via_n, stub_n)]
+        new_terminals[i] = (_fake_pad(pp, stub_p.end_x, stub_p.end_y, target_layer),
+                            _fake_pad(nn, stub_n.end_x, stub_n.end_y, target_layer))
+        print(f"    Relocated terminal {pp.component_ref}:{pp.pad_number}/{nn.pad_number} "
+              f"{pad_layer}({frac*100:.0f}%) -> {target_layer}({tgt_frac*100:.0f}%)")
+    return new_terminals, fans
+
+
+def _attach_fans(merged, fans):
+    """Record relocation fan copper (via + stub per pad) on the merged route so
+    sync_pcb_data_segments writes it to the output."""
+    merged['new_segments'] = list(merged.get('new_segments', [])) + [s for _, s in fans]
+    merged['new_vias'] = list(merged.get('new_vias', [])) + [v for v, _ in fans]
+
+
+def _cleanup_fans(pcb_data, fans):
+    """Remove relocation fan copper from pcb_data (failed attempt)."""
+    for via, stub in fans:
+        if via in pcb_data.vias:
+            pcb_data.vias.remove(via)
+        if stub in pcb_data.segments:
+            pcb_data.segments.remove(stub)
 
 
 def candidate_terminal_chains(terminals: List[Tuple[Pad, Pad]],
@@ -266,11 +403,66 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
     Returns (leg_results, merged_result) on full success, ([], None) on
     failure (failed attempts' legs are ripped back out).
     """
-    pcb_data = state.pcb_data
     config = state.config
+    pcb_data = state.pcb_data
+    obstacles = state.diff_pair_base_obstacles
 
-    chains = candidate_terminal_chains(terminals)
     print(f"  Multi-point pair: {len(terminals)} terminals, {len(terminals) - 1} legs")
+    # Try the full coupled chain first - a pair that routes fine through a
+    # widely-spaced terminal (e.g. a test point reached as a chain end) must not
+    # be broken up needlessly (issue #121).
+    leg_results, merged = _route_terminal_set(state, pair, pair_name, terminals)
+    if merged is not None:
+        return leg_results, merged, []
+
+    # The chain couldn't launch on the terminals' own layers (jammed outer
+    # layers). Relocate the blocked terminals onto an open layer (drop a via,
+    # launch from the stub) and retry - trying candidate target layers in turn
+    # (non-plane first, then planes, which the router treats as open).
+    def _try_relocated(term_set):
+        for layer in _candidate_relocation_layers(state, term_set, obstacles):
+            reloc, fans = _relocate_blocked_terminals(state, pair, term_set, obstacles, layer)
+            if not fans:
+                continue
+            print(f"  Retrying chain with {len(fans)//2} terminal(s) relocated to {layer}...")
+            legs, m = _route_terminal_set(state, pair, pair_name, reloc)
+            if m is not None:
+                _attach_fans(m, fans)
+                return legs, m
+            _cleanup_fans(pcb_data, fans)
+        return [], None
+
+    if obstacles is not None:
+        leg_results, merged = _try_relocated(terminals)
+        if merged is not None:
+            return leg_results, merged, []
+
+    # Still stuck. If some terminals are too far apart to be a coupled
+    # differential connection, peel them off and route only the coupled
+    # terminals as a pair; the peeled pads are connected single-ended afterward.
+    coupled, uncoupled = classify_terminals(terminals, config)
+    if uncoupled and len(coupled) >= 2:
+        far = min(terminal_separation(t) for t in uncoupled)
+        print(f"  Coupled chain failed; peeling {len(uncoupled)} far-apart terminal(s) "
+              f"(P/N >= {far:.1f}mm apart) to route single-ended, retrying "
+              f"coupled {len(coupled)}-terminal chain...")
+        leg_results, merged = _route_terminal_set(state, pair, pair_name, coupled)
+        if merged is not None:
+            return leg_results, merged, uncoupled
+        if obstacles is not None:
+            leg_results, merged = _try_relocated(coupled)
+            if merged is not None:
+                return leg_results, merged, uncoupled
+    return [], None, []
+
+
+def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
+                        terminals: List[Tuple[Pad, Pad]]):
+    """Route a fixed set of terminals as a coupled chain, trying alternative
+    chain orderings. Returns (leg_results, merged) or ([], None)."""
+    if len(terminals) < 2:
+        return [], None
+    chains = candidate_terminal_chains(terminals)
     for attempt, chain in enumerate(chains):
         if attempt > 0:
             print(f"  Trying alternative chain order ({attempt + 1}/{len(chains)})...")

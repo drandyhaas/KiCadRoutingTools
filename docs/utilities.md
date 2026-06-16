@@ -18,7 +18,14 @@ Options:
   --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
   --nets PATTERN       Only check nets matching pattern
   --debug-lines        Output debug lines on User.7 showing violation locations
+  --max-print INT      Max violations listed per type before "... and N more"
+                       (0 = print all; default 20)
 ```
+
+The per-type listing is capped at `--max-print` (default 20); when a type has
+more, a `... and N more (use --max-print 0 to show all)` marker is printed so
+the listing is never silently truncated relative to the header count. Use
+`--max-print 0` to dump everything for log-based triage.
 
 ### Examples
 
@@ -97,6 +104,12 @@ Verifies that all nets are fully connected after routing. Detects two types of i
 
 1. **Unrouted nets** - Nets with pads but no tracks (routing was never attempted or failed)
 2. **Broken routes** - Nets with tracks that don't connect all pads (incomplete routing)
+
+Unrouted detection is based on whether a net is actually covered by a copper
+zone, not a hard-coded name list — a power net (GND, +3V3, …) with no plane on
+this board *is* reported as unrouted. Same-net pads whose copper overlaps (e.g.
+a castellated module's co-located through-hole + SMD pad pair) count as
+connected even with no track between them.
 
 ### Usage
 
@@ -244,7 +257,7 @@ Removed orphans (fixed): 2
 
 ## Net Analyzer (`list_nets.py`)
 
-Analyzes nets in a PCB file. Can list nets on a component, detect differential pairs, and identify power/ground nets.
+Analyzes nets in a PCB file. Can list nets on a component, detect differential pairs, identify power/ground nets, and report the board's net-class design rules.
 
 ### Usage
 
@@ -256,9 +269,50 @@ Options:
   --pads                Show pad-to-net assignments
   --diff-pairs, -d      Detect differential pairs
   --power, -p           Show power/ground nets with pad counts
+  --design-rules, -r    Show net-class clearance/track/via/diff-pair rules
+                        and the CLI flags to pass them to the routing tools
   --top N               Show top N most-connected nets (default: 10)
   --pattern GLOB        Filter nets by pattern
 ```
+
+### Design rules
+
+The routers do **not** read the board's net classes — they fall back to a
+generic `--clearance 0.25` / default track width, which is often wider than the
+board's own rule and can box pads in (nets then fail with "no rippable
+blockers"). `--design-rules` reads the real rules so you can pass them
+explicitly:
+
+```bash
+python list_nets.py board.kicad_pcb --design-rules
+```
+
+It reads two tiers of rules and combines them with the JLCPCB fab floor:
+
+- **Net-class values** from the sibling `.kicad_pro` (KiCad 8+,
+  `net_settings.classes`) or `(net_class …)` blocks (KiCad 6/7): `clearance`,
+  `track_width`, `via_diameter`, `via_drill`, `diff_pair_gap`, `diff_pair_width`.
+  These are KiCad *drawing defaults*; only `clearance` is a DRC minimum.
+- **Board Constraints** from `board.design_settings.rules`: `min_clearance`,
+  `min_track_width`, `min_via_diameter`, `min_hole_to_hole`,
+  `min_through_hole_diameter`. **These are what DRC actually enforces** for the
+  geometric rules — so a board can use a via/track *smaller* than the net-class
+  nominal and still pass DRC (issues #111/#115).
+
+From these it prints a **manufacturing floor** (the Constraint or the JLC fab
+minimum for the board's layer count, whichever is larger). The floor spells out
+two distinct rules the router honours: **hole-to-hole** (drill-to-drill) is
+net-INDEPENDENT and applies to via/via, via/pad-drill and pad-drill/pad-drill on
+*all* nets including same-net; **copper clearance** applies to via/pad and
+via/via copper between *different* nets, while same-net via-pad copper clearance
+may be 0 (via-in-pad) where the fab allows it. It then emits ready-to-paste
+flags: routing uses the net-class `--clearance`/`--track-width` but the small
+**working** `--via-size`/`--via-drill` from the floor (not the net-class
+`via_diameter`), and `check_drc.py` is graded at the floor
+(`--clearance <floor> --hole-to-hole-clearance <floor>`), not the inflated
+net-class clearance. Nets assigned to a non-Default class are reported so they
+can be routed separately with that class's values. When neither net classes nor
+Constraints exist, it falls back to the JLC fab floor for the layer count.
 
 ### Examples
 
@@ -579,5 +633,5 @@ python list_nets.py board.kicad_pcb U2A --pads
 # Route with debug lines enabled
 python route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-lines
 
-# Open debug.kicad_pcb in KiCad, check User.3/4/8/9 layers
+# Open debug.kicad_pcb in KiCad, check User.3/4/5/6/8/9 layers
 ```

@@ -51,6 +51,7 @@ version, model, discovered skills) so you can confirm what actually ran.
 | [`/recommend-plane-mappings`](#recommend-plane-mappings) | Recommend net → plane-layer assignments with SI rationale | Assignment list for the Planes tab / `route_planes.py` arguments |
 | [`/diagnose-routing-failures`](#diagnose-routing-failures) | Root-cause failed routes from logs + board | Targeted retry command for the failed nets |
 | [`/review-routed-board`](#review-routed-board) | Post-route QA and sign-off | Pass/fail report with next actions |
+| [`/stress-test-router`](#stress-test-router) | Batch-test the router on real-world open-source boards | Completion/DRC summary table + GitHub issues for findings |
 
 ### /plan-pcb-routing
 
@@ -85,6 +86,10 @@ Root-causes failed routes after a `route.py` / `route_diff.py` run. Parses the `
 ### /review-routed-board
 
 Post-route QA on any routed board (from this tool, by hand, or another router). Runs the DRC/connectivity/orphan-stub checkers (noting that zone copper needs KiCad's own `kicad-cli pcb drc`), verifies length/time-match groups landed within tolerance, checks GND return via coverage on high-speed nets, and reviews diff-pair gaps and polarity. Produces a compact pass/fail sign-off report ending with concrete next actions.
+
+### /stress-test-router
+
+A development/QA skill rather than a board-design skill: batch-tests the router against real-world open-source KiCad boards of varying complexity (simple keyboards up to 6-layer SoC carriers). Drives the `tests/stress/` harness — downloads the corpus from upstream GitHub projects (boards are never checked into the repo), normalizes via a `pcbnew` round-trip, strips all routing, then routes each board end-to-end with the `/plan-pcb-routing` workflow under strict resource limits (~4 GB per job, 4 boards concurrent via the `run_queue.sh` manager). Aggregates per-board completion rates, DRC deltas vs the unrouted baseline, connectivity verdicts, and crash/hang findings into a summary table, deduplicates findings against existing GitHub issues, and files new issues after user approval. See `tests/README.md` and `tests/stress/README.md` for the harness internals.
 
 ## How They Fit Together
 

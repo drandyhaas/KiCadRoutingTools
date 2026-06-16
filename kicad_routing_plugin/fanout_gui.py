@@ -743,6 +743,15 @@ class BGAOptionsPanel(wx.Panel):
         self.no_inner_top.SetToolTip("Prevent inner pads from using F.Cu")
         options_sizer.Add(self.no_inner_top, 0, wx.LEFT | wx.BOTTOM, 5)
 
+        self.underpad_escape = wx.CheckBox(self, label="Under-pad escape (dense BGA)")
+        self.underpad_escape.SetToolTip(
+            "Use the under-pad grid escape instead of the channel router. Each "
+            "signal vias in its pad and routes under the pad field on inner "
+            "layers - escapes fully-populated arrays the channel router can't "
+            "(#122). Routes diff pairs as single-ended; power nets tap planes. "
+            "Use a small via/track for dense pitch (e.g. via 0.35, track 0.12).")
+        options_sizer.Add(self.underpad_escape, 0, wx.LEFT | wx.BOTTOM, 5)
+
         main_sizer.Add(options_sizer, 0, wx.EXPAND)
 
         self.SetSizer(main_sizer)
@@ -766,6 +775,7 @@ class BGAOptionsPanel(wx.Panel):
             'rebalance_escape': self.rebalance_escape.GetValue(),
             'check_for_previous': self.check_previous.GetValue(),
             'no_inner_top_layer': self.no_inner_top.GetValue(),
+            'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'channel',
         }
 
 
@@ -1058,6 +1068,7 @@ class FanoutTab(wx.Panel):
                 via_drill=via_drill,
                 check_for_previous=config['check_for_previous'],
                 no_inner_top_layer=config['no_inner_top_layer'],
+                escape_method=config.get('escape_method', 'channel'),
             )
 
             self._apply_fanout_results(

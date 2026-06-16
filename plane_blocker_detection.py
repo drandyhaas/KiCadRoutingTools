@@ -319,6 +319,77 @@ class ViaPlacementResult:
     via_at_pad_center: bool
 
 
+def _point_to_segment_dist_sq(px: float, py: float,
+                              ax: float, ay: float,
+                              bx: float, by: float) -> float:
+    """Squared distance from point (px,py) to segment (ax,ay)-(bx,by)."""
+    dx, dy = bx - ax, by - ay
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq <= 1e-12:
+        return (px - ax) ** 2 + (py - ay) ** 2
+    t = ((px - ax) * dx + (py - ay) * dy) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+    cx, cy = ax + t * dx, ay + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
+
+
+def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
+                             plane_vias: List[Dict], plane_segments: List[Dict],
+                             via_size: float, clearance: float) -> bool:
+    """Issue #88.1: return True if a to-be-restored segment or via would
+    overlap newly-placed plane copper (plane vias/segments placed this run).
+
+    Plane stitching vias span all layers, so a restored via or any restored
+    segment (on any layer) that comes within (via_size/2 + own_radius +
+    clearance) of a plane via center is a short. Restored segments are also
+    tested against plane segments on the same layer. Collision-free pieces are
+    restored verbatim; colliding pieces are left ripped (so the net falls into
+    the ripped-nets set to be re-routed rather than shorted onto plane copper).
+    """
+    via_r = via_size / 2.0
+
+    if via is not None:
+        # Restored via vs plane vias (via-via, all layers).
+        vr = via.get('size', via_size) / 2.0
+        thresh = via_r + vr + clearance
+        thresh_sq = thresh * thresh
+        for pv in plane_vias:
+            if (via['x'] - pv['x']) ** 2 + (via['y'] - pv['y']) ** 2 < thresh_sq:
+                return True
+        return False
+
+    if seg is not None:
+        sx0, sy0 = seg['start'][0], seg['start'][1]
+        sx1, sy1 = seg['end'][0], seg['end'][1]
+        half_w = seg.get('width', 0.2) / 2.0
+        # Restored segment vs plane vias (via copper, all layers).
+        thresh = via_r + half_w + clearance
+        thresh_sq = thresh * thresh
+        for pv in plane_vias:
+            if _point_to_segment_dist_sq(pv['x'], pv['y'], sx0, sy0, sx1, sy1) < thresh_sq:
+                return True
+        # Restored segment vs plane segments on the same layer (seg-seg).
+        seg_layer = seg.get('layer')
+        for ps in plane_segments:
+            if ps.get('layer') != seg_layer:
+                continue
+            ps_half_w = ps.get('width', 0.2) / 2.0
+            s_thresh = half_w + ps_half_w + clearance
+            s_thresh_sq = s_thresh * s_thresh
+            # Sample endpoints of each segment against the other (cheap, and
+            # sufficient for the short axis-overlap case we are guarding).
+            px0, py0 = ps['start'][0], ps['start'][1]
+            px1, py1 = ps['end'][0], ps['end'][1]
+            if (_point_to_segment_dist_sq(px0, py0, sx0, sy0, sx1, sy1) < s_thresh_sq or
+                    _point_to_segment_dist_sq(px1, py1, sx0, sy0, sx1, sy1) < s_thresh_sq or
+                    _point_to_segment_dist_sq(sx0, sy0, px0, py0, px1, py1) < s_thresh_sq or
+                    _point_to_segment_dist_sq(sx1, sy1, px0, py0, px1, py1) < s_thresh_sq):
+                return True
+        return False
+
+    return False
+
+
 def try_place_via_with_ripup(
     pad: Pad,
     pad_layer: str,
@@ -342,7 +413,14 @@ def try_place_via_with_ripup(
     verbose: bool = False,
     find_via_position_fn=None,  # Function to find via position
     route_via_to_pad_fn=None,  # Function to route via to pad
-    pending_pads: Optional[List[Dict]] = None  # Pads that still need vias (for exclusion zones)
+    pending_pads: Optional[List[Dict]] = None,  # Pads that still need vias (for exclusion zones)
+    # Issue #88.1: collision-aware restoration. Plane vias/segments placed so
+    # far this run, plus geometry, so restoration can skip pieces that would
+    # overlap newly-placed plane copper instead of restoring shorts.
+    plane_vias: Optional[List[Dict]] = None,
+    plane_segments: Optional[List[Dict]] = None,
+    via_size: float = 0.5,
+    clearance: float = 0.25
 ) -> ViaPlacementResult:
     """
     Try to place a via and route to pad, ripping up blockers as needed.
@@ -464,10 +542,49 @@ def try_place_via_with_ripup(
             for rp in ripped_pads:
                 pending_pads.append({'pad': rp, 'needs_via': True})
 
-    # Failed - restore all ripped nets to pcb_data and obstacles
+    # Failed - restore ripped nets, but collision-aware (issue #88.1).
+    #
+    # The old behaviour restored every ripped net verbatim, which re-added
+    # copper on top of plane vias/segments placed during this run, shipping
+    # shorts (28/38 of castor_pollux's DRC violations were restored
+    # -12V-vs-GND overlaps). Now: a net is restored only if NONE of its
+    # segments/vias would overlap newly-placed plane copper. If any piece
+    # collides, leave the whole net ripped and return it in ripped_net_ids so
+    # the caller re-routes it cleanly instead of restoring a short.
+    plane_vias = plane_vias or []
+    plane_segments = plane_segments or []
+    still_ripped: List[int] = []
     if ripped_data:
+        any_restored = False
         for blocker_id, removed_segs, removed_vias in ripped_data:
+            # Test this net's copper against newly-placed plane copper.
+            collides = False
+            for s in removed_segs:
+                seg_dict = {
+                    'start': (s.start_x, s.start_y),
+                    'end': (s.end_x, s.end_y),
+                    'width': s.width, 'layer': s.layer,
+                }
+                if _restored_piece_collides(seg_dict, None, plane_vias,
+                                            plane_segments, via_size, clearance):
+                    collides = True
+                    break
+            if not collides:
+                for v in removed_vias:
+                    via_dict = {'x': v.x, 'y': v.y, 'size': v.size}
+                    if _restored_piece_collides(None, via_dict, plane_vias,
+                                                plane_segments, via_size, clearance):
+                        collides = True
+                        break
+
+            if collides:
+                # Leave ripped: do NOT re-add copper or obstacles. Caller will
+                # see this net in ripped_net_ids and re-route it.
+                still_ripped.append(blocker_id)
+                continue
+
             restore_net_to_pcb_data(pcb_data, removed_segs, removed_vias)
+            any_restored = True
             # Restore obstacles from cache
             if blocker_id in via_obstacle_cache:
                 cache = via_obstacle_cache[blocker_id]
@@ -477,10 +594,16 @@ def try_place_via_with_ripup(
                     if layer in routing_obstacles_cache and len(cells) > 0:
                         cells_3d = np.column_stack([cells, np.zeros(len(cells), dtype=np.int32)])
                         routing_obstacles_cache[layer].add_blocked_cells_batch(cells_3d)
-        print("(restored) ", end="")
+        if any_restored:
+            print("(restored) ", end="")
+        if still_ripped:
+            print(f"(left {len(still_ripped)} colliding net(s) ripped) ", end="")
 
     return ViaPlacementResult(
         success=False, via_pos=None, segments=[],
-        ripped_net_ids=[],  # Empty since we restored them
+        # Nets we restored are gone from this list; nets we left ripped (because
+        # restoring them would short onto plane copper) are returned so the
+        # caller marks them ripped and re-routes them.
+        ripped_net_ids=still_ripped,
         via_at_pad_center=False
     )

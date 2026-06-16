@@ -274,32 +274,61 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     - name_P / name_N
     - nameP / nameN
     - name+ / name-
-    - name_t / name_c (true/complement, common for DDR)
-    - name_t_X / name_c_X (true/complement with suffix, e.g., DQS0_t_A)
+    - name_t / name_c (true/complement, common for DDR; case-insensitive)
+    - name_t_X / name_c_X (true/complement with channel suffix, e.g., DQS0_t_A)
+    - name_TA / name_CA (true/complement, no separator before channel char)
+    - nameDP / nameDM, nameDPLUS / nameDMINUS (USB data lines)
 
     Returns (base_name, is_positive, style) or None if not a diff pair.
-    style identifies the suffix convention ('_t', '_P', 'P', '+') - nets only
-    form a pair when both use the same convention, so e.g. /CLK+ does not pair
-    with an unrelated /CLK_N net.
+    style identifies the suffix convention ('_t', '_P', 'P', '+', 'DP') - nets
+    only form a pair when both use the same convention, so e.g. /CLK+ does not
+    pair with an unrelated /CLK_N net.
     """
     import re
 
     if not net_name:
         return None
 
-    # Try _t_X/_c_X pattern (DDR style with channel suffix, e.g., DQS0_t_A / DQS0_c_A)
-    # Match _t_ or _c_ followed by any suffix
-    tc_match = re.match(r'^(.+)_([tc])_(.+)$', net_name)
+    # KiCad auto-names a netless pin's net 'Net-(<ref>-<pin>)'. The trailing ')'
+    # buries the polarity suffix (e.g. Net-(U12-USB_D+) ends in '+)'), so peel a
+    # matching wrapper before applying the suffix rules (issue #91, bitaxe USB).
+    if net_name.startswith('Net-(') and net_name.endswith(')'):
+        net_name = net_name[5:-1]
+
+    # DDR true/complement, _t/_c, case-insensitive (CK_t/CK_c, CK_T/CK_C).
+    # With an explicit channel separator: DQS0_t_A / DQS0_c_A
+    tc_match = re.match(r'^(.+)_([tc])_(.+)$', net_name, re.IGNORECASE)
     if tc_match:
         base = tc_match.group(1) + '_X_' + tc_match.group(3)  # Keep suffix in base for pairing
-        is_positive = tc_match.group(2) == 't'
+        is_positive = tc_match.group(2).lower() == 't'
         return (base, is_positive, '_t')
 
-    # Try _t/_c suffix (DDR style, e.g., CK_t / CK_c)
-    if net_name.endswith('_t'):
+    # No separator before the channel char: DQS0_TA / DQS0_CA, CK_T0 / CK_C0.
+    # Requires a trailing char so plain CK_t / CK_c falls through to the next rule.
+    tc_match = re.match(r'^(.+)_([tc])([A-Za-z0-9])$', net_name, re.IGNORECASE)
+    if tc_match:
+        base = tc_match.group(1) + '_X' + tc_match.group(3)  # Keep channel in base for pairing
+        is_positive = tc_match.group(2).lower() == 't'
+        return (base, is_positive, '_t')
+
+    # Plain _t / _c suffix (DDR style, e.g., CK_t / CK_c), case-insensitive
+    if net_name[-2:].lower() == '_t':
         return (net_name[:-2], True, '_t')
-    if net_name.endswith('_c'):
+    if net_name[-2:].lower() == '_c':
         return (net_name[:-2], False, '_t')
+
+    # USB data lines: DPLUS / DMINUS (case-insensitive). The D is kept in the
+    # base so the two halves pair. Reject a letter before the D (e.g. an
+    # unrelated word ending in 'dplus') so this only fires on real USB names.
+    dpm_match = re.match(r'^(.*?)D(PLUS|MINUS)$', net_name, re.IGNORECASE)
+    if dpm_match and (not dpm_match.group(1) or not dpm_match.group(1)[-1].isalpha()):
+        return (dpm_match.group(1) + 'D', dpm_match.group(2).upper() == 'PLUS', 'DP')
+
+    # USB data lines: DP / DM (case-insensitive, e.g. USB_DP / USB_DM, D+ aliases).
+    # Same letter-boundary guard so words like 'LCDP' don't match.
+    dpm_match = re.match(r'^(.*?)D([PM])$', net_name, re.IGNORECASE)
+    if dpm_match and (not dpm_match.group(1) or not dpm_match.group(1)[-1].isalpha()):
+        return (dpm_match.group(1) + 'D', dpm_match.group(2).upper() == 'P', 'DP')
 
     # Try _P/_N suffix (most common for LVDS)
     if net_name.endswith('_P'):
@@ -325,9 +354,30 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     return None
 
 
+def matches_diff_pair_patterns(net_name: str, base_name: str, patterns: List[str]) -> bool:
+    """
+    Return True if any glob pattern selects this diff-pair half.
+
+    Matches the pattern against the full net name, its leaf (the last
+    '/'-separated segment), the diff-pair base name, and the base name's leaf.
+    This lets a glob that only catches one half (e.g. '*_P') or an explicit
+    base name (e.g. '/DVI_CK') select the whole pair, even for hierarchical
+    (slash-separated) net names where '*_P' would otherwise miss the '_N'
+    sibling and a leaf/base name would never equal the full path. (issue #120)
+    """
+    candidates = (net_name, net_name.rsplit('/', 1)[-1],
+                  base_name, base_name.rsplit('/', 1)[-1])
+    return any(fnmatch.fnmatch(candidate, pattern)
+               for pattern in patterns for candidate in candidates)
+
+
 def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str, DiffPairNet]:
     """
     Find all differential pairs in the PCB matching the given glob patterns.
+
+    A pair is selected when *either* half matches the patterns (see
+    matches_diff_pair_patterns), so '*_P', '*_N', or an explicit base name all
+    pull in the complete pair.
 
     Args:
         pcb_data: PCB data with net information
@@ -339,16 +389,13 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
     # Key by (base_name, suffix style) so nets only pair within the same naming
     # convention (e.g. /CLK+ pairs with /CLK-, never with an unrelated /CLK_N)
     pairs: Dict[Tuple[str, str], DiffPairNet] = {}
+    matched_keys: Set[Tuple[str, str]] = set()
 
-    # Collect all net names from pcb_data
+    # Collect all diff-pair halves, regardless of pattern, so a pattern that
+    # only catches one half can still pull in its sibling below.
     for net_id, net in pcb_data.nets.items():
         net_name = net.name
         if not net_name or net_id == 0:
-            continue
-
-        # Check if this net matches any diff pair pattern
-        matched = any(fnmatch.fnmatch(net_name, pattern) for pattern in patterns)
-        if not matched:
             continue
 
         # Try to extract diff pair info
@@ -369,12 +416,19 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
             pairs[key].n_net_id = net_id
             pairs[key].n_net_name = net_name
 
-    # Filter to only complete pairs, keyed by base name (disambiguate with the
-    # suffix style in the unlikely case two conventions share a base name)
+        if matches_diff_pair_patterns(net_name, base_name, patterns):
+            matched_keys.add(key)
+
+    # Filter to only complete pairs whose key was matched, keyed by base name
+    # (disambiguate with the suffix style in the unlikely case two conventions
+    # share a base name)
     complete_pairs: Dict[str, DiffPairNet] = {}
-    for (base_name, style), pair in pairs.items():
+    for key, pair in pairs.items():
+        if key not in matched_keys:
+            continue
         if not pair.is_complete:
             continue
+        base_name, style = key
         name = base_name if base_name not in complete_pairs else f"{base_name}({style})"
         complete_pairs[name] = pair
 

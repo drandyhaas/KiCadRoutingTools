@@ -21,9 +21,14 @@ The router recognizes common differential pair naming conventions:
 | Convention | Example P | Example N |
 |------------|-----------|-----------|
 | `_P` / `_N` suffix | `LVDS_CLK_P` | `LVDS_CLK_N` |
-| `_t` / `_c` suffix | `DQS0_t_A` | `DQS0_c_A` |
+| `_t` / `_c` suffix (case-insensitive) | `DQS0_t_A`, `CK_T` | `DQS0_c_A`, `CK_C` |
+| `_tX` / `_cX` (no-separator channel) | `DQS0_TA` | `DQS0_CA` |
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
+| `DP` / `DM`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DPLUS` | `USB_DM`, `USB_DMINUS` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
+
+KiCad auto-named nets such as `Net-(U12-USB_D+)` / `Net-(U12-USB_D-)` are
+recognized too: the wrapping `Net-(…)` is peeled before the suffix is matched.
 
 Pairing is suffix-style aware: nets only pair when both use the **same**
 convention. For example `/CLK+` pairs with `/CLK-` but never with an unrelated
@@ -52,9 +57,21 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
 # Keep diff pairs out of a keepout polygon drawn on a User layer (issue #27)
 python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --keepout --keepout-layer User.2
+
+# 4+ layer board: pass EVERY copper layer (issue #116)
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
+    --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
 
 Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
+
+**Escape layers (4+ layer boards):** `--layers` defaults to `F.Cu B.Cu` only.
+When a pair was escaped onto an INNER layer by `bga_fanout.py`, `route_diff.py`
+can only launch from those escaped stubs if that inner layer is in `--layers` —
+omitting it strands the inner-layer stubs and silently drops those pairs
+(butterstick: 8/40 pairs without, 22/40 with the full layer list). Pass the same
+copper-layer list you gave `bga_fanout.py`; drop `--layers` only for true 2-layer
+boards (issue #116).
 
 Differential pairs respect user-drawn keepout polygons (`--keepout`, default layer
 `User.2`) and KiCad native keep-out rule areas (`(zone … (keepout …))`, honoured
@@ -105,6 +122,19 @@ otherwise excluded from the obstacle map and the offset P/N tracks could cross
 the partner polarity's pad mid-route. Capsule-shaped corridors from each
 pad-pair center out past the setback position stay open so the route can still
 reach its endpoints and fan out to the pads.
+
+### Bare-Pad Target on a Different Layer (Connector Fanout)
+
+When the target is a bare outer-layer pad (F.Cu/B.Cu) with no stub and the
+pair's source copper is on a different layer, the surface approach can be
+blocked - e.g. a connector pin in the **front row of a 2-row header** is boxed
+in between the board edge and the tall back-row pads, so an inner-layer pair
+can't reach it through the surface channel. The upfront layer-swap pass handles
+this with a **bare-pad target swap**: it drops a through-via on each pad and
+grows a short stub on the source layer (aimed toward the source), turning the
+bare pad into a stub the router lands on while the via carries the connection
+back to the pad's outer layer. See the layer-optimization options in
+[configuration.md](configuration.md#layer-optimization-options).
 
 ### Multi-Point Differential Pairs
 
@@ -379,7 +409,9 @@ With `--debug-lines`, debug geometry is output on User layers as graphic lines:
 |-------|---------|
 | `User.3` | Connectors (stub to P/N track) |
 | `User.4` | Stub direction arrows (1mm arrows from midpoint at src/tgt) |
-| `User.7` | DRC violation debug lines (from `check_drc.py --debug-lines`) |
+| `User.5` | BGA exclusion-zone rectangles (inner zone + proximity outer) and stub/pad proximity circles |
+| `User.6` | Boundary position labels (from `--mps-unroll`) |
+| `User.7` | DRC violation lines (from `check_drc.py --debug-lines`) |
 | `User.8` | Simplified centerline path |
 | `User.9` | Raw A* centerline path |
 
@@ -398,7 +430,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
-| `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
+| `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers |
 | `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
 | `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |

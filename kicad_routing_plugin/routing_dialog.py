@@ -970,6 +970,17 @@ class RoutingDialog(wx.Dialog):
         bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
         options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Rip pre-existing nets (issue #103): make tracks committed by a
+        # previous run eligible for rip-up during retry. Mirrors the CLI
+        # --rip-existing-nets flag (fnmatch patterns; ALL = everything).
+        rip_existing_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        rip_existing_sizer.Add(wx.StaticText(options_scroll, label="Rip Pre-Existing Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.rip_existing_nets_ctrl = wx.TextCtrl(options_scroll, value="")
+        self.rip_existing_nets_ctrl.SetToolTip("Let the router rip up tracks committed by a previous run when they block a retry: "
+                                               "net-name patterns (e.g. /DDR* USB+), ALL for every pre-existing net, or leave empty to keep them fixed")
+        rip_existing_sizer.Add(self.rip_existing_nets_ctrl, 1, wx.EXPAND)
+        options_inner.Add(rip_existing_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Layer costs
         layer_sizer = wx.BoxSizer(wx.HORIZONTAL)
         layer_sizer.Add(wx.StaticText(options_scroll, label="Layer Costs:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -1347,6 +1358,9 @@ class RoutingDialog(wx.Dialog):
                 'max_iterations': int(self.max_iterations.GetValue()),
                 'max_ripup': int(self.max_ripup.GetValue()),
                 'board_edge_clearance': edge_clearance,
+                # Share the route tab's No-BGA-Zones intent so plane rip-up
+                # reroutes match signal routing on BGA boards (issue #88).
+                'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
             }
 
         def get_claude_params():
@@ -1846,6 +1860,7 @@ class RoutingDialog(wx.Dialog):
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("ALL")
+        self.rip_existing_nets_ctrl.SetValue("")
         self.layer_costs_ctrl.SetValue("")
 
         # Reset advanced parameters
@@ -2175,6 +2190,16 @@ class RoutingDialog(wx.Dialog):
             config['no_bga_zones'] = no_bga_text.split()
         else:
             config['no_bga_zones'] = None  # None means use BGA zones
+
+        # Parse rip-pre-existing-nets (issue #103): empty -> None (keep
+        # pre-existing tracks fixed), ALL -> ["*"], else fnmatch patterns.
+        rip_existing_text = self.rip_existing_nets_ctrl.GetValue().strip()
+        if not rip_existing_text:
+            config['rip_existing_nets'] = None
+        elif rip_existing_text.upper() == 'ALL':
+            config['rip_existing_nets'] = ['*']
+        else:
+            config['rip_existing_nets'] = rip_existing_text.split()
 
         # Parse layer costs
         layer_costs_text = self.layer_costs_ctrl.GetValue().strip()
@@ -2642,6 +2667,7 @@ class RoutingDialog(wx.Dialog):
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
+                    rip_existing_nets=config.get('rip_existing_nets'),
                     layer_costs=config.get('layer_costs', []),
                     length_match_groups=config.get('length_match_groups'),
                     length_match_tolerance=config.get('length_match_tolerance', 0.1),
@@ -2755,6 +2781,7 @@ class RoutingDialog(wx.Dialog):
                         power_nets=config.get('power_nets', []),
                         power_nets_widths=config.get('power_nets_widths', []),
                         disable_bga_zones=config.get('no_bga_zones'),
+                        rip_existing_nets=config.get('rip_existing_nets'),
                         layer_costs=config.get('layer_costs', []),
                         length_match_groups=config.get('length_match_groups'),
                         length_match_tolerance=config.get('length_match_tolerance', 0.1),

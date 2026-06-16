@@ -476,6 +476,10 @@ def run_reroute_loop(
                 if not reroute_succeeded:
                     if not ripped_items:
                         print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
+                        from routing_diagnostics import static_boxin_hint
+                        hint = static_boxin_hint(result, config, pcb_data)
+                        if hint:
+                            print(f"  {hint}")
                     # Remove from pending_multipoint_nets to prevent Phase 3 from
                     # trying to route taps for a net with no main route.
                     if ripped_net_id in state.pending_multipoint_nets:

@@ -112,10 +112,15 @@ def route_diff_pairs(
         # legs - a pair cannot tap mid-track without P/N crossing
         terminals = get_diff_pair_terminals(pcb_data, pair.p_net_id, pair.n_net_id)
         if len(terminals) > 2:
-            leg_results, merged = route_multipoint_diff_pair(state, pair, pair_name, terminals)
+            leg_results, merged, peeled = route_multipoint_diff_pair(state, pair, pair_name, terminals)
             elapsed = time.time() - start_time
             total_time += elapsed
             results.extend(leg_results)
+            if peeled:
+                # Far-apart terminal pads were dropped from the coupled chain;
+                # connect them single-ended afterward (issue #121).
+                state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
+                state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
             if merged is not None:
                 total_segs = len(merged['new_segments'])
                 total_legs = len(leg_results)

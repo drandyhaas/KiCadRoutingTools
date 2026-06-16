@@ -18,6 +18,10 @@ python route_diff.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite i
 
 Use `route.py` for single-ended nets and `route_diff.py` for differential pairs. By default, all nets are routed. Use `--nets` to filter specific patterns.
 
+`route.py` always writes the output file, even when nothing routes (no valid nets, or all already connected) — it writes an unchanged copy of the input in that case, so output→input pipelines don't break on a missing file.
+
+Pads with no pad number (paste/thermal-via artifacts KiCad doesn't netlist individually) are not used as routing targets; they remain copper obstacles.
+
 ### Net Selection
 
 Net names support glob wildcards. Use `--nets` (or `-n`) to specify patterns:
@@ -249,6 +253,12 @@ These options control stub layer switching, which moves stubs to different layer
 - Stub layer switching moves one stub to match the other's layer, eliminating the via
 - For **swap pairs**, two nets exchange layers to help each other (e.g., Net1 src:A→B and Net2 src:B→A)
 - For **solo switches**, a single stub moves when it doesn't conflict with other stubs
+- For **bare-pad target swaps**, a diff-pair target that is a bare outer-layer pad
+  (F.Cu/B.Cu) with no stub - e.g. a connector pin boxed in by neighbouring pads
+  such as the front row of a 2-row header - is fanned out onto the pair's source
+  layer: a through-via is dropped on each pad and a short stub grown on the source
+  layer, so an inner-layer pair can land on the pad via the via instead of fighting
+  through the congested surface channel
 - Multiple swap options are tried: src/src, tgt/tgt, src/tgt, tgt/src
 
 ### Length Matching Options
@@ -328,7 +338,7 @@ Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
+| `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers (zones + proximity circles on User.5) |
 | `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, bus routing order, etc.) |
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |

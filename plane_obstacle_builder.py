@@ -111,6 +111,23 @@ def block_circle(obstacles: GridObstacleMap, cx: int, cy: int, radius_sq: float,
                     obstacles.add_blocked_cell(cx + ex, cy + ey, layer_idx)
 
 
+def _point_in_pad_copper(pad: Pad, x: float, y: float, extra: float = 0.0) -> bool:
+    """Return True if (x, y) lies within the pad's copper rectangle (rotation-aware).
+
+    `extra` expands the pad bounds, e.g. by a via radius so that a via whose
+    copper overlaps the pad edge still counts as touching.
+    """
+    dx = x - pad.global_x
+    dy = y - pad.global_y
+    rot = math.radians(pad.rotation or 0.0)
+    cos_r = math.cos(rot)
+    sin_r = math.sin(rot)
+    lx = dx * cos_r + dy * sin_r
+    ly = -dx * sin_r + dy * cos_r
+    return (abs(lx) <= pad.size_x / 2 + extra and
+            abs(ly) <= pad.size_y / 2 + extra)
+
+
 def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
                             pcb_data: PCBData, tolerance: float = 0.01) -> bool:
     """Return True if the SMD `pad` already has an electrical path to
@@ -122,6 +139,11 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
       - Same-net segment endpoints connect their two states.
       - Same-net via positions connect all layers in the via's span.
       - Same-net through-hole pad positions connect all copper layers.
+
+    The walk is seeded from the pad center AND from any same-net via or
+    segment endpoint that lands inside the pad's copper (route_planes places
+    in-pad stitching vias off-center, which previously went undetected and
+    caused duplicate taps on re-runs, issue #104).
     """
     pad_layer = None
     for layer in pad.layers:
@@ -152,14 +174,20 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
         seg_adj.setdefault(k1, set()).add(k2)
         seg_adj.setdefault(k2, set()).add(k1)
 
+    def via_layers(v) -> List[str]:
+        """Copper layers a via connects. A through via is written with
+        (layers F.Cu B.Cu) in KiCad but spans every copper layer."""
+        if not v.layers or ('F.Cu' in v.layers and 'B.Cu' in v.layers):
+            return all_cu
+        return v.layers
+
     # Via vertical jumps keyed by pos_key -> set of layers.
     via_at: Dict[Tuple, set] = {}
     for v in pcb_data.vias:
         if v.net_id != net_id:
             continue
         k = pkey(v.x, v.y)
-        layers = v.layers if v.layers else all_cu
-        via_at.setdefault(k, set()).update(layers)
+        via_at.setdefault(k, set()).update(via_layers(v))
 
     # Pads at each position - through-hole pads bridge all copper layers.
     pad_at: Dict[Tuple, set] = {}
@@ -177,6 +205,29 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
     start = (pkey(pad.global_x, pad.global_y), pad_layer)
     visited = {start}
     queue = [start]
+
+    # Seed from same-net copper that lands inside this pad's copper:
+    # - a via overlapping the pad connects the pad to all the via's layers
+    # - a segment endpoint inside the pad (on the pad's layer) connects there
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
+            continue
+        if _point_in_pad_copper(pad, v.x, v.y, extra=v.size / 2):
+            for vl in via_layers(v):
+                state = (pkey(v.x, v.y), vl)
+                if state not in visited:
+                    visited.add(state)
+                    queue.append(state)
+    for s in pcb_data.segments:
+        if s.net_id != net_id or s.layer != pad_layer:
+            continue
+        for ex, ey in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            if _point_in_pad_copper(pad, ex, ey):
+                state = (pkey(ex, ey), pad_layer)
+                if state not in visited:
+                    visited.add(state)
+                    queue.append(state)
+
     while queue:
         pos, layer = queue.pop(0)
         if layer == target_layer:
@@ -612,9 +663,13 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     for via in pcb_data.vias:
         drill_holes.append((via.x, via.y, via.drill))
 
+    # Hole-to-hole is a physical drill-to-drill minimum, independent of net, so
+    # include the plane net's OWN through-hole pads too (exclude_net_id is NOT
+    # skipped here). Otherwise a stitching via can land within the fab
+    # hole-to-hole minimum of a same-net TH pad -- issue #125
+    # (PAD-DRILL-VIA-DRILL-SAME-NET). A same-net TH pad already reaches the
+    # plane through its own barrel, so blocking vias around it costs nothing.
     for net_id, pads in pcb_data.pads_by_net.items():
-        if net_id == exclude_net_id:
-            continue
         for pad in pads:
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))

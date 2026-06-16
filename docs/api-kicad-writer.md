@@ -37,6 +37,12 @@ add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 The main entry point for scripting. Reads `input_path`, appends the given
 copper, writes `output_path`. Returns `True` on success.
 
+`net_id_to_name` maps the parser's synthetic net IDs to names so net
+references are written name-style on KiCad 10 boards. If omitted on a
+KiCad 10 board, the mapping is derived from the file automatically (the
+synthetic IDs match any caller that got its `net_id`s from parsing that
+file), so numeric refs are never mixed into a name-style board.
+
 Track dicts:
 
 ```python
@@ -273,7 +279,8 @@ dicts.
 
 Debug geometry layers (with `debug_lines=True`): raw A* path on `User.9`,
 simplified path on `User.8`, connector segments on `User.3`, stub arrows on
-`User.4`, exclusion zones on `User.5`, boundary labels on `User.6`.
+`User.4`, BGA exclusion-zone rectangles plus stub/pad proximity circles on
+`User.5`, boundary labels on `User.6`.
 
 ## Gotchas
 

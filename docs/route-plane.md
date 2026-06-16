@@ -93,6 +93,8 @@ These options control MST-based routing between vias when multiple nets share th
 
 The `--plane-track-via-clearance` parameter ensures MST routes don't pass through narrow gaps between other nets' vias. A larger value ensures more room for polygon fill but may cause routing failures on dense boards.
 
+A net earns a Voronoi zone on a shared layer if it has **any** connection point there — a stitching via *or* a pad. A net whose pads are all through-hole or already on the layer places zero stitching vias, but its zone is still poured (seeded from those pads' positions); the partition is not gated on placing ≥1 via (issue #114).
+
 ### Blocker Rip-up Options
 
 | Option | Default | Description |
@@ -100,12 +102,15 @@ The `--plane-track-via-clearance` parameter ensures MST routes don't pass throug
 | `--rip-blocker-nets` | off | Enable blocker identification and removal |
 | `--max-rip-nets` | 3 | Maximum blocker nets to rip up per pad |
 | `--reroute-ripped-nets` | off | Automatically re-route ripped nets after via placement |
+| `--no-bga-zone` | off | Disable BGA auto-exclusion zones when re-routing ripped nets — use when the original signal route used `--no-bga-zones`, so the reroute uses compatible parameters |
 | `--power-nets` | - | Glob patterns for power nets to route with wider tracks |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern |
 
-When `--rip-blocker-nets` is enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad.
+When `--rip-blocker-nets` is enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad. If an attempt ultimately fails, ripped nets are restored **collision-aware**: a net is put back only when none of its segments/vias overlap the plane copper placed this run; any piece that would overlap is left ripped (and returned for re-routing) instead of restoring a short.
 
-When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, the tool automatically re-routes the ripped nets using the batch router from `route.py`. This uses all copper layers specified by `--layers` for proper via clearance checking.
+When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, the tool automatically re-routes the ripped nets using the batch router from `route.py`. This uses all copper layers specified by `--layers` for proper via clearance checking. Pass `--no-bga-zone` so the reroute matches the original signal route's parameters. After the reroute the tool geometrically re-checks each ripped net, and for any that is **still disconnected it restores the net's original trace** — re-read from the pristine input — and removes the plane stitching via(s) that would short against it, so the net returns to exactly its pre-rip connected state rather than being left worse than the input (issue #88). A net with no original copper to restore is reported by name instead.
+
+After writing output, `route_planes.py` runs a **geometric verification** pass: it re-parses the board and reports, per plane net, how many pads are actually joined to the plane (via `check_net_connectivity`), and prints a NOTE when this disagrees with the via-placement counters. This surfaces pads whose stitching via is not electrically joined and TH pads on multi-net Voronoi layers that fell in the other net's region.
 
 **Note:** The plane nets being processed are protected and will never be ripped up, even if they block each other during multi-net processing.
 
@@ -198,6 +203,8 @@ For each pad needing a via, the algorithm:
 By default the CLI keeps the legacy "via-in-pad" behavior — `--same-net-pad-clearance -1` means same-net pads are not added as via-placement obstacles, so a stitching via lands on the pad center whenever possible (no trace needed). Set `--same-net-pad-clearance` to a non-negative value to force vias outside same-net pads with that edge-to-edge clearance. For example, `--same-net-pad-clearance 0.25` keeps the same edge-to-edge gap as the global `--clearance`.
 
 In the GUI Planes tab, the **Same-net Pad Clearance** spin control defaults to the main `Clearance` value (so the GUI default is to avoid via-in-pad). Tick **Allow via-in-pad (override clearance)** to restore the legacy behavior — this disables the spin control and passes `-1` to the CLI; unticking re-enables the spin control and resumes using its value.
+
+**Hole-to-hole is separate from via-in-pad.** `--same-net-pad-clearance` governs only the *copper* clearance to same-net pads. The *drill-to-drill* (hole-to-hole) minimum is a physical fab constraint and is always enforced against every drilled hole regardless of net — so even with via-in-pad enabled (`-1`), stitching vias still keep `--hole-to-hole-clearance` away from same-net **through-hole** pad drills (and from other vias). This is why via-in-pad applies to same-net **SMD** pads (no drill), but a stitching via will never be placed within the hole-to-hole minimum of a same-net through-hole pad (issue #125).
 
 ### Via Obstacle Checking
 
@@ -567,9 +574,32 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--grid-step` | 0.1 | Routing grid step (mm) |
 | `--analysis-grid-step` | 0.5 | Grid step for connectivity analysis (coarser = faster) |
 | `--max-iterations` | 200000 | Maximum A* iterations per route attempt |
+| `--repair-pads` / `--no-repair-pads` | on | Also repair pad-level plane connection failures (see below) |
+| `--max-search-radius` | 10.0 | Max radius to search for a via position during pad repair (mm) |
 | `--dry-run` | off | Analyze without writing output |
 | `--verbose`, `-v` | off | Print detailed debug messages |
 | `--debug-lines` | off | Add debug lines on User.4 layer showing route paths |
+
+### Pad-Level Repair (`--repair-pads`, default on)
+
+`route_planes.py` can leave a tail of pads it could not via down to the plane
+(congested SMD neighborhoods). Before the region repair, the tool finds pads
+of each plane net with no geometric connection to the plane — no same-net
+via or segment touching the pad's copper (including vias landed inside the
+pad), and the pad not sitting directly on a zone layer — and retries each
+with a stitching via + short trace. The retry uses the same parameter
+escalation as `route_planes.py`: the run parameters first, then scoped fine
+parameters (grid 0.05mm, clearance 0.15mm, track = min(pad min dimension,
+0.15mm)) when the pad is fine-pitch (a same-component neighbor pad within
+0.65mm, or pad min dimension below 0.35mm). Obstacle maps for each retry are
+built on a small window around the pad, so fine grids stay cheap on large
+boards. Per-pad outcomes are printed, and pads that still fail are listed in
+the summary. Use `--no-repair-pads` to only reconnect zone islands.
+
+`route_planes.py` itself applies the same fine-parameter retry to fine-pitch
+pads whose tap fails during the initial run (issue #104), so the repair pass
+typically only sees pads that survived that retry or boards routed by other
+tools.
 
 ### How It Works
 

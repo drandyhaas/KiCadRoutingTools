@@ -443,9 +443,10 @@ def try_phase3_ripup(
 
                 # Re-route ripped nets IMMEDIATELY (not deferred) to prevent subsequent
                 # Phase 3 nets from routing through the ripped area
+                stranded = []
                 if ripped_items:
                     print(f"    Re-routing {len(ripped_items)} ripped net(s)...")
-                    _reroute_phase3_ripped_nets(
+                    stranded = _reroute_phase3_ripped_nets(
                         ripped_items, pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
@@ -459,6 +460,51 @@ def try_phase3_ripup(
                 if tap_segments_added or tap_vias_added:
                     remove_segments_list_from_obstacles(state.working_obstacles, tap_segments_added, config)
                     remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config)
+
+                # Issue #85: only commit the rip-up if it is a net improvement.
+                # Stranding (totally losing) a previously-routed victim is fine
+                # only when this tap connected at least as many pads as the
+                # victim(s) lost; trading a whole multipoint net for one tap
+                # edge is not. When it doesn't pay off, abandon THIS tap retry:
+                # return None so the caller keeps net_id's original (smaller)
+                # tap, which never claimed the freed-edge space - then re-route
+                # the stranded victims into that now-free space.
+                #
+                # The victims are re-routed FRESH (not restored from their old
+                # copper): the board has moved on since they were ripped, so
+                # adding back stale segments would short against it. A fresh
+                # route avoids whatever is actually on the board now. We guard
+                # it with net_id's original tap so the victim steers clear of
+                # the copper the caller is about to commit.
+                pads_lost = sum(lost for _item, lost in stranded)
+                pads_gained = (len(completed_result.get('failed_pads_info', []))
+                               - len(retry_result.get('failed_pads_info', [])))
+                if pads_lost > pads_gained:
+                    stranded_names = ", ".join(
+                        pcb_data.nets[item[0]].name if item[0] in pcb_data.nets else f"net_{item[0]}"
+                        for item, _lost in stranded
+                    )
+                    print(f"    {RED}{net_name}: tap rip-up lost {pads_lost} pad(s) "
+                          f"({stranded_names}) to gain {pads_gained}; abandoning tap, "
+                          f"re-routing victim(s){RESET}")
+                    orig_tap_segs = completed_result['new_segments'][len(lm_segments):]
+                    orig_tap_vias = completed_result['new_vias'][len(lm_vias):]
+                    guard = (state.working_obstacles is not None
+                             and (orig_tap_segs or orig_tap_vias))
+                    if guard:
+                        add_segments_list_as_obstacles(state.working_obstacles, orig_tap_segs, config)
+                        add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config)
+                    _reroute_phase3_ripped_nets(
+                        [item for item, _lost in stranded],
+                        pcb_data, config, state, routed_net_ids, remaining_net_ids,
+                        all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
+                        results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
+                        reroute_depth=reroute_depth + 1
+                    )
+                    if guard:
+                        remove_segments_list_from_obstacles(state.working_obstacles, orig_tap_segs, config)
+                        remove_vias_list_from_obstacles(state.working_obstacles, orig_tap_vias, config)
+                    return None
 
                 return retry_result
             else:
@@ -502,7 +548,15 @@ def _reroute_phase3_ripped_nets(
 
     This includes routing their main route and any tap connections.
     If tap routing fails, attempts rip-up retry (up to config.max_rip_up_count depth).
+
+    Returns the list of victims left TOTALLY unrouted (no copper at all), as
+    ((net_id, saved_result, ripped_ids, was_in_results), pads_lost) entries.
+    A non-empty return tells the caller the rip-up that produced these victims
+    may not have paid off; it weighs pads_lost against what the tap bought and,
+    if the trade is negative, abandons the tap and re-routes the victims into
+    the freed space (issue #85).
     """
+    stranded = []
 
     for ripped_net_id, saved_result, ripped_ids, was_in_results in phase3_ripped_nets:
         net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"net_{ripped_net_id}"
@@ -512,6 +566,10 @@ def _reroute_phase3_ripped_nets(
         if ripped_net_id in routed_results:
             print(f"    Already routed, skipping")
             continue
+
+        # Connectivity the victim had before being ripped: re-routing must not
+        # leave it worse off than this, or ripping it was a net loss.
+        saved_failed_count = len(saved_result.get('failed_pads_info', [])) if saved_result else 0
 
         # Build obstacles
         if state.working_obstacles is not None and state.net_obstacles_cache:
@@ -677,3 +735,20 @@ def _reroute_phase3_ripped_nets(
             # no longer in pcb_data), leading to duplicate/stale segments in the output.
             if ripped_net_id in state.pending_multipoint_nets:
                 del state.pending_multipoint_nets[ripped_net_id]
+
+        # Did re-routing leave the victim with NO route at all? That total
+        # strand is the issue #85 pathology: a previously-routed net wiped out
+        # to make room for a tap, with no recovery. Record how many pad
+        # connections it lost so the caller can weigh that against what the
+        # rip-up bought. Partial regressions (the net still routes but drops a
+        # tap pad) are normal greedy churn and recover, so are not flagged -
+        # treating them as strandings vetoes beneficial rip-ups and lowers
+        # overall connectivity. Entries are
+        # ((net_id, saved_result, ripped_ids, was_in_results), pads_lost).
+        if routed_results.get(ripped_net_id) is None:
+            item = (ripped_net_id, saved_result, ripped_ids, was_in_results)
+            num_pads = len(pcb_data.pads_by_net.get(ripped_net_id, []))
+            pads_lost = max(1, num_pads - saved_failed_count)
+            stranded.append((item, pads_lost))
+
+    return stranded

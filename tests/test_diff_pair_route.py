@@ -42,12 +42,17 @@ CLEARANCE = "0.1"
 PAIRS = ["lvds_rx1_11", "lvds_rx1_10", "lvds_rx1_12"]
 
 
-def route_pair(pattern, out):
-    """Route the single pair matching *pattern*; return (routed_ok, output)."""
-    cmd = [sys.executable, "route_diff.py", BOARD, out, "--nets", f"*{pattern}*"] + GEOM
+def route_with_nets(out, nets):
+    """Route with explicit --nets args *nets*; return (routed_ok, output)."""
+    cmd = [sys.executable, "route_diff.py", BOARD, out, "--nets", *nets] + GEOM
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     txt = r.stdout + r.stderr
     return ('"successful": 1' in txt and '"failed": 0' in txt), txt
+
+
+def route_pair(pattern, out):
+    """Route the single pair matching *pattern*; return (routed_ok, output)."""
+    return route_with_nets(out, [f"*{pattern}*"])
 
 
 def is_connected(board, pattern):
@@ -83,6 +88,25 @@ def scenario_pair(pattern, verbose):
             os.remove(out)
 
 
+def scenario_selector(label, nets, pattern, verbose):
+    """Route a pair selected via *nets* (a one-sided glob or explicit base
+    name), then assert BOTH halves connect -- regression for issue #120 where
+    such selectors silently matched 0 pairs on hierarchical net names."""
+    log = []
+    fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="diffroute_sel_")
+    os.close(fd)
+    try:
+        routed, txt = route_with_nets(out, nets)
+        if not routed or not os.path.exists(out):
+            return label, False, [f"route_diff did not report 1/1 routed for --nets {nets}"]
+        conn = is_connected(out, pattern)
+        log.append(f"--nets {nets}  routed=1/1  connected={conn}")
+        return label, (routed and conn), log
+    finally:
+        if os.path.exists(out):
+            os.remove(out)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Differential-pair routing correctness test")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose routing output")
@@ -99,6 +123,22 @@ def main():
     results = []
     for pattern in PAIRS:
         name, passed, log = scenario_pair(pattern, args.verbose)
+        status = "PASS" if passed else "FAIL"
+        print(f"\n[{status}] {name}")
+        for line in log:
+            print(f"        {line}")
+        results.append((name, passed))
+
+    # issue #120: a one-sided '*_P' glob and an explicit hierarchical base name
+    # must each select the whole pair (and route both halves).
+    selectors = [
+        ("issue#120 one-sided glob '*lvds_rx1_11_P' routes full pair",
+         ["*lvds_rx1_11_P"], "lvds_rx1_11"),
+        ("issue#120 explicit base name '/fpga_adc/lvds_rx1_10' routes full pair",
+         ["/fpga_adc/lvds_rx1_10"], "lvds_rx1_10"),
+    ]
+    for label, nets, pattern in selectors:
+        name, passed, log = scenario_selector(label, nets, pattern, args.verbose)
         status = "PASS" if passed else "FAIL"
         print(f"\n[{status}] {name}")
         for line in log:

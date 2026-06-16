@@ -658,7 +658,7 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
             hole_to_hole_clearance: float = 0.2, board_edge_clearance: float = 0.0,
-            clearance_margin: float = 0.05):
+            clearance_margin: float = 0.05, max_print: int = 20):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -1112,10 +1112,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     by_type[t] = []
                 by_type[t].append(v)
 
+            # Per-type print cap. max_print <= 0 means print every violation
+            # (issue #93: a fixed cap silently dropped most of a long list).
+            limit = len(violations) if max_print is not None and max_print <= 0 else max_print
             for vtype, vlist in by_type.items():
                 print(f"\n{vtype.upper()} violations ({len(vlist)}):")
                 print("-" * 40)
-                for v in vlist[:20]:  # Show first 20 of each type
+                for v in vlist[:limit]:  # Show first `limit` of each type
                     if vtype == 'segment-segment':
                         print(f"  {v['net1']} <-> {v['net2']}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
@@ -1166,8 +1169,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
 
-                if len(vlist) > 20:
-                    print(f"  ... and {len(vlist) - 20} more")
+                if len(vlist) > limit:
+                    print(f"  ... and {len(vlist) - limit} more "
+                          f"(use --max-print 0 to show all)")
         else:
             print("NO DRC VIOLATIONS FOUND!")
 
@@ -1197,10 +1201,13 @@ if __name__ == "__main__":
                         help='Write debug lines to User.7 layer showing violation locations')
     parser.add_argument('--quiet', '-q', action='store_true',
                         help='Only print a summary line unless there are violations')
+    parser.add_argument('--max-print', type=int, default=20,
+                        help='Max violations to list per type before "... and N more" '
+                             '(0 = print all). Default 20.')
 
     args = parser.parse_args()
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
-                         args.clearance_margin)
+                         args.clearance_margin, max_print=args.max_print)
     sys.exit(1 if violations else 0)

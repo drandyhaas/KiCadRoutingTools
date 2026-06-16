@@ -16,7 +16,8 @@ from kicad_parser import PCBData
 from routing_config import GridRouteConfig, DiffPairNet
 from connectivity import is_edge_stub
 from stub_layer_switching import (
-    get_stub_info, apply_stub_layer_switch, collect_stubs_by_layer,
+    get_stub_info, apply_stub_layer_switch, apply_bare_pad_target_via,
+    collect_stubs_by_layer,
     collect_stub_endpoints_by_layer, validate_swap, validate_single_swap,
     collect_single_ended_stubs_by_layer, revert_stub_layer_switch,
     STUB_OVERLAP_Y_TOLERANCE
@@ -132,7 +133,9 @@ def apply_diff_pair_layer_swaps(
     can_swap_to_top_layer: bool,
     all_segment_modifications: List,
     all_swap_vias: List,
-    verbose: bool = False
+    verbose: bool = False,
+    all_swap_segments: Optional[List] = None,
+    probe_obstacles=None
 ) -> Tuple[int, Dict, Dict]:
     """
     Apply upfront layer swap optimization for diff pairs.
@@ -150,6 +153,9 @@ def apply_diff_pair_layer_swaps(
     Returns:
         (total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer)
     """
+    if all_swap_segments is None:
+        all_swap_segments = []
+
     print(f"\nAnalyzing layer swaps for {len(diff_pair_ids_to_route_set)} diff pair(s)...")
 
     # Collect layer info for pairs we're routing
@@ -608,6 +614,60 @@ def apply_diff_pair_layer_swaps(
                                    targets[0][7], targets[0][8], tgt_layer)
 
         if not tgt_p_stub or not tgt_n_stub:
+            # No stub at the target. If the target is a bare outer-layer pad (e.g.
+            # a connector pin on F.Cu or B.Cu) and the pair's source is on a
+            # different layer, fan the pad out onto the source layer: drop a
+            # through-via on each pad and grow a short stub on src_layer, turning
+            # the bare pad into a stub the router can land on (the through-via
+            # carries the connection back to the pad's outer layer). This is the
+            # bare-pad target layer swap.
+            if (tgt_layer in ('F.Cu', 'B.Cu') and src_layer != tgt_layer):
+                p_tgt_x, p_tgt_y = targets[0][5], targets[0][6]
+                n_tgt_x, n_tgt_y = targets[0][7], targets[0][8]
+                # Aim the stubs toward the pair's source so the free ends open the
+                # right way for the launcher.
+                src_cx = (sources[0][5] + sources[0][7]) / 2
+                src_cy = (sources[0][6] + sources[0][8]) / 2
+                # Fan onto the most-open layer around the target (non-plane first)
+                # rather than blindly src_layer, which can be fully blocked by a
+                # connector pad wall while inner layers are open (issue #121).
+                fan_layer = src_layer
+                if probe_obstacles is not None:
+                    from layer_swap_fallback import rank_fallback_layers
+                    tgt_cx = (p_tgt_x + n_tgt_x) / 2
+                    tgt_cy = (p_tgt_y + n_tgt_y) / 2
+                    ranked = rank_fallback_layers(
+                        config, pcb_data, probe_obstacles, tgt_cx, tgt_cy, tgt_layer)
+                    if ranked:
+                        fan_layer = ranked[0]
+                        if fan_layer != src_layer:
+                            print(f"    Bare-pad target launch layer: {fan_layer} "
+                                  f"(most open; src is {src_layer})")
+                via_p, stub_p = apply_bare_pad_target_via(
+                    pcb_data, pair.p_net_id, p_tgt_x, p_tgt_y, fan_layer,
+                    src_cx, src_cy, config)
+                via_n, stub_n = apply_bare_pad_target_via(
+                    pcb_data, pair.n_net_id, n_tgt_x, n_tgt_y, fan_layer,
+                    src_cx, src_cy, config)
+                all_swap_vias.extend([via_p, via_n])
+                all_swap_segments.extend([stub_p, stub_n])
+
+                # Register the new stubs (on fan_layer) so later swap validation sees them.
+                if fan_layer not in all_stubs_by_layer:
+                    all_stubs_by_layer[fan_layer] = []
+                all_stubs_by_layer[fan_layer].append((pair_name, [stub_p, stub_n]))
+                if fan_layer not in stub_endpoints_by_layer:
+                    stub_endpoints_by_layer[fan_layer] = []
+                stub_endpoints_by_layer[fan_layer].append(
+                    (pair_name, [(stub_p.end_x, stub_p.end_y), (stub_n.end_x, stub_n.end_y)])
+                )
+
+                applied_swaps.add(pair_name)
+                solo_switch_count += 1
+                total_layer_swaps += 1
+                print(f"  Bare-pad target swap: {pair_name} ({tgt_layer} pad -> {fan_layer} stub), added 2 pad via(s)")
+                continue
+
             missing = []
             if not tgt_p_stub:
                 missing.append("P")

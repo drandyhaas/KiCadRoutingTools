@@ -271,6 +271,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 
 **Fanout Tab:**
 - BGA fanout with exit margin, escape direction, differential pair support
+- Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](bga_fanout/README.md#escape-methods)
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 
@@ -602,7 +603,8 @@ KiCadRoutingTools/
 │   ├── test_flat_hierarchy.py    # 2-layer board with GND plane test
 │   ├── test_interf_u.py          # 2-layer board with non-rectangular outline test
 │   ├── test_sonde_u.py           # Wide track routing test
-│   └── run_utils.py              # Shared test utilities
+│   ├── run_utils.py              # Shared test utilities
+│   └── stress/                   # Real-world-board stress-test harness (run_queue.sh) — see tests/README.md
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
@@ -629,7 +631,8 @@ KiCadRoutingTools/
     ├── identify-diff-pairs/  # Datasheet-based diff pair detection skill
     ├── recommend-stackup/    # Stackup review/recommendation skill
     ├── diagnose-routing-failures/  # Failure root-cause and retry skill
-    └── review-routed-board/  # Post-route QA and sign-off skill
+    ├── review-routed-board/  # Post-route QA and sign-off skill
+    └── stress-test-router/   # Batch stress-test on real-world boards + issue filing (dev/QA)
 ```
 
 ## Module Overview

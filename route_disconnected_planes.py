@@ -18,7 +18,8 @@ Usage:
 import sys
 import os
 import argparse
-from typing import List, Tuple, Dict, Optional
+from dataclasses import replace
+from typing import List, Tuple, Dict, Optional, Set
 
 # Run startup checks first
 from startup_checks import run_all_checks
@@ -29,6 +30,8 @@ from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generat
 from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
 from plane_region_connector import route_disconnected_regions, build_base_obstacles, add_route_to_obstacles
+from plane_pad_tap import find_unconnected_plane_pads, tap_pad_with_escalation
+from terminal_colors import GREEN, RED, RESET
 import routing_defaults as defaults
 import re
 
@@ -140,7 +143,9 @@ def route_planes(
     debug_lines: bool = False,
     routing_layers: Optional[List[str]] = None,
     pcb_data: Optional[PCBData] = None,
-    return_results: bool = False
+    return_results: bool = False,
+    repair_pads: bool = True,
+    max_search_radius: float = defaults.PLANE_MAX_SEARCH_RADIUS
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -165,6 +170,13 @@ def route_planes(
         verbose: Print detailed debug info
         dry_run: Analyze without writing output
         routing_layers: List of layers that can be used for routing (if None, auto-detect from PCB)
+        repair_pads: If True (default), also repair pad-level plane connection
+            failures (issue #99): pads of the plane net with no via/segment of
+            the net within reach and not directly on a zone layer get a tap
+            retry with route_planes' parameter escalation (default params,
+            then scoped fine params for fine-pitch pads).
+        max_search_radius: Max radius to search for a via position during pad
+            repair (mm).
 
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
@@ -226,6 +238,9 @@ def route_planes(
     total_routes = 0
     total_regions = 0
     total_vias = 0
+    total_pads_unconnected = 0
+    total_pads_repaired = 0
+    failed_repair_pads: List[str] = []
 
     # Extract per-zone clearances and min_thickness from PCB file
     zone_props = extract_zone_properties(input_file)
@@ -263,6 +278,58 @@ def route_planes(
         layers_str = ", ".join(sorted(net_zone_layers))
         clearances_str = ", ".join(f"{l}={zone_clearances.get(l, zone_clearance)}mm" for l in sorted(net_zone_layers))
         print(f"\n[{net_name}] on {layers_str} (clearances: {clearances_str}):")
+
+        # Per-pad repair pass (issue #99): reconnect pads route_planes could
+        # not via down to the plane. Runs before island repair so the new
+        # vias participate in the region connectivity analysis.
+        if repair_pads:
+            unconnected = find_unconnected_plane_pads(pcb_data, net_id, net_zone_layers)
+            total_pads_unconnected += len(unconnected)
+            if not unconnected:
+                print(f"  Pad repair: all {net_name} pads reach the plane")
+            else:
+                print(f"  Pad repair: {len(unconnected)} pad(s) with no connection to the {net_name} plane:")
+                tap_config = replace(
+                    config,
+                    layers=routing_layers,
+                    hole_to_hole_clearance=hole_to_hole_clearance
+                )
+                for pad, pad_layer in unconnected:
+                    print(f"    Pad {pad.component_ref}.{pad.pad_number} ({pad_layer})...", end=" ", flush=True)
+                    result = tap_pad_with_escalation(
+                        pad, pad_layer, net_id, pcb_data, tap_config,
+                        max_search_radius=max_search_radius,
+                        via_size=via_size,
+                        via_drill=via_drill,
+                        verbose=verbose,
+                        fine_for_all=True  # last-resort repair: escalate every failed pad
+                    )
+                    if result.success:
+                        total_pads_repaired += 1
+                        params_note = " [fine params]" if result.params_label == 'fine' else ""
+                        if result.via is not None:
+                            all_new_vias.append(result.via)
+                            total_vias += 1
+                            pcb_data.vias.append(Via(
+                                x=result.via['x'], y=result.via['y'],
+                                size=result.via['size'], drill=result.via['drill'],
+                                layers=['F.Cu', 'B.Cu'], net_id=net_id
+                            ))
+                            where = f"placed via at ({result.via['x']:.2f}, {result.via['y']:.2f})"
+                        else:
+                            where = (f"reused via at ({result.reused_via_pos[0]:.2f}, "
+                                     f"{result.reused_via_pos[1]:.2f})")
+                        for s in result.segments:
+                            all_new_segments.append(s)
+                            pcb_data.segments.append(Segment(
+                                start_x=s['start'][0], start_y=s['start'][1],
+                                end_x=s['end'][0], end_y=s['end'][1],
+                                width=s['width'], layer=s['layer'], net_id=s['net_id']
+                            ))
+                        print(f"{GREEN}{where}, {len(result.segments)} trace segment(s){params_note}{RESET}")
+                    else:
+                        failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
+                        print(f"{RED}FAILED{RESET}")
 
         # Build obstacle map for this net
         print(f"  Building obstacle map...", end=" ", flush=True)
@@ -339,12 +406,16 @@ def route_planes(
     print(f"  Total routes added: {total_routes}")
     if total_vias > 0:
         print(f"  Total vias added: {total_vias}")
+    if repair_pads:
+        print(f"  Pad repair: {total_pads_repaired}/{total_pads_unconnected} unconnected pad(s) reconnected")
+        if failed_repair_pads:
+            print(f"  Pads still unconnected: {', '.join(failed_repair_pads)}")
     if debug_lines and all_debug_lines:
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
     if dry_run:
         print("\nDry run - no output file written")
-    elif total_routes > 0:
+    elif total_routes > 0 or total_pads_repaired > 0:
         print(f"\nWriting output to {output_file}...")
         _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines,
                       net_id_to_name=pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None)
@@ -485,6 +556,17 @@ Examples:
     parser.add_argument("--max-iterations", type=int, default=200000,
                         help="Maximum A* iterations per route attempt (default: 200000)")
 
+    # Pad-level repair (issue #99)
+    parser.add_argument("--repair-pads", dest="repair_pads", action="store_true", default=True,
+                        help="Repair pad-level plane connection failures: retry a stitching "
+                             "via + trace for plane-net pads with no connection to the plane, "
+                             "escalating to fine parameters for fine-pitch pads (default: on)")
+    parser.add_argument("--no-repair-pads", dest="repair_pads", action="store_false",
+                        help="Disable the pad-level repair pass (only reconnect zone islands)")
+    parser.add_argument("--max-search-radius", type=float, default=defaults.PLANE_MAX_SEARCH_RADIUS,
+                        help=f"Max radius to search for a via position during pad repair in mm "
+                             f"(default: {defaults.PLANE_MAX_SEARCH_RADIUS})")
+
     # Debug options
     parser.add_argument("--dry-run", action="store_true",
                         help="Analyze without writing output")
@@ -558,7 +640,9 @@ Examples:
         verbose=args.verbose,
         dry_run=args.dry_run,
         debug_lines=args.debug_lines,
-        routing_layers=args.layers
+        routing_layers=args.layers,
+        repair_pads=args.repair_pads,
+        max_search_radius=args.max_search_radius
     )
 
 

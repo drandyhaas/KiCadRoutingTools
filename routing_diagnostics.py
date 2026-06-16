@@ -348,3 +348,38 @@ def format_suggestions_for_dialog(suggestions: List[str]) -> str:
     for s in suggestions:
         lines.append(f"  - {s}")
     return "\n".join(lines)
+
+
+def static_boxin_hint(result, config, pcb_data=None) -> str:
+    """One-line hint when a route died immediately with nothing rippable.
+
+    A failure with almost no A* iterations and no rippable blockers means the
+    start/target cells are boxed in by STATIC obstacles (neighboring pads plus
+    clearance expansion) - typical for fine-pitch (0.4-0.65 mm) packages at
+    coarse grid/clearance settings - not by other nets' routes (issue #95).
+    Returns '' when the failure doesn't match that signature.
+    """
+    if result is None:
+        return ""
+    iters = result.get('iterations_forward', 0) + result.get('iterations_backward', 0)
+    if iters >= 20000:
+        return ""
+    finer = config.grid_step / 2
+    # Don't steer users into an OOM (issue #105): halving the grid step
+    # quadruples cell count. Above ~4M cells per layer, suggest scoping the
+    # finer grid to the failing nets instead of a board-global parameter.
+    grid_advice = f"--grid-step {finer:g}"
+    if pcb_data is not None and getattr(pcb_data.board_info, 'board_bounds', None):
+        b = pcb_data.board_info.board_bounds
+        cells = (b[2] - b[0]) * (b[3] - b[1]) / (finer * finer)
+        if cells > 4e6:
+            grid_advice = (f"--grid-step {finer:g} scoped to just the failing nets "
+                           f"via --nets (board-global it is ~{cells / 1e6:.0f}M "
+                           f"cells/layer and may exhaust memory)")
+    return (f"Hint: search exhausted after only {iters} iterations with no rippable "
+            f"blockers - the start/target pads are boxed in by static obstacles "
+            f"(neighboring pads + clearance), not by congestion. For fine-pitch "
+            f"parts try a finer grid and/or smaller clearance/track, e.g. "
+            f"{grid_advice} --clearance 0.15 --track-width 0.15 "
+            f"(current: grid {config.grid_step:g}, clearance {config.clearance:g}, "
+            f"track {config.track_width:g} mm)")

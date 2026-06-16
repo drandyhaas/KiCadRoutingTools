@@ -129,7 +129,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `max_rip_up_count` | `3` | Max blocking routes ripped up at once (progressive 1..N) |
-| `stub_layer_swap` | `True` | Allow moving stubs to other layers to resolve conflicts |
+| `stub_layer_swap` | `True` | Allow moving stubs to other layers to resolve conflicts (never moves an SMD pad's stub off the one layer that pad lives on — that would orphan the pad) |
 | `target_swap_crossing_penalty` | `1000.0` | Penalty for crossing assignments during target swap |
 | `crossing_layer_check` | `True` | Only count crossings between routes sharing a layer |
 

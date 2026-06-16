@@ -86,7 +86,7 @@ from reroute_loop import run_reroute_loop
 from length_matching import apply_intra_pair_length_matching
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 from routing_common import (
-    setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
+    setup_bga_exclusion_zones, filter_already_routed,
     run_length_matching, sync_pcb_data_segments, get_common_config_kwargs
 )
 import re
@@ -301,8 +301,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     print(f"Found {len(diff_pairs)} differential pair(s)")
 
-    # Find net IDs and filter already-routed nets
-    net_ids = resolve_net_ids(pcb_data, net_names)
+    # Build the net-id list from the diff pairs we found (both halves), so an
+    # explicit base name ('/DVI_CK') or a one-sided glob ('*_P') still routes
+    # both halves -- resolve_net_ids only matches exact full net names and would
+    # drop the unmatched sibling (or a base name that names no net). (issue #120)
+    net_ids = []
+    seen_net_ids = set()
+    for pair in diff_pairs.values():
+        for nid, nname in ((pair.p_net_id, pair.p_net_name),
+                           (pair.n_net_id, pair.n_net_name)):
+            if nid is not None and nid not in seen_net_ids:
+                net_ids.append((nname, nid))
+                seen_net_ids.add(nid)
     if not net_ids:
         print("No valid nets to route!")
         if return_results:
@@ -320,6 +330,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_segment_modifications = []
     # Track all vias added during stub layer swapping
     all_swap_vias = []
+    # Track new stub segments synthesized by bare-pad target swaps
+    all_swap_segments = []
     # Track total number of layer swaps applied
     total_layer_swaps = 0
 
@@ -386,9 +398,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_stubs_by_layer = {}
     stub_endpoints_by_layer = {}
     if enable_layer_switch and diff_pair_ids_to_route_set:
+        # Probe obstacle map so a bare-pad target swap can fan onto an OPEN
+        # launch layer rather than blindly the source layer (issue #121: lpddr4
+        # DQ_S0's target was fanned to B.Cu, which is 100% blocked by a connector
+        # pad wall, while the inner layers right there were empty).
+        _swap_probe_clearance = (config.track_width + config.diff_pair_gap) / 2
+        swap_probe_obstacles = build_base_obstacle_map(
+            pcb_data, config, [nid for _, nid in net_ids], _swap_probe_clearance)
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
-            can_swap_to_top_layer, all_segment_modifications, all_swap_vias
+            can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
+            all_swap_segments=all_swap_segments, probe_obstacles=swap_probe_obstacles
         )
 
     # Add stub swap vias to pcb_data so routing and length matching see them as obstacles
@@ -600,6 +620,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     total_time += dp_time
     total_iterations += dp_iterations
 
+    # Report nets whose far-apart (uncoupled) terminal pads were peeled off the
+    # coupled chain (issue #121). Those pads are not a coupled differential
+    # connection (e.g. spread-out test points), so they are left for a separate
+    # single-ended pass (route.py); the plan-pcb-routing workflow sequences that
+    # after this step. Surfaced here and in JSON_SUMMARY so the follow-up knows
+    # which nets still need P->P / N->N routing.
+    single_ended_followup = sorted(state.diff_pair_single_ended_nets.values())
+    if single_ended_followup:
+        print("\n" + "=" * 60)
+        print(f"{len(single_ended_followup)} net(s) have far-apart terminal pads "
+              f"peeled from the coupled chain - route them single-ended next:")
+        for nm in single_ended_followup:
+            print(f"  {nm}")
+        print("  e.g.  route.py <this_output> <out2> --nets " +
+              " ".join(f"'{n}'" for n in single_ended_followup[:3]) +
+              (" ..." if len(single_ended_followup) > 3 else ""))
+        print("=" * 60)
+
     # Run reroute loop for nets that were ripped during diff pair routing
     rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
         state, route_index_start=route_index,
@@ -682,6 +720,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
+        'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
@@ -702,6 +741,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         results_data = {
             'results': results,
             'all_swap_vias': all_swap_vias,
+            'all_swap_segments': all_swap_segments,
             'pad_swaps': pad_swaps,
             'target_swap_info': target_swap_info,
             'all_segment_modifications': all_segment_modifications,
@@ -715,6 +755,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             results=results,
             all_segment_modifications=all_segment_modifications,
             all_swap_vias=all_swap_vias,
+            all_swap_segments=all_swap_segments,
             target_swap_info=target_swap_info,
             single_ended_target_swap_info=[],
             pad_swaps=pad_swaps,

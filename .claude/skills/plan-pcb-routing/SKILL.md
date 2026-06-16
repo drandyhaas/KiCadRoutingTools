@@ -131,6 +131,31 @@ Examples:
 
 Inner pins beyond depth 2 cannot escape without fanout routing through channels between outer pins.
 
+**Escape layers (multi-layer boards):** `bga_fanout.py` defaults to `--layers F.Cu B.Cu`
+only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
+`--layers F.Cu In1.Cu In2.Cu B.Cu` — otherwise deep balls have nowhere to escape to
+and those nets are dropped from the fanout. `qfn_fanout.py` is perimeter-only and
+doesn't take escape layers.
+
+**Always check the fanout escaped all requested balls.** `bga_fanout.py` ends with
+`JSON_SUMMARY: {"component", "requested", "escaped", "failed", "unescaped_nets", ...}`.
+A dropped ball is **removed from the output** and later fails signal routing as "no
+rippable blockers", so it must be caught here. If `failed > 0`, retry the fanout with
+more layers and/or a smaller `--clearance` (see "Escape clearance" below) before
+moving on — do not start signal routing while balls are still dropped.
+
+**If balls still drop on a dense, fully-populated array, switch to the under-pad
+escape:** add `--escape-method underpad` with a small via/track for the pitch
+(e.g. `--via-size 0.35 --track-width 0.12 --clearance 0.1` at 0.8 mm pitch). The
+default `channel` engine confines every layer to the gaps *between* ball rows, so
+a few channels over-subscribe and the deepest balls can't escape; `underpad`
+routes each ball *under* the pad field on inner layers via a via-in-pad and
+escapes arrays `channel` can't (e.g. a 22×22 BGA that drops ~20 balls → 0).
+Caveats: it routes diff pairs as **single-ended**, and it **skips power/plane
+nets** (they tap their plane), so create the planes first (or exclude power with
+`--nets`). Rule of thumb: try `channel` first (keeps diff pairs); fall back to
+`underpad` when `channel` can't escape a dense array.
+
 Report to user:
 - List of components that may need fanout
 - Package type, pad count, and grid depth for each
@@ -144,6 +169,77 @@ Use `list_nets.py` to detect differential pairs and power/ground nets:
 python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
 
+### Read the board's design rules and pass them to the CLI
+
+The router does NOT read the board's design rules — it falls back to a generic
+`--clearance 0.25` / `--track-width` default, which is often WIDER than the
+board's own rule and can box pads in so nets fail with "no rippable blockers".
+Read the board's real rules and pass them explicitly:
+
+```bash
+python3 list_nets.py path/to/file.kicad_pcb --design-rules
+```
+
+**KiCad has TWO tiers of rules, and DRC only enforces one of them — this matters
+for fine-pitch boards (#111/#115):**
+
+- **Net-class values** (`clearance`, `track_width`, `via_diameter`, `via_drill`):
+  these are the size new objects are *drawn at*. Of these, only **clearance** is
+  a DRC-enforced minimum. `track_width` and `via_diameter`/`drill` are **not** DRC
+  floors — they are just defaults, so a board can (and the human originals do) use
+  a **smaller** via/track than the net-class nominal and still pass DRC.
+- **Board Constraints** (`min_clearance`, `min_track_width`, `min_via_diameter`,
+  `min_hole_to_hole`, `min_through_hole_diameter`): **these are the actual DRC
+  floors.** `--design-rules` reads them from `design_settings.rules` and combines
+  them with the JLCPCB fab minimum (backstop when a Constraint is 0/unset — e.g.
+  `min_clearance` is frequently 0) into a single **manufacturing floor**.
+
+Use the printed flags as-is:
+
+- **Routing** (`route.py`, `qfn_fanout.py`, `bga_fanout.py`, `route_planes.py`):
+  `--track-width` and `--clearance` from the **Default class** (track width is a
+  per-class minimum — keep it for current/impedance), but **`--via-size`/`--via-drill`
+  from the working floor**, NOT the net-class `via_diameter`. Emitting the net-class
+  via everywhere is #115 — it's a max-like default, far too big for fine-pitch
+  escape (e.g. a 0.4 mm QFN/BGA needs the small working via the original used).
+- **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
+  inter-ball channel is too narrow to fit a track at the net-class clearance on
+  more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls
+  at `--clearance 0.2` (the ~0.45 mm gap between 0.35 mm balls can't fit a 0.2 mm
+  track at 0.2 mm clearance) — the same board escapes **all** balls at the 0.1 mm
+  floor. So don't gate on pitch: gate on whether balls actually dropped.
+  `bga_fanout.py` ends with a `JSON_SUMMARY: {...}` line giving
+  `requested`/`escaped`/`failed`/`unescaped_nets`. **After every fanout, parse it;
+  if `failed > 0` (escaped < requested), re-run the fanout with `--clearance` at
+  the manufacturing floor** (never below it — the floor is the rule the human
+  board passes DRC against, so tightening board-wide is manufacturable and needs
+  no rule-area settings). If still short, also try the smaller **fine-pitch escape
+  via** (below) and/or a narrower `--track-width` toward the floor. Do not proceed
+  to signal routing with `failed > 0` unexpected — those balls are dropped from the
+  output and will fail later as "no rippable blockers".
+- **Fine-pitch escape VIA (4+ layer):** the 0.45 mm standard via can't dog-bone /
+  via-in-pad sub-~0.5 mm-pitch BGA/QFN balls. For *those parts only*, pass the
+  smaller **fine-pitch escape via** that `--design-rules` prints (`fine-pitch
+  escape via <d>/<drill>`, e.g. `0.30/0.15` — JLC "advanced", small extra cost)
+  as `--via-size`/`--via-drill` to that part's `bga_fanout.py` / `qfn_fanout.py`,
+  to `route_diff.py` when it launches from that part's escaped stubs, **and to
+  `route_disconnected_planes.py`** (its per-pad repair connects the fine-pitch
+  GND/power plane balls under such parts). Keep the **standard** working via for
+  general `route.py` routing and the bulk `route_planes.py` pour — the advanced
+  via is escape-only, not a board-wide default (issues #99/#122).
+- **Non-Default classes:** route those nets separately with that class's
+  `--clearance`/`--track-width` (clearance is the one per-class DRC value, so keep
+  each class's nets at their own clearance rather than forcing one global value).
+- **Diff pairs:** `--track-width`/`--diff-pair-gap` from the Default class for `route_diff.py`.
+
+**Verification (DRC/connectivity) grades at the manufacturing floor**, not the
+inflated net-class clearance — that is the same rule the human original passes, so
+it's the honest delta. Use the printed `check_drc.py` flags
+(`--clearance <floor> --hole-to-hole-clearance <floor>`); see Step 6.
+
+Only fall back to tool defaults when neither net classes nor Constraints are found
+(`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
+
 This will output:
 - Differential pairs detected (P/N naming conventions)
 - Ground nets with pad counts
@@ -153,6 +249,15 @@ If differential pairs are found:
 - List each P/N pair
 - Note that `route_diff.py` should be used for these
 - Explain that diff pairs maintain consistent spacing and length matching
+- **If a pair's pads are on a BGA/PGA being fanned out, escape it with
+  `bga_fanout.py` too** — pass `--diff-pairs "<patterns>" --diff-pair-gap <gap>`
+  so P and N escape the array together on one layer. Don't just exclude the
+  pair from fanout and hand it to `route_diff.py`: it can't launch from the
+  deep balls ("no valid position at any setback"). `route_diff.py` then
+  connects the escaped stubs — **but on a 4+ layer board you must pass those
+  inner layers to `route_diff.py` via `--layers` too** (it defaults to F.Cu
+  B.Cu, so an inner-layer escaped stub is otherwise unreachable and the pair is
+  silently dropped — issue #116). Pairs not on an array package don't need fanout.
 
 > **Tip:** Name-based detection misses pairs with unconventional names. For boards with
 > high-speed ICs (PHYs, SerDes, USB, FPGA transceivers), or when detection finds suspiciously
@@ -162,6 +267,19 @@ If differential pairs are found:
 Also note: `route_diff.py` resolves P/N polarity mismatches automatically, which can swap
 target pad net assignments. Swaps are reported in the output — when they happen, the
 schematic sync step below applies (see "Schematic Synchronization After Swaps").
+
+**Far-apart terminal pads → single-ended follow-up (issue #121).** A "diff pair"
+sometimes has pads that aren't a coupled connection — e.g. a P and an N test point
+several mm apart, or a logical pair daisy-chained through spread-out parts. If the
+coupled chain can't be routed, `route_diff.py` peels those far-apart pads off the
+chain (routing the genuinely-coupled terminals as a pair) and lists the affected
+nets under `single_ended_followup_nets` in its `JSON_SUMMARY` (and a "route them
+single-ended next" block on stdout). Those pads are **not** dropped — the **Signal
+Routing** step (`route.py "*" "!GND" "!VCC"`) connects them P→P / N→N along with
+every other unrouted net, since they remain unrouted after the diff-pair step. So:
+**do not exclude the diff-pair nets from the signal-routing step's net selection** —
+that step is what finishes the peeled pads. If you scope the signal step to specific
+nets instead of `"*"`, add any `single_ended_followup_nets` to it explicitly.
 
 ### Check for DDR/High-Speed Memory Signals
 
@@ -222,11 +340,14 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
    nets that planes will handle (`"*" "!GND" "!VCC"`).
 2. **Differential Pairs** - The most constrained routes claim their channels before
-   anything else can block them (if present).
+   anything else can block them (if present). May peel far-apart "terminal" pads
+   (e.g. spread-out test points) off the coupled chain and leave them for the
+   signal-routing step (reported as `single_ended_followup_nets`, issue #121).
 3. **Signal Routing** - All remaining nets, **excluding the plane nets**
    (`--nets "*" "!GND" "!VCC"`). Routing them as tracks now would defeat the
    planes step - the exclusions are mandatory whenever a later step gives those
-   nets planes.
+   nets planes. This step also finishes any diff-pair pads peeled off in step 2,
+   so keep the diff-pair nets in its selection (the `"*"` covers them).
 4. **Power Planes** - Create GND and VCC planes together. Stitching vias adapt
    around the routed signals; the reverse is not true - a stitching via placed
    early can block the only clean channel for a diff pair (issue #56). If signal
@@ -272,11 +393,24 @@ avoiding `--no-bga-zone` workarounds during routing.
 plane nets. Do NOT use `"/*"` alone, as it misses nets with non-hierarchical
 names like `Net-(U9-Pad1)` which would then require `--no-bga-zone` to route.
 
+On a 4+ layer board also pass every copper layer with `--layers` (default is
+F.Cu B.Cu only) so inner balls can escape — drop `--layers` only for true
+2-layer boards.
+
 python3 -X utf8 bga_fanout.py board.kicad_pcb \
     --component U9 \
     --nets "*" "!GND" "!VCC" \
+    --layers F.Cu In1.Cu In2.Cu B.Cu \
     --output board_step1.kicad_pcb \
     2>&1 | tee /tmp/step1_fanout.txt
+
+**Then check the `JSON_SUMMARY` line: if `failed > 0`, balls were dropped — retry
+before continuing.** First confirm all copper layers are passed; then re-run with
+`--clearance` at the manufacturing floor (e.g. `--clearance 0.1`), which fixes the
+common case (an 0.8 mm-pitch BGA can't fit a track between balls at 0.2 mm). If still
+short, add the fine-pitch escape via and/or a smaller `--track-width`. Only proceed
+to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood and
+accepted).
 
 ### Step 2: Route All Signal Nets (excluding plane nets)
 Routes all remaining unrouted nets EXCEPT the nets that get planes in the
@@ -334,9 +468,12 @@ python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5.k
 ### Step 6: Verify Results
 Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
-diff pair checks). If that skill is unavailable, run the raw checks:
+diff pair checks). If that skill is unavailable, run the raw checks — DRC at the
+**manufacturing floor** from Step 4's `--design-rules` output (the
+`check_drc.py` flags it printed), NOT a hardcoded 0.25, so legitimately-tight
+fine-pitch escapes that are still fabbable don't read as violations (#111):
 
-python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance 0.25 2>&1 | tee /tmp/step6_drc.txt
+python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/step6_drc.txt
 python3 -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
 python3 -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
 ```
@@ -433,8 +570,18 @@ Insert diff pair routing after fanout but before single-ended signals:
 python3 route_diff.py board.kicad_pcb \
     --nets "*LVDS*" "*USB*" \
     --diff-pair-gap 0.15 \
+    --layers F.Cu In1.Cu In2.Cu B.Cu \
     --output board_diff.kicad_pcb
 ```
+
+**Escape layers (multi-layer boards):** like `bga_fanout.py`, `route_diff.py`
+defaults to `--layers F.Cu B.Cu` only. On a 4+ layer board you MUST pass every
+copper layer — when a pair was escaped by `bga_fanout.py` onto an INNER layer,
+`route_diff.py` can only launch from those escaped stubs if that inner layer is
+in `--layers`. Omitting it strands the inner-layer stubs and silently drops
+those pairs (you'll see a low routed-pair count, e.g. 8/40 instead of 22/40 —
+issue #116). Use the same copper-layer list you passed to `bga_fanout.py`; drop
+`--layers` only for true 2-layer boards.
 
 Key options:
 - `--diff-pair-gap 0.1` - Gap between P and N traces (mm)
@@ -663,8 +810,12 @@ Always capture command output to `/tmp` files for later analysis:
 python3 -X utf8 route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt
 python3 -X utf8 route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu 2>&1 | tee /tmp/planes_output.txt
 python3 -X utf8 check_connected.py output.kicad_pcb 2>&1 | tee /tmp/connectivity.txt
-python3 -X utf8 check_drc.py output.kicad_pcb 2>&1 | tee /tmp/drc.txt
+python3 -X utf8 check_drc.py output.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/drc.txt
 ```
+
+(`<floor>` = the manufacturing floor from `list_nets.py --design-rules`, not the
+0.2 default — grade DRC at the rule the board's own Constraints + fab capability
+define, per #111/#115.)
 
 ### Parse Logs for Failure Analysis
 

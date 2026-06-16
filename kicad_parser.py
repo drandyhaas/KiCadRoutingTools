@@ -222,6 +222,41 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
     return global_x, global_y
 
 
+def find_matching_paren(content: str, open_idx: int) -> int:
+    """Return the index just past the ``)`` matching the ``(`` at ``open_idx``.
+
+    Counts parentheses but SKIPS those inside quoted strings, honoring KiCad's
+    backslash escapes (``\\"`` and ``\\\\``). A naive depth counter breaks when a
+    property value contains a lone paren, e.g. an MPN like ``"TCR2EF115,LM(CT"``:
+    the unmatched ``(`` makes the scan run far past the block end and swallow
+    following footprints' pads (issue #113). Returns ``len(content)`` if no match
+    is found.
+    """
+    depth = 0
+    in_string = False
+    i = open_idx
+    n = len(content)
+    while i < n:
+        char = content[i]
+        if in_string:
+            if char == '\\':
+                i += 2  # skip escaped char
+                continue
+            if char == '"':
+                in_string = False
+        else:
+            if char == '"':
+                in_string = True
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return n
+
+
 def parse_s_expression(text: str) -> list:
     """
     Simple S-expression parser - returns nested lists.
@@ -255,8 +290,11 @@ def extract_layers(content: str) -> BoardInfo:
     layers = {}
     copper_layers = []
 
-    # Find the layers section
-    layers_match = re.search(r'\(layers\s*((?:\([^)]+\)\s*)+)\)', content, re.DOTALL)
+    # Find the layers section. Capture lazily up to the block's closing paren on
+    # its own line, rather than requiring a run of paren-free (...) entries: layer
+    # user-names can contain parentheses (e.g. "In1(GND).Cu", "plate (unused)"),
+    # which truncated the old regex and made such boards parse as 0 copper layers.
+    layers_match = re.search(r'\(layers\b(.*?)\n[ \t]*\)', content, re.DOTALL)
     if layers_match:
         layers_text = layers_match.group(1)
         # Parse individual layer entries: (0 "F.Cu" signal)
@@ -266,7 +304,11 @@ def extract_layers(content: str) -> BoardInfo:
             layer_name = m.group(2)
             layer_type = m.group(3)
             layers[layer_id] = layer_name
-            if layer_type == 'signal' and '.Cu' in layer_name:
+            # Any copper layer counts, whatever its declared use. KiCad types
+            # plane layers 'power' (and sometimes 'mixed'/'jumper'); restricting
+            # to 'signal' dropped real layers, making a 4-layer board look
+            # 2-layer (issue #76).
+            if '.Cu' in layer_name and layer_type in ('signal', 'power', 'mixed', 'jumper'):
                 copper_layers.append(layer_name)
 
     # Extract board bounds from Edge.Cuts
@@ -406,6 +448,14 @@ def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
     return segments
 
 
+# Regex gap that matches anything EXCEPT the start of another graphic element,
+# so a lazy match can't run past the current element to a later (layer "...")
+# token. A plain `.*?` gap let a silk/fab gr_* element match across element
+# boundaries to a later Edge.Cuts token, consuming the real edge elements in
+# between (issue #77). Shared by the Edge.Cuts and guide-corridor readers.
+_GR_ELEMENT_GAP = r'(?:(?!\(gr_)[\s\S])*?'
+
+
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
     """Extract board outline bounds from Edge.Cuts layer."""
     min_x = min_y = float('inf')
@@ -413,7 +463,7 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
     found = False
 
     # Look for gr_rect on Edge.Cuts (multi-line format)
-    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(rect_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         min_x = min(min_x, x1, x2)
@@ -423,7 +473,7 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
         found = True
 
     # Look for gr_line on Edge.Cuts (multi-line format)
-    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(line_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         min_x = min(min_x, x1, x2)
@@ -433,7 +483,7 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
         found = True
 
     # Look for gr_arc on Edge.Cuts (multi-line format)
-    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(arc_pattern, content, re.DOTALL):
         sx, sy = float(m.group(1)), float(m.group(2))
         mx, my = float(m.group(3)), float(m.group(4))
@@ -467,13 +517,13 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
     segments = []
 
     # gr_line
-    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(line_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         segments.append(((x1, y1), (x2, y2)))
 
     # gr_arc - approximate as polyline
-    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    arc_pattern = r'\(gr_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(arc_pattern, content, re.DOTALL):
         sx, sy = float(m.group(1)), float(m.group(2))
         mx, my = float(m.group(3)), float(m.group(4))
@@ -481,7 +531,7 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         segments.extend(_arc_to_segments((sx, sy), (mx, my), (ex, ey)))
 
     # gr_rect - expand to 4 line segments
-    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)'
+    rect_pattern = r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(rect_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
         segments.append(((x1, y1), (x2, y1)))
@@ -495,12 +545,6 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
             segments.append((poly[i], poly[(i + 1) % len(poly)]))
 
     return segments
-
-
-# Regex gap that matches anything EXCEPT the start of another graphic element,
-# so a lazy match can't run past the current element to a later (layer "...")
-# token. Shared by the gr_line/gr_poly/gr_rect readers below.
-_GR_ELEMENT_GAP = r'(?:(?!\(gr_)[\s\S])*?'
 
 
 def _parse_gr_polys_on_layer(content: str, layer: str) -> List[List[Tuple[float, float]]]:
@@ -846,17 +890,9 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
     footprint_starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
 
     for start in footprint_starts:
-        # Find the matching end parenthesis
-        depth = 0
-        end = start
-        for i, char in enumerate(content[start:], start):
-            if char == '(':
-                depth += 1
-            elif char == ')':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
+        # Find the matching end parenthesis (string-aware: a property value with
+        # a lone paren must not throw off the count — see find_matching_paren).
+        end = find_matching_paren(content, start)
 
         fp_text = content[start:end]
 
@@ -879,8 +915,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
         fp_layer = layer_match.group(1) if layer_match else "F.Cu"
 
-        # Extract reference
+        # Extract reference. KiCad 8+ uses (property "Reference" "R1"); KiCad
+        # 6/7 use (fp_text reference "R1" ...). Without the fallback every 6/7
+        # footprint got reference "?" and collapsed onto one dict key, so a
+        # whole board parsed as a single footprint (issue #78).
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+        if not ref_match:
+            ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
         reference = ref_match.group(1) if ref_match else "?"
 
         # Extract value (component part number or value)
@@ -905,17 +946,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         # Note: pad number can be empty string (pad "") so use [^"]* not [^"]+
         for pad_match in re.finditer(r'\(pad\s+"([^"]*)"\s+(\w+)\s+(\w+)', fp_text):
             pad_start = pad_match.start()
-            # Find end of this pad block
-            depth = 0
-            pad_end = pad_start
-            for i, char in enumerate(fp_text[pad_start:], pad_start):
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-                    if depth == 0:
-                        pad_end = i + 1
-                        break
+            # Find end of this pad block (string-aware paren matching).
+            pad_end = find_matching_paren(fp_text, pad_start)
 
             pad_text = fp_text[pad_start:pad_end]
 
@@ -980,9 +1012,15 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             pintype_match = re.search(r'\(pintype\s+"([^"]*)"\)', pad_text)
             pintype = pintype_match.group(1) if pintype_match else ""
 
-            # Extract drill size for through-hole pads
-            drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
-            drill_size = float(drill_match.group(1)) if drill_match else 0.0
+            # Extract drill size for through-hole pads. Oval/slot drills are
+            # (drill oval w h); take max(w, h) so the pad keeps drill>0 (TH)
+            # semantics instead of being misread as SMD (issue #106).
+            oval_match = re.search(r'\(drill\s+oval\s+([\d.]+)\s+([\d.]+)', pad_text)
+            if oval_match:
+                drill_size = max(float(oval_match.group(1)), float(oval_match.group(2)))
+            else:
+                drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
+                drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
             # Extract roundrect_rratio for roundrect pads
             rratio_match = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', pad_text)
@@ -1049,8 +1087,12 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
         )
         vias.append(via)
 
-    if not vias and name_to_id:
-        # KiCad 10 format: (net "name")
+    if name_to_id:
+        # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
+        # pattern and merge: a file can legally mix both styles (e.g. a tool
+        # that writes numeric refs into a v10 board), and each via matches
+        # exactly one pattern. An either/or fallback silently dropped every
+        # name-style via when any numeric one existed (issue #79).
         # Use flexible matching between layers and net to handle new v10 fields
         # (tenting, covering, plugging, capping, filling) that appear after layers.
         via_pattern_v10 = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
@@ -1103,8 +1145,10 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         )
         segments.append(segment)
 
-    if not segments and name_to_id:
-        # KiCad 10 format: (net "name")
+    if name_to_id:
+        # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
+        # pattern and merge — mixed-style files are legal and each segment
+        # matches exactly one pattern (issue #79).
         segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
@@ -1137,20 +1181,12 @@ def _iter_zone_blocks(content: str):
     """
     zone_start_pattern = r'\r?\n\t\(zone\s*\r?\n'
     for start_match in re.finditer(zone_start_pattern, content):
-        # Find the matching closing paren by counting balanced parens
-        paren_count = 1
-        pos = start_match.end()
-        zone_end = None
-        while pos < len(content) and paren_count > 0:
-            char = content[pos]
-            if char == '(':
-                paren_count += 1
-            elif char == ')':
-                paren_count -= 1
-                if paren_count == 0:
-                    zone_end = pos
-            pos += 1
-        if zone_end is None:
+        # Find the matching closing paren (string-aware, so a lone paren inside
+        # a quoted token cannot run the scan past the zone end — see issue #113).
+        # start_match begins at the newline before "(zone"; locate that "(".
+        open_idx = content.index('(', start_match.start())
+        zone_end = find_matching_paren(content, open_idx) - 1
+        if zone_end <= open_idx:
             continue
         yield content[start_match.end():zone_end]
 
@@ -1270,25 +1306,35 @@ def extract_keepouts(content: str) -> List[dict]:
         lm = re.search(r'\(layers\s+([^)]+)\)', zc) or re.search(r'\(layer\s+("[^"]+")\)', zc)
         layers = set(re.findall(r'"([^"]+)"', lm.group(1))) if lm else set()
 
-        # Polygon (same parsing as filled zones)
-        pts_start = zc.find('(pts')
-        if pts_start < 0:
+        # Outline polygons. A rule area can have several (polygon (pts ...))
+        # blocks: the first is the outer outline, any further ones are HOLES
+        # (even-odd fill). An edge-keepout ring is the board rectangle with an
+        # inset hole; parsing only the first polygon collapses the ring to its
+        # bounding box and bans the whole board (issue #95). Capture them all.
+        polys = []
+        search = 0
+        while True:
+            p_start = zc.find('(polygon', search)
+            if p_start < 0:
+                break
+            pc = 0
+            p_end = p_start
+            for i in range(p_start, len(zc)):
+                if zc[i] == '(':
+                    pc += 1
+                elif zc[i] == ')':
+                    pc -= 1
+                    if pc == 0:
+                        p_end = i
+                        break
+            pts = [(float(a), float(b)) for a, b in
+                   re.findall(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', zc[p_start:p_end + 1])]
+            if len(pts) >= 3:
+                polys.append(pts)
+            search = p_end + 1
+        if not polys:
             continue
-        pc = 0
-        pts_end = pts_start
-        for i in range(pts_start, len(zc)):
-            if zc[i] == '(':
-                pc += 1
-            elif zc[i] == ')':
-                pc -= 1
-                if pc == 0:
-                    pts_end = i
-                    break
-        polygon = [(float(a), float(b)) for a, b in
-                   re.findall(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', zc[pts_start:pts_end + 1])]
-        if len(polygon) < 3:
-            continue
-        keepouts.append({'polygon': polygon, 'layers': layers,
+        keepouts.append({'polygon': polys[0], 'holes': polys[1:], 'layers': layers,
                          'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed})
     return keepouts
 
@@ -2726,6 +2772,48 @@ def get_nets_to_route(pcb_data: PCBData,
     return routes
 
 
+def _is_ball_grid(pads) -> bool:
+    """Gate for geometry-based BGA classification: only a genuine ball/pin grid
+    qualifies — enough pads, near-uniform pad size, AND a true 2-D matrix.
+    Guards against keyswitches, SMD diode pairs, thermal-via exposed pads, and
+    connector arrays being classified as BGAs and walled off behind exclusion
+    zones (issue #82). BGA/PGA balls are identical; the size-mix false positives
+    (switch pins + stabilizer holes, EP via grid + perimeter pads) fail the
+    uniform-size test.
+
+    The matrix test additionally rejects wide-pitch through-hole *headers* —
+    e.g. the 2-row RPi_Pico_SMD_TH, which is uniform-size but only two columns
+    wide (issue #82, set-2 reopen). A real array fills >=3 rows AND >=3 columns
+    with several pads each; a 2-row header's columns are deep but it has only
+    two of them, and a 1-/2-row header's rows hold just 1-2 pads. Pad-local
+    coordinates are used so the test is independent of placement rotation.
+    """
+    if len(pads) < 16:
+        return False
+    size_counts = {}
+    for p in pads:
+        key = (round(p.size_x, 2), round(p.size_y, 2))
+        size_counts[key] = size_counts.get(key, 0) + 1
+    dominant_size, dominant_n = max(size_counts.items(), key=lambda kv: kv[1])
+    if dominant_n < 0.9 * len(pads):
+        return False
+
+    # Among the uniform pads, count rows/columns that hold >=3 pads. A genuine
+    # ball/pin array populates several of each; a pin header does not.
+    uniform = [p for p in pads
+               if (round(p.size_x, 2), round(p.size_y, 2)) == dominant_size]
+    row_counts = {}
+    col_counts = {}
+    for p in uniform:
+        ry = round(p.local_y, 2)
+        rx = round(p.local_x, 2)
+        row_counts[ry] = row_counts.get(ry, 0) + 1
+        col_counts[rx] = col_counts.get(rx, 0) + 1
+    populated_rows = sum(1 for n in row_counts.values() if n >= 3)
+    populated_cols = sum(1 for n in col_counts.values() if n >= 3)
+    return populated_rows >= 3 and populated_cols >= 3
+
+
 def detect_package_type(footprint: Footprint) -> str:
     """
     Detect the package type of a footprint based on its characteristics.
@@ -2784,9 +2872,11 @@ def detect_package_type(footprint: Footprint) -> str:
             else:
                 interior_pads += 1
 
-        # BGA has many interior pads, QFN/QFP has mostly perimeter pads
+        # BGA has many interior pads, QFN/QFP has mostly perimeter pads.
+        # Either way the geometry path only declares BGA for a genuine
+        # uniform ball/pin grid (issue #82).
         if interior_pads > perimeter_pads:
-            return 'BGA'
+            return 'BGA' if _is_ball_grid(pads) else 'OTHER'
         elif perimeter_pads > 0:
             # Check pad shapes - QFN typically has rectangular pads, BGA has circular
             circular_pads = sum(1 for p in pads if p.shape in ('circle', 'oval'))
@@ -2794,7 +2884,7 @@ def detect_package_type(footprint: Footprint) -> str:
             if rect_pads > circular_pads:
                 return 'QFN'
             else:
-                return 'BGA'
+                return 'BGA' if _is_ball_grid(pads) else 'OTHER'
 
     return 'OTHER'
 

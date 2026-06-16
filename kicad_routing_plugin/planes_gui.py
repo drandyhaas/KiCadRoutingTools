@@ -413,6 +413,14 @@ class RepairPlanesOptionsPanel(wx.Panel):
         track_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
         sizer.Add(track_sizer, 0, wx.EXPAND)
 
+        # Repair pad connections (on by default; matches the CLI --repair-pads).
+        self.repair_pads = wx.CheckBox(self, label="Repair pad connections")
+        self.repair_pads.SetValue(True)
+        self.repair_pads.SetToolTip(
+            "Also tap pads that aren't connected to their plane (pad-level repair). "
+            "Uncheck to only connect disconnected zone regions (CLI --no-repair-pads).")
+        sizer.Add(self.repair_pads, 0, wx.LEFT | wx.TOP, 5)
+
         # Info text
         info = wx.StaticText(self, label="Leave nets/layers empty to auto-detect existing zones.")
         info.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -425,11 +433,12 @@ class RepairPlanesOptionsPanel(wx.Panel):
         return {
             'max_track_width': self.max_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
+            'repair_pads': self.repair_pads.GetValue(),
         }
 
     def _on_max_track_width_changed(self, event):
         """Validate max track width >= track width from Basic tab."""
-        # Guard against re-entrancy: see _on_drc_param_changed in swig_gui.py (#30).
+        # Guard against re-entrancy: see _on_drc_param_changed in routing_dialog.py (#30).
         if getattr(self, '_validating', False):
             return
 
@@ -903,6 +912,10 @@ class PlanesTab(wx.Panel):
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
                 max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),
+                # Match signal routing's No-BGA-Zones intent when rerouting
+                # ripped nets on a BGA board (issue #88). The route tab's
+                # "ALL" means disable every BGA exclusion zone.
+                no_bga_zone=(config.get('no_bga_zones_text', '').upper() == 'ALL'),
                 pcb_data=self.pcb_data,
                 return_results=True,
                 layer_nets=layer_nets,
@@ -1017,6 +1030,7 @@ class PlanesTab(wx.Panel):
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
                 max_iterations=config.get('max_iterations', defaults.MAX_ITERATIONS),
                 routing_layers=all_layers,
+                repair_pads=config.get('repair_pads', True),
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 pcb_data=self.pcb_data,
                 return_results=True,

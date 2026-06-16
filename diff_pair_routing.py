@@ -136,9 +136,86 @@ def get_pair_end_direction(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     return (perp_x, perp_y, True)
 
 
+def _setback_ladder(setback, spacing_mm, pad_gap_half, config):
+    """Candidate setback radii to scan, preferred first (issue #90).
+
+    The old single fixed-radius search failed whole pairs whenever every
+    angle on that one ring was blocked - dense terminals (0402 resistor
+    rows, SOT-23s, USB-C) often have an open ring nearer or farther.
+
+    The geometric floor is the longitudinal room the P/N connector fan
+    needs to taper from the pad separation down to the pair spacing at
+    <= ~45 degrees: |pad_gap/2 - spacing| plus a grid step of margin,
+    never less than 2*spacing. Below that the connectors would kink.
+    Above the configured setback, 1.5x and 2x are also tried - sometimes
+    the neighborhood only opens up farther out.
+    """
+    floor = max(2 * spacing_mm,
+                abs(pad_gap_half - spacing_mm) + config.grid_step)
+    # The configured/default setback is always rung 1, even below the floor -
+    # an explicit --diff-pair-centerline-setback must be honored as given.
+    ladder = [setback]
+    for s in (0.75 * setback, 0.5 * setback, floor,
+              1.5 * setback, 2 * setback):
+        s = max(s, floor)
+        if all(abs(s - e) > 1e-6 for e in ladder):
+            ladder.append(s)
+    return ladder
+
+
+def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
+                                  setback, pad_gap_half, label, layer_names,
+                                  spacing_mm, config, obstacles,
+                                  connector_obstacles, coord, neighbor_stubs):
+    """_find_open_positions over a ladder of setback radii (issue #90).
+
+    Returns (candidates, used_setback, rotated); `rotated` is True when the
+    position was only found by rotating the launch direction away from the
+    escape direction (the centerline route must then wrap around the
+    endpoint, like a flipped attempt).
+    """
+    ladder = _setback_ladder(setback, spacing_mm, pad_gap_half, config)
+    for i, s in enumerate(ladder):
+        candidates = _find_open_positions(
+            center_x, center_y, dir_x, dir_y, layer_idx, s, label,
+            layer_names, spacing_mm, config, obstacles,
+            connector_obstacles, coord, neighbor_stubs,
+            quiet_failure=True)
+        if candidates:
+            if i > 0:
+                print(f"      {label}: setback {ladder[0]:.2f}mm blocked, "
+                      f"using {s:.2f}mm")
+            return candidates, s, False
+
+    # Full-sweep fallback: the angle fan only covers +-max_setback_angle
+    # around the escape direction, but buried terminals (SOT-23 chains,
+    # USB-C row-to-row legs) often only open sideways or backwards.
+    # Re-run the ladder with the launch direction rotated 90/180/270 deg -
+    # together with the fan this covers the whole circle.
+    for rot_deg in (90, -90, 180):
+        rot = math.radians(rot_deg)
+        rdx = dir_x * math.cos(rot) - dir_y * math.sin(rot)
+        rdy = dir_x * math.sin(rot) + dir_y * math.cos(rot)
+        for s in ladder:
+            candidates = _find_open_positions(
+                center_x, center_y, rdx, rdy, layer_idx, s, label,
+                layer_names, spacing_mm, config, obstacles,
+                connector_obstacles, coord, neighbor_stubs,
+                quiet_failure=True)
+            if candidates:
+                print(f"      {label}: escape direction blocked at every "
+                      f"setback - launching rotated {rot_deg:+d}deg at {s:.2f}mm")
+                return candidates, s, True
+
+    print(f"  Error: {label} - no valid position at any setback/direction "
+          f"(ladder {', '.join(f'{s:.2f}' for s in ladder)}mm x full sweep)")
+    return [], setback, False
+
+
 def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
                          label, layer_names, spacing_mm, config, obstacles,
-                         connector_obstacles, coord, neighbor_stubs):
+                         connector_obstacles, coord, neighbor_stubs,
+                         quiet_failure=False):
     """Find open position for setback, preferring 0° but angling away from nearby stubs if needed.
 
     Only angles away from 0° if the nearest unrouted stub is too close (within
@@ -274,7 +351,8 @@ def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
                 print(f"      {label} {angle_deg:+.1f}°: OK (dist={dist:.2f}mm)")
 
     if not valid_candidates:
-        print(f"  Error: {label} - no valid position at setback={setback:.2f}mm (all angles blocked)")
+        if not quiet_failure:
+            print(f"  Error: {label} - no valid position at setback={setback:.2f}mm (all angles blocked)")
         return []
 
     # Sort by clearance (larger better), then by angle magnitude (smaller better)
@@ -868,22 +946,53 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
                     best_p, best_n = p, n
         return best_p, best_n, best_dist
 
-    # Find the closest P-N pair - this becomes one end (we'll call it "source")
-    p_src, n_src, src_dist = find_closest_pair(p_all, n_all)
-    if p_src is None or n_src is None:
-        return [], [], "Could not find matching P and N endpoints on same layer"
+    # Honor get_net_endpoints' source/target split so a multi-point cluster on
+    # one end (e.g. a BGA diff-pair escape stub, returned as many clustered
+    # points) can't be picked for BOTH terminals - the old "two closest P-N
+    # pairs over the merged set" landed both terminals inside that one cluster,
+    # collapsing the pair to a degenerate ~0.1mm corridor that downstream then
+    # refused. Each terminal is now the closest P-N pair WITHIN one labeled
+    # group, so the two terminals stay on opposite ends.
+    #
+    # P/N agreement: get_net_endpoints labels each net independently, so N's
+    # "source" group may be the end P calls "target" (asymmetric copper). Try
+    # both ways of matching P's sides to N's sides and keep the one whose two
+    # P-N pairs are tighter (each P endpoint actually adjacent to its N) - the
+    # wrong matching pairs opposite ends and comes back far apart.
+    def labeled_pair(p_grp, n_grp):
+        p, n, d = find_closest_pair(p_grp, n_grp)
+        return (p, n, d) if p is not None and n is not None else None
 
-    # Remove the matched endpoints from consideration
-    p_remaining = [p for p in p_all if p != p_src]
-    n_remaining = [n for n in n_all if n != n_src]
+    def matching_cost(src_pair, tgt_pair):
+        if src_pair is None or tgt_pair is None:
+            return None
+        return src_pair[2] + tgt_pair[2]  # sum of the two P-N gaps; smaller = P/N agree
 
-    if not p_remaining or not n_remaining:
-        return [], [], "Not enough endpoints for source and target"
+    aligned = (labeled_pair(p_sources, n_sources), labeled_pair(p_targets, n_targets))
+    crossed = (labeled_pair(p_sources, n_targets), labeled_pair(p_targets, n_sources))
+    cost_a, cost_c = matching_cost(*aligned), matching_cost(*crossed)
 
-    # Find the closest P-N pair from remaining - this becomes the other end ("target")
-    p_tgt, n_tgt, tgt_dist = find_closest_pair(p_remaining, n_remaining)
-    if p_tgt is None or n_tgt is None:
-        return [], [], "Could not find matching P and N target endpoints on same layer"
+    chosen = None
+    if cost_a is not None and (cost_c is None or cost_a <= cost_c):
+        chosen = aligned
+    elif cost_c is not None:
+        chosen = crossed
+
+    if chosen is not None:
+        (p_src, n_src, _), (p_tgt, n_tgt, _) = chosen
+    else:
+        # Labels unusable (e.g. a net has no separable target group): fall back
+        # to the original two-closest-pairs search over the merged endpoint set.
+        p_src, n_src, src_dist = find_closest_pair(p_all, n_all)
+        if p_src is None or n_src is None:
+            return [], [], "Could not find matching P and N endpoints on same layer"
+        p_remaining = [p for p in p_all if p != p_src]
+        n_remaining = [n for n in n_all if n != n_src]
+        if not p_remaining or not n_remaining:
+            return [], [], "Not enough endpoints for source and target"
+        p_tgt, n_tgt, tgt_dist = find_closest_pair(p_remaining, n_remaining)
+        if p_tgt is None or n_tgt is None:
+            return [], [], "Could not find matching P and N target endpoints on same layer"
 
     # Build the paired source and target tuples
     paired_sources = [(
@@ -1303,6 +1412,19 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
 
+    # Degenerate pair: both terminal centers (nearly) coincide, so no pair
+    # corridor exists - the centerline can only leave and loop back to its
+    # own start, and the offset/connector geometry necessarily tangles
+    # (neo6502 /D_P //D_N: USB-C row-join nets whose A and B pad pairs share
+    # one midpoint). Refuse pair routing with a clear message; these nets
+    # are jumpers and should be routed single-ended.
+    center_dist = math.hypot(center_tgt_x - center_src_x, center_tgt_y - center_src_y)
+    if center_dist < 2 * spacing_mm + config.grid_step:
+        print(f"  Pair terminals nearly coincide (centers {center_dist:.2f}mm apart "
+              f"< pair width {2 * spacing_mm:.2f}mm) - no pair corridor exists. "
+              f"Route these nets single-ended (connector row-join).")
+        return None, 0, [], None
+
     # Get escape directions at source and target (averaged stub directions, or
     # synthesized from pad geometry when the endpoints are bare pads)
     src_dir_x, src_dir_y, src_dir_synth = get_pair_end_direction(
@@ -1356,16 +1478,23 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Allow radius for finding open positions near blocked cells
     allow_radius = 2
 
-    # Get all valid setback positions for source and target, sorted by preference
-    src_candidates = _find_open_positions(
-        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
+    # Half pad separation per terminal, for the ladder's geometric floor
+    src_pad_gap_half = math.hypot(p_src_x - n_src_x, p_src_y - n_src_y) / 2
+    tgt_pad_gap_half = math.hypot(p_tgt_x - n_tgt_x, p_tgt_y - n_tgt_y) / 2
+
+    # Get all valid setback positions for source and target, sorted by
+    # preference, scanning a ladder of radii per terminal (issue #90)
+    src_candidates, _, src_rotated = _find_open_positions_laddered(
+        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+        src_pad_gap_half, "source",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
     if not src_candidates and src_dir_synth and not src_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
-        src_candidates = _find_open_positions(
-            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
+        src_candidates, _, src_rotated = _find_open_positions_laddered(
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+            src_pad_gap_half, "source",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not src_candidates:
@@ -1375,15 +1504,17 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         )
         return None, 0, blocked, None
 
-    tgt_candidates = _find_open_positions(
-        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
+    tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
+        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+        tgt_pad_gap_half, "target",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
     if not tgt_candidates and tgt_dir_synth and not tgt_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
-        tgt_candidates = _find_open_positions(
-            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
+        tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+            tgt_pad_gap_half, "target",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not tgt_candidates:
@@ -1409,7 +1540,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # in the hairpin.
     # Flipped or forced-direction ends (multi-point chain continuations) may
     # need to wrap around their endpoint to approach from the far side
-    wrapping = (src_flip or tgt_flip or
+    wrapping = (src_flip or tgt_flip or src_rotated or tgt_rotated or
                 src_forced is not None or tgt_forced is not None)
     spacing_multiplier = 3 if wrapping else 2
     diff_pair_spacing_grid = max(1, int(spacing_multiplier * spacing_mm / config.grid_step + 0.5))
@@ -2080,7 +2211,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # shortest - either one can resolve polarity with a needlessly long route
     # (e.g. a flip that wraps all the way around its own terminal).
     polarity_fixed = False
-    if polarity_swap_needed:
+    # force_swap also enters when the detector saw NO mismatch: _detect_polarity
+    # is blind to a route's winding, so the crossing guard at the success exit
+    # can request an explicit swap for an undetected odd pad permutation.
+    if polarity_swap_needed or force_swap:
         swap_end = 'source' if routing_backwards else 'target'
         swap_allowed = config.fix_polarity and swap_end in swap_allowed_ends
         can_flip = (not (flip_source or flip_target) and
@@ -2370,6 +2504,41 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             'n_pos': orig_n_tgt,  # N target stub position (routing target end)
             'p_net_id': p_net_id,  # P net ID to find target pad
             'n_net_id': n_net_id,  # N net ID to find target pad
+        }
+
+    # Issue #102: never report a pair routed whose P and N copper touches.
+    # Orientation-flipped terminals (e.g. USB-C dual-row interleaves, where
+    # the pad order reverses between the rows) make a same-layer P/N crossing
+    # topologically unavoidable; without this check such pairs shipped as
+    # claimed-good output with genuine P-to-N shorts (neo6502 /D_P //D_N).
+    if _pn_tracks_cross(result.get('new_segments', []), p_net_id, n_net_id):
+        print("  P/N tracks cross in final geometry - rejecting pair route")
+        # _detect_polarity is path-local and blind to a route's net winding,
+        # so an undetected odd pad permutation can land here. Before failing,
+        # try the polarity pad swap explicitly - it untangles interleaved
+        # terminals (e.g. USB-C rows) that the detector missed.
+        swap_end = 'source' if routing_backwards else 'target'
+        if (not force_swap and config.fix_polarity
+                and swap_end in swap_allowed_ends):
+            print("  Retrying with a polarity pad swap to untangle the crossing...")
+            swap_result = route_diff_pair_with_obstacles(
+                pcb_data, diff_pair, config, obstacles, base_obstacles,
+                unrouted_stubs, endpoints=endpoints,
+                forced_source_dir=forced_source_dir,
+                forced_target_dir=forced_target_dir,
+                swap_allowed_ends=swap_allowed_ends, force_swap=True)
+            if (swap_result and not swap_result.get('failed')
+                    and not swap_result.get('probe_blocked')):
+                swap_result['iterations'] = (swap_result.get('iterations', 0)
+                                             + result.get('iterations', 0))
+                return swap_result
+            print("  Pad-swap retry did not produce a clean route either")
+        print("  (terminals likely have opposite P/N pad order; needs a polarity "
+              "swap, a layer change, or opposite-side joins)")
+        return {
+            'failed': True,
+            'iterations': result.get('iterations', 0),
+            'pn_crossing': True,
         }
 
     return result
