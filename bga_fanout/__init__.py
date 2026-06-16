@@ -54,6 +54,7 @@ from bga_fanout.reroute import (
     resolve_collisions,
     repair_pad_crossings,
     route_clear_of_foreign_pads,
+    clear_escapes_of_foreign_pads,
 )
 from obstacle_map import build_base_obstacle_map, build_layer_map
 from routing_config import GridRouteConfig
@@ -1929,6 +1930,28 @@ def generate_bga_fanout(footprint: Footprint,
                 if nm not in failed_nets:
                     failed_nets.append(nm)
             print(f"  Pad-aware: removed {len(pad_failed)} unroutable net(s): {pad_failed}")
+
+    # Clearance-aware escape clearing (issue #123 PAD-SEGMENT). The repair above
+    # fires only on true crossings; a route's outer escape can still graze a
+    # breakout-region passive within clearance. Trim the decorative jog and/or
+    # shorten the escape (without pulling its free end inside the BGA zone) to
+    # clear the pad; if even the minimum escape grazes, drop the ball and warn.
+    esc_net_name = {r.net_id: r.pad.net_name for r in best_routes if r.pad.net_name}
+    n_escfix, esc_dropped = clear_escapes_of_foreign_pads(
+        best_routes, tracks, grid, track_width, clearance,
+        foreign_pads, obstacle_layer_map, esc_net_name)
+    if n_escfix:
+        print(f"  Pad-clearance: cleared {n_escfix} escape(s) grazing a foreign "
+              f"pad by jog-trim/shorten (issue #123)")
+    if esc_dropped:
+        drop_ids = {nid for nid, nm in esc_net_name.items() if nm in esc_dropped}
+        tracks[:] = [t for t in tracks if t['net_id'] not in drop_ids]
+        vias_to_add[:] = [v for v in vias_to_add if v['net_id'] not in drop_ids]
+        for nm in esc_dropped:
+            if nm not in failed_nets:
+                failed_nets.append(nm)
+        print(f"  WARNING: dropped {len(esc_dropped)} ball(s) that cannot escape "
+              f"the BGA zone without grazing a foreign pad (issue #123): {esc_dropped}")
 
     # Via-barrel vs foreign-track clearance (issue #123). A fanout via is a
     # through-hole spanning every copper layer, so the track-vs-track layer
