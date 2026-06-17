@@ -56,7 +56,8 @@ in `RUNBOOK.md` → "Orchestration".
 Operational limits (baked into the scripts / learned the hard way):
 
 - Every routing/fanout/plane/check command is wrapped in `run_limited.sh`
-  (kills the job at ~4 GB RSS, overridable with `LIMIT_KB`).
+  (kills the job at ~4 GB RSS, overridable with `LIMIT_KB`). It also **records**
+  each command to a replay manifest — see "Deterministic replay" below.
 - 4 boards run concurrently — most jobs stay well under the 4 GB cap, so
   4-in-flight works on an 8 GB machine and the per-job watchdog backstops any
   spike. (Lower the concurrency arg if you see swapping.)
@@ -64,6 +65,43 @@ Operational limits (baked into the scripts / learned the hard way):
   20-min/command cap and ~45-min board budget (RUNBOOK rule 12). The queue
   manager and `stress_status.sh` track liveness from disk (results JSON +
   run-dir activity), so dropped/stale notifications can't mislead them.
+
+## Deterministic replay (redo without an LLM) — issue #132
+
+The LLM agent routes each board once, with judgment. That run is slow (tens of
+minutes, mostly API latency), can die mid-pipeline on a transient API error, and
+picks parameters afresh each time — so two runs of the same board aren't
+identical, which makes it impossible to cleanly A/B an engine change.
+
+To fix this, `run_limited.sh` records **every** command it wraps (fully quoted
+argv + the cwd it ran in) to a manifest, `<run-dir>/redo_commands.sh`. Because
+the RUNBOOK routes every routing/fanout/plane/check command through that wrapper,
+the manifest is a complete, replayable transcript of the run.
+
+`redo_stress_test.py` replays a manifest verbatim — no LLM, no API calls,
+seconds-to-minutes instead of tens of minutes, and immune to API outages. The
+router is deterministic, so a replay reproduces the recorded board exactly (only
+the freshly-assigned track/via UUIDs differ; geometry and nets are identical).
+
+```bash
+# Replay a recorded run in place (re-runs the exact recorded sequence):
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh
+
+# A/B an engine change: replay the SAME manifest into two fresh dirs with
+# --remap (rewrites the original run-dir path prefix so absolute intermediate
+# paths land in the new dir; the source board's own absolute path still resolves):
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
+    --remap /…/runs/<board>:/tmp/redo_baseline      # with your change reverted
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
+    --remap /…/runs/<board>:/tmp/redo_change         # with your change applied
+# then diff the two final boards (ignore uuid lines) / re-grade DRC + connectivity.
+```
+
+Flags: `--skip-checks` (omit the non-mutating `check_*` commands for speed),
+`--dry-run` (print the plan), `--continue-on-error` (push past a failing command
+instead of stopping — the recorded sequence already contains the agent's retries,
+so a recorded failure is normal and is followed by its successful retry). Disable
+recording for a one-off command with `REDO_MANIFEST=/dev/null`.
 
 ## Routing-constraint validation (what params to route with)
 

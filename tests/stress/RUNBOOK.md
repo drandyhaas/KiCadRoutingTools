@@ -92,6 +92,10 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    the watchdog wrapper, e.g.
    `bash /Users/andy/Documents/KiCadRoutingTools/tests/stress/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
    It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
+   It also records each wrapped command to `<run-dir>/redo_commands.sh` so the
+   whole run can later be replayed deterministically with no LLM via
+   `redo_stress_test.py` (issue #132; see `tests/stress/README.md`). Nothing extra
+   to do — just keep prefixing every command with the wrapper.
    Up to 4 boards run concurrently — in practice most jobs sit well under the
    4 GB cap most of the time, so 4-in-flight is fine on an 8 GB machine; the
    per-job watchdog still backstops any board that spikes. Keep an eye on RAM.
