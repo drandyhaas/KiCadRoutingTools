@@ -759,7 +759,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
         }
     else:
-        write_routed_output(
+        wrote = write_routed_output(
             input_file=input_file,
             output_file=output_file,
             results=results,
@@ -776,6 +776,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             skip_routing=skip_routing,
             add_teardrops=add_teardrops
         )
+        # When every pair was deferred to single-ended (electrically short),
+        # there is no coupled copper to write - but the deferred nets still need
+        # the downstream single-ended pass, so pass the board through unchanged so
+        # the pipeline can continue (otherwise no output file is produced at all).
+        if not wrote and output_file and state.diff_pair_single_ended_nets:
+            import shutil
+            shutil.copy(input_file, output_file)
+            print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
+                  f"added); wrote board through to {output_file} for the "
+                  f"single-ended pass")
 
     # Update schematics with swap info if directory specified
     if schematic_dir and (target_swap_info or pad_swaps):
