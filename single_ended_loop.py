@@ -615,7 +615,7 @@ def route_single_ended_nets(
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
                                            results, config, track_proximity_cache, layer_map,
                                            state.working_obstacles, state.net_obstacles_cache,
-                                           state.ripped_route_layer_costs, state.ripped_route_via_positions)
+                                           state.ripped_route_layer_costs, state.ripped_route_via_positions, refused_sink=state.collision_refused_net_ids)
                                 if was_in_results:
                                     successful += 1
                                 ripped_items.pop()
@@ -754,7 +754,7 @@ def route_single_ended_nets(
                                        routed_results, diff_pair_by_net_id, remaining_net_ids,
                                        results, config, track_proximity_cache, layer_map,
                                        state.working_obstacles, state.net_obstacles_cache,
-                                       state.ripped_route_layer_costs, state.ripped_route_via_positions)
+                                       state.ripped_route_layer_costs, state.ripped_route_via_positions, refused_sink=state.collision_refused_net_ids)
                             if was_in_results:
                                 successful += 1
 

@@ -591,7 +591,8 @@ def try_phase3_ripup(
                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                 results, config, track_proximity_cache, layer_map,
                 state.working_obstacles, state.net_obstacles_cache,
-                state.ripped_route_layer_costs, state.ripped_route_via_positions
+                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                refused_sink=state.collision_refused_net_ids
             )
 
     return None

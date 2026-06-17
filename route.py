@@ -725,6 +725,39 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         cancel_check=cancel_check,
     )
 
+    # Issue #134: nets whose stale copper would have shorted another net on
+    # restore were left ripped instead of re-added (collision-safe restore).
+    # Now that the board is stable, give them one clean reroute pass so the fix
+    # does not cost completion. Only runs when a refusal actually happened, so
+    # boards without the collision are unaffected.
+    if state.collision_refused_net_ids:
+        recover = []
+        for nid in sorted(state.collision_refused_net_ids):
+            if nid in routed_results or nid not in pcb_data.nets:
+                continue
+            if len(pcb_data.pads_by_net.get(nid, [])) < 2:
+                continue
+            if nid in state.diff_pair_by_net_id:
+                pair_name, pair = state.diff_pair_by_net_id[nid]
+                if (pair.p_net_id in state.queued_net_ids
+                        or pair.n_net_id in state.queued_net_ids):
+                    continue
+                state.reroute_queue.append(('diff_pair', pair_name, pair))
+                state.queued_net_ids.add(pair.p_net_id)
+                state.queued_net_ids.add(pair.n_net_id)
+                recover.append(pair_name)
+            else:
+                if nid in state.queued_net_ids:
+                    continue
+                state.reroute_queue.append(('single', pcb_data.nets[nid].name, nid))
+                state.queued_net_ids.add(nid)
+                recover.append(pcb_data.nets[nid].name)
+        if recover:
+            print(f"Issue #134 recovery: re-routing {len(recover)} net(s) left ripped "
+                  f"to avoid a short: {', '.join(recover)}")
+            run_reroute_loop(state, route_index_start=route_index,
+                             cancel_check=cancel_check)
+
     # Final progress update
     if progress_callback:
         progress_callback(total_routes, total_routes, "Routing complete")
