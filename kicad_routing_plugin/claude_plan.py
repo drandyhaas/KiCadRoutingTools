@@ -31,11 +31,14 @@ PLAN_RESULT_SCHEMA = (
     '"power_nets_widths": [<mm>, ...]}} | '
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
-    '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>}} | '
+    '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
+    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false, '
+    '"reroute_ripped_nets": true|false}} | '
     '{"action": "repair_planes", '
     '"assignments": [{"nets": ["<exact net name>", ...], "layer": "<copper layer>"}], '
     '"params": {"via_size": <mm>, "via_drill": <mm>, "max_track_width": <mm>, '
-    '"analysis_grid_step": <mm>, "repair_pads": true|false}} '
+    '"analysis_grid_step": <mm>, "repair_pads": true|false, '
+    '"rip_blocker_nets": true|false, "reroute_ripped_nets": true|false}} '
     ']} '
     'List steps in execution order: fanout first, then route_diff, then route, '
     'then route_planes, then repair_planes - signals route before planes because '
@@ -43,7 +46,11 @@ PLAN_RESULT_SCHEMA = (
     'block a diff pair; repair_planes runs LAST to connect any disconnected plane '
     'regions and tap plane pads the pour missed. Give it the SAME "assignments" '
     'as the route_planes step (same nets and layers). Include exactly one '
-    'repair_planes step at the end whenever there is a route_planes step. '
+    'repair_planes step at the end whenever there is a route_planes step. Set '
+    'its rip_blocker_nets and reroute_ripped_nets true so a plane pad blocked by '
+    'a signal trace (e.g. a connector GND pin) is connected by ripping and '
+    're-routing the blocker; the re-route reuses the route step\'s '
+    'power_nets/power_nets_widths (shared Basic-tab fields, no need to repeat). '
     'The route step\'s "nets" globs support '
     '"!" exclusions and MUST exclude any net that a route_planes step will handle, '
     'e.g. ["*", "!GND", "!VCC"]. '
@@ -157,6 +164,12 @@ def apply_step_params(step, dialog):
                 opts.gnd_via_distance.SetValue(float(params["gnd_via_distance"]))
             except (TypeError, ValueError):
                 notes.append(f"ignored non-numeric gnd_via_distance={params['gnd_via_distance']!r}")
+        if "gnd_via_net" in params:
+            opts.gnd_via_net.SetValue(str(params["gnd_via_net"]))
+        if "rip_blocker_nets" in params:
+            opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
+        if "reroute_ripped_nets" in params:
+            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
     elif action == "repair_planes":
         # via size/drill come from the shared Basic-tab controls (same as route);
         # the repair-specific knobs live on the Repair options panel.
@@ -176,6 +189,10 @@ def apply_step_params(step, dialog):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
         if "repair_pads" in params:
             opts.repair_pads.SetValue(bool(params["repair_pads"]))
+        if "rip_blocker_nets" in params:
+            opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
+        if "reroute_ripped_nets" in params:
+            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
     return notes
 
 
