@@ -934,7 +934,68 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
                                             pad.size_x / 2, pad.size_y / 2)
             if d < clearance + half:
                 return False
+    # Other-net copper pours (planes): a connector must not enter or graze them.
+    zones = getattr(pcb_data, 'zones', None)
+    if zones:
+        from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
+        n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.05) + 1)
+        for z in zones:
+            if z.net_id == net_id or z.layer != layer or not z.polygon:
+                continue
+            for i in range(n + 1):
+                t = i / n
+                px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+                if point_in_polygon(px, py, z.polygon) or \
+                        point_to_polygon_edge_distance(px, py, z.polygon) < clearance + half:
+                    return False
     return True
+
+
+def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1) -> Tuple[int, int]:
+    """Apply the dead-end sweep + gap-snap to a plane tool's output file (issue #84).
+
+    route_planes / route_disconnected_planes write copper outside route.py's
+    write-list, so they miss the in-route cleanup, leaving dead-end stubs (and the
+    occasional near-miss) on plane nets. This re-parses the written board, snaps
+    small same-net gaps and trims gated-safe dead ends on the given plane nets,
+    then rewrites the file (stripping removed segments, appending snap connectors).
+    The connectivity gate uses the plane zones, and the snap clearance check
+    rejects any connector that would enter another net's pour. Returns
+    ``(snapped, removed)``.
+    """
+    from types import SimpleNamespace
+    from kicad_parser import parse_kicad_pcb, is_kicad_10
+    from kicad_writer import remove_segments_from_content, generate_segment_sexpr
+
+    pcb = parse_kicad_pcb(output_file)
+    with open(output_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    names = set(plane_net_names)
+    scope = {nid for nid, net in pcb.nets.items() if net.name in names}
+    if not scope:
+        return 0, 0
+
+    snap_results = []
+    snapped = snap_stub_gaps(snap_results, pcb, scope, SimpleNamespace(clearance=clearance))
+    connectors = [s for r in snap_results for s in (r.get('new_segments') or [])]
+    _, _, to_remove = sweep_dead_ends(snap_results, pcb, scope)
+    if not (connectors or to_remove):
+        return 0, 0
+
+    n2n = getattr(pcb, 'net_id_to_name', {}) or {}
+    v10 = is_kicad_10(content)
+    if to_remove:
+        content, _ = remove_segments_from_content(content, to_remove, n2n if v10 else None)
+    if connectors:
+        sexprs = [generate_segment_sexpr((s.start_x, s.start_y), (s.end_x, s.end_y),
+                                         s.width, s.layer, s.net_id,
+                                         n2n.get(s.net_id) if v10 else None)
+                  for s in connectors]
+        lp = content.rfind(')')
+        content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return snapped, len(to_remove)
 
 
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,

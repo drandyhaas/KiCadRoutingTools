@@ -2710,6 +2710,15 @@ Examples:
             )
             print(f"Wrote {len(gnd_vias)} GND vias to {args.output_file}")
 
+    # Dead-end sweep + gap-snap on the plane copper (issue #84): plane routing
+    # writes outside route.py's write-list, so its dead-end stubs are not cleaned
+    # otherwise. Gated against connectivity + pours, so it never breaks a net.
+    if not args.dry_run:
+        from pcb_modification import clean_plane_copper
+        _snapped, _removed = clean_plane_copper(args.output_file, net_names, args.clearance)
+        if _snapped or _removed:
+            print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
 
 if __name__ == "__main__":
     main()

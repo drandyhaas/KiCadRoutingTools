@@ -74,6 +74,17 @@ def run():
     r4 = []
     check("4 snap to pad copper", snap_stub_gaps(r4, pcb4, {5}, Cfg()) == 1)
 
+    # 5. Another net's copper pour (zone) lies in the connector's path -> refused
+    #    (the connector must not enter another net's plane).
+    trunk5 = _seg(0, 0, 10, 0, net=5)
+    stub5 = _seg(5, 2, 5, 0.12, net=5)
+    zone = SimpleNamespace(net_id=9, net_name='GND', layer='F.Cu',
+                           polygon=[(4, 0.02), (6, 0.02), (6, 0.1), (4, 0.1)])
+    pcb5 = _pcb([trunk5, stub5])
+    pcb5.zones = [zone]
+    r5 = []
+    check("5 connector into another net's pour refused", snap_stub_gaps(r5, pcb5, {5}, Cfg()) == 0)
+
     print("=" * 60)
     if fails:
         for f in fails:
@@ -81,8 +92,8 @@ def run():
         print(f"\n{len(fails)} failure(s)")
         return 1
     print("  PASS  snaps a clear small gap (trace + pad), refuses a too-big gap")
-    print("        and a connector blocked by another net (4 cases)")
-    print("\n4/4 checks passed")
+    print("        a connector blocked by another net, and one into a pour (5 cases)")
+    print("\n5/5 checks passed")
     return 0
 
 

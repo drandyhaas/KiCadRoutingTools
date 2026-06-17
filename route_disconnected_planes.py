@@ -647,6 +647,14 @@ Examples:
         max_search_radius=args.max_search_radius
     )
 
+    # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated
+    # against connectivity + pours so it never breaks a net.
+    if not args.dry_run:
+        from pcb_modification import clean_plane_copper
+        _snapped, _removed = clean_plane_copper(args.output_file, net_names, args.clearance)
+        if _snapped or _removed:
+            print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
 
 if __name__ == "__main__":
     main()
