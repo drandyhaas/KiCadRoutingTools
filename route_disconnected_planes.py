@@ -484,6 +484,8 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
 
 
 def main():
+    from redo_record import record_invocation
+    record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
     parser = argparse.ArgumentParser(
         description="Route between disconnected regions in power plane zones",
         formatter_class=argparse.RawDescriptionHelpFormatter,

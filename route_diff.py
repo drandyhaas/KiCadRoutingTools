@@ -828,6 +828,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
 if __name__ == "__main__":
     import argparse
+    from redo_record import record_invocation
+    record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 
     parser = argparse.ArgumentParser(
         description="Batch Differential Pair PCB Router - Routes differential pairs using Rust-accelerated A*",

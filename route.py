@@ -916,6 +916,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
 if __name__ == "__main__":
     import argparse
+    from redo_record import record_invocation
+    record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 
     parser = argparse.ArgumentParser(
         description="Batch PCB Router - Routes single-ended nets using Rust-accelerated A*. For differential pairs, use route_diff.py.",

@@ -73,10 +73,14 @@ minutes, mostly API latency), can die mid-pipeline on a transient API error, and
 picks parameters afresh each time — so two runs of the same board aren't
 identical, which makes it impossible to cleanly A/B an engine change.
 
-To fix this, `run_limited.sh` records **every** command it wraps (fully quoted
-argv + the cwd it ran in) to a manifest, `<run-dir>/redo_commands.sh`. Because
-the RUNBOOK routes every routing/fanout/plane/check command through that wrapper,
-the manifest is a complete, replayable transcript of the run.
+To fix this, each board-mutating tool (`route.py`, `route_diff.py`,
+`route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`) **self-records**
+its invocation (fully quoted argv + cwd) to a manifest via
+`redo_record.record_invocation()` at the top of `main()`. Recording is gated on
+the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
+`<run-dir>/redo_commands.sh` for every board run. Self-recording is reliable even
+when a command isn't routed through `run_limited.sh` — which the agent does
+inconsistently — so the manifest is a complete, replayable transcript of the run.
 
 `redo_stress_test.py` replays a manifest verbatim — no LLM, no API calls,
 seconds-to-minutes instead of tens of minutes, and immune to API outages. The
@@ -100,8 +104,11 @@ python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
 Flags: `--skip-checks` (omit the non-mutating `check_*` commands for speed),
 `--dry-run` (print the plan), `--continue-on-error` (push past a failing command
 instead of stopping — the recorded sequence already contains the agent's retries,
-so a recorded failure is normal and is followed by its successful retry). Disable
-recording for a one-off command with `REDO_MANIFEST=/dev/null`.
+so a recorded failure is normal and is followed by its successful retry).
+
+Recording is opt-in: set `REDO_MANIFEST=<path>` to capture a manual run (only the
+board-mutating tools record; re-run `check_*` separately for grading), or leave it
+unset / `=/dev/null` to disable.
 
 ## Routing-constraint validation (what params to route with)
 

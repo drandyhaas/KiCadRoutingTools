@@ -2451,6 +2451,8 @@ def create_plane(
 
 
 def main():
+    from redo_record import record_invocation
+    record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
     parser = argparse.ArgumentParser(
         description="Create copper zones with via stitching to net pads",
         formatter_class=argparse.RawDescriptionHelpFormatter,
