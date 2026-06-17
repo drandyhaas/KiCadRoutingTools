@@ -170,6 +170,56 @@ class TapResult:
     segments: List[Dict] = field(default_factory=list)
     reused_via_pos: Optional[Tuple[float, float]] = None
     params_label: str = ""              # 'default' or 'fine'
+    # Failure diagnostics for rip-up (route_disconnected_planes --rip-blocker-nets):
+    via_blocked: bool = False           # True if NO via position could be found
+    blocked_cells: List = field(default_factory=list)  # frontier from a failed via->pad route
+
+
+def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
+                           route_via_to_pad_fn, radius: float):
+    """Last-resort connection: route a trace from `pad` to the nearest same-net
+    via or same-net pad reachable on `pad_layer`, like a human routing a USB
+    connector's GND pin to its adjacent shield pad. Used when no via can be
+    placed in/near the pad (e.g. a tiny B.Cu connector pin amid congestion) and
+    no same-net via is within the close-reuse radius.
+
+    Returns a successful TapResult, a failure TapResult carrying the blocked
+    frontier (so the caller can rip the blocker and retry), or None if there is
+    no same-net target within `radius` (then the caller reports via_blocked)."""
+    if not pad_layer:
+        return None
+    px, py = pad.global_x, pad.global_y
+    cands: List[Tuple[float, Tuple[float, float]]] = []
+    for v in local.vias:
+        if v.net_id == net_id:
+            d = math.hypot(v.x - px, v.y - py)
+            if 1e-6 < d <= radius:
+                cands.append((d, (v.x, v.y)))
+    for opad in local.pads_by_net.get(net_id, []):
+        if (opad.component_ref == pad.component_ref
+                and opad.pad_number == pad.pad_number):
+            continue
+        reachable = (pad_layer in opad.layers
+                     or any(l.startswith('*') for l in opad.layers)
+                     or opad.drill > 0)  # via reachable on any layer / through-hole
+        if not reachable:
+            continue
+        d = math.hypot(opad.global_x - px, opad.global_y - py)
+        if 1e-6 < d <= radius:
+            cands.append((d, (opad.global_x, opad.global_y)))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: c[0])
+    best_frontier: List = []
+    for _d, pos in cands:
+        rr = route_via_to_pad_fn(pos, pad, pad_layer, net_id, routing_obs, config,
+                                 verbose=False, return_blocked_cells=True)
+        if rr.success and rr.segments:
+            return TapResult(success=True, via=None, segments=rr.segments,
+                             reused_via_pos=pos)
+        if rr.blocked_cells and not best_frontier:
+            best_frontier = rr.blocked_cells
+    return TapResult(success=False, blocked_cells=best_frontier)
 
 
 def try_tap_pad(
@@ -187,6 +237,7 @@ def try_tap_pad(
     extra_segments: Optional[List[Dict]] = None,
     verbose: bool = False,
     routing_clearance_cushion: bool = False,
+    distant_trace_radius: float = 0.0,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
 
@@ -277,7 +328,18 @@ def try_tap_pad(
         pending_pads=pending_pads,
     )
     if via_pos is None:
-        return TapResult(success=False)
+        # No via site anywhere in the search radius. Before giving up, try
+        # connecting to a nearby same-net pad/via with a trace (the human's
+        # connector-pin-to-shield-pad strategy) - this is the only way a tiny
+        # pad amid congestion can connect, and its blocked frontier lets a
+        # rip-up caller free the path.
+        if distant_trace_radius > 0:
+            r = _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs,
+                                       config, route_via_to_pad, distant_trace_radius)
+            if r is not None:
+                return r
+        # No via site anywhere in the search radius - via placement is blocked.
+        return TapResult(success=False, via_blocked=True)
 
     segments: List[Dict] = []
     # A via landing inside the pad's own copper connects it directly (via-in-pad)
@@ -286,10 +348,15 @@ def try_tap_pad(
     in_pad = (abs(via_pos[0] - pad.global_x) <= pad.size_x / 2 + 1e-6 and
               abs(via_pos[1] - pad.global_y) <= pad.size_y / 2 + 1e-6)
     if pad_layer and not in_pad:
-        segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                    routing_obs, config, verbose=False)
-        if segments is None:
-            return TapResult(success=False)
+        # Capture the search frontier on failure so a caller doing rip-up can
+        # identify which net is blocking the via->pad trace (route_disconnected_
+        # planes --rip-blocker-nets).
+        route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
+                                        routing_obs, config, verbose=False,
+                                        return_blocked_cells=True)
+        if not route_result.success:
+            return TapResult(success=False, blocked_cells=route_result.blocked_cells or [])
+        segments = route_result.segments
 
     via = {'x': via_pos[0], 'y': via_pos[1], 'size': via_size,
            'drill': via_drill, 'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id}
@@ -312,6 +379,7 @@ def tap_pad_with_escalation(
     verbose: bool = False,
     try_default: bool = True,
     fine_for_all: bool = False,
+    distant_trace_radius: float = 0.0,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -325,14 +393,17 @@ def tap_pad_with_escalation(
     handful of last-resort pads remain and small pads in congested
     fine-pitch neighborhoods also benefit from the fine parameters).
     """
+    last_failure = TapResult(success=False)
     if try_default:
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, config, max_search_radius,
             via_size, via_drill, same_net_pad_clearance,
-            pending_pads, extra_vias, extra_segments, verbose)
+            pending_pads, extra_vias, extra_segments, verbose,
+            distant_trace_radius=distant_trace_radius)
         if result.success:
             result.params_label = 'default'
             return result
+        last_failure = result
 
     if fine_for_all or pad_is_fine_pitch(pad, pcb_data):
         fine_config = make_fine_tap_config(config, pad)
@@ -341,12 +412,16 @@ def tap_pad_with_escalation(
             min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
-            routing_clearance_cushion=True)
+            routing_clearance_cushion=True,
+            distant_trace_radius=distant_trace_radius)
         if result.success:
             result.params_label = 'fine'
             return result
+        last_failure = result
 
-    return TapResult(success=False)
+    # Return the last failure so a rip-up caller sees its via_blocked /
+    # blocked_cells diagnostics.
+    return last_failure
 
 
 def find_unconnected_plane_pads(

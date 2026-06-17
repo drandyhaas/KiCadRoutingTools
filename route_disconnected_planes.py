@@ -31,9 +31,127 @@ from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
 from plane_region_connector import route_disconnected_regions, build_base_obstacles, add_route_to_obstacles
 from plane_pad_tap import find_unconnected_plane_pads, tap_pad_with_escalation
+from plane_blocker_detection import find_route_blocker_from_frontier, find_via_position_blocker
 from terminal_colors import GREEN, RED, RESET
 import routing_defaults as defaults
 import re
+
+# Radius (mm) within which a plane-net pad that cannot get its own via may be
+# connected to a nearby same-net pad/via with a trace (the human's connector-pin
+# -> shield-pad strategy). Only used by the --rip-blocker-nets repair.
+DISTANT_PAD_TRACE_RADIUS = 4.0
+
+
+def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
+    """Remove a net's segments and vias from pcb_data so a blocked repair can
+    re-attempt through the freed space. Returns (segments, vias) removed."""
+    rsegs = [s for s in pcb_data.segments if s.net_id == rip_net_id]
+    rvias = [v for v in pcb_data.vias if v.net_id == rip_net_id]
+    if rsegs:
+        pcb_data.segments = [s for s in pcb_data.segments if s.net_id != rip_net_id]
+    if rvias:
+        pcb_data.vias = [v for v in pcb_data.vias if v.net_id != rip_net_id]
+    return rsegs, rvias
+
+
+def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
+                        max_search_radius, via_size, via_drill, max_rip_nets,
+                        protected_net_ids, first_failure, ripped_net_ids, verbose,
+                        distant_trace_radius=0.0):
+    """A plane-net pad too small to drop a via in needs a trace to the plane (or
+    to an adjacent same-net pad); if signal nets block that trace, rip them (up
+    to max_rip_nets), retry the tap. Identifies the blocker from the failed
+    route's frontier (or the via site for a via-placement block), never ripping a
+    protected (plane) net. Ripped net ids are appended to ripped_net_ids for
+    re-routing. Returns a successful TapResult, or None if no rip-up unblocked it."""
+    failure = first_failure
+    for _ in range(max_rip_nets):
+        if failure.blocked_cells:
+            blocker = find_route_blocker_from_frontier(
+                failure.blocked_cells, pcb_data, blocker_config, net_id, protected_net_ids)
+        else:
+            blocker = find_via_position_blocker(
+                pad.global_x, pad.global_y, pcb_data, blocker_config, net_id, protected_net_ids)
+        if blocker is None or blocker in protected_net_ids:
+            return None
+        bname = pcb_data.nets[blocker].name if blocker in pcb_data.nets else f"net_{blocker}"
+        print(f"{RED}blocked by {bname} - ripping{RESET}...", end=" ", flush=True)
+        _rip_net_from_pcb(pcb_data, blocker)
+        if blocker not in ripped_net_ids:
+            ripped_net_ids.append(blocker)
+        result = tap_pad_with_escalation(
+            pad, pad_layer, net_id, pcb_data, tap_config,
+            max_search_radius=max_search_radius, via_size=via_size, via_drill=via_drill,
+            verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius)
+        if result.success:
+            return result
+        failure = result
+    return None
+
+
+def _reroute_ripped_nets(input_file, output_file, pcb_data, ripped_net_ids, do_reroute,
+                         routing_layers, plane_layers, plane_vias, net_id_to_name,
+                         track_width, clearance, via_size, via_drill, grid_step,
+                         hole_to_hole_clearance, power_nets, power_nets_widths,
+                         no_bga_zone, verbose):
+    """Re-route nets ripped to clear blocked pad repairs. Mirrors route_planes'
+    reroute pass: a net that cannot re-route is RESTORED to its original trace
+    (issue #88), never left disconnected. Re-route must use the same signal
+    parameters as the original run (track/clearance/via and power-net widths) or
+    nets that only routed with relaxed settings get silently dropped."""
+    import sys
+    ripped_names = [pcb_data.nets[r].name for r in ripped_net_ids if r in pcb_data.nets]
+    if not ripped_names:
+        return
+    if not do_reroute:
+        print(f"\nNote: {len(ripped_names)} net(s) ripped to clear pad repairs were "
+              f"excluded from output; re-route them with route.py (matching width): "
+              f"{', '.join(ripped_names)}")
+        return
+
+    print(f"\n{'='*60}\nRe-routing {len(ripped_names)} ripped net(s)...\n{'='*60}")
+    from route import batch_route
+    all_copper = sorted(set(routing_layers) | set(plane_layers))
+    disable_bga = [] if no_bga_zone else None
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old_limit, 100000))
+    try:
+        routed, failed, t = batch_route(
+            input_file=output_file, output_file=output_file, net_names=ripped_names,
+            layers=all_copper, track_width=track_width, clearance=clearance,
+            via_size=via_size, via_drill=via_drill, grid_step=grid_step,
+            hole_to_hole_clearance=hole_to_hole_clearance, verbose=verbose,
+            minimal_obstacle_cache=True, power_nets=power_nets,
+            power_nets_widths=power_nets_widths, disable_bga_zones=disable_bga)
+        print(f"Re-routing complete: {routed} routed, {failed} failed in {t:.2f}s")
+        try:
+            from check_connected import check_net_connectivity
+            from plane_io import restore_failed_reroute_nets
+            out = parse_kicad_pcb(output_file)
+            sb: Dict[int, List] = {}; vb: Dict[int, List] = {}; zb: Dict[int, List] = {}
+            for s in out.segments: sb.setdefault(s.net_id, []).append(s)
+            for v in out.vias: vb.setdefault(v.net_id, []).append(v)
+            for z in out.zones: zb.setdefault(z.net_id, []).append(z)
+            still = [r for r in ripped_net_ids if not check_net_connectivity(
+                r, sb.get(r, []), vb.get(r, []), out.pads_by_net.get(r, []),
+                zb.get(r, [])).get('connected', False)]
+            if still:
+                restored, vrem = restore_failed_reroute_nets(
+                    input_file=input_file, output_file=output_file, broken_net_ids=still,
+                    plane_vias=plane_vias, net_id_to_name=net_id_to_name,
+                    via_size=via_size, clearance=clearance)
+                if restored:
+                    names = [pcb_data.nets[r].name if r in pcb_data.nets else f"net_{r}" for r in restored]
+                    print(f"Restored {len(restored)} ripped net(s) that failed to re-route "
+                          f"(removed {vrem} colliding via(s)): {', '.join(names)}")
+                unrest = [r for r in still if r not in restored]
+                if unrest:
+                    names = [pcb_data.nets[r].name if r in pcb_data.nets else f"net_{r}" for r in unrest]
+                    print(f"WARNING: {len(unrest)} ripped net(s) remain disconnected: {', '.join(names)}")
+        except Exception as e:
+            print(f"  (post-reroute restore step skipped: {e})")
+    finally:
+        sys.setrecursionlimit(old_limit)
 
 
 def extract_zone_properties(input_file: str) -> Dict[Tuple[str, str], Dict]:
@@ -145,7 +263,13 @@ def route_planes(
     pcb_data: Optional[PCBData] = None,
     return_results: bool = False,
     repair_pads: bool = True,
-    max_search_radius: float = defaults.PLANE_MAX_SEARCH_RADIUS
+    max_search_radius: float = defaults.PLANE_MAX_SEARCH_RADIUS,
+    rip_blocker_nets: bool = False,
+    max_rip_nets: int = 3,
+    reroute_ripped_nets: bool = False,
+    power_nets: Optional[List[str]] = None,
+    power_nets_widths: Optional[List[float]] = None,
+    no_bga_zone: bool = False,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -260,6 +384,12 @@ def route_planes(
             unique_nets[net_id] = (net_name, set())
         unique_nets[net_id][1].add(plane_layer)
 
+    # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
+    # signal nets are, and they are re-routed afterward.
+    plane_net_ids = set(unique_nets.keys())
+    ripped_net_ids: List[int] = []
+    distant_radius = min(max_search_radius, DISTANT_PAD_TRACE_RADIUS) if rip_blocker_nets else 0.0
+
     for net_id, (net_name, net_zone_layers) in unique_nets.items():
         # Build per-layer zone clearances for all layers with zones for this net
         # These are used in flood fill to determine what the zone fill connects
@@ -302,8 +432,19 @@ def route_planes(
                         via_size=via_size,
                         via_drill=via_drill,
                         verbose=verbose,
-                        fine_for_all=True  # last-resort repair: escalate every failed pad
+                        fine_for_all=True,  # last-resort repair: escalate every failed pad
+                        distant_trace_radius=distant_radius
                     )
+                    if not result.success and rip_blocker_nets:
+                        # Rip the signal net(s) blocking this pad's trace and retry
+                        # (the ripped nets are re-routed after the repair pass).
+                        rr = _tap_pad_with_ripup(
+                            pad, pad_layer, net_id, pcb_data, tap_config, config,
+                            max_search_radius, via_size, via_drill, max_rip_nets,
+                            plane_net_ids, result, ripped_net_ids, verbose,
+                            distant_trace_radius=distant_radius)
+                        if rr is not None:
+                            result = rr
                     if result.success:
                         total_pads_repaired += 1
                         params_note = " [fine params]" if result.params_label == 'fine' else ""
@@ -413,12 +554,15 @@ def route_planes(
     if debug_lines and all_debug_lines:
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
+    kv10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if dry_run:
         print("\nDry run - no output file written")
-    elif total_routes > 0 or total_pads_repaired > 0:
+    elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids:
         print(f"\nWriting output to {output_file}...")
+        # Strip the ripped signal nets' copper from the output - it is re-routed
+        # below (or restored if that fails).
         _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines,
-                      net_id_to_name=pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None)
+                      net_id_to_name=kv10_names, exclude_net_ids=ripped_net_ids)
         print(f"Output written to {output_file}")
         print("Note: Open in KiCad and press 'B' to refill zones")
     else:
@@ -428,16 +572,38 @@ def route_planes(
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(content)
 
+    # Re-route the nets that were ripped to clear a blocked pad repair.
+    if ripped_net_ids and not dry_run:
+        _reroute_ripped_nets(
+            input_file, output_file, pcb_data, ripped_net_ids, reroute_ripped_nets,
+            routing_layers, plane_layers, all_new_vias, kv10_names,
+            track_width=track_width, clearance=clearance, via_size=via_size,
+            via_drill=via_drill, grid_step=grid_step,
+            hole_to_hole_clearance=hole_to_hole_clearance,
+            power_nets=power_nets, power_nets_widths=power_nets_widths,
+            no_bga_zone=no_bga_zone, verbose=verbose)
+
     if return_results:
         return (total_routes, total_regions, all_new_vias, all_new_segments)
     return (total_routes, total_regions)
 
 
 def _write_output(input_file: str, output_file: str, segments: List[Dict], vias: List[Dict] = None,
-                  debug_lines: List[str] = None, net_id_to_name: Dict = None):
-    """Write the output PCB file with new segments, vias, and optional debug lines."""
+                  debug_lines: List[str] = None, net_id_to_name: Dict = None,
+                  exclude_net_ids: List[int] = None):
+    """Write the output PCB file with new segments, vias, and optional debug lines.
+
+    exclude_net_ids: nets whose existing copper is stripped from the output (used
+    for nets ripped to clear a blocked pad repair, which are re-routed separately).
+    """
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    if exclude_net_ids:
+        from plane_io import filter_nets_from_content
+        names = ([net_id_to_name[n] for n in exclude_net_ids if net_id_to_name and n in net_id_to_name]
+                 or None)
+        content = filter_nets_from_content(content, exclude_net_ids, names)
 
     # Generate segment S-expressions
     segment_sexprs = []
@@ -569,6 +735,26 @@ Examples:
                         help=f"Max radius to search for a via position during pad repair in mm "
                              f"(default: {defaults.PLANE_MAX_SEARCH_RADIUS})")
 
+    # Rip-blocker repair (mirror of route_planes): connect a plane-net pad that
+    # cannot get its own via by tracing to an adjacent same-net pad, ripping the
+    # signal net(s) blocking that trace, then re-routing them with the original
+    # signal parameters - which must therefore be passed through.
+    parser.add_argument("--rip-blocker-nets", action="store_true",
+                        help="When a plane-net pad cannot be connected, trace to a nearby same-net "
+                             "pad, ripping the signal net(s) blocking it, then re-route the ripped nets.")
+    parser.add_argument("--max-rip-nets", type=int, default=3,
+                        help="Maximum number of blocker nets to rip per pad (default: 3)")
+    parser.add_argument("--reroute-ripped-nets", action="store_true",
+                        help="Automatically re-route the ripped nets after the repair pass "
+                             "(otherwise they are excluded from output and listed for a later pass).")
+    parser.add_argument("--power-nets", nargs="+", default=None,
+                        help="Power net names that need wider tracks when re-routing ripped nets.")
+    parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,
+                        help="Track width (mm) per --power-nets entry, used when re-routing ripped nets.")
+    parser.add_argument("--no-bga-zone", action="store_true",
+                        help="Disable BGA auto-exclusion zones when re-routing ripped nets "
+                             "(match the original signal run's --no-bga-zone).")
+
     # Debug options
     parser.add_argument("--dry-run", action="store_true",
                         help="Analyze without writing output")
@@ -644,7 +830,13 @@ Examples:
         debug_lines=args.debug_lines,
         routing_layers=args.layers,
         repair_pads=args.repair_pads,
-        max_search_radius=args.max_search_radius
+        max_search_radius=args.max_search_radius,
+        rip_blocker_nets=args.rip_blocker_nets,
+        max_rip_nets=args.max_rip_nets,
+        reroute_ripped_nets=args.reroute_ripped_nets,
+        power_nets=args.power_nets,
+        power_nets_widths=args.power_nets_widths,
+        no_bga_zone=args.no_bga_zone
     )
 
     # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated
