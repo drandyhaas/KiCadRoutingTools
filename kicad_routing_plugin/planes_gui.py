@@ -931,6 +931,9 @@ class PlanesTab(wx.Panel):
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
                 max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),
+                # Re-route a ripped wide power net at its proper width.
+                power_nets=config.get('power_nets'),
+                power_nets_widths=config.get('power_nets_widths'),
                 # Match signal routing's No-BGA-Zones intent when rerouting
                 # ripped nets on a BGA board (issue #88). The route tab's
                 # "ALL" means disable every BGA exclusion zone.
