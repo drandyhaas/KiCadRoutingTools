@@ -1798,7 +1798,8 @@ def create_plane(
             # Also block positions of vias we've already placed in previous nets
             for placed_via in all_new_vias:
                 block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
-                                   hole_to_hole_clearance, via_drill)
+                                   hole_to_hole_clearance, via_drill,
+                                   via_size, config.clearance)
         else:
             obstacles = None
 
@@ -1997,7 +1998,8 @@ def create_plane(
                 vias_placed += 1
                 # Block this via position for hole-to-hole clearance
                 block_via_position(obstacles, via_in_pad[0], via_in_pad[1], coord,
-                                   hole_to_hole_clearance, via_drill)
+                                   hole_to_hole_clearance, via_drill,
+                                   via_size, config.clearance)
                 if via_in_pad == (pad.global_x, pad.global_y):
                     print(f"placed via at pad center (no trace needed)")
                 else:
@@ -2131,7 +2133,8 @@ def create_plane(
                     new_segments.extend(result.segments)
                     traces_added += len(result.segments)
                     block_via_position(obstacles, result.via_pos[0], result.via_pos[1], coord,
-                                       hole_to_hole_clearance, via_drill)
+                                       hole_to_hole_clearance, via_drill,
+                                   via_size, config.clearance)
                     print(f"{GREEN}placed via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}) after ripping {len(result.ripped_net_ids)} nets{RESET}")
                 else:
                     failed_pads += 1
@@ -2163,7 +2166,8 @@ def create_plane(
                     new_segments.extend(trace_segments)
                     traces_added += len(trace_segments)
                 block_via_position(obstacles, via_pos[0], via_pos[1], coord,
-                                   hole_to_hole_clearance, via_drill)
+                                   hole_to_hole_clearance, via_drill,
+                                   via_size, config.clearance)
 
                 if via_at_pad_center:
                     print(f"placed via at pad center (no trace needed)")
@@ -2252,7 +2256,8 @@ def create_plane(
                         available_vias.append((result.via['x'], result.via['y']))
                         via_index.add(result.via['x'], result.via['y'])
                         block_via_position(obstacles, result.via['x'], result.via['y'],
-                                           coord, hole_to_hole_clearance, via_drill)
+                                           coord, hole_to_hole_clearance, via_drill,
+                                   via_size, config.clearance)
                     else:
                         vias_reused += 1
                     if result.segments:

@@ -689,8 +689,16 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
 
 def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
-                        coord: GridCoord, hole_to_hole_clearance: float, via_drill: float):
-    """Block the area around a newly placed via for hole-to-hole clearance.
+                        coord: GridCoord, hole_to_hole_clearance: float, via_drill: float,
+                        via_size: float = None, clearance: float = None):
+    """Block the area around a newly placed via so the next same-net via clears it.
+
+    A second via must clear this one on BOTH measures: drill hole-to-hole AND
+    via-ring copper-to-copper. Blocking only the drill distance
+    (via_drill + hole_to_hole) is smaller than the copper distance
+    (via_size + clearance) for these planes, so it let the pour drop a second
+    stitching via close enough to trip same-net via-via copper DRC (the GND/+3V3
+    overlaps). When via_size/clearance are given, block the larger of the two.
 
     Args:
         obstacles: The obstacle map to update
@@ -698,11 +706,15 @@ def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
         coord: Grid coordinate converter
         hole_to_hole_clearance: Minimum clearance between drill holes
         via_drill: Drill diameter of the via
+        via_size: Via outer (copper) diameter; with clearance, also enforce via-via copper clearance
+        clearance: Copper-to-copper clearance
     """
     gx, gy = coord.to_grid(via_x, via_y)
-    # Required distance: (this_drill/2) + (other_drill/2) + clearance
-    # Since we're placing vias of the same size, it's: via_drill + clearance
+    # Drill hole-to-hole: (this_drill/2)+(other_drill/2)+clearance = via_drill + clearance
     required_dist = via_drill + hole_to_hole_clearance
+    # Via-ring copper-to-copper (same-size vias): (size/2)+(size/2)+clearance = via_size + clearance
+    if via_size is not None and clearance is not None:
+        required_dist = max(required_dist, via_size + clearance)
     radius_sq = (required_dist / coord.grid_step) ** 2
     block_circle(obstacles, gx, gy, radius_sq, via_mode=True)
 
