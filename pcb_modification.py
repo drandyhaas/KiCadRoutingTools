@@ -699,6 +699,42 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     result['new_segments'] = cleaned_segments
 
 
+def drop_phantom_copper(results, pcb_data: PCBData) -> Tuple[int, int]:
+    """Drop, from each result's write-list copper, any segment/via no longer on the board.
+
+    A result's ``new_segments`` / ``new_vias`` hold the SAME objects that
+    ``add_route_to_pcb_data`` appended to ``pcb_data``; ``remove_route_from_pcb_data``
+    drops those objects when a net is ripped. But a result snapshot taken before a
+    rip-reroute can keep referencing copper that was later ripped and not restored
+    (e.g. a multipoint net's ``completed_result``, built before ``try_phase3_ripup``
+    ripped that net's own main route out from under it, is still committed). The
+    output is written from these results, so the phantom copper lands on the board --
+    including a DIFFERENT-net via at a cell another net legitimately took while this
+    net was ripped, an un-manufacturable drill-on-drill short (issue #133:
+    EPHY_TX_N / EPHY_RX_P escape vias).
+
+    Membership is by object identity, so a re-cleaned or re-placed object (same
+    position, different object) is never confused with the ripped one, and live
+    copper is never dropped. Mutates each result in place; returns
+    ``(phantom_segments_dropped, phantom_vias_dropped)``.
+    """
+    board_segs = {id(s) for s in pcb_data.segments}
+    board_vias = {id(v) for v in pcb_data.vias}
+    phantom_segs = phantom_vias = 0
+    for r in results:
+        segs = r.get('new_segments')
+        if segs:
+            kept = [s for s in segs if id(s) in board_segs]
+            phantom_segs += len(segs) - len(kept)
+            r['new_segments'] = kept
+        vias = r.get('new_vias')
+        if vias:
+            kept = [v for v in vias if id(v) in board_vias]
+            phantom_vias += len(vias) - len(kept)
+            r['new_vias'] = kept
+    return phantom_segs, phantom_vias
+
+
 def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
     """Remove routed segments and vias from PCB data (for rip-up and reroute)."""
     segments_to_remove = result.get('new_segments', [])

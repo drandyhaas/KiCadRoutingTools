@@ -30,6 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
+from pcb_modification import drop_phantom_copper
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -784,6 +785,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _stale:
         results[:] = [r for r in results if id(r) in _authoritative]
         print(f"Dropped {len(_stale)} superseded rip-reroute result(s) from the write-list")
+
+    # Reconcile the write-list against the actual board so the output can never
+    # contain copper that was ripped off and not restored (issue #133). See
+    # drop_phantom_copper for the full rationale.
+    _phantom_segs, _phantom_vias = drop_phantom_copper(results, pcb_data)
+    if _phantom_segs or _phantom_vias:
+        print(f"Dropped {_phantom_segs} phantom segment(s) and {_phantom_vias} "
+              f"phantom via(s) not on the board from the write-list")
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
