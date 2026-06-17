@@ -41,26 +41,6 @@ class Phase3Stats:
     total_time: float = 0.0
 
 
-def _commit_net_result(results, routed_results, net_id, new_result):
-    """Make new_result this net's single entry in the write-list `results`.
-
-    A net being rip-and-rerouted is committed here once per attempt. The net's
-    PRIOR result (from an earlier attempt) must be dropped from `results` before
-    the new one is recorded -- otherwise superseded results linger and their
-    copper is written alongside the final attempt's, stacking coincident same-net
-    vias at the shared transition cell (issue #87; the EPHY_TX_N exact stack, its
-    main edge routed many times). Removing only the current attempt's main result
-    (the old code) missed the prior attempt's committed result.
-    """
-    prior = routed_results.get(net_id)
-    if prior is not None and prior is not new_result:
-        while prior in results:
-            results.remove(prior)
-    routed_results[net_id] = new_result
-    if new_result not in results:
-        results.append(new_result)
-
-
 def run_phase3_tap_routing(
     state: RoutingState,
     pcb_data: PCBData,
@@ -249,9 +229,9 @@ def run_phase3_tap_routing(
             # 2. rip_up_net can find routed_results[net_id] in the results list
             if main_result in results:
                 results.remove(main_result)
-            # Drop the net's prior result too (a superseded earlier attempt), then
-            # commit completed_result as the net's single entry.
-            _commit_net_result(results, routed_results, net_id, completed_result)
+            results.append(completed_result)
+
+            routed_results[net_id] = completed_result
 
             # Invalidate this net's cache entry since we added tap segments
             # Otherwise subsequent nets would use stale obstacle cells
@@ -625,13 +605,12 @@ def _reroute_phase3_ripped_nets(
         if result and not result.get('failed') and result.get('path'):
             main_vias = result.get('new_vias', [])
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-            # Commit as the net's single result, dropping any prior (superseded)
-            # result for this net so re-routes don't stack coincident vias (#87).
-            _commit_net_result(results, routed_results, ripped_net_id, result)
+            results.append(result)
             routed_net_ids.append(ripped_net_id)
             if ripped_net_id in remaining_net_ids:
                 remaining_net_ids.remove(ripped_net_id)
             routed_net_paths[ripped_net_id] = result['path']
+            routed_results[ripped_net_id] = result
             record_net_event(state, ripped_net_id, "reroute_succeeded", {
                 "segments": len(result['new_segments']),
                 "vias": len(main_vias)
@@ -727,12 +706,13 @@ def _reroute_phase3_ripped_nets(
                             update_net_obstacles_after_routing(pcb_data, ripped_net_id, tap_result, config, state.net_obstacles_cache)
                             add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
 
-                    # Replace this attempt's main route result with the combined
-                    # tap_result, and commit it as the net's single result (drops
-                    # any prior superseded result -- the coincident-via fix, #87).
+                    # IMPORTANT: Replace the main route result with tap_result in results
+                    # The main route result was added above. We need routed_results[net_id] to
+                    # point to something that's actually in results for rip_up_net to work correctly.
                     if result in results:
                         results.remove(result)
-                    _commit_net_result(results, routed_results, ripped_net_id, tap_result)
+                    results.append(tap_result)
+                    routed_results[ripped_net_id] = tap_result
 
                     # Print red final failure message if re-routed net still has unconnected pads
                     final_failed_pads = tap_result.get('failed_pads_info', [])
