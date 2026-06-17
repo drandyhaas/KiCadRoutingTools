@@ -421,6 +421,21 @@ class RepairPlanesOptionsPanel(wx.Panel):
             "Uncheck to only connect disconnected zone regions (CLI --no-repair-pads).")
         sizer.Add(self.repair_pads, 0, wx.LEFT | wx.TOP, 5)
 
+        # Rip blocking nets to connect a pad that can't reach its plane (e.g. a
+        # tiny connector GND pin) by tracing to an adjacent same-net pad. Mirrors
+        # the Create tab (CLI --rip-blocker-nets / --reroute-ripped-nets).
+        self.rip_blocker_check = wx.CheckBox(self, label="Rip up blocking nets")
+        self.rip_blocker_check.SetToolTip(
+            "When a pad can't connect to its plane, trace it to a nearby same-net pad, "
+            "ripping the signal net(s) blocking it (uses Max Rip-up from the Basic tab).")
+        sizer.Add(self.rip_blocker_check, 0, wx.LEFT | wx.TOP, 5)
+
+        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets")
+        self.reroute_ripped_check.SetToolTip(
+            "Automatically re-route the ripped nets after the repair (deletes their old "
+            "tracks and adds the re-routed ones).")
+        sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.TOP, 5)
+
         # Info text
         info = wx.StaticText(self, label="Leave nets/layers empty to auto-detect existing zones.")
         info.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -434,6 +449,8 @@ class RepairPlanesOptionsPanel(wx.Panel):
             'max_track_width': self.max_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
             'repair_pads': self.repair_pads.GetValue(),
+            'rip_blocker_nets': self.rip_blocker_check.GetValue(),
+            'reroute_ripped_nets': self.reroute_ripped_check.GetValue(),
         }
 
     def _on_max_track_width_changed(self, event):
@@ -843,6 +860,9 @@ class PlanesTab(wx.Panel):
 
     def _run_create_planes(self, config):
         """Run plane creation."""
+        # The pour doesn't delete ripped tracks via pcbnew; clear any stale set
+        # from a prior repair run so the apply step doesn't remove copper.
+        self._ripped_net_ids = []
         from route_planes import create_plane
         from add_gnd_vias import add_gnd_vias_to_existing_board
         from routing_config import GridRouteConfig, GridCoord
@@ -911,6 +931,9 @@ class PlanesTab(wx.Panel):
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
                 max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),
+                # Re-route a ripped wide power net at its proper width.
+                power_nets=config.get('power_nets'),
+                power_nets_widths=config.get('power_nets_widths'),
                 # Match signal routing's No-BGA-Zones intent when rerouting
                 # ripped nets on a BGA board (issue #88). The route tab's
                 # "ALL" means disable every BGA exclusion zone.
@@ -1013,7 +1036,7 @@ class PlanesTab(wx.Panel):
         print(f"Repairing zones: {list(zip(net_names, plane_layers))}")
 
         try:
-            routes_added, regions_connected, new_vias, new_segments = repair_planes(
+            routes_added, regions_connected, new_vias, new_segments, ripped_net_ids = repair_planes(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=net_names,
@@ -1027,9 +1050,18 @@ class PlanesTab(wx.Panel):
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 analysis_grid_step=config.get('analysis_grid_step', defaults.REPAIR_ANALYSIS_GRID_STEP),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
+                board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
                 max_iterations=config.get('max_iterations', defaults.MAX_ITERATIONS),
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),
+                rip_blocker_nets=config.get('rip_blocker_nets', False),
+                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
+                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
+                power_nets=config.get('power_nets'),
+                power_nets_widths=config.get('power_nets_widths'),
+                # The route tab's "ALL" no-BGA-zones intent, mirrored when
+                # re-routing ripped nets on a BGA board (issue #88).
+                no_bga_zone=(config.get('no_bga_zones_text', '').upper() == 'ALL'),
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 pcb_data=self.pcb_data,
                 return_results=True,
@@ -1037,6 +1069,10 @@ class PlanesTab(wx.Panel):
 
             self._new_vias = new_vias
             self._new_segments = new_segments
+            # Tracks of these nets were ripped to clear blocked pad repairs and
+            # re-routed (their new copper is in new_segments/new_vias); the apply
+            # step deletes the old tracks before adding the new ones.
+            self._ripped_net_ids = ripped_net_ids
             self._operation_result = {
                 'mode': 'repair',
                 'routes_added': routes_added,
@@ -1150,6 +1186,19 @@ class PlanesTab(wx.Panel):
         board = pcbnew.GetBoard()
         if board is None:
             return
+
+        # Delete the tracks/vias of nets that were ripped to clear a blocked pad
+        # repair - their re-routed copper is in _new_segments/_new_vias below, so
+        # the old (blocking) copper must go first or it would short the repair.
+        ripped = set(getattr(self, '_ripped_net_ids', None) or [])
+        if ripped:
+            removed = 0
+            for item in list(board.GetTracks()):  # tracks + vias
+                if item.GetNetCode() in ripped:
+                    board.RemoveNative(item)
+                    removed += 1
+            if removed:
+                print(f"Removed {removed} old track/via(s) of {len(ripped)} ripped net(s)")
 
         # Get layer name to ID mapping
         name_to_id = {}

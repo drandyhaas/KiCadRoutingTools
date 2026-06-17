@@ -1250,6 +1250,14 @@ class RoutingDialog(wx.Dialog):
 
         def get_shared_params():
             edge_clearance = self._effective_board_edge_clearance()
+            # Power nets/widths from the route tab, so plane rip-up re-routes a
+            # ripped wide power net at its proper width, not the signal default
+            # (matches the CLI passing --power-nets to route_disconnected_planes).
+            power_nets = self.power_nets_ctrl.GetValue().split() or None
+            try:
+                power_widths = [float(w) for w in self.power_widths_ctrl.GetValue().split()] or None
+            except ValueError:
+                power_widths = None
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -1263,6 +1271,8 @@ class RoutingDialog(wx.Dialog):
                 # Share the route tab's No-BGA-Zones intent so plane rip-up
                 # reroutes match signal routing on BGA boards (issue #88).
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
+                'power_nets': power_nets,
+                'power_nets_widths': power_widths,
             }
 
         def get_claude_params():
