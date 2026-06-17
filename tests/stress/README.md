@@ -110,6 +110,38 @@ Recording is opt-in: set `REDO_MANIFEST=<path>` to capture a manual run (only th
 board-mutating tools record; re-run `check_*` separately for grading), or leave it
 unset / `=/dev/null` to disable.
 
+### Per-command timing (#132)
+
+Both the original run and a replay record per-command wall-clock so routing
+performance can be compared across code versions:
+
+- **Original run** — alongside `redo_commands.sh`, `record_invocation()` writes a
+  sibling `redo_timings.jsonl` (one JSON line per command: `seconds`, `cwd`,
+  `argv`, appended on process exit via `atexit`). The manifest itself stays a
+  clean, replayable script.
+- **Replay** — `redo_stress_test.py` times each command, prints a slowest-first
+  breakdown, and with `--timings-out PATH` writes the per-command timings as JSON.
+  Timing the deterministic replay (not the LLM run, whose wall time is interleaved
+  with model thinking) is the apples-to-apples measurement.
+
+### Minimizing a manifest (#132)
+
+A recorded manifest contains the agent's trial-and-error — `--help` probes,
+retries that overwrite an output with different parameters, dead-end attempts
+whose output is never consumed. `minimize_manifest.py` reduces it to the minimal
+set of commands that still reproduces the final board, via a data-flow backward
+slice (each read binds to the file's current producer, so superseded writes drop
+out). It is **read-only on the input** — writes only to `-o` or stdout, and
+refuses `-o` equal to the input, so a recorded artifact is never clobbered:
+
+```bash
+# Emit a minimal replay alongside the recorded one (never overwrites it):
+python3 tests/stress/minimize_manifest.py <run-dir>/redo_commands.sh \
+    -o <run-dir>/redo_commands.min.sh
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.min.sh \
+    --timings-out <run-dir>/redo_timings.replay.json
+```
+
 ## Routing-constraint validation (what params to route with)
 
 `measure_routing.py <routed.kicad_pcb>...` reports the geometry actually used
