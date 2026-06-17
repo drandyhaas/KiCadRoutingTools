@@ -645,12 +645,19 @@ def apply_diff_pair_layer_swaps(
                                   f"(most open; src is {src_layer})")
                 # The fan-out drops a through-via on each pad; don't let either
                 # barrel punch through another net's under-pad copper (issue #123).
+                # Check EACH via against the PARTNER pair-net too: a through-via
+                # for one half can land inside the other half's pad copper (a big
+                # connector pad on a different net) -- a real P-to-N short.
+                # Excluding the partner (the old {p,n}) defeated the pad check and
+                # let castor_pollux /MCU/CONN_D drop the N via inside D+'s 4x1.5mm
+                # J11 pad (#90/#130). via_barrel_clear_of_foreign_copper adds the
+                # via's own net to the exclude internally, so pass empty: the P
+                # via is checked vs N + all others, the N via vs P + all others.
                 from stub_layer_switching import via_barrel_clear_of_foreign_copper
-                bp_exclude = {pair.p_net_id, pair.n_net_id}
                 p_clear, p_reason = via_barrel_clear_of_foreign_copper(
-                    p_tgt_x, p_tgt_y, pair.p_net_id, pcb_data, config, bp_exclude)
+                    p_tgt_x, p_tgt_y, pair.p_net_id, pcb_data, config, set())
                 n_clear, n_reason = via_barrel_clear_of_foreign_copper(
-                    n_tgt_x, n_tgt_y, pair.n_net_id, pcb_data, config, bp_exclude)
+                    n_tgt_x, n_tgt_y, pair.n_net_id, pcb_data, config, set())
                 if not p_clear or not n_clear:
                     print(f"    Bare-pad target swap skipped for {pair_name}: "
                           f"{p_reason if not p_clear else n_reason}")
