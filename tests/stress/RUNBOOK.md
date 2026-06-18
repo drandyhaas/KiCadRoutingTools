@@ -17,7 +17,9 @@ results JSON, deriving ALL state from disk — so it's safe to Ctrl-C and restar
 (it skips finished boards and won't double-launch running ones). Each worker is
 `tests/stress/run_board.sh <board> <set> [model]`: a non-interactive agent that
 follows THIS runbook, writes the results JSON + `FINDINGS.md` into the run dir,
-and drops a `.worker_done` marker (`ok`/`NORESULT`). This replaces the older
+captures `transcript.jsonl` and derives `agent_narrative.md` (a compact routing
+decision trail, via `extract_narrative.py`), and drops a `.worker_done` marker
+(`ok`/`NORESULT`). This replaces the older
 manual approach (a parent launching one background `Agent` per board and
 refilling on notifications) — the queue manager removes the drop-/stale-prone
 notification stream entirely.
@@ -33,9 +35,10 @@ notification stream entirely.
 
 **Monitoring:** `bash tests/stress/stress_status.sh` — prints DONE/RUNNING/TODO
 across all 30 boards plus free slots. (For detail: `QUEUE_STATUS.txt` is the
-manager heartbeat; `runs[_set2]/<board>/worker.log` is a worker's log — note
-`claude -p` buffers its own stdout to the end, but the per-tool `*.log` files in
-the run dir update live.)
+manager heartbeat; `runs[_set2]/<board>/worker.log` holds the wrapper markers +
+stderr, the per-tool `*.log` files update live, and after the run
+`agent_narrative.md` is the readable routing decision trail derived from
+`transcript.jsonl`.)
 
 **State signals** (what the queue and `stress_status.sh` use):
 - DONE: results JSON exists.
