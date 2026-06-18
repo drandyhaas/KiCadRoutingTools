@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stress-test queue manager — keeps N headless board workers in flight until the
-# whole corpus (set 1 + set 2) has a results JSON. Pure file/process polling, no
+# whole corpus (set 1 + set 2 + set 3 ...) has a results JSON. Pure file/process polling, no
 # notification stream. Safe to (re)start anytime: state is derived from disk, so
 # it skips finished boards and won't double-launch ones already running (incl.
 # harness Agent runs detected via the run-dir).
@@ -16,12 +16,22 @@ ROOT="${STRESS_ROOT:-$HOME/Documents/kicad_stress_test}"
 REPO="${STRESS_REPO:-$(cd "$SELF/../.." && pwd)}"
 STATUS="$ROOT/QUEUE_STATUS.txt"
 
-boards1=$(ls "$ROOT"/boards_unrouted/*.kicad_pcb 2>/dev/null      | xargs -n1 basename | sed 's/\.kicad_pcb$//')
-boards2=$(ls "$ROOT"/boards_unrouted_set2/*.kicad_pcb 2>/dev/null | xargs -n1 basename | sed 's/\.kicad_pcb$//')
-total=$(( $(echo "$boards1" | grep -c .) + $(echo "$boards2" | grep -c .) ))
+# Build "board:set" pairs across set 1 (boards_unrouted/) and every set N
+# (boards_unrouted_setN/) discovered on disk, so new sets need no edit here.
+pairs=""
+for d in "$ROOT"/boards_unrouted "$ROOT"/boards_unrouted_set*; do
+  [ -d "$d" ] || continue
+  case "$d" in *_set*) s="${d##*_set}";; *) s=1;; esac
+  for f in "$d"/*.kicad_pcb; do
+    [ -e "$f" ] || continue
+    b=$(basename "$f" .kicad_pcb); pairs="$pairs $b:$s"
+  done
+done
+total=$(echo $pairs | wc -w | tr -d ' ')
 
-rundir(){ if [ "$2" = 1 ]; then echo "$ROOT/runs/$1"; else echo "$ROOT/runs_set2/$1"; fi; }
-resfile(){ if [ "$2" = 1 ]; then echo "$ROOT/results/$1.json"; else echo "$ROOT/results_set2/$1.json"; fi; }
+setdir(){ if [ "$1" = 1 ]; then echo "$2"; else echo "${2}_set$1"; fi; }
+rundir(){ echo "$ROOT/$(setdir "$2" runs)/$1"; }
+resfile(){ echo "$ROOT/$(setdir "$2" results)/$1.json"; }
 is_done(){ [ -f "$(resfile "$1" "$2")" ]; }
 is_running(){  # our worker, any tool writing the run dir, or run dir touched <15min
   pgrep -f "run_board.sh $1 $2" >/dev/null 2>&1 && return 0
@@ -37,7 +47,7 @@ log "queue start: concurrency=$CONC model=$MODEL total=$total"
 
 while true; do
   done_n=0; run_n=0; run_l=""; todo=""
-  for pair in $(for b in $boards1; do echo "$b:1"; done; for b in $boards2; do echo "$b:2"; done); do
+  for pair in $pairs; do
     b="${pair%%:*}"; s="${pair##*:}"
     if   is_done "$b" "$s";    then done_n=$((done_n+1))
     elif is_running "$b" "$s"; then run_n=$((run_n+1)); run_l="$run_l $b"

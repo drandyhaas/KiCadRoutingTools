@@ -191,7 +191,7 @@ Wired into RUNBOOK step 11b; output goes into the results JSON `comparison` /
 
 ## Two 15-board sets
 
-Both corpora are exactly **15 boards**:
+Each corpus is exactly **15 boards**:
 
 - **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
@@ -203,12 +203,24 @@ Both corpora are exactly **15 boards**:
   (usb-sniffer, free-dap), QFN/QFP carriers (tinytapeout, caravel, system76,
   nitrokey), simple keyboards (crkbd, sofle, lily58). Boards live in
   `boards_unrouted_set2/`; results kept separate in `results_set2/`.
+- **Set 3** — 15 boards listed in `manifest_set3.json`, fetched by
+  `fetch_set3.py` to `$STRESS_DIR/sources/github_set3/`. Spans L2→L8 and tiny→huge:
+  USB3 (daisho, 392 fp / L8), ECP5+DDR3 (orangecrab L6), iCE40/ECP5 FPGA (upduino,
+  fomu, keks, eis), STM32WLE LoRaWAN (lora_v3), ESP32 wearable (watchy), FT2232H
+  debug tool (tigard), Allwinner SBC (a20_can), RF LNA (lna3030), Olimex modules
+  (esp_prog, olimex_lora, mod_bme280), and an all-through-hole passive tap
+  (throwing_star). Deliberately heavy on **old KiCad formats** (v4 / v20171130):
+  the text parser can't read pre-v6 directly, so the pcbnew round-trip in
+  `prep_set3.sh` upgrades them first — extra coverage of that rescue path. Boards
+  live in `boards_unrouted_set3/`; results in `results_set3/`.
 
-Prepare set 2 (KiCad Python; loads each board once):
+Prepare set 2 / set 3 (KiCad Python; loads each board once):
 
 ```bash
 bash prep_set2.sh    # -> boards_set2/ (normalized routed + .kicad_pro)
                      #    boards_unrouted_set2/ (stripped, to route)
+
+python3 fetch_set3.py && bash prep_set3.sh   # set 3: fetch + normalize + strip
 ```
 
 `prep_set2.py <src> <routed_dst> <stripped_dst>` normalizes the routed reference
