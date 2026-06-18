@@ -1,6 +1,6 @@
 ---
 name: find-high-speed-nets
-description: Analyzes a KiCad PCB to identify high-speed nets by looking up component datasheets via AI. Classifies nets by speed tier (ultra-high/high/medium/low), estimates max frequencies and rise times per interface, and recommends GND return via distances for signal integrity.
+description: Analyzes a KiCad PCB to identify high-speed and impedance-controlled nets by looking up component datasheets via AI. Classifies nets by speed tier (ultra-high/high/medium/low), detects RF/antenna feeds and other controlled-impedance nets, estimates max frequencies and rise times per interface, and recommends GND return via distances AND impedance-controlled routing (target ohms + the route.py/route_diff.py --impedance commands).
 ---
 
 # Find High-Speed Nets
@@ -170,6 +170,130 @@ Record per-component findings:
 Upgrade net classifications based on datasheet findings. A datasheet-confirmed speed
 always overrides the name-pattern estimate from Step 2.
 
+## Step 4.5: RF / Antenna Feeds and Controlled-Impedance Nets
+
+Some nets must be routed to a **target impedance** regardless of their switching
+"speed tier" — most importantly RF/antenna feeds, which are a blind spot of the
+name-pattern and speed-tier logic above (a 915 MHz antenna trace may be named just
+`RF` or `ANT`). Detect them explicitly and attach a target impedance + a routing
+recommendation; these feed the plan's impedance-controlled routing step (see the
+report below and `/plan-pcb-routing`).
+
+### 4.5a. RF / antenna feeds (single-ended 50 ohm, or 100 ohm balanced)
+
+The decisive signature is a net connecting an **RF source** to an **antenna
+termination**:
+
+This is a deliberately **broad candidate scan** — favour recall over precision.
+The matching below will over-include (e.g. `SMA` hits "D_SMALL", `PA` hits "Pad",
+GND touches the SMA shell). That is fine: **you then confirm each candidate with
+judgment** — is it really a radio/transceiver/PA output going to an antenna
+termination? — using the component knowledge and datasheet lookup from Step 4, and
+discard the coincidental hits. The only hard pre-filter is power/ground and very
+large nets, which are never a point-to-point 50 ohm feed.
+
+```python
+# Broad keyword lists (substring match). Radio/transceiver/PA/LNA parts:
+RF_SOURCE_KEYWORDS = ['SX12', 'SX127', 'LORA', 'WIO', 'NRF', 'ESP32', 'CC1101',
+                      'CC120', 'RFM9', 'SI446', 'RADIO', 'TRANSCEIVER', 'BALUN',
+                      'PA', 'LNA', 'RF']
+# Antenna terminations (RF connectors / chip antennas). 73391 = Molex SMA part no.
+ANTENNA_KEYWORDS = ['SMA', 'U.FL', 'UFL', 'IPEX', 'IPX', 'MHF', 'MMCX', 'BNC',
+                    'ANTENNA', 'ANT', 'CHIP_ANT', '73391']
+RF_PIN_HINTS = ['RF', 'ANT']
+
+def is_rf_source(fp):
+    blob = (fp.footprint_name + ' ' + (fp.value or '')).upper()
+    if any(k in blob for k in RF_SOURCE_KEYWORDS):
+        return True
+    return any(any(h in (p.pinfunction or '').upper() for h in RF_PIN_HINTS)
+               for p in fp.pads)
+
+def is_antenna_term(ref, fp):
+    # include the reference designator so ANT1 / JANT1 / EXT_ANT1 match too
+    blob = (ref + ' ' + fp.footprint_name + ' ' + (fp.value or '')).upper()
+    return any(k in blob for k in ANTENNA_KEYWORDS)
+
+# A net is an RF/antenna feed if it touches an antenna terminal AND (an RF source
+# OR is RF-named) -- but NOT if it is a power/ground net or a large net. This guard
+# matters: the SMA's shell/ground pads and the radio's ground pins both sit on GND,
+# so GND would otherwise be falsely flagged. A real antenna feed is point-to-point
+# (the signal pin plus at most a small matching network), never a 90-pad rail.
+import re
+POWER_GND_PREFIXES = ['GND', 'GROUND', 'VSS', 'VCC', 'VDD', 'VBAT', 'VBUS', 'VIN',
+                      'VEE', 'VREF', 'PGND', 'AGND', 'DGND', 'PWR', 'POWER',
+                      'VAA', 'VDDA', 'VSSA', '+', '-']
+# `power_ground_nets` is the GND + power-net set from `list_nets.py --power` (Step 1);
+# pass it in. The name checks are a fallback that also catches rails the pattern
+# scan would miss (e.g. PWR2V5, +3V3, 1V8, 5V, V33).
+def is_power_ground(name, power_ground_nets=()):
+    nu = name.upper().lstrip('/')
+    if name in power_ground_nets:
+        return True
+    if any(nu == p or nu.startswith(p) for p in POWER_GND_PREFIXES):
+        return True
+    return bool(re.search(r'\d+V\d*|V\d+', nu))  # voltage-style rail names
+
+rf_sources = {ref for ref, fp in pcb.footprints.items() if is_rf_source(fp)}
+antenna_terms = {ref for ref, fp in pcb.footprints.items() if is_antenna_term(ref, fp)}
+rf_candidates = {}  # {net_name: [endpoints]}
+for net in pcb.nets.values():
+    if not net.name or is_power_ground(net.name, power_ground_nets) or len(net.pads) > 6:
+        continue  # skip rails (GND touches both the SMA shell and the radio) and big nets
+    refs = {pad.component_ref for pad in net.pads}
+    nu = net.name.upper().lstrip('/')
+    name_rf = any(nu == p or nu.startswith(p) for p in ['RF', 'ANT', 'RFIO', 'RFO', 'RFI'])
+    if (refs & antenna_terms) and ((refs & rf_sources) or name_rf):
+        rf_candidates[net.name] = [f'{p.component_ref}.{p.pad_number}' for p in net.pads]
+```
+
+### Confirm each candidate (read the datasheet)
+
+`rf_candidates` is a broad first pass — **confirm each one before recommending
+impedance routing**, exactly as Step 4 does for speed:
+
+- **Read the part's datasheet** (WebSearch) for the component on the source side.
+  Verify it is a radio/transceiver/PA/LNA and that the pad on this net is its **RF
+  output/antenna pin** (e.g. `RFO`, `ANT`, `RFIO`, `RF_HF`). The datasheet/reference
+  design also states the **target impedance** — almost always **50 ohm
+  single-ended**, but confirm (a balun output is differential; some modules
+  integrate matching and specify a particular port impedance).
+- **Reject coincidental hits**: `SMA` inside "D_SMALL", `PA` inside "Pad", a logic
+  net that merely touches a connector also tagged as an antenna, etc. A real feed
+  is a short point-to-point net from the radio's RF pin to an antenna termination
+  (often through a small matching network / DC-block — those series parts are fine).
+- If a part is clearly an RF source but **no** antenna net was found (or vice-versa),
+  say so and look closer — a missed antenna feed is worse than a candidate you reject.
+
+Record confirmed feeds as `rf_nets = {net_name: 'single-ended 50'}` (or
+`'differential 100'` for a balun/balanced port). Report each with its endpoints and
+the datasheet basis, e.g.
+`RF: IC1.15 (Wio-E5 / SX1262 radio, RFO_HF pin) -> CONN5.1 (Molex SMA) => 50 ohm SE (datasheet-confirmed)`.
+
+### 4.5b. Other controlled-impedance interfaces
+
+The high-speed interfaces classified above carry standard impedance targets. Record
+a target for each so the plan can route them with `--impedance`:
+
+| Interface (detected) | Impedance target | Routed by |
+|----------------------|------------------|-----------|
+| RF / antenna feed (single-ended) | **50 ohm SE** | `route.py --impedance 50` |
+| RF / antenna feed (balanced pair) | **100 ohm diff** | `route_diff.py --impedance 100` |
+| USB 2.0 HS | 90 ohm diff | `route_diff.py --impedance 90` |
+| USB 3.x / PCIe / SATA | 85 ohm diff | `route_diff.py --impedance 85` |
+| Gigabit Ethernet / LVDS | 100 ohm diff | `route_diff.py --impedance 100` |
+| DDR3/4 data & strobe | 40 ohm SE (SSTL) | `route.py --impedance 40` |
+| HDMI/DP (TMDS) | 100 ohm diff | `route_diff.py --impedance 100` |
+
+Split the result into **single-ended impedance nets** (RF 50, DDR SSTL 40 — these
+need the new single-ended impedance routing step) and **differential impedance
+pairs** (the rest — handled by `route_diff.py --impedance`).
+
+> **Stackup is required.** `--impedance` computes the trace width per layer from
+> the board stackup. If the board has only KiCad's default stackup (see
+> `/plan-pcb-routing` Step 2 / `/recommend-stackup`), the width will be wrong —
+> flag this and recommend running `/recommend-stackup` first.
+
 ## Step 5: Trace High-Speed Signals Through Series Passives
 
 High-speed signals often pass through series components (termination resistors, AC coupling
@@ -278,19 +402,50 @@ For this board, the tightest interface is **[interface]** at **[freq]**, so use:
 are routed with `route_diff.py`, which adds its own GND return vias automatically.
 The `--gnd-via-distance` recommendation here applies to single-ended signal vias only.
 
-### Impedance Notes (if applicable)
+### Impedance-Controlled Routing Recommendation (actionable)
 
-If high-speed interfaces are detected, note relevant impedance targets:
+List every controlled-impedance net found in Steps 4.5/5 with its target and the
+command that routes it. The router computes the per-layer width from the board
+stackup, so **a real stackup must exist first** (`/recommend-stackup`).
 
-| Interface | Typical Impedance | Notes |
-|-----------|-------------------|-------|
-| DDR3/4 | 40 ohm SE | SSTL, check memory controller spec |
-| USB 2.0 HS | 90 ohm diff | Routed as diff pair |
-| USB 3.x | 85 ohm diff | Routed as diff pair |
-| Gigabit Ethernet | 100 ohm diff | Routed as diff pair |
-| LVDS | 100 ohm diff | Routed as diff pair |
-| PCIe | 85 ohm diff | Routed as diff pair |
-| SPI/I2C/UART | 50 ohm SE (typical) | Usually not impedance-controlled |
+**Single-ended impedance nets** (RF/antenna 50 ohm, DDR SSTL 40 ohm) — these need a
+**dedicated `route.py --impedance` pass**, placed in the pipeline **after the
+diff-pair step and before the general single-ended signal route** (a "Step 2b").
+Like diff pairs, they are highly constrained (fixed width, want a short/direct path
+over a clean ground reference) so they must claim their channel before the bulk
+signals fill the area. They must then be **excluded from the general signal route**
+(`"*" "!GND" "!VCC" "!RF"`) so a later rip-up cannot re-route them at the wrong
+width, and counted as "claimed by the impedance step" in the coverage ledger.
+
+```bash
+# Step 2b: impedance-controlled single-ended nets (e.g. the antenna feed), on an
+# outer layer over the GND plane created later; short/direct is the router default.
+python3 -X utf8 route.py board_diff.kicad_pcb board_imp.kicad_pcb \
+    --nets RF --impedance 50 --layers F.Cu --clearance <floor> ...
+```
+
+**Differential impedance pairs** keep being routed in the diff-pair step (Step 2),
+just add `--impedance`:
+
+```bash
+python3 -X utf8 route_diff.py board.kicad_pcb board_diff.kicad_pcb \
+    --nets "*USB*" "*LVDS*" --impedance 90 --layers F.Cu In1.Cu In2.Cu B.Cu
+```
+
+| Interface | Target | Routed by | Pipeline step |
+|-----------|--------|-----------|---------------|
+| **RF / antenna feed (SE)** | **50 ohm SE** | `route.py --impedance 50` | **2b (new)** |
+| DDR3/4 data & strobe | 40 ohm SE (SSTL) | `route.py --impedance 40` | 2b (new) |
+| RF balanced / Ethernet / LVDS / HDMI | 100 ohm diff | `route_diff.py --impedance 100` | 2 (diff pairs) |
+| USB 2.0 HS | 90 ohm diff | `route_diff.py --impedance 90` | 2 (diff pairs) |
+| USB 3.x / PCIe / SATA | 85 ohm diff | `route_diff.py --impedance 85` | 2 (diff pairs) |
+| SPI / I2C / UART / GPIO | not impedance-controlled | general `route.py` | 3 (signal) |
+
+**RF/antenna extras:** route the feed **short and direct** on an outer layer over a
+continuous ground plane (the planes step provides the reference); if the board has
+an antenna/RF region, recommend the user draw a `User.2` keepout around it and pass
+`--keepout` so other tracks/vias stay clear (you describe where; the user draws it
+— see `/plan-pcb-routing`).
 
 ## Important Notes
 
@@ -306,3 +461,10 @@ If high-speed interfaces are detected, note relevant impedance targets:
    pairs independently; this analysis is for single-ended vias from `route.py`
 6. **When in doubt, include GND return vias** - They cost only board space; omitting them
    on a board that needs them causes signal integrity and EMI problems
+7. **RF/antenna feeds are controlled-impedance, not "fast logic"** - A net from a radio/PA/LNA
+   to an SMA/U.FL/chip-antenna is a 50 ohm single-ended line even if its name (`RF`, `ANT`) and
+   low logic-speed make the tier logic miss it. Detect it by the source->antenna topology
+   (Step 4.5), route it in the dedicated single-ended `--impedance` step (2b), and require a
+   real stackup first. Balanced antenna ports are 100 ohm differential via `route_diff.py`.
+8. **Impedance width needs the stackup** - `--impedance` is meaningless on KiCad's default
+   stackup; run `/recommend-stackup` before any impedance-controlled routing.
