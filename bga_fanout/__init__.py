@@ -54,6 +54,7 @@ from bga_fanout.reroute import (
     resolve_collisions,
     repair_pad_crossings,
     route_clear_of_foreign_pads,
+    clear_escapes_of_foreign_pads,
 )
 from obstacle_map import build_base_obstacle_map, build_layer_map
 from routing_config import GridRouteConfig
@@ -1930,6 +1931,64 @@ def generate_bga_fanout(footprint: Footprint,
                     failed_nets.append(nm)
             print(f"  Pad-aware: removed {len(pad_failed)} unroutable net(s): {pad_failed}")
 
+    # Clearance-aware escape clearing (issue #123 PAD-SEGMENT). The repair above
+    # fires only on true crossings; a route's outer escape can still graze a
+    # breakout-region passive within clearance. Trim the decorative jog and/or
+    # shorten the escape (without pulling its free end inside the BGA zone) to
+    # clear the pad; if even the minimum escape grazes, drop the ball and warn.
+    esc_net_name = {r.net_id: r.pad.net_name for r in best_routes if r.pad.net_name}
+    n_escfix, esc_dropped = clear_escapes_of_foreign_pads(
+        best_routes, tracks, grid, track_width, clearance,
+        foreign_pads, obstacle_layer_map, esc_net_name)
+    if n_escfix:
+        print(f"  Pad-clearance: cleared {n_escfix} escape(s) grazing a foreign "
+              f"pad by jog-trim/shorten (issue #123)")
+    if esc_dropped:
+        drop_ids = {nid for nid, nm in esc_net_name.items() if nm in esc_dropped}
+        tracks[:] = [t for t in tracks if t['net_id'] not in drop_ids]
+        vias_to_add[:] = [v for v in vias_to_add if v['net_id'] not in drop_ids]
+        for nm in esc_dropped:
+            if nm not in failed_nets:
+                failed_nets.append(nm)
+        print(f"  WARNING: dropped {len(esc_dropped)} ball(s) that cannot escape "
+              f"the BGA zone without grazing a foreign pad (issue #123): {esc_dropped}")
+
+    # Via-barrel vs foreign-track clearance (issue #123). A fanout via is a
+    # through-hole spanning every copper layer, so the track-vs-track layer
+    # assignment can't keep it clear of another net's escape track on an inner
+    # layer. When the via/track are too large for the BGA pitch the inter-via
+    # channel is narrower than track + 2*clearance and the via copper overlaps a
+    # neighbour's track (e.g. ottercast_audio 0.5mm via / 0.2mm track on 0.65mm
+    # pitch -> 77 VIA-SEGMENT shorts). Rather than silently emit the short, drop
+    # those balls and report them unescaped; a smaller --via-size/--track-width/
+    # --clearance retry escapes them cleanly (0.3/0.1 -> 0 VIA-SEGMENT). A small
+    # tolerance keeps sub-grid rounding (#70) from triggering spurious drops.
+    from geometry_utils import point_to_segment_distance
+    via_net_name = {r.net_id: r.pad.net_name for r in best_routes if r.pad.net_name}
+    via_clear_tol = 0.02
+    via_drop_ids = set()
+    for via in vias_to_add:
+        vr = via['size'] / 2
+        for t in tracks:
+            if t['net_id'] == via['net_id']:
+                continue
+            d = point_to_segment_distance(via['x'], via['y'],
+                                          t['start'][0], t['start'][1],
+                                          t['end'][0], t['end'][1])
+            if d < vr + clearance + t['width'] / 2 - via_clear_tol:
+                via_drop_ids.add(via['net_id'])
+                break
+    if via_drop_ids:
+        tracks[:] = [t for t in tracks if t['net_id'] not in via_drop_ids]
+        vias_to_add[:] = [v for v in vias_to_add if v['net_id'] not in via_drop_ids]
+        for nid in via_drop_ids:
+            nm = via_net_name.get(nid)
+            if nm and nm not in failed_nets:
+                failed_nets.append(nm)
+        print(f"  Via-clearance: dropped {len(via_drop_ids)} ball(s) whose via "
+              f"would short a foreign track (issue #123); retry with smaller "
+              f"--via-size / --track-width / --clearance")
+
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
@@ -2048,6 +2107,14 @@ def main():
         print("Done!")
     else:
         print("\nNo fanout tracks generated")
+        # Still produce the output file (board unchanged) so a multi-step
+        # pipeline can continue - otherwise a fanout that finds nothing to do
+        # (e.g. all balls already fanned on a retry) leaves the next step with
+        # no input file.
+        if getattr(args, 'output', None):
+            import shutil
+            shutil.copyfile(args.pcb, args.output)
+            print(f"Wrote board through to {args.output} (unchanged)")
 
     # Structured summary so downstream tooling (plan-pcb-routing skill, stress
     # harness) can reliably detect when not all requested balls escaped - and

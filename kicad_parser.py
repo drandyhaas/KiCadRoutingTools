@@ -1168,6 +1168,35 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             )
             segments.append(segment)
 
+    # Arc tracks: KiCad routes rounded corners as (arc (start)(mid)(end)...).
+    # The parser otherwise drops them, fragmenting arc-routed (human) boards so
+    # connectivity/clearance checks see false gaps (KiCad finds them connected).
+    # Linearize each arc into straight Segments via the existing helper so the
+    # copper graph is complete. (The router never emits arcs, so its own output
+    # is unaffected; this only matters when ingesting hand-routed boards.)
+    arc_fields = (r'\(arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                  r'\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                  r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                  r'\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+')
+
+    def _append_arc(sx, sy, mx, my, ex, ey, width, layer, net_id, uuid):
+        for (p0, p1) in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
+            segments.append(Segment(
+                start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                width=width, layer=layer, net_id=net_id, uuid=uuid,
+                start_x_str=repr(p0[0]), start_y_str=repr(p0[1]),
+                end_x_str=repr(p1[0]), end_y_str=repr(p1[1])))
+
+    for m in re.finditer(arc_fields + r'(\d+)\)\s+\(uuid\s+"([^"]+)"\)', content, re.DOTALL):
+        _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
+                    float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
+                    int(m.group(9)), m.group(10))
+    if name_to_id:
+        for m in re.finditer(arc_fields + r'"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)', content, re.DOTALL):
+            _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
+                        float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
+                        name_to_id.get(m.group(9), 0), m.group(10))
+
     return segments
 
 

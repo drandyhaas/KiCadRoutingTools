@@ -25,7 +25,7 @@
   ],
   "versions": [
     {
-      "version": "0.15.11",
+      "version": "0.15.12",
       "status": "development",
       "kicad_version": "10.0",
       "runtime": "ipc",
@@ -34,7 +34,7 @@
         "macos",
         "windows"
       ],
-      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.15.11/KiCadRoutingTools-0.15.11.zip",
+      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.15.12/KiCadRoutingTools-0.15.12.zip",
       "download_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "download_size": 0,
       "install_size": 0

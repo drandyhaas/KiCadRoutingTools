@@ -1090,12 +1090,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'via_loc': (via.x, via.y),
                 })
 
+    # Same-net segment crossings are not DRC failures: same-net copper is allowed
+    # to overlap (KiCad's own DRC permits it -- it only enforces clearance between
+    # DIFFERENT nets). They are at most cosmetic clutter, so report them as
+    # warnings and keep them out of the violation count / exit status. (Same-net
+    # DRILL-hole checks stay violations -- those are real fab constraints.)
+    warnings = [v for v in violations if v['type'] == 'segment-crossing-same-net']
+    violations = [v for v in violations if v['type'] != 'segment-crossing-same-net']
+
+    def _warn_note():
+        if warnings:
+            print(f"\nWARNINGS ({len(warnings)}, not DRC failures):")
+            print(f"  same-net self-crossing: {len(warnings)} (same-net copper overlap; "
+                  f"permitted by KiCad DRC)")
+
     # Report violations
     if quiet:
         if violations:
             print(f"FAILED ({len(violations)} violations)")
         else:
-            print("OK")
+            print("OK" + (f" ({len(warnings)} same-net-crossing warning(s))" if warnings else ""))
             return violations
 
     # Print detailed results (always for non-quiet, or when violations in quiet mode)
@@ -1175,6 +1189,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         else:
             print("NO DRC VIOLATIONS FOUND!")
 
+        _warn_note()
         print("=" * 60)
 
     # Write debug lines if requested

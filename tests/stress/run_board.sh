@@ -20,6 +20,12 @@ RESULT="$ROOT/results${SFX}/$BOARD.json"
 mkdir -p "$RUNDIR"
 rm -f "$RUNDIR/.worker_done"
 
+# Record every board-mutating tool invocation to a replay manifest (issue #132).
+# The tools self-record when REDO_MANIFEST is set, so capture is reliable even if
+# the agent doesn't route a command through run_limited.sh. Start each run fresh.
+export REDO_MANIFEST="$RUNDIR/redo_commands.sh"
+rm -f "$REDO_MANIFEST"
+
 PROMPT="Stress-test the KiCadRoutingTools autorouter on ONE board: **$BOARD** (set $SET).
 
 FIRST read $REPO/tests/stress/RUNBOOK.md and obey EVERY rule exactly. Do NOT ask

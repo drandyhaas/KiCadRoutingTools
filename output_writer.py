@@ -15,7 +15,7 @@ from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
     swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers,
-    move_copper_text_to_silkscreen, add_teardrops_to_pads
+    move_copper_text_to_silkscreen, add_teardrops_to_pads, remove_segments_from_content
 )
 from connectivity import find_connected_segment_positions
 
@@ -35,7 +35,8 @@ def write_routed_output(
     boundary_debug_labels: List = None,
     skip_routing: bool = False,
     add_teardrops: bool = False,
-    all_swap_segments: List = None
+    all_swap_segments: List = None,
+    segments_to_remove: List = None
 ) -> bool:
     """
     Write the routed PCB output file.
@@ -83,6 +84,14 @@ def write_routed_output(
     # Determine if this is a KiCad 10 file and get net name mapping
     net_id_to_name = getattr(pcb_data, 'net_id_to_name', {}) if pcb_data else {}
     kicad_v10 = is_kicad_10(content)
+
+    # Strip original-file segments the dead-end sweep flagged (issue #84). Done
+    # before swaps so matching uses the net the input file carries.
+    if segments_to_remove:
+        content, removed = remove_segments_from_content(
+            content, segments_to_remove, net_id_to_name if kicad_v10 else None)
+        if removed:
+            print(f"Removed {removed} dead-end input segment(s) from the output")
 
     # Apply target swaps FIRST - layer modifications were recorded with post-swap net IDs,
     # so we need to swap the file content to match before applying layer modifications

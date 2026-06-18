@@ -51,6 +51,10 @@ class RoutingState:
     reroute_queue: List[Tuple] = field(default_factory=list)
     # Track which nets are already queued (to prevent duplicate entries)
     queued_net_ids: Set[int] = field(default_factory=set)
+    # Issue #134: nets whose stale copper would have shorted another net on
+    # restore, so they were left ripped instead. Given a clean reroute pass
+    # after Phase 3 so the collision-safe restore does not cost completion.
+    collision_refused_net_ids: Set[int] = field(default_factory=set)
 
     # Tracking sets
     polarity_swapped_pairs: Set[str] = field(default_factory=set)

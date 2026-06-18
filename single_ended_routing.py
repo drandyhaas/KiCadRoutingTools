@@ -2004,8 +2004,15 @@ def route_multipoint_taps(
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
 
-    # Get through-hole pad positions for this net (layer transitions without via)
-    through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
+    # Cells needing NO new via on a layer change: same-net through-hole pads and
+    # same-net vias (each already connects all layers). Seeding with the net's
+    # current vias (the main edge + pre-existing) and updating it as each tap edge
+    # places vias lets a later edge REUSE a via the main edge already dropped at
+    # the same cell, instead of stacking a second coincident one (EPHY_TX_N).
+    through_hole_positions = set(get_same_net_through_hole_positions(pcb_data, net_id, config))
+    for _v in pcb_data.vias:
+        if _v.net_id == net_id:
+            through_hole_positions.add(coord.to_grid(_v.x, _v.y))
 
     # Get remaining MST edges (skip the first one which was routed in Phase 1)
     # MST edges are already sorted longest-first
@@ -2250,6 +2257,10 @@ def route_multipoint_taps(
                                               coord, layer_names, track_margin)
         all_segments.extend(segments)
         all_vias.extend(vias)
+        # Make this edge's vias reusable by later edges of the same net, so a
+        # later edge changing layers at one of these cells reuses the via.
+        for _v in vias:
+            through_hole_positions.add(coord.to_grid(_v.x, _v.y))
 
         # Note: We don't add segments as obstacles since they're the same net
         # and future tap routes can overlap with our own traces

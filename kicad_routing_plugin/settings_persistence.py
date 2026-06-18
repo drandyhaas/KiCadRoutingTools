@@ -184,6 +184,8 @@ def get_dialog_settings(dialog):
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
         'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
+        'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
+        'planes_repair_reroute_ripped_check': dialog.planes_tab.repair_options.reroute_ripped_check.GetValue(),
 
         # Claude tab settings (issue #40)
         'claude_model': dialog.claude_tab.get_model_value(),
@@ -549,6 +551,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
     if 'planes_repair_pads' in settings:
         dialog.planes_tab.repair_options.repair_pads.SetValue(settings['planes_repair_pads'])
+    if 'planes_repair_rip_blocker_check' in settings:
+        dialog.planes_tab.repair_options.rip_blocker_check.SetValue(settings['planes_repair_rip_blocker_check'])
+    if 'planes_repair_reroute_ripped_check' in settings:
+        dialog.planes_tab.repair_options.reroute_ripped_check.SetValue(settings['planes_repair_reroute_ripped_check'])
 
     # Restore Claude tab model/effort (issue #40). The setters validate
     # against the current dropdown choices, so a saved model or effort

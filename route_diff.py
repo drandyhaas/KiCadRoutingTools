@@ -685,9 +685,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     import json
     routed_diff_pairs = []
     failed_diff_pairs = []
+    single_ended_diff_pairs = []
     for pair_name, pair in diff_pair_ids_to_route:
         if pair.p_net_id in routed_results and pair.n_net_id in routed_results:
             routed_diff_pairs.append(pair_name)
+        elif (pair.p_net_id in state.diff_pair_single_ended_nets
+              or pair.n_net_id in state.diff_pair_single_ended_nets):
+            # Intentionally left for single-ended routing (electrically short, or
+            # fully peeled) - not a coupled route, but not a failure either.
+            single_ended_diff_pairs.append(pair_name)
         else:
             failed_diff_pairs.append(pair_name)
 
@@ -711,12 +717,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if target_swaps:
         swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
         print(f"  Target swaps:  {len(swap_pairs)}")
+    if single_ended_diff_pairs:
+        print(f"  Single-ended:  {len(single_ended_diff_pairs)} (electrically short - "
+              f"deferred to single-ended routing)")
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
     summary = {
         'routed_diff_pairs': routed_diff_pairs,
         'failed_diff_pairs': failed_diff_pairs,
+        'single_ended_diff_pairs': single_ended_diff_pairs,
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
@@ -749,7 +759,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
         }
     else:
-        write_routed_output(
+        wrote = write_routed_output(
             input_file=input_file,
             output_file=output_file,
             results=results,
@@ -766,6 +776,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             skip_routing=skip_routing,
             add_teardrops=add_teardrops
         )
+        # When every pair was deferred to single-ended (electrically short),
+        # there is no coupled copper to write - but the deferred nets still need
+        # the downstream single-ended pass, so pass the board through unchanged so
+        # the pipeline can continue (otherwise no output file is produced at all).
+        if not wrote and output_file and state.diff_pair_single_ended_nets:
+            import shutil
+            shutil.copy(input_file, output_file)
+            print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
+                  f"added); wrote board through to {output_file} for the "
+                  f"single-ended pass")
 
     # Update schematics with swap info if directory specified
     if schematic_dir and (target_swap_info or pad_swaps):
@@ -828,6 +848,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
 if __name__ == "__main__":
     import argparse
+    from redo_record import record_invocation
+    record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 
     parser = argparse.ArgumentParser(
         description="Batch Differential Pair PCB Router - Routes differential pairs using Rust-accelerated A*",

@@ -14,14 +14,16 @@ import fnmatch
 
 import wx
 
-KNOWN_ACTIONS = ("fanout", "route_diff", "route", "route_planes")
+KNOWN_ACTIONS = ("fanout", "route_diff", "route", "route_planes", "repair_planes")
 
 # Appended to the /plan-pcb-routing prompt so the plan lands as parseable JSON.
 PLAN_RESULT_SCHEMA = (
     'RESULT=<compact single-line JSON> with this exact schema: '
     '{"steps": [ '
     '{"action": "fanout", "component": "<ref e.g. U1>", "kind": "bga"|"qfn", '
-    '"nets": ["<glob>", ...]} | '
+    '"nets": ["<glob>", ...], '
+    '"params": {"escape_method": "underpad"|"channel", "exit_margin": <mm>, '
+    '"extension": <mm>}} | '
     '{"action": "route_diff", "pairs": ["<pair base name, the net name with its '
     'P/N suffix stripped, e.g. /lvds_rx0>", ...], '
     '"params": {"diff_pair_width": <mm>, "diff_pair_gap": <mm>}} | '
@@ -31,14 +33,29 @@ PLAN_RESULT_SCHEMA = (
     '"power_nets_widths": [<mm>, ...]}} | '
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
-    '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>}} '
+    '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
+    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false, '
+    '"reroute_ripped_nets": true|false}} | '
+    '{"action": "repair_planes", '
+    '"assignments": [{"nets": ["<exact net name>", ...], "layer": "<copper layer>"}], '
+    '"params": {"via_size": <mm>, "via_drill": <mm>, "max_track_width": <mm>, '
+    '"analysis_grid_step": <mm>, "repair_pads": true|false, '
+    '"rip_blocker_nets": true|false, "reroute_ripped_nets": true|false}} '
     ']} '
     'List steps in execution order: fanout first, then route_diff, then route, '
-    'then route_planes - signals route before planes because plane stitching '
-    'vias can adapt around tracks, but a via placed early can block a diff '
-    'pair. The route step\'s "nets" globs support "!" exclusions and MUST '
-    'exclude any net that a route_planes step will handle, e.g. '
-    '["*", "!GND", "!VCC"]. '
+    'then route_planes, then repair_planes - signals route before planes because '
+    'plane stitching vias can adapt around tracks, but a via placed early can '
+    'block a diff pair; repair_planes runs LAST to connect any disconnected plane '
+    'regions and tap plane pads the pour missed. Give it the SAME "assignments" '
+    'as the route_planes step (same nets and layers). Include exactly one '
+    'repair_planes step at the end whenever there is a route_planes step. Set '
+    'its rip_blocker_nets and reroute_ripped_nets true so a plane pad blocked by '
+    'a signal trace (e.g. a connector GND pin) is connected by ripping and '
+    're-routing the blocker; the re-route reuses the route step\'s '
+    'power_nets/power_nets_widths (shared Basic-tab fields, no need to repeat). '
+    'The route step\'s "nets" globs support '
+    '"!" exclusions and MUST exclude any net that a route_planes step will handle, '
+    'e.g. ["*", "!GND", "!VCC"]. '
     'Use only these actions; omit any parameter you have no recommendation for; '
     'all params are optional.'
 )
@@ -100,6 +117,8 @@ def step_label(index, step):
             if isinstance(a, dict):
                 parts.append(f"{'|'.join(a.get('nets', []))}->{a.get('layer')}")
         return f"{index}. Planes: {', '.join(parts)}"
+    if action == "repair_planes":
+        return f"{index}. Repair planes (connect regions + tap pads)"
     return f"{index}. {action}"
 
 
@@ -147,6 +166,53 @@ def apply_step_params(step, dialog):
                 opts.gnd_via_distance.SetValue(float(params["gnd_via_distance"]))
             except (TypeError, ValueError):
                 notes.append(f"ignored non-numeric gnd_via_distance={params['gnd_via_distance']!r}")
+        if "gnd_via_net" in params:
+            opts.gnd_via_net.SetValue(str(params["gnd_via_net"]))
+        if "rip_blocker_nets" in params:
+            opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
+        if "reroute_ripped_nets" in params:
+            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
+    elif action == "repair_planes":
+        # via size/drill come from the shared Basic-tab controls (same as route);
+        # the repair-specific knobs live on the Repair options panel.
+        for name in ("via_size", "via_drill"):
+            if name in params:
+                try:
+                    getattr(dialog, name).SetValue(float(params[name]))
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric {name}={params[name]!r}")
+        opts = dialog.planes_tab.repair_options
+        for name in ("max_track_width", "analysis_grid_step"):
+            if name in params:
+                ctrl = opts.max_track_width if name == "max_track_width" else opts.analysis_grid
+                try:
+                    ctrl.SetValue(float(params[name]))
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric {name}={params[name]!r}")
+        if "repair_pads" in params:
+            opts.repair_pads.SetValue(bool(params["repair_pads"]))
+        if "rip_blocker_nets" in params:
+            opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
+        if "reroute_ripped_nets" in params:
+            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
+    elif action == "fanout":
+        kind = (step.get("kind") or "bga").lower()
+        if kind == "bga":
+            opts = dialog.fanout_tab.bga_options
+            if "escape_method" in params:
+                opts.underpad_escape.SetValue(str(params["escape_method"]).lower() == "underpad")
+            if "exit_margin" in params:
+                try:
+                    opts.exit_margin.SetValue(float(params["exit_margin"]))
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric exit_margin={params['exit_margin']!r}")
+        else:
+            opts = dialog.fanout_tab.qfn_options
+            if "extension" in params:
+                try:
+                    opts.extension.SetValue(float(params["extension"]))
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric extension={params['extension']!r}")
     return notes
 
 
@@ -190,29 +256,51 @@ def apply_step_selection(step, dialog):
         tab = dialog.planes_tab
         tab.mode_selector.SetSelection(0)  # Create Planes
         tab._on_mode_changed(None)
-        copper = set(dialog.pcb_data.board_info.copper_layers)
-        net_names = {net.name for net in dialog.pcb_data.nets.values() if net.name}
-        assignments = []
-        for a in step.get("assignments", []):
-            if not isinstance(a, dict):
-                continue
-            # Accept a single "layer" or a "layers" list from the plan; the
-            # assignment panel stores (nets_list, layers_list) tuples.
-            layers = a.get("layers") if isinstance(a.get("layers"), list) else [a.get("layer")]
-            valid_layers = [l for l in layers if l in copper]
-            nets = [n for n in a.get("nets", []) if n in net_names]
-            unknown = [n for n in a.get("nets", []) if n not in net_names]
-            if unknown:
-                notes.append(f"route_planes: unknown nets {unknown} dropped")
-            if not valid_layers:
-                notes.append(f"route_planes: no valid copper layers in {layers}, assignment dropped")
-                continue
-            if nets:
-                assignments.append((nets, valid_layers))
+        assignments = _plane_assignments_from_step(step, dialog, notes, "route_planes")
         if not assignments:
             notes.append("route_planes: no valid assignments")
         tab.assignment_panel.set_assignments(assignments)
+    elif action == "repair_planes":
+        # Repair runs on the same planes tab in Repair mode. The GUI repair
+        # requires net->layer assignments (unlike the CLI, which auto-detects the
+        # poured zones). Use the step's own assignments if given; otherwise keep
+        # the ones the preceding route_planes step left in the panel.
+        tab = dialog.planes_tab
+        tab.mode_selector.SetSelection(1)  # Repair Disconnected
+        tab._on_mode_changed(None)
+        if step.get("assignments"):
+            assignments = _plane_assignments_from_step(step, dialog, notes, "repair_planes")
+            if assignments:
+                tab.assignment_panel.set_assignments(assignments)
+        if not tab.assignment_panel.get_assignments():
+            notes.append("repair_planes: no assignments (add a route_planes step first, "
+                         "or include assignments on the repair step)")
     return notes
+
+
+def _plane_assignments_from_step(step, dialog, notes, action_name):
+    """Build (nets_list, layers_list) assignment tuples from a plane step's
+    "assignments", validating nets and copper layers against the board."""
+    copper = set(dialog.pcb_data.board_info.copper_layers)
+    net_names = {net.name for net in dialog.pcb_data.nets.values() if net.name}
+    assignments = []
+    for a in step.get("assignments", []):
+        if not isinstance(a, dict):
+            continue
+        # Accept a single "layer" or a "layers" list from the plan; the
+        # assignment panel stores (nets_list, layers_list) tuples.
+        layers = a.get("layers") if isinstance(a.get("layers"), list) else [a.get("layer")]
+        valid_layers = [l for l in layers if l in copper]
+        nets = [n for n in a.get("nets", []) if n in net_names]
+        unknown = [n for n in a.get("nets", []) if n not in net_names]
+        if unknown:
+            notes.append(f"{action_name}: unknown nets {unknown} dropped")
+        if not valid_layers:
+            notes.append(f"{action_name}: no valid copper layers in {layers}, assignment dropped")
+            continue
+        if nets:
+            assignments.append((nets, valid_layers))
+    return assignments
 
 
 def _match_net_names(pcb_data, globs):
@@ -312,6 +400,10 @@ class PlanExecutor:
                        lambda: not d.fanout_tab.fanout_btn.IsEnabled()),
             "route_planes": (lambda: d.planes_tab._on_action(None),
                              lambda: not d.planes_tab.action_btn.IsEnabled()),
+            # Same planes tab + action button; apply_step_selection has already
+            # switched it to Repair mode, so _on_action runs the repair.
+            "repair_planes": (lambda: d.planes_tab._on_action(None),
+                              lambda: not d.planes_tab.action_btn.IsEnabled()),
         }[action]
 
     # -- sequencing ----------------------------------------------------------
@@ -332,7 +424,14 @@ class PlanExecutor:
         self.on_status(index, "running")
         self.log(f"Claude plan: step {index + 1} ({step['action']}) starting")
         try:
-            notes = apply_step_selection(step, self.dialog)
+            # Re-apply BOTH this step's parameters and its selection right before
+            # running it: consecutive steps of the same action share one tab's
+            # controls, so plan-time fill leaves only the last such step's
+            # track_width/clearance/via/diff-pair geometry in place. Without this
+            # re-apply, e.g. a fine-pitch route step and a general route step
+            # would both run at whichever was applied last.
+            notes = apply_step_params(step, self.dialog)
+            notes += apply_step_selection(step, self.dialog)
             for note in notes:
                 self.log(f"Claude plan: {note}")
             invoke, busy = self._action_parts(step["action"])

@@ -576,6 +576,12 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--max-iterations` | 200000 | Maximum A* iterations per route attempt |
 | `--repair-pads` / `--no-repair-pads` | on | Also repair pad-level plane connection failures (see below) |
 | `--max-search-radius` | 10.0 | Max radius to search for a via position during pad repair (mm) |
+| `--rip-blocker-nets` | off | Connect a pad that can't reach its plane by tracing to a nearby same-net pad, ripping the signal net(s) blocking that trace (see below) |
+| `--max-rip-nets` | 3 | Maximum blocker nets to rip per pad |
+| `--reroute-ripped-nets` | off | Re-route the ripped nets after the repair (else they are excluded from output and listed for a later pass) |
+| `--power-nets` | — | Power net names needing wider tracks when re-routing ripped nets |
+| `--power-nets-widths` | — | Track width (mm) per `--power-nets` entry, for re-routing ripped nets |
+| `--no-bga-zone` | off | Disable BGA auto-exclusion zones when re-routing ripped nets (match the signal run) |
 | `--dry-run` | off | Analyze without writing output |
 | `--verbose`, `-v` | off | Print detailed debug messages |
 | `--debug-lines` | off | Add debug lines on User.4 layer showing route paths |
@@ -600,6 +606,33 @@ the summary. Use `--no-repair-pads` to only reconnect zone islands.
 pads whose tap fails during the initial run (issue #104), so the repair pass
 typically only sees pads that survived that retry or boards routed by other
 tools.
+
+### Rip-Blocker Pad Repair (`--rip-blocker-nets`)
+
+Some plane-net pads can't take a via at all — a tiny outer-layer pad (e.g. a
+0.4mm USB-connector GND pin) amid congestion, where the plane is on an inner
+layer and the signal pass excluded the plane net. The human connects these with
+a short trace to an adjacent same-net pad (a connector GND pin to its shield
+pad). With `--rip-blocker-nets`, the repair does the same: when no via fits and
+no same-net via is within the close-reuse radius, it routes a trace to the
+nearest same-net pad/via reachable on the pad's layer. If a signal net crosses
+that corridor, it is **ripped** (up to `--max-rip-nets`), the pad connected, and
+the ripped net **re-routed** (`--reroute-ripped-nets`) using the original signal
+parameters — pass `--power-nets`/`--power-nets-widths` so power nets re-route at
+their proper width, and `--no-bga-zone` to match a `--no-bga-zones` signal run.
+A net that cannot re-route is **restored** to its original trace rather than left
+disconnected (issue #88). Example:
+
+```bash
+python route_disconnected_planes.py step_planes.kicad_pcb out.kicad_pcb \
+    --clearance 0.15 --via-size 0.5 --via-drill 0.3 --track-width 0.127 --grid-step 0.05 \
+    --rip-blocker-nets --reroute-ripped-nets \
+    --power-nets +12V -12V --power-nets-widths 0.5 0.5 --no-bga-zone
+```
+
+The plugin's Planes "repair" tab exposes this as the **Rip up blocking nets** and
+**Auto-reroute ripped nets** checkboxes; in the GUI the ripped nets are
+re-routed in memory and their old tracks deleted before the new copper is added.
 
 ### How It Works
 

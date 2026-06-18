@@ -1348,6 +1348,14 @@ class RoutingDialog(wx.Dialog):
 
         def get_shared_params():
             edge_clearance = self._effective_board_edge_clearance()
+            # Power nets/widths from the route tab, so plane rip-up re-routes a
+            # ripped wide power net at its proper width, not the signal default
+            # (matches the CLI passing --power-nets to route_disconnected_planes).
+            power_nets = self.power_nets_ctrl.GetValue().split() or None
+            try:
+                power_widths = [float(w) for w in self.power_widths_ctrl.GetValue().split()] or None
+            except ValueError:
+                power_widths = None
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -1361,6 +1369,8 @@ class RoutingDialog(wx.Dialog):
                 # Share the route tab's No-BGA-Zones intent so plane rip-up
                 # reroutes match signal routing on BGA boards (issue #88).
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
+                'power_nets': power_nets,
+                'power_nets_widths': power_widths,
             }
 
         def get_claude_params():
@@ -2884,7 +2894,9 @@ class RoutingDialog(wx.Dialog):
             except Exception as e:
                 print(f"Warning: failed to move copper text: {e}")
 
-        # Push tracks + vias (+ optional debug lines) as a single commit.
+        # Push tracks + vias (+ optional debug lines) as a single commit. The
+        # adapter also strips the original-board dead-end copper the post-route
+        # sweep flagged (issue #84, via results_data['segments_to_remove']).
         try:
             counts = apply_routing_results(
                 board,
@@ -2902,6 +2914,7 @@ class RoutingDialog(wx.Dialog):
         tracks_added = counts["tracks"]
         vias_added = counts["vias"]
         debug_lines_added = counts["debug_lines"]
+        tracks_removed = counts.get("removed", 0)
 
         # Clear guide/keepout User-layer graphics after a successful route, if
         # requested (only for features that were actually enabled this run).
@@ -2935,6 +2948,8 @@ class RoutingDialog(wx.Dialog):
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
+        if tracks_removed > 0:
+            msg += f"  {tracks_removed} dead-end stub(s) removed\n"
         if text_moved > 0:
             msg += f"  {text_moved} text items moved to silkscreen\n"
         if debug_lines_added > 0:

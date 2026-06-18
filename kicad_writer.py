@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import Pad
+from kicad_parser import Pad, is_kicad_10
 from routing_utils import pos_key, POSITION_DECIMALS
 
 
@@ -587,6 +587,93 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
     result = re.sub(segment_pattern, replace_net, content, flags=re.DOTALL)
     return result, count
+
+
+def remove_segments_from_content(content: str, segments: List,
+                                 net_id_to_name: Dict = None) -> Tuple[str, int]:
+    """Delete whole ``(segment ...)`` blocks matching the given segments.
+
+    Used by the dead-end sweep (issue #84) to strip original input-file copper
+    that prune_dead_end_segments flagged as a dead end -- copper the writer would
+    otherwise carry into the output verbatim. A segment is matched by its
+    unordered endpoint pair plus layer and net, which uniquely identifies it
+    (a duplicate with the same endpoints/layer/net is interchangeable). The whole
+    block (including its trailing uuid) is removed, not just the net token.
+
+    Returns ``(modified_content, count_removed)``.
+    """
+    if not segments:
+        return content, 0
+
+    use_names = net_id_to_name is not None and is_kicad_10(content)
+
+    def seg_key(p1, p2, layer, net_token):
+        return (frozenset((p1, p2)), layer, net_token)
+
+    targets = set()
+    for s in segments:
+        net_token = (net_id_to_name.get(s.net_id) if use_names else s.net_id)
+        targets.add(seg_key(pos_key(s.start_x, s.start_y),
+                            pos_key(s.end_x, s.end_y), s.layer, net_token))
+
+    start_re = re.compile(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)')
+    end_re = re.compile(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)')
+    layer_re = re.compile(r'\(layer\s+"?([^")]+)"?\)')
+    net_name_re = re.compile(r'\(net\s+"([^"]*)"\)')
+    net_id_re = re.compile(r'\(net\s+(\d+)\)')
+
+    # Scan top-level (segment ...) blocks with a quote-aware paren matcher. A
+    # plain nested-paren regex breaks on KiCad v10 auto-net names that contain
+    # parentheses, e.g. (net "Net-(R2-Pad1)") -- the inner parens are inside a
+    # string and must not count toward block nesting.
+    out = []
+    pos = 0
+    n = len(content)
+    count = 0
+    while True:
+        j = content.find('(segment', pos)
+        if j < 0:
+            out.append(content[pos:])
+            break
+        out.append(content[pos:j])
+        depth = 0
+        in_str = False
+        k = j
+        while k < n:
+            ch = content[k]
+            if in_str:
+                if ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    k += 1
+                    break
+            k += 1
+        block = content[j:k]
+        ms, me, ml = start_re.search(block), end_re.search(block), layer_re.search(block)
+        keep = True
+        if ms and me and ml:
+            if use_names:
+                mn = net_name_re.search(block)
+                net_token = mn.group(1) if mn else None
+            else:
+                mn = net_id_re.search(block)
+                net_token = int(mn.group(1)) if mn else None
+            key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
+                          pos_key(float(me.group(1)), float(me.group(2))),
+                          ml.group(1), net_token)
+            if key in targets:
+                keep = False
+                count += 1
+        if keep:
+            out.append(block)
+        pos = k
+    return ''.join(out), count
 
 
 def swap_via_nets_at_positions(content: str, positions: set,

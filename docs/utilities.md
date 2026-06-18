@@ -305,10 +305,17 @@ two distinct rules the router honours: **hole-to-hole** (drill-to-drill) is
 net-INDEPENDENT and applies to via/via, via/pad-drill and pad-drill/pad-drill on
 *all* nets including same-net; **copper clearance** applies to via/pad and
 via/via copper between *different* nets, while same-net via-pad copper clearance
-may be 0 (via-in-pad) where the fab allows it. It then emits ready-to-paste
-flags: routing uses the net-class `--clearance`/`--track-width` but the small
-**working** `--via-size`/`--via-drill` from the floor (not the net-class
-`via_diameter`), and `check_drc.py` is graded at the floor
+may be 0 (via-in-pad) where the fab allows it. The floor's **track** value is the
+DRC-enforced one (the board's own `min_track_width`); separately it reports a
+**fine-pitch signal track floor** — the fab's *physical* minimum trace width,
+which is layer-dependent (JLC: 3.5 mil / 0.0889 mm on 4+ layer, 5 mil / 0.127 mm
+on 2-layer) and can be *below* the board's `min_track_width`. On dense/congested
+boards, route ordinary signals at that fab floor (`route.py --track-width`), below
+the board's own rule, like the human originals — thinner completes more nets and
+routes faster; keep power nets on `--power-nets` and impedance nets at net-class
+width. It then emits ready-to-paste flags: the small **working**
+`--via-size`/`--via-drill` from the floor (not the net-class `via_diameter`), and
+`check_drc.py` is graded at the floor
 (`--clearance <floor> --hole-to-hole-clearance <floor>`), not the inflated
 net-class clearance. Nets assigned to a non-Default class are reported so they
 can be routed separately with that class's values. When neither net classes nor

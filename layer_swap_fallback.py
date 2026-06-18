@@ -28,7 +28,8 @@ from polarity_swap import get_canonical_net_id
 
 def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
                                               config, extra_clearance: float,
-                                              exclude_cells=None, exempt_capsules=None):
+                                              exclude_cells=None, exempt_capsules=None,
+                                              exempt_pads=None):
     """Add a diff pair's own stubs and pads as obstacles to prevent the centerline
     (and its offset P/N tracks) from crossing them mid-route.
 
@@ -39,6 +40,9 @@ def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int,
     and (x1, y1, x2, y2, radius) capsules exempted from own-pad blocking).
     When exempt_capsules is None the pad corridors are derived from the pair's
     closest-endpoint connector regions.
+
+    exempt_pads: optional set of id(pad) the capsules may open; foreign pads of
+    other terminals stay fully blocked (see add_diff_pair_own_pads_as_obstacles).
     """
     p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
     n_segments = [s for s in pcb_data.segments if s.net_id == n_net_id]
@@ -59,7 +63,8 @@ def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int,
     if exempt_capsules is not None:
         add_diff_pair_own_pads_as_obstacles(
             obstacles, pcb_data, p_net_id, n_net_id, config,
-            exempt_capsules=exempt_capsules, extra_clearance=extra_clearance)
+            exempt_capsules=exempt_capsules, extra_clearance=extra_clearance,
+            exempt_pads=exempt_pads)
     else:
         add_own_pads_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id, n_net_id,
                                                 config, extra_clearance)

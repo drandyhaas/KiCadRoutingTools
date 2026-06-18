@@ -57,7 +57,8 @@ def generate_qfn_fanout(footprint: Footprint,
                         net_filter: Optional[List[str]] = None,
                         layer: str = "F.Cu",
                         track_width: float = 0.1,
-                        extension: float = 0.1) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        extension: float = 0.1,
+                        clearance: float = 0.1) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -155,6 +156,60 @@ def generate_qfn_fanout(footprint: Footprint,
         )
         stubs.append(stub)
 
+    # Foreign-pad clearance (issue #123). The QFN fan emits each stub blind to
+    # other components' pads, so a stub on a fine-pitch part routed out toward a
+    # neighbouring passive grazes it within clearance (PAD-SEGMENT). Mirror the
+    # bga_fanout escape clearing: shorten the 45 fan inward to clear the pad
+    # (connectivity-neutral - the straight segment still escapes the chip), and
+    # if even the straight escape itself grazes a pad, drop that stub and warn.
+    from bga_fanout.reroute import _seg_hits_pad
+    margin = clearance + track_width / 2
+    fp_lo_x, fp_hi_x = layout.min_x - 3.0, layout.max_x + 3.0
+    fp_lo_y, fp_hi_y = layout.min_y - 3.0, layout.max_y + 3.0
+    foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist
+                    if p.component_ref != footprint.reference
+                    and fp_lo_x <= p.global_x <= fp_hi_x and fp_lo_y <= p.global_y <= fp_hi_y]
+
+    def _seg_grazes(p1, p2, net_id):
+        for pad in foreign_pads:
+            if pad.net_id == net_id:
+                continue
+            if pad.drill <= 0 and layer not in (pad.layers or []):
+                continue
+            if _seg_hits_pad(p1[0], p1[1], p2[0], p2[1], pad, margin=margin):
+                return True
+        return False
+
+    qfn_dropped: List[str] = []
+    n_short = 0
+    kept_stubs: List[FanoutStub] = []
+    for stub in stubs:
+        nid = stub.net_id
+        if _seg_grazes(stub.pad_pos, stub.corner_pos, nid):
+            # The perpendicular escape itself hits a foreign pad - cannot fan out.
+            if stub.pad.net_name and stub.pad.net_name not in qfn_dropped:
+                qfn_dropped.append(stub.pad.net_name)
+            continue
+        if _seg_grazes(stub.corner_pos, stub.stub_end, nid):
+            # Shorten the 45 fan toward the corner until it clears (worst case
+            # collapse it entirely - the straight escape is already clear).
+            cx, cy = stub.corner_pos
+            ex, ey = stub.stub_end
+            new_end = stub.corner_pos
+            for i in range(1, 9):
+                t = 1.0 - i / 9.0  # walk inward from current tip toward corner
+                cand = (cx + (ex - cx) * t, cy + (ey - cy) * t)
+                if not _seg_grazes(stub.corner_pos, cand, nid):
+                    new_end = cand
+                    break
+            stub.stub_end = new_end
+            n_short += 1
+        kept_stubs.append(stub)
+    if n_short or qfn_dropped:
+        print(f"  Pad-clearance: shortened {n_short} fan(s); dropped {len(qfn_dropped)} "
+              f"stub(s) grazing a foreign pad (issue #123)")
+    stubs = kept_stubs
+
     # Generate tracks - two segments per stub
     tracks = []
     for stub in stubs:
@@ -210,7 +265,7 @@ def generate_qfn_fanout(footprint: Footprint,
     min_spacing = track_width + extension
     collisions = check_endpoint_spacing(stubs, min_spacing)
 
-    failed_nets: List[str] = []
+    failed_nets: List[str] = list(qfn_dropped)
     if collisions:
         print(f"  WARNING: {len(collisions)} endpoint pairs too close!")
         for i, j, dist in collisions[:5]:
@@ -247,6 +302,9 @@ def main():
                         help='Track width in mm')
     parser.add_argument('--extension', type=float, default=0.1,
                         help='Extension past pad edge before bend (mm)')
+    parser.add_argument('--clearance', type=float, default=0.1,
+                        help='Min clearance to other-net pads (mm); stubs that '
+                             'would graze a foreign pad are shortened or dropped')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
 
@@ -299,7 +357,8 @@ def main():
         net_filter=args.nets,
         layer=layer,
         track_width=args.width,
-        extension=args.extension
+        extension=args.extension,
+        clearance=args.clearance
     )
 
     if tracks:
@@ -310,6 +369,14 @@ def main():
         print("Done!")
     else:
         print("\nNo fanout tracks generated")
+        # Still produce the output file (board unchanged) so a multi-step
+        # pipeline can continue - otherwise a fanout that finds nothing to do
+        # (e.g. the component is already fanned on a retry) leaves the next step
+        # with no input file.
+        if getattr(args, 'output', None):
+            import shutil
+            shutil.copyfile(args.pcb, args.output)
+            print(f"Wrote board through to {args.output} (unchanged)")
 
     return 0
 

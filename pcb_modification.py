@@ -599,6 +599,496 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     return result_segments
 
 
+def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
+                    all_segs, ignore_seg, tol: float) -> bool:
+    """A segment endpoint is anchored if it lands on a same-net via (vias span
+    layers), on a same-net pad (on a shared layer), or in the middle of another
+    same-net segment on the same layer (a T-junction). Anchored endpoints are
+    real connections, never dead ends."""
+    for vx, vy, vsize in via_pts:
+        if math.hypot(x - vx, y - vy) < vsize / 2 + 0.05:
+            return True
+    for px, py, psize, players in pad_pts:
+        on_layer = (not players) or layer in players or any('*' in L for L in players)
+        if on_layer and math.hypot(x - px, y - py) < psize / 2 + 0.05:
+            return True
+    for s in all_segs:
+        if s is ignore_seg or s.layer != layer:
+            continue
+        dx = s.end_x - s.start_x
+        dy = s.end_y - s.start_y
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-9:
+            continue
+        t = ((x - s.start_x) * dx + (y - s.start_y) * dy) / seg_len_sq
+        # Strictly interior (endpoints are handled by the degree count) so a
+        # shared endpoint isn't double-counted as a T-junction.
+        if t <= 0.02 or t >= 0.98:
+            continue
+        cx = s.start_x + t * dx
+        cy = s.start_y + t * dy
+        # A landing anywhere within the trace's copper (half-width) is a real
+        # connection; use the wider of tol and the trace half-width so a stub
+        # landing inside a wide power trace is not mistaken for a dead end.
+        if math.hypot(x - cx, y - cy) < max(tol, getattr(s, 'width', 0.0) / 2 + 0.025):
+            return True
+    return False
+
+
+def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segment] = None,
+                            vias: List = None, pads: List = None,
+                            tol: float = 0.05,
+                            keep_terminal_escapes: bool = True) -> Tuple[List[Segment], List[Segment]]:
+    """Iteratively drop a net's dead-end segments (issue #84).
+
+    A dead end is a segment endpoint of degree 1 -- no other same-net segment
+    endpoint coincides with it on its layer -- that also does not land on a pad,
+    a via, or the interior of another same-net segment (a T-junction). Such an
+    endpoint connects nothing, so the segment is dead copper: a tap tail left
+    when the branch it fed was superseded, a stub a net routed away from, a
+    fragment orphaned by rip-and-reroute. Removing it can never disconnect the
+    net (the other end stays joined to the rest), and it exposes the next
+    segment of a spur chain, so this iterates to a fixpoint.
+
+    Unlike ``collapse_appendices`` (single pass, only appendices <= 1 mm anchored
+    to a junction) this removes dead ends of any length and unwinds whole spurs.
+
+    Args:
+        prunable: segments eligible for removal (one net).
+        anchor_segments: extra same-net segments that count toward junctions /
+            T-anchoring but are never removed (e.g. original file copper that the
+            output writer cannot delete). Endpoints shared with these are kept.
+        vias, pads: same-net vias / pads that anchor an endpoint.
+        tol: proximity tolerance (mm) for the on-segment / coincidence tests.
+
+    Returns ``(kept, removed)`` from ``prunable``; ``anchor_segments`` are never
+    returned (they were never candidates).
+    """
+    anchor_segments = anchor_segments or []
+    via_pts = [(v.x, v.y, getattr(v, 'size', 0.6)) for v in (vias or [])]
+    pad_pts = []
+    for p in (pads or []):
+        px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
+        py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
+        psize = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
+        pad_pts.append((px, py, psize, getattr(p, 'layers', [])))
+
+    def key(x, y, layer):
+        return (round(x, 3), round(y, 3), layer)
+
+    kept = list(prunable)
+    removed = []
+    changed = True
+    while changed:
+        changed = False
+        all_segs = kept + anchor_segments
+        degree = {}
+        for s in all_segs:
+            degree[key(s.start_x, s.start_y, s.layer)] = \
+                degree.get(key(s.start_x, s.start_y, s.layer), 0) + 1
+            degree[key(s.end_x, s.end_y, s.layer)] = \
+                degree.get(key(s.end_x, s.end_y, s.layer), 0) + 1
+
+        survivors = []
+        for s in kept:
+            sk = key(s.start_x, s.start_y, s.layer)
+            ek = key(s.end_x, s.end_y, s.layer)
+            start_free = (degree[sk] == 1 and
+                          not _point_anchored(s.start_x, s.start_y, s.layer,
+                                              via_pts, pad_pts, all_segs, s, tol))
+            end_free = (degree[ek] == 1 and
+                        not _point_anchored(s.end_x, s.end_y, s.layer,
+                                            via_pts, pad_pts, all_segs, s, tol))
+            remove = False
+            if start_free and end_free:
+                remove = True                      # isolated fragment
+            elif start_free or end_free:
+                # Exactly one free end. The rooted end is either a junction
+                # (degree >= 2 -- a spur hanging off the through-path) or a
+                # degree-1 pad/via anchor (the net's escape stub).
+                root = ek if start_free else sk
+                if degree[root] >= 2:
+                    remove = True                  # spur off the through-path
+                elif not keep_terminal_escapes:
+                    # Whole branch back to a pad/via is dead (the chain unwound to
+                    # here). It is a dead antenna -- the pad/via connects nothing
+                    # through it -- so removing it cannot change connectivity. The
+                    # per-commit pass keeps these (the net may still be routing);
+                    # the final sweep removes them.
+                    remove = True
+            if remove:
+                removed.append(s)
+                changed = True
+            else:
+                survivors.append(s)
+        kept = survivors
+    return kept, removed
+
+
+def _safe_prune_net(net_id, prunable, vias, pads, zones,
+                    anchor_segments=None, aggressive=False, tol=0.05):
+    """Prune a net's dead ends, but never at the cost of pad connectivity.
+
+    prune_dead_end_segments works on an endpoint-coincidence model that does not
+    know about zones (a segment ending on a plane is connected) or segment
+    overlap, so on its own it can remove copper that actually carries a pad to a
+    plane. This gates it against check_net_connectivity (the authoritative
+    union-find the connectivity checker uses).
+
+    Removing any subset of genuinely-dead copper is independently connectivity-
+    safe, so rather than accept-or-revert the whole net, each flagged segment is
+    validated on its own: drop it only if doing so does not raise the net's
+    disconnected-pad count. A dead-end that actually lands on a plane (the
+    geometric model's blind spot) fails that check and is kept, while the net's
+    true dead ends are still removed. Returns ``(kept_prunable, removed)``.
+    """
+    _, candidates = prune_dead_end_segments(prunable, anchor_segments=anchor_segments,
+                                            vias=vias, pads=pads, tol=tol,
+                                            keep_terminal_escapes=not aggressive)
+    if not candidates:
+        return prunable, []
+
+    from check_connected import check_net_connectivity
+    anchor = anchor_segments or []
+
+    def disconnected(segs):
+        return len(check_net_connectivity(net_id, anchor + segs, vias, pads, zones)['disconnected_pads'])
+
+    base = disconnected(list(prunable))
+    kept = list(prunable)
+    removed = []
+    # Removing a dead end can expose its neighbour as a new dead end (a chain
+    # unwinds one segment at a time), so iterate: re-derive candidates from what
+    # is left until a full pass removes nothing. A candidate whose removal would
+    # strand a pad stays load-bearing no matter what other dead copper goes, so
+    # cache those rejections and never re-test them (keeps it O(dead ends) and
+    # guarantees termination).
+    rejected = set()
+    while True:
+        progress = False
+        for c in candidates:
+            if id(c) in rejected or c not in kept:
+                continue
+            trial = [s for s in kept if s is not c]
+            if disconnected(trial) <= base:
+                kept = trial
+                removed.append(c)
+                progress = True
+            else:
+                rejected.add(id(c))
+        if not progress:
+            break
+        _, candidates = prune_dead_end_segments(kept, anchor_segments=anchor_segments,
+                                                vias=vias, pads=pads, tol=tol,
+                                                keep_terminal_escapes=not aggressive)
+    return kept, removed
+
+
+def _nearest_pad_point(px, py, pad):
+    """Nearest point on a pad's (rotated) bounding box to (px, py), and the gap."""
+    cx, cy = pad.global_x, pad.global_y
+    rot = math.radians(getattr(pad, 'rotation', 0.0) or 0.0)
+    ca, sa = math.cos(-rot), math.sin(-rot)
+    # into pad-local frame
+    lx = (px - cx) * ca - (py - cy) * sa
+    ly = (px - cx) * sa + (py - cy) * ca
+    hx, hy = pad.size_x / 2, pad.size_y / 2
+    clx = max(-hx, min(hx, lx))
+    cly = max(-hy, min(hy, ly))
+    # back to board frame
+    ca2, sa2 = math.cos(rot), math.sin(rot)
+    tx = cx + clx * ca2 - cly * sa2
+    ty = cy + clx * sa2 + cly * ca2
+    return (tx, ty), math.hypot(px - tx, py - ty)
+
+
+def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
+                   max_gap_factor: float = 1.5) -> int:
+    """Close small gaps where a routed dead end stopped just short of same-net
+    copper (issue #84).
+
+    A route can land up to ~half a grid step shy of its target, leaving a stub
+    whose loose end is a fraction of a track width from a same-net pad, via, or
+    trace. The connectivity model bridges that with tolerance, but the copper does
+    not physically touch -- KiCad's DRC sees a dangling end. Rather than report it
+    or loosen the checker, extend the stub with a short connector to the nearest
+    same-net copper, provided the connector clears every OTHER net's copper by the
+    configured clearance (same gate principle as removal, applied to addition).
+
+    Only gaps up to ``max_gap_factor`` x the stub's track width are closed. Adds
+    the connector to ``results`` (and pcb_data) so both the CLI writer and the GUI
+    pick it up. Returns the number of connectors added.
+    """
+    coord_clear = config.clearance
+    added = 0
+    new_conns = []
+
+    # Same-net copper grouped for fast lookup.
+    segs_by_net_layer = {}
+    for s in pcb_data.segments:
+        segs_by_net_layer.setdefault((s.net_id, s.layer), []).append(s)
+
+    for net_id in scope_net_ids:
+        net = pcb_data.nets.get(net_id)
+        if net is None:
+            continue
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        for (nid, lyr), segs in list(segs_by_net_layer.items()):
+            if nid != net_id:
+                continue
+            # Degree-1 endpoints on this layer (exact-coord coincidence).
+            deg = {}
+            for s in segs:
+                deg[(s.start_x, s.start_y)] = deg.get((s.start_x, s.start_y), 0) + 1
+                deg[(s.end_x, s.end_y)] = deg.get((s.end_x, s.end_y), 0) + 1
+            for s in segs:
+                for (px, py) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                    if deg[(px, py)] != 1:
+                        continue
+                    w = s.width
+                    limit = max_gap_factor * w
+                    best = None  # (gap, target_point)
+                    # nearest same-net trace on this layer (a real T-junction)
+                    for o in segs:
+                        if o is s:
+                            continue
+                        dx, dy = o.end_x - o.start_x, o.end_y - o.start_y
+                        L2 = dx * dx + dy * dy
+                        if L2 < 1e-12:
+                            continue
+                        t = max(0.0, min(1.0, ((px - o.start_x) * dx + (py - o.start_y) * dy) / L2))
+                        fx, fy = o.start_x + t * dx, o.start_y + t * dy
+                        g = math.hypot(px - fx, py - fy)
+                        if best is None or g < best[0]:
+                            best = (g, (fx, fy))
+                    # nearest same-net pad on this layer (land on its copper)
+                    for pad in net_pads:
+                        if not (lyr in pad.layers or any('*' in L for L in pad.layers)):
+                            continue
+                        tp, g = _nearest_pad_point(px, py, pad)
+                        if best is None or g < best[0]:
+                            best = (g, tp)
+                    # nearest same-net via (vias span layers): land just inside it
+                    for v in net_vias:
+                        dc = math.hypot(px - v.x, py - v.y)
+                        r = getattr(v, 'size', 0.0) / 2
+                        if dc < 1e-9:
+                            continue
+                        ux, uy = (v.x - px) / dc, (v.y - py) / dc
+                        tp = (px + ux * max(0.0, dc - 0.9 * r), py + uy * max(0.0, dc - 0.9 * r))
+                        g = math.hypot(px - tp[0], py - tp[1])
+                        if best is None or g < best[0]:
+                            best = (g, tp)
+
+                    if best is None or not (1e-4 < best[0] <= limit):
+                        continue  # already touching, no target, or gap too big
+                    tx, ty = best[1]
+
+                    # Clearance check: the connector must keep `clearance` from
+                    # every OTHER net's copper.
+                    if not _connector_clear(px, py, tx, ty, w, lyr, net_id,
+                                            pcb_data, coord_clear):
+                        continue
+                    conn = Segment(start_x=px, start_y=py, end_x=tx, end_y=ty,
+                                   width=w, layer=lyr, net_id=net_id)
+                    new_conns.append(conn)
+                    segs.append(conn)  # so a later endpoint sees it connected
+                    deg[(px, py)] = deg.get((px, py), 0) + 1
+                    deg[(tx, ty)] = deg.get((tx, ty), 0) + 1
+                    added += 1
+
+    if new_conns:
+        for c in new_conns:
+            pcb_data.segments.append(c)
+        results.append({'new_segments': new_conns, 'new_vias': []})
+    return added
+
+
+def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
+    """True if a candidate connector segment keeps `clearance` from all OTHER
+    nets' copper (segments on its layer, vias on any layer, pads on its layer)."""
+    from geometry_utils import segment_to_segment_distance, point_to_segment_distance
+    from check_drc import segment_to_rect_distance
+    half = width / 2
+    for s in pcb_data.segments:
+        if s.net_id == net_id or s.layer != layer:
+            continue
+        if segment_to_segment_distance(x1, y1, x2, y2,
+                                       s.start_x, s.start_y, s.end_x, s.end_y) \
+                < clearance + half + s.width / 2:
+            return False
+    for v in pcb_data.vias:
+        if v.net_id == net_id:
+            continue
+        if point_to_segment_distance(v.x, v.y, x1, y1, x2, y2) \
+                < clearance + half + getattr(v, 'size', 0.0) / 2:
+            return False
+    for nid, pads in pcb_data.pads_by_net.items():
+        if nid == net_id:
+            continue
+        for pad in pads:
+            if not (layer in pad.layers or any('*' in L for L in pad.layers)):
+                continue
+            d, _ = segment_to_rect_distance(x1, y1, x2, y2, pad.global_x, pad.global_y,
+                                            pad.size_x / 2, pad.size_y / 2)
+            if d < clearance + half:
+                return False
+    # Other-net copper pours (planes): a connector must not enter or graze them.
+    zones = getattr(pcb_data, 'zones', None)
+    if zones:
+        from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
+        n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.05) + 1)
+        for z in zones:
+            if z.net_id == net_id or z.layer != layer or not z.polygon:
+                continue
+            for i in range(n + 1):
+                t = i / n
+                px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+                if point_in_polygon(px, py, z.polygon) or \
+                        point_to_polygon_edge_distance(px, py, z.polygon) < clearance + half:
+                    return False
+    return True
+
+
+def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1) -> Tuple[int, int]:
+    """Apply the dead-end sweep + gap-snap to a plane tool's output file (issue #84).
+
+    route_planes / route_disconnected_planes write copper outside route.py's
+    write-list, so they miss the in-route cleanup, leaving dead-end stubs (and the
+    occasional near-miss) on plane nets. This re-parses the written board, snaps
+    small same-net gaps and trims gated-safe dead ends on the given plane nets,
+    then rewrites the file (stripping removed segments, appending snap connectors).
+    The connectivity gate uses the plane zones, and the snap clearance check
+    rejects any connector that would enter another net's pour. Returns
+    ``(snapped, removed)``.
+    """
+    from types import SimpleNamespace
+    from kicad_parser import parse_kicad_pcb, is_kicad_10
+    from kicad_writer import remove_segments_from_content, generate_segment_sexpr
+
+    pcb = parse_kicad_pcb(output_file)
+    with open(output_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    names = set(plane_net_names)
+    scope = {nid for nid, net in pcb.nets.items() if net.name in names}
+    if not scope:
+        return 0, 0
+
+    snap_results = []
+    snapped = snap_stub_gaps(snap_results, pcb, scope, SimpleNamespace(clearance=clearance))
+    connectors = [s for r in snap_results for s in (r.get('new_segments') or [])]
+    _, _, to_remove = sweep_dead_ends(snap_results, pcb, scope)
+    if not (connectors or to_remove):
+        return 0, 0
+
+    n2n = getattr(pcb, 'net_id_to_name', {}) or {}
+    v10 = is_kicad_10(content)
+    if to_remove:
+        content, _ = remove_segments_from_content(content, to_remove, n2n if v10 else None)
+    if connectors:
+        sexprs = [generate_segment_sexpr((s.start_x, s.start_y), (s.end_x, s.end_y),
+                                         s.width, s.layer, s.net_id,
+                                         n2n.get(s.net_id) if v10 else None)
+                  for s in connectors]
+        lp = content.rfind(')')
+        content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return snapped, len(to_remove)
+
+
+def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
+                    tol: float = 0.05) -> Tuple[int, int, List[Segment]]:
+    """Final whole-net dead-end sweep, after routing has settled (issue #84).
+
+    ``collapse_appendices`` runs per route-commit and only trims short appendices
+    anchored to a junction, so dead ends survive on nets that otherwise route
+    100% and pass DRC + connectivity: a tap tail superseded by a rip-and-reroute,
+    a spur left when a blocker was ripped, and -- the dominant source -- fanout /
+    escape stubs from earlier pipeline stages that a net routed away from or never
+    completed. This prunes each in-scope net's FULL board copper once via
+    prune_dead_end_segments, so original (input-file) dead copper is reached too,
+    not only this run's new copper.
+
+    Removed copper is split by origin:
+      * segments/vias produced by this run (present in ``results``) are dropped
+        from the write-list in place;
+      * original input-file segments are returned so the caller can strip them
+        from the output (the writer otherwise copies the input verbatim).
+
+    ``scope_net_ids`` limits the sweep to the nets this run was asked to route
+    (so untouched planes / excluded nets are never altered); None sweeps every net
+    with copper. Returns ``(segments_removed, vias_removed, original_segments_to_remove)``.
+    """
+    from collections import defaultdict
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            segs_by_net[s.net_id].append(s)
+
+    all_zones = getattr(pcb_data, 'zones', []) or []
+    removed_routed_ids = set()
+    original_to_remove = []
+    kept_segs_by_net = {}
+    for net_id, net_segs in segs_by_net.items():
+        vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        pads = pcb_data.pads_by_net.get(net_id, [])
+        zones = [z for z in all_zones if z.net_id == net_id]
+        kept, removed = _safe_prune_net(net_id, net_segs, vias, pads, zones,
+                                        aggressive=True, tol=tol)
+        kept_segs_by_net[net_id] = kept
+        for s in removed:
+            if id(s) in routed_seg_ids:
+                removed_routed_ids.add(id(s))
+            else:
+                original_to_remove.append(s)
+
+    if removed_routed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_routed_ids]
+
+    # Drop routed vias left unsupported by the pruning: no kept same-net segment
+    # endpoint and no pad lands on them. Original vias are left in place (their
+    # dead-end segment, if any, would have anchored on them and not been removed).
+    removed_via_ids = set()
+    for net_id, kept in kept_segs_by_net.items():
+        pad_pts = []
+        for p in pcb_data.pads_by_net.get(net_id, []):
+            px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
+            py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
+            psize = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
+            pad_pts.append((px, py, psize))
+        endpoints = []
+        for s in kept:
+            endpoints.append((s.start_x, s.start_y))
+            endpoints.append((s.end_x, s.end_y))
+        for r in results:
+            for v in r.get('new_vias') or []:
+                if v.net_id != net_id or id(v) in removed_via_ids:
+                    continue
+                supported = any(math.hypot(v.x - ex, v.y - ey) < tol for ex, ey in endpoints) \
+                    or any(math.hypot(v.x - px, v.y - py) < ps / 2 + 0.05 for px, py, ps in pad_pts)
+                if not supported:
+                    removed_via_ids.add(id(v))
+    if removed_via_ids:
+        for r in results:
+            vias = r.get('new_vias')
+            if vias:
+                r['new_vias'] = [v for v in vias if id(v) not in removed_via_ids]
+
+    segs_removed = len(removed_routed_ids) + len(original_to_remove)
+    return segs_removed, len(removed_via_ids), original_to_remove
+
+
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
     """Swap the net assignments of two pads in pcb_data (net_id, net_name, and
     membership in pads_by_net / Net.pads).
@@ -691,12 +1181,70 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
                     other.end_x, other.end_y = mid_x, mid_y
     cleaned_segments = kept_segments
 
+    # Per-commit dead-end prune (issue #84): drop this route's own dead-end spurs
+    # so the dead copper is not left on the board to block following routes. Only
+    # the segments being added are prunable; the net's copper already on the board
+    # anchors junctions/escapes but is not removed here (the final sweep handles
+    # board-wide settle). collapse_appendices above only trims short junction
+    # appendices; this unwinds longer spurs and chains via prune_dead_end_segments.
+    all_zones = getattr(pcb_data, 'zones', []) or []
+    pruned_segments = []
+    for net_id in net_ids:
+        net_new = [s for s in cleaned_segments if s.net_id == net_id]
+        if not net_new:
+            continue
+        anchor = [s for s in pcb_data.segments if s.net_id == net_id]
+        net_vias = [v for v in new_vias if v.net_id == net_id]
+        net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_zones = [z for z in all_zones if z.net_id == net_id]
+        kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
+                                      anchor_segments=anchor, aggressive=False)
+        pruned_segments.extend(kept_net)
+    cleaned_segments = pruned_segments
+
     for seg in cleaned_segments:
         pcb_data.segments.append(seg)
     for via in result['new_vias']:
         pcb_data.vias.append(via)
     # Update result so output file also gets cleaned segments
     result['new_segments'] = cleaned_segments
+
+
+def drop_phantom_copper(results, pcb_data: PCBData) -> Tuple[int, int]:
+    """Drop, from each result's write-list copper, any segment/via no longer on the board.
+
+    A result's ``new_segments`` / ``new_vias`` hold the SAME objects that
+    ``add_route_to_pcb_data`` appended to ``pcb_data``; ``remove_route_from_pcb_data``
+    drops those objects when a net is ripped. But a result snapshot taken before a
+    rip-reroute can keep referencing copper that was later ripped and not restored
+    (e.g. a multipoint net's ``completed_result``, built before ``try_phase3_ripup``
+    ripped that net's own main route out from under it, is still committed). The
+    output is written from these results, so the phantom copper lands on the board --
+    including a DIFFERENT-net via at a cell another net legitimately took while this
+    net was ripped, an un-manufacturable drill-on-drill short (issue #133:
+    EPHY_TX_N / EPHY_RX_P escape vias).
+
+    Membership is by object identity, so a re-cleaned or re-placed object (same
+    position, different object) is never confused with the ripped one, and live
+    copper is never dropped. Mutates each result in place; returns
+    ``(phantom_segments_dropped, phantom_vias_dropped)``.
+    """
+    board_segs = {id(s) for s in pcb_data.segments}
+    board_vias = {id(v) for v in pcb_data.vias}
+    phantom_segs = phantom_vias = 0
+    for r in results:
+        segs = r.get('new_segments')
+        if segs:
+            kept = [s for s in segs if id(s) in board_segs]
+            phantom_segs += len(segs) - len(kept)
+            r['new_segments'] = kept
+        vias = r.get('new_vias')
+        if vias:
+            kept = [v for v in vias if id(v) in board_vias]
+            phantom_vias += len(vias) - len(kept)
+            r['new_vias'] = kept
+    return phantom_segs, phantom_vias
 
 
 def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:

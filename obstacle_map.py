@@ -645,6 +645,50 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[
             obstacles.add_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
 
 
+def block_via_cells_near_drills(obstacles: GridObstacleMap,
+                                 drill_holes, via_drill: float,
+                                 hole_to_hole_clearance: float, grid_step: float):
+    """Block via-placement cells within the hole-to-hole drill minimum of each
+    drill hole.
+
+    A via placed on the grid sits at its cell's real center; block the cell when
+    that center is within the required center-to-center distance of the REAL
+    drill center, tested in mm -- NOT as a floored/quantized integer-cell disk.
+    Flooring the radius (or centering the disk on the quantized drill cell) lets
+    a via land a sub-cell inside the hole-to-hole minimum (issue #70 / #125:
+    PAD-DRILL-VIA-DRILL at the default 0.1mm grid). Being exact in mm avoids both
+    the under-block (a real fab violation) and the over-block (lost routability).
+
+    Shared by the signal router (add_drill_hole_obstacles) and route_planes
+    (_add_drill_hole_via_obstacles) so both enforce the keepout identically.
+
+    Args:
+        obstacles: the obstacle map to add via-blocks to
+        drill_holes: iterable of (x_mm, y_mm, drill_diameter_mm)
+        via_drill: drill diameter of the via being placed (mm)
+        hole_to_hole_clearance: minimum drill edge-to-edge clearance (mm)
+        grid_step: grid resolution (mm)
+    """
+    if hole_to_hole_clearance <= 0:
+        return
+    coord = GridCoord(grid_step)
+    cells = []
+    for hx, hy, drill_dia in drill_holes:
+        # Required center-to-center distance = drill/2 + via_drill/2 + clearance.
+        required_dist = drill_dia / 2.0 + via_drill / 2.0 + hole_to_hole_clearance
+        req_sq = required_dist * required_dist
+        gx, gy = coord.to_grid(hx, hy)
+        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
+        for ex in range(-expand, expand + 1):
+            cx = (gx + ex) * grid_step
+            for ey in range(-expand, expand + 1):
+                cy = (gy + ey) * grid_step
+                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
+                    cells.append((gx + ex, gy + ey))
+    if cells:
+        obstacles.add_blocked_vias_batch(np.array(cells, dtype=np.int32))
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set):
     """Block via placement near existing drill holes (hole-to-hole clearance).
@@ -657,8 +701,6 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     """
     if config.hole_to_hole_clearance <= 0:
         return
-
-    coord = GridCoord(config.grid_step)
 
     # Collect all existing drill holes: (x, y, drill_diameter)
     drill_holes = []
@@ -676,18 +718,8 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))
 
-    # Block via placement near each drill hole
-    # New via drill needs to be hole_to_hole_clearance away from existing drill edge
-    for hx, hy, drill_dia in drill_holes:
-        # Required center-to-center distance = (existing_drill/2) + (new_via_drill/2) + clearance
-        required_dist = drill_dia / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        expand = coord.to_grid_dist(required_dist)
-        gx, gy = coord.to_grid(hx, hy)
-
-        for ex in range(-expand, expand + 1):
-            for ey in range(-expand, expand + 1):
-                if ex*ex + ey*ey <= expand*expand:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+    block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
+                                config.hole_to_hole_clearance, config.grid_step)
 
 
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -779,7 +811,8 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
                                          p_net_id: int, n_net_id: int,
                                          config: GridRouteConfig,
                                          exempt_capsules: List[Tuple[float, float, float, float, float]] = None,
-                                         extra_clearance: float = 0.0):
+                                         extra_clearance: float = 0.0,
+                                         exempt_pads: set = None):
     """Add a diff pair's own pads as obstacles for centerline routing.
 
     The diff pair's nets are excluded from the base obstacle map so the route can
@@ -799,6 +832,13 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
         exempt_capsules: List of (x1, y1, x2, y2, radius_mm) capsules in mm where
             pad blocking is skipped
         extra_clearance: Additional clearance to add (diff pair half-spacing)
+        exempt_pads: Optional set of id(pad) allowed to be opened by the capsules.
+            A capsule only carves out the corridor of the leg that built it, so on
+            a multi-point pair another terminal's pad that happens to fall inside
+            this corridor must stay fully blocked - otherwise the partner-polarity
+            track grazes it (castor_pollux: J2's corridor clipped the bottom of
+            J11's 4mm connector pad). When None, every own pad is exemptable
+            (the old behavior, correct for a single-terminal corridor set).
     """
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -827,9 +867,13 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
 
     for net_id in (p_net_id, n_net_id):
         for pad in pcb_data.pads_by_net.get(net_id, []):
+            # A foreign pad (one this leg's corridors don't serve) stays fully
+            # blocked; only this leg's own terminal pads may be opened.
+            skip = (in_exempt_capsule if (exempt_pads is None or id(pad) in exempt_pads)
+                    else None)
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config,
                               extra_clearance=extra_clearance,
-                              skip_cell=in_exempt_capsule)
+                              skip_cell=skip)
 
 
 def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,
@@ -1141,13 +1185,20 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
             continue  # SMD pad, no drill hole
 
         # Required center-to-center distance = (pad_drill/2) + (new_via_drill/2) + clearance
+        # mm-distance test (not floored integer cells) so a via cannot land a
+        # sub-cell inside the hole-to-hole minimum (issue #70 / #125).
         required_dist = pad.drill / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        expand = coord.to_grid_dist(required_dist)
-        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+        req_sq = required_dist * required_dist
+        hx, hy = pad.global_x, pad.global_y
+        gx, gy = coord.to_grid(hx, hy)
+        step = config.grid_step
+        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
 
         for ex in range(-expand, expand + 1):
+            cx = (gx + ex) * step
             for ey in range(-expand, expand + 1):
-                if ex*ex + ey*ey <= expand*expand:
+                cy = (gy + ey) * step
+                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
                     # Skip the pad center - the router can use the existing
                     # through-hole for layer transitions without a new via
                     if ex == 0 and ey == 0:
@@ -1310,6 +1361,10 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
             True are left unblocked (used for connector-region exemptions)
     """
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    # Sub-cell offset of the real pad center from its quantized cell, so blocking
+    # is measured from the real center, not the grid cell (issue #70).
+    off_x = pad.global_x - gx * coord.grid_step
+    off_y = pad.global_y - gy * coord.grid_step
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     clearance = clearance_override if clearance_override is not None else config.clearance
@@ -1340,7 +1395,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # exemptions) filters the array with the same predicate.
     layer_idxs = [layer_map[layer] for layer in expanded_layers if layer in layer_map]
     cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
-                                    config.grid_step, corner_radius, corner_buffer)
+                                    config.grid_step, corner_radius, corner_buffer,
+                                    off_x, off_y)
     if skip_cell is not None and len(cells):
         keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in cells),
                            dtype=bool, count=len(cells))
@@ -1352,7 +1408,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_margin = config.via_size / 2 + clearance + extra_clearance
         via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
-                                            config.grid_step, corner_radius, corner_buffer)
+                                            config.grid_step, corner_radius, corner_buffer,
+                                            off_x, off_y)
         if skip_cell is not None and len(via_cells):
             keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in via_cells),
                                dtype=bool, count=len(via_cells))

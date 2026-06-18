@@ -393,6 +393,7 @@ class _Commit:
         self._net_map = net_map
         self._items: list = []
         self._updated: list = []
+        self._removed: list = []
         self._handle = board.begin_commit()
 
     @property
@@ -414,7 +415,13 @@ class _Commit:
         if item not in self._updated:
             self._updated.append(item)
 
+    def remove(self, item) -> None:
+        """Queue deletion of an EXISTING board item (part of this undo step)."""
+        self._removed.append(item)
+
     def push(self, message: str) -> None:
+        if self._removed:
+            self._board.remove_items(self._removed)
         if self._updated:
             self._board.update_items(self._updated)
         if self._items:
@@ -785,7 +792,8 @@ def apply_routing_results(board, results_data: dict, *,
     nets or layers were modified by polarity/target swaps and stub layer
     switching.
     """
-    counts = {"tracks": 0, "vias": 0, "debug_lines": 0, "swapped_items": 0}
+    counts = {"tracks": 0, "vias": 0, "debug_lines": 0, "swapped_items": 0,
+              "removed": 0}
 
     def net_name_for(net_id):
         if pcb_data is None or net_id is None:
@@ -793,10 +801,34 @@ def apply_routing_results(board, results_data: dict, *,
         net = pcb_data.nets.get(net_id)
         return net.name if net is not None else None
 
+    from routing_utils import pos_key
+
     with begin_commit(board, message) as commit:
         # Pad/stub net swaps (polarity fixes, target swaps) and stub layer
         # modifications first - the new tracks were routed assuming them
         counts["swapped_items"] = _apply_board_swaps(commit, board, results_data, pcb_data)
+
+        # Remove original-board dead-end copper the post-route sweep flagged
+        # (issue #84), mirroring the CLI writer's strip so GUI output matches.
+        # Match each flagged segment to a live track by unordered endpoint pair,
+        # layer, and net, then delete it as part of this commit.
+        segs_to_remove = results_data.get("segments_to_remove") or []
+        if segs_to_remove:
+            remove_keys = set()
+            for s in segs_to_remove:
+                a = pos_key(s.start_x, s.start_y)
+                b = pos_key(s.end_x, s.end_y)
+                remove_keys.add((frozenset((a, b)), layer_id_for(s.layer),
+                                 net_name_for(s.net_id)))
+            for t in board.get_tracks():
+                sx, sy = _vec_xy_mm(t.start)
+                ex, ey = _vec_xy_mm(t.end)
+                tname = (getattr(t.net, "name", "") or "") if t.net is not None else ""
+                key = (frozenset((pos_key(sx, sy), pos_key(ex, ey))), t.layer, tname)
+                if key in remove_keys:
+                    commit.remove(t)
+                    counts["removed"] += 1
+
         # Segments + vias from each net's result
         for result in results_data.get("results", []):
             for seg in result.get("new_segments", []):
@@ -822,14 +854,19 @@ def apply_routing_results(board, results_data: dict, *,
 
 def apply_planes_results(board, *, pcb_data,
                          new_vias=None, new_segments=None, new_zones=None,
+                         ripped_net_ids=None,
                          message: str = "KiCadRoutingTools: planes") -> dict:
     """Apply planes-tab results (zones + stitch vias + tracks) in one commit.
 
     Each input is a list of dicts (see planes_gui callers for the exact
     keys). Returns counts and the list of skipped zones (those whose
     net+layer already had a zone on the board).
+
+    ripped_net_ids: nets whose existing tracks/vias were ripped to clear a
+    blocked pad repair - their old copper is deleted in this same commit before
+    the re-routed copper (in new_segments/new_vias) is added (issue #112).
     """
-    counts = {"tracks": 0, "vias": 0, "zones": 0, "zones_skipped": 0}
+    counts = {"tracks": 0, "vias": 0, "zones": 0, "zones_skipped": 0, "removed": 0}
     skipped: list[tuple[str, str]] = []
 
     def name_for(net_id):
@@ -841,6 +878,17 @@ def apply_planes_results(board, *, pcb_data,
     existing = existing_zone_keys(board)
 
     with begin_commit(board, message) as commit:
+        # Delete the ripped nets' existing copper before adding the re-routed
+        # copper, so it is one undo step and the repair trace can't short the
+        # still-present blocker (issue #112).
+        if ripped_net_ids:
+            ripped_names = {name_for(r) for r in ripped_net_ids if name_for(r)}
+            if ripped_names:
+                for item in list(board.get_tracks()) + list(board.get_vias()):
+                    tn = (getattr(item.net, "name", "") or "") if item.net is not None else ""
+                    if tn in ripped_names:
+                        commit.remove(item)
+                        counts["removed"] += 1
         for vd in (new_vias or []):
             layers = vd.get('layers') or ['F.Cu', 'B.Cu']
             top = layers[0]

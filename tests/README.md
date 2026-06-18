@@ -284,8 +284,10 @@ bash stress_status.sh                              # DONE/RUNNING/TODO + free sl
 
 See `tests/stress/README.md` for the full pipeline, the per-board run
 procedure (`RUNBOOK.md`), the ~4 GB-per-job memory watchdog (`run_limited.sh`),
-and the list of kicad_parser issues the corpus preparation currently works
-around.
+the **deterministic no-LLM replay** of a recorded run (`redo_stress_test.py` +
+the command manifest `run_limited.sh` records — fast, reproducible, and the way
+to A/B an engine change), and the list of kicad_parser issues the corpus
+preparation currently works around.
 
 The whole suite can also be driven by Claude Code with the `/stress-test-router`
 skill (see `docs/claude-skills.md`): it prepares the corpus if missing, runs the
@@ -303,6 +305,23 @@ skipped automatically; ~30s total.
 
 ```bash
 python3 tests/run_doc_examples.py
+```
+
+### Post-route cleanup unit tests
+
+Fast, board-free regression tests for the output-cleanup pass (issues #133 / #84).
+No KiCad needed; each runs in well under a second.
+
+```bash
+python3 tests/test_phantom_copper.py     # drop write-list copper not on the board (#133)
+python3 tests/test_dead_end_prune.py     # dead-end spur pruning + connectivity-gated removal
+python3 tests/test_snap_stub_gaps.py     # close small same-net gaps (extend stub when clear)
+python3 tests/test_remove_segments.py    # output segment removal (incl. v10 paren net names)
+python3 tests/test_orphan_tjunction.py   # orphan detection by real copper extent (no false T-junctions)
+python3 tests/test_restore_collision.py  # collision-safe rip-up restore: refuse stale copper that would short (#134)
+python3 tests/test_drill_hole_keepout.py # hole-to-hole via keepout by mm distance, not a floored disk (#70/#125)
+python3 tests/test_pad_offset_keepout.py # pad keepout measured from the real center, not the quantized cell (#70)
+python3 tests/test_arc_track_parse.py    # (arc) track elements linearized into connected segments (hand-routed-board ingest)
 ```
 
 ## Verifying With KiCad's Own DRC (manual, not part of the tests)

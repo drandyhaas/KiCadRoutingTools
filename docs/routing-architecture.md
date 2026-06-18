@@ -61,7 +61,8 @@ KiCadRoutingTools/
 
 | Module | Purpose |
 |--------|---------|
-| `diff_pair_loop.py` | Main loop iterating over differential pairs to route |
+| `diff_pair_loop.py` | Main loop iterating over differential pairs to route; defers electrically-short legs (< ~5× connector setback) to single-ended |
+| `diff_pair_multipoint.py` | Multi-point chain routing; same-component terminal pairing, per-leg coupled/single-ended decision (`leg_electrically_short`) |
 | `single_ended_loop.py` | Main loop iterating over single-ended nets to route |
 | `reroute_loop.py` | Processes queue of routes that need rerouting after rip-up |
 | `diff_pair_routing.py` | Routes P/N pairs using centerline + offset approach with GND vias |

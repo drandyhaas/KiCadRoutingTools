@@ -130,6 +130,118 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
     return saved_result, ripped_net_ids, was_in_results
 
 
+def _pt_seg_dist_sq(px: float, py: float,
+                    ax: float, ay: float, bx: float, by: float) -> float:
+    """Squared distance from point (px,py) to segment (ax,ay)-(bx,by)."""
+    dx, dy = bx - ax, by - ay
+    if dx == 0.0 and dy == 0.0:
+        return (px - ax) ** 2 + (py - ay) ** 2
+    t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+    cx, cy = ax + t * dx, ay + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
+
+
+def _segs_cross(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> bool:
+    """True if the two segments properly intersect (centerlines cross)."""
+    def ccw(ox, oy, px, py, qx, qy):
+        return (qy - oy) * (px - ox) - (qx - ox) * (py - oy)
+    d1 = ccw(bx0, by0, bx1, by1, ax0, ay0)
+    d2 = ccw(bx0, by0, bx1, by1, ax1, ay1)
+    d3 = ccw(ax0, ay0, ax1, ay1, bx0, by0)
+    d4 = ccw(ax0, ay0, ax1, ay1, bx1, by1)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+
+def _seg_seg_dist_sq(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> float:
+    """Minimum squared distance between two segments (0 if they cross)."""
+    if _segs_cross(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1):
+        return 0.0
+    return min(
+        _pt_seg_dist_sq(ax0, ay0, bx0, by0, bx1, by1),
+        _pt_seg_dist_sq(ax1, ay1, bx0, by0, bx1, by1),
+        _pt_seg_dist_sq(bx0, by0, ax0, ay0, ax1, ay1),
+        _pt_seg_dist_sq(bx1, by1, ax0, ay0, ax1, ay1),
+    )
+
+
+def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
+                          own_net_ids: List[int], clearance: float) -> bool:
+    """Issue #134: return True if restoring saved_result's copper verbatim would
+    violate clearance against another net's copper currently in pcb_data.
+
+    A rolled-back net's saved geometry is stale: while it was ripped, another
+    net may have been (re)routed through the corridor it used to occupy.
+    Re-adding it verbatim then ships a different-net short (the IPS/RESETn
+    collinear F.Cu overlap and the RESETn-via-on-EPHY_RX_P inner trace on
+    ottercast both arose this way). Restoring exactly where it was only
+    collides with copper that MOVED into its space while it was ripped -
+    precisely the desync we want to refuse. Mirrors the plane fix (#88.1).
+    """
+    own = set(own_net_ids)
+    segs = saved_result.get('new_segments', []) or []
+    vias = saved_result.get('new_vias', []) or []
+    if not segs and not vias:
+        return False
+
+    # Bounding box of the saved route, expanded, to prefilter pcb_data copper.
+    xs, ys = [], []
+    for s in segs:
+        xs.extend((s.start_x, s.end_x))
+        ys.extend((s.start_y, s.end_y))
+    for v in vias:
+        xs.append(v.x)
+        ys.append(v.y)
+    margin = 1.0  # widths + clearance are well under 1mm
+    minx, maxx = min(xs) - margin, max(xs) + margin
+    miny, maxy = min(ys) - margin, max(ys) + margin
+
+    def _in_box(lo_x, hi_x, lo_y, hi_y):
+        return not (hi_x < minx or lo_x > maxx or hi_y < miny or lo_y > maxy)
+
+    o_segs = [s for s in pcb_data.segments
+              if s.net_id not in own and s.net_id != 0
+              and _in_box(min(s.start_x, s.end_x), max(s.start_x, s.end_x),
+                          min(s.start_y, s.end_y), max(s.start_y, s.end_y))]
+    o_vias = [v for v in pcb_data.vias
+              if v.net_id not in own and v.net_id != 0
+              and minx <= v.x <= maxx and miny <= v.y <= maxy]
+
+    # Restored segments vs other-net segments (same layer) and vias (all layers).
+    for s in segs:
+        hw = s.width / 2.0
+        for o in o_segs:
+            if o.layer != s.layer:
+                continue
+            thr = hw + o.width / 2.0 + clearance
+            if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
+                                o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
+                return True
+        for v in o_vias:
+            thr = hw + v.size / 2.0 + clearance
+            if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
+                               s.end_x, s.end_y) < thr * thr:
+                return True
+
+    # Restored vias (span layers) vs other-net vias and segments.
+    for vv in vias:
+        vr = vv.size / 2.0
+        for v in o_vias:
+            thr = vr + v.size / 2.0 + clearance
+            if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
+                return True
+        for o in o_segs:
+            thr = vr + o.width / 2.0 + clearance
+            if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
+                               o.end_x, o.end_y) < thr * thr:
+                return True
+
+    return False
+
+
 def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 was_in_results: bool, pcb_data: PCBData, routed_net_ids: List[int],
                 routed_net_paths: Dict[int, List], routed_results: Dict[int, dict],
@@ -141,7 +253,8 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 working_obstacles: 'GridObstacleMap' = None,
                 net_obstacles_cache: Dict[int, 'NetObstacleData'] = None,
                 ripped_route_layer_costs: Dict[int, 'np.ndarray'] = None,
-                ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None):
+                ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None,
+                refused_sink: Optional[set] = None):
     """Restore a previously ripped net to pcb_data and tracking structures.
 
     Args:
@@ -163,8 +276,24 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
         net_obstacles_cache: Optional cache of net obstacles for incremental updates
         ripped_route_layer_costs: Optional dict to clear ripped route layer-specific costs
         ripped_route_via_positions: Optional dict to clear ripped route via positions
+        refused_sink: Optional set; net IDs of a collision-refused restore are
+            added here so the caller can re-route them cleanly later (#134)
     """
     if saved_result is None:
+        return
+
+    # Issue #134: collision-aware restoration. If re-adding this net's stale
+    # saved copper would short other-net copper that moved into its corridor
+    # while it was ripped, refuse: leave the net ripped (rip_up_net already put
+    # it in remaining_net_ids with stubs-only obstacles) so it is reported
+    # unrouted rather than shorted. The net IDs are recorded in refused_sink so
+    # the caller gives them a clean reroute pass afterward (no completion loss).
+    if _saved_route_collides(saved_result, pcb_data, ripped_net_ids, config.clearance):
+        net_label = '/'.join(str(r) for r in ripped_net_ids) or str(net_id)
+        print(f"      restore skipped (net {net_label}): saved copper would short "
+              f"other-net copper; left ripped (#134)")
+        if refused_sink is not None:
+            refused_sink.update(ripped_net_ids)
         return
 
     # Add back to pcb_data

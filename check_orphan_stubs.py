@@ -19,6 +19,7 @@ Examples:
 """
 
 import argparse
+import math
 import sys
 from collections import Counter, defaultdict
 from typing import Set, Tuple, Dict, List, Optional
@@ -33,26 +34,45 @@ def load_pcb_data(filename: str):
     return parse_kicad_pcb(filename)
 
 
-class SpatialIndex:
-    """Simple grid-based spatial index for fast proximity queries."""
+def _endpoint_connected(pt: Tuple[float, float], segments: List[Dict],
+                        vias: List[Tuple[float, float, float]] = None,
+                        ph_pads: List[Tuple[float, float, float]] = None,
+                        layer_pads: List[Tuple[float, float, float]] = None,
+                        tol: float = 0.05) -> bool:
+    """True if a degree-1 endpoint actually lands on same-net copper.
 
-    def __init__(self, points: Set[Tuple[float, float]], cell_size: float = 0.5):
-        self.cell_size = cell_size
-        self.grid: Dict[Tuple[int, int], List[Tuple[float, float]]] = defaultdict(list)
-        for pt in points:
-            cell = (int(pt[0] / cell_size), int(pt[1] / cell_size))
-            self.grid[cell].append(pt)
+    The naive checker treated an endpoint as connected only if within a fixed
+    0.15 mm of a via/pad CENTRE and only matched exact shared segment endpoints,
+    so it mis-flagged copper that is electrically connected: a stub ending inside
+    a via/pad's copper but >0.15 mm from its centre, a tap landing on another
+    trace's body (T-junction), or two traces meeting near-coincidentally. This
+    tests against the actual copper extents -- via radius, pad half-extent, trace
+    half-width -- plus a small overlap margin, matching the connectivity model.
 
-    def has_nearby(self, pt: Tuple[float, float], tolerance: float = 0.15) -> bool:
-        """Check if any point is within tolerance of pt."""
-        cx, cy = int(pt[0] / self.cell_size), int(pt[1] / self.cell_size)
-        # Check the cell and all 8 neighbors
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for p in self.grid.get((cx + dx, cy + dy), ()):
-                    if abs(pt[0] - p[0]) < tolerance and abs(pt[1] - p[1]) < tolerance:
-                        return True
-        return False
+    vias / ph_pads span all layers; layer_pads are SMD pads on this layer. Each
+    entry is (x, y, size) where size is the full diameter / max pad dimension.
+    The endpoint's own segment is skipped (an endpoint trivially touches itself).
+    """
+    px, py = pt
+    for group in (vias, ph_pads, layer_pads):
+        for cx, cy, csize in (group or ()):
+            if math.hypot(px - cx, py - cy) < csize / 2 + tol:
+                return True
+    for s in segments:
+        sx, sy = s['start']
+        ex, ey = s['end']
+        if (px == sx and py == sy) or (px == ex and py == ey):
+            continue  # the endpoint's own segment
+        dx, dy = ex - sx, ey - sy
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-12:
+            continue
+        # Nearest point on the whole segment (endpoints included): catches
+        # T-junction taps, near-coincident endpoints, and collinear overlap.
+        t = max(0.0, min(1.0, ((px - sx) * dx + (py - sy) * dy) / seg_len_sq))
+        if math.hypot(px - (sx + t * dx), py - (sy + t * dy)) < s.get('width', 0.0) / 2 + tol:
+            return True
+    return False
 
 
 def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
@@ -65,17 +85,18 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
     pcb_data = load_pcb_data(filename)
 
     # Build lookup structures once
-    # Vias by net_id
-    vias_by_net: Dict[int, Set[Tuple[float, float]]] = defaultdict(set)
+    # Vias by net_id, with copper size (vias connect on all layers)
+    vias_by_net: Dict[int, List[Tuple[float, float, float]]] = defaultdict(list)
     for via in pcb_data.vias:
-        vias_by_net[via.net_id].add((via.x, via.y))
+        vias_by_net[via.net_id].append((via.x, via.y, getattr(via, 'size', 0.0)))
 
     # Segments by (net_id, layer)
     segments_by_net_layer: Dict[Tuple[int, str], List[Dict]] = defaultdict(list)
     for seg in pcb_data.segments:
         segments_by_net_layer[(seg.net_id, seg.layer)].append({
             'start': (seg.start_x, seg.start_y),
-            'end': (seg.end_x, seg.end_y)
+            'end': (seg.end_x, seg.end_y),
+            'width': getattr(seg, 'width', 0.0)
         })
 
     # Determine which nets to check
@@ -96,11 +117,12 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
     for net_id, net in nets_to_check:
         vias = vias_by_net[net_id]
 
-        # Get through-hole pads (drill > 0 or *.Cu in layers)
-        through_hole_pads = set()
+        # Through-hole pads (drill > 0 or *.Cu) connect on all layers; carry size.
+        through_hole_pads = []
         for pad in net.pads:
             if pad.drill > 0 or '*.Cu' in pad.layers:
-                through_hole_pads.add((pad.global_x, pad.global_y))
+                through_hole_pads.append((pad.global_x, pad.global_y,
+                                          max(pad.size_x, pad.size_y)))
 
         net_results = {}
         for lyr in layers_to_check:
@@ -118,22 +140,21 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
             if not single_endpoints:
                 continue
 
-            # Get layer-specific pads (including SMD pads on this layer)
-            layer_pads = set()
+            # SMD pads on this layer (carry size).
+            layer_pads = []
             for pad in net.pads:
                 if lyr in pad.layers or '*.Cu' in pad.layers:
-                    layer_pads.add((pad.global_x, pad.global_y))
+                    layer_pads.append((pad.global_x, pad.global_y,
+                                       max(pad.size_x, pad.size_y)))
 
-            # Combined valid endpoints: vias, through-hole pads, or layer-specific pads
-            all_valid_endpoints = vias | through_hole_pads | layer_pads
-
-            if not all_valid_endpoints:
-                # All single endpoints are orphans
-                orphans = set(single_endpoints)
-            else:
-                # Use spatial index for fast proximity queries
-                spatial_idx = SpatialIndex(all_valid_endpoints)
-                orphans = {pt for pt in single_endpoints if not spatial_idx.has_nearby(pt)}
+            # A degree-1 endpoint is an orphan only if it touches NO same-net
+            # copper: not within a via/pad's copper extent, and not on another
+            # same-net segment (T-junction / near-coincident / overlap). Matching
+            # the real copper geometry instead of a fixed centre tolerance keeps
+            # connected stubs from being reported as dead ends.
+            orphans = {pt for pt in single_endpoints
+                       if not _endpoint_connected(pt, segments, vias,
+                                                  through_hole_pads, layer_pads)}
 
             if orphans:
                 net_results[lyr] = orphans

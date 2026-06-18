@@ -18,7 +18,7 @@ from routing_config import GridRouteConfig
 from routing_state import RoutingState, record_net_event
 from routing_context import build_single_ended_obstacles, build_incremental_obstacles
 from single_ended_routing import route_multipoint_taps, route_net_with_obstacles, route_multipoint_main
-from connectivity import get_multipoint_net_pads
+from connectivity import get_multipoint_net_pads, get_zone_connected_pad_groups
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
@@ -39,6 +39,67 @@ class Phase3Stats:
     tap_edges_routed: int = 0
     tap_edges_failed: int = 0
     total_time: float = 0.0
+
+
+def _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id):
+    """Re-derive a multipoint result's routed/failed pads from the net's ACTUAL
+    copper currently in pcb_data, via the same union-find used for MST seeding.
+
+    routed_pad_indices is otherwise set optimistically (the two endpoints of the
+    main MST edge are assumed connected). Across rip-and-reroute, the copper that
+    actually reached a pad can be changed or lost while routed_pad_indices keeps
+    claiming the pad is connected -- so the pad is never flagged or retried (the
+    silent SDC0_D3.J2 drop). Recomputing from real copper keeps the flag honest:
+    a pad the result no longer reaches lands in failed_pads_info and gets retried.
+    """
+    pad_info = new_result.get('multipoint_pad_info')
+    if not pad_info:
+        return
+    pads = [pi[5] if len(pi) > 5 else None for pi in pad_info]
+    if any(p is None for p in pads):
+        return  # can't map pads reliably; leave as-is
+    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    zones = [z for z in getattr(pcb_data, 'zones', []) if z.net_id == net_id]
+    layers = [l for l in config.layers if l.endswith('.Cu')]
+    groups = get_zone_connected_pad_groups(segs, vias, pads, zones, layers)
+    if not groups:
+        return
+    from collections import Counter
+    main_comp = Counter(groups.values()).most_common(1)[0][0]
+    routed = {i for i in range(len(pad_info)) if groups.get(i) == main_comp}
+    failed = []
+    for i in range(len(pad_info)):
+        if i not in routed:
+            pad = pad_info[i]
+            po = pad[5] if len(pad) > 5 else None
+            failed.append({'pad_idx': i, 'x': pad[3], 'y': pad[4],
+                           'component_ref': getattr(po, 'component_ref', '?') if po else '?',
+                           'pad_number': getattr(po, 'pad_number', '?') if po else '?'})
+    new_result['routed_pad_indices'] = routed
+    new_result['failed_pads_info'] = failed
+    new_result['tap_pads_connected'] = len(routed)
+    new_result['tap_pads_total'] = len(pad_info)
+
+
+def _commit_net_result(results, routed_results, net_id, new_result,
+                       pcb_data=None, config=None):
+    """Make new_result this net's single entry in the write-list `results`.
+
+    Drops the net's PRIOR result (a superseded earlier rip-reroute attempt) so it
+    doesn't linger and stack coincident same-net vias at the shared transition
+    cell (issue #87). Then reconciles routed_pad_indices with the result's actual
+    copper, so a pad a reroute dropped is flagged rather than silently kept.
+    """
+    prior = routed_results.get(net_id)
+    if prior is not None and prior is not new_result:
+        while prior in results:
+            results.remove(prior)
+    routed_results[net_id] = new_result
+    if new_result not in results:
+        results.append(new_result)
+    if pcb_data is not None and config is not None and new_result.get('multipoint_pad_info'):
+        _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id)
 
 
 def run_phase3_tap_routing(
@@ -229,9 +290,8 @@ def run_phase3_tap_routing(
             # 2. rip_up_net can find routed_results[net_id] in the results list
             if main_result in results:
                 results.remove(main_result)
-            results.append(completed_result)
-
-            routed_results[net_id] = completed_result
+            _commit_net_result(results, routed_results, net_id, completed_result,
+                               pcb_data, config)
 
             # Invalidate this net's cache entry since we added tap segments
             # Otherwise subsequent nets would use stale obstacle cells
@@ -531,7 +591,8 @@ def try_phase3_ripup(
                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                 results, config, track_proximity_cache, layer_map,
                 state.working_obstacles, state.net_obstacles_cache,
-                state.ripped_route_layer_costs, state.ripped_route_via_positions
+                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                refused_sink=state.collision_refused_net_ids
             )
 
     return None
@@ -605,12 +666,12 @@ def _reroute_phase3_ripped_nets(
         if result and not result.get('failed') and result.get('path'):
             main_vias = result.get('new_vias', [])
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-            results.append(result)
+            _commit_net_result(results, routed_results, ripped_net_id, result,
+                               pcb_data, config)
             routed_net_ids.append(ripped_net_id)
             if ripped_net_id in remaining_net_ids:
                 remaining_net_ids.remove(ripped_net_id)
             routed_net_paths[ripped_net_id] = result['path']
-            routed_results[ripped_net_id] = result
             record_net_event(state, ripped_net_id, "reroute_succeeded", {
                 "segments": len(result['new_segments']),
                 "vias": len(main_vias)
@@ -711,8 +772,8 @@ def _reroute_phase3_ripped_nets(
                     # point to something that's actually in results for rip_up_net to work correctly.
                     if result in results:
                         results.remove(result)
-                    results.append(tap_result)
-                    routed_results[ripped_net_id] = tap_result
+                    _commit_net_result(results, routed_results, ripped_net_id, tap_result,
+                                       pcb_data, config)
 
                     # Print red final failure message if re-routed net still has unconnected pads
                     final_failed_pads = tap_result.get('failed_pads_info', [])

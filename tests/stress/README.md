@@ -56,7 +56,8 @@ in `RUNBOOK.md` → "Orchestration".
 Operational limits (baked into the scripts / learned the hard way):
 
 - Every routing/fanout/plane/check command is wrapped in `run_limited.sh`
-  (kills the job at ~4 GB RSS, overridable with `LIMIT_KB`).
+  (kills the job at ~4 GB RSS, overridable with `LIMIT_KB`). It also **records**
+  each command to a replay manifest — see "Deterministic replay" below.
 - 4 boards run concurrently — most jobs stay well under the 4 GB cap, so
   4-in-flight works on an 8 GB machine and the per-job watchdog backstops any
   spike. (Lower the concurrency arg if you see swapping.)
@@ -64,6 +65,82 @@ Operational limits (baked into the scripts / learned the hard way):
   20-min/command cap and ~45-min board budget (RUNBOOK rule 12). The queue
   manager and `stress_status.sh` track liveness from disk (results JSON +
   run-dir activity), so dropped/stale notifications can't mislead them.
+
+## Deterministic replay (redo without an LLM) — issue #132
+
+The LLM agent routes each board once, with judgment. That run is slow (tens of
+minutes, mostly API latency), can die mid-pipeline on a transient API error, and
+picks parameters afresh each time — so two runs of the same board aren't
+identical, which makes it impossible to cleanly A/B an engine change.
+
+To fix this, each board-mutating tool (`route.py`, `route_diff.py`,
+`route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`) **self-records**
+its invocation (fully quoted argv + cwd) to a manifest via
+`redo_record.record_invocation()` at the top of `main()`. Recording is gated on
+the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
+`<run-dir>/redo_commands.sh` for every board run. Self-recording is reliable even
+when a command isn't routed through `run_limited.sh` — which the agent does
+inconsistently — so the manifest is a complete, replayable transcript of the run.
+
+`redo_stress_test.py` replays a manifest verbatim — no LLM, no API calls,
+seconds-to-minutes instead of tens of minutes, and immune to API outages. The
+router is deterministic, so a replay reproduces the recorded board exactly (only
+the freshly-assigned track/via UUIDs differ; geometry and nets are identical).
+
+```bash
+# Replay a recorded run in place (re-runs the exact recorded sequence):
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh
+
+# A/B an engine change: replay the SAME manifest into two fresh dirs with
+# --remap (rewrites the original run-dir path prefix so absolute intermediate
+# paths land in the new dir; the source board's own absolute path still resolves):
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
+    --remap /…/runs/<board>:/tmp/redo_baseline      # with your change reverted
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
+    --remap /…/runs/<board>:/tmp/redo_change         # with your change applied
+# then diff the two final boards (ignore uuid lines) / re-grade DRC + connectivity.
+```
+
+Flags: `--skip-checks` (omit the non-mutating `check_*` commands for speed),
+`--dry-run` (print the plan), `--continue-on-error` (push past a failing command
+instead of stopping — the recorded sequence already contains the agent's retries,
+so a recorded failure is normal and is followed by its successful retry).
+
+Recording is opt-in: set `REDO_MANIFEST=<path>` to capture a manual run (only the
+board-mutating tools record; re-run `check_*` separately for grading), or leave it
+unset / `=/dev/null` to disable.
+
+### Per-command timing (#132)
+
+Both the original run and a replay record per-command wall-clock so routing
+performance can be compared across code versions:
+
+- **Original run** — alongside `redo_commands.sh`, `record_invocation()` writes a
+  sibling `redo_timings.jsonl` (one JSON line per command: `seconds`, `cwd`,
+  `argv`, appended on process exit via `atexit`). The manifest itself stays a
+  clean, replayable script.
+- **Replay** — `redo_stress_test.py` times each command, prints a slowest-first
+  breakdown, and with `--timings-out PATH` writes the per-command timings as JSON.
+  Timing the deterministic replay (not the LLM run, whose wall time is interleaved
+  with model thinking) is the apples-to-apples measurement.
+
+### Minimizing a manifest (#132)
+
+A recorded manifest contains the agent's trial-and-error — `--help` probes,
+retries that overwrite an output with different parameters, dead-end attempts
+whose output is never consumed. `minimize_manifest.py` reduces it to the minimal
+set of commands that still reproduces the final board, via a data-flow backward
+slice (each read binds to the file's current producer, so superseded writes drop
+out). It is **read-only on the input** — writes only to `-o` or stdout, and
+refuses `-o` equal to the input, so a recorded artifact is never clobbered:
+
+```bash
+# Emit a minimal replay alongside the recorded one (never overwrites it):
+python3 tests/stress/minimize_manifest.py <run-dir>/redo_commands.sh \
+    -o <run-dir>/redo_commands.min.sh
+python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.min.sh \
+    --timings-out <run-dir>/redo_timings.replay.json
+```
 
 ## Routing-constraint validation (what params to route with)
 

@@ -56,11 +56,18 @@ _CONSTRAINT_FIELDS = ('min_clearance', 'min_track_width', 'min_via_diameter',
 # 0.45mm standard via can't via-in-pad / dog-bone between). Not the default --
 # general routing uses the standard via. On 2-layer it equals the standard via
 # (advanced small vias are a multilayer option).
+# 'track_width' is the fab PHYSICAL minimum trace width, and it is LAYER-DEPENDENT:
+# JLCPCB allows 3.5 mil (0.0889 mm) only on 4+ layer boards; 2-layer is limited to
+# 5 mil (0.127 mm). It is deliberately BELOW the board's own min_track_width
+# constraint, which is usually conservative (human originals route dense channels
+# at the fab minimum, e.g. ottercast 0.127 mm under its 0.2 mm board rule). Dense/
+# congested signals route down to this (see list_nets --design-rules "fine-pitch
+# signal track floor"); power/impedance nets keep their net-class width.
 _FAB_FLOORS = {
     2: {'clearance': 0.127, 'track_width': 0.127, 'via_diameter': 0.45,
         'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
         'fine_via_diameter': 0.45, 'fine_via_drill': 0.20},
-    4: {'clearance': 0.10, 'track_width': 0.10, 'via_diameter': 0.45,
+    4: {'clearance': 0.10, 'track_width': 0.0889, 'via_diameter': 0.45,
         'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
         'fine_via_diameter': 0.30, 'fine_via_drill': 0.15},
 }
@@ -107,7 +114,14 @@ def effective_floors(constraints, copper_layers):
         # smallest, not floored by the board's nominal min via.
         'fine_via_diameter':    fab['fine_via_diameter'],
         'fine_via_drill':       fab['fine_via_drill'],
+        # DRC-enforced track floor: the board's own min_track_width if set, else the
+        # fab minimum. min_track_width IS a DRC rule, so this is what DRC checks.
         'min_track_width':      floor(constraints.get('min_track_width'), fab['track_width']),
+        # Fab PHYSICAL track minimum, NOT clamped to the board constraint. Dense/
+        # congested signals route down to this (below the board's min_track_width,
+        # like the human originals); it's the routing-capability floor, distinct
+        # from the DRC floor above.
+        'fab_track_width':      fab['track_width'],
         'drc_clearance':        fab['clearance'],
         'drc_hole_to_hole':     fab['hole_to_hole'],
         'fab': fab,
@@ -232,7 +246,7 @@ def print_design_rules(pcb_path):
     print(f"Manufacturing floor (Constraint or JLC fab min, whichever is larger): "
           f"via {eff['working_via_diameter']}/{eff['working_via_drill']}  "
           f"clearance {eff['drc_clearance']}  hole-to-hole {eff['drc_hole_to_hole']}  "
-          f"track {eff['min_track_width']}")
+          f"track {eff['min_track_width']} (DRC track floor = board min_track_width)")
     # The router must honour these as DISTINCT rules (issue #125):
     print(f"  - hole-to-hole {eff['drc_hole_to_hole']} = drill-to-drill minimum, "
           "net-INDEPENDENT: applies to via/via, via/pad-drill and pad-drill/pad-drill "
@@ -247,6 +261,16 @@ def print_design_rules(pcb_path):
               "(JLC advanced, small extra cost): use ONLY for sub-~0.5mm-pitch "
               "BGA/QFN escape (bga_fanout/qfn_fanout/route_diff for those parts); "
               "keep the standard via for general routing.")
+    # Fab PHYSICAL track floor, distinct from the DRC track floor above. Surfaced
+    # only when the fab can go thinner than the board's min_track_width — that gap
+    # is where dense-board completion is won (the human originals route there).
+    if eff['fab_track_width'] < eff['min_track_width']:
+        print(f"  - fine-pitch signal track floor {eff['fab_track_width']} "
+              f"({dr['copper_layers']}-layer fab min; the board's min_track_width is "
+              f"{eff['min_track_width']}): on DENSE/congested boards route ordinary "
+              "signals at this width (route.py --track-width), BELOW the board's own "
+              "rule, like the human originals — thinner is more complete AND faster. "
+              "Keep power nets on --power-nets and impedance nets at net-class width.")
 
     # Routing flags: track_width is a per-class MINIMUM (keep, for current/
     # impedance); clearance is the per-class default. But the VIA uses the small
@@ -262,6 +286,10 @@ def print_design_rules(pcb_path):
           "(Default class; small working via):\n  " + " ".join(flags))
     print("  Fine-pitch escape may drop --clearance toward the manufacturing floor "
           f"{eff['drc_clearance']} (never below); route non-Default-class nets separately.")
+    if eff['fab_track_width'] < eff['min_track_width']:
+        print(f"  On dense/congested boards, drop --track-width to the fab floor "
+              f"{eff['fab_track_width']} for ordinary signals (keep --power-nets and "
+              "impedance nets wide); thinner completes more nets and routes faster.")
 
     if 'diff_pair_gap' in d or 'diff_pair_width' in d:
         dp = []

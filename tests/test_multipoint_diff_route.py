@@ -18,18 +18,27 @@ This exercises, end to end:
   candidates compete by routed length (swaps only at chain-fresh terminals);
   with --no-fix-polarity, flips only - pad swaps must never occur
 
-Each scenario asserts the pair(s) routed, EVERY terminal is connected
-(multi-point connectivity), polarity swaps match expectations, and the result
-is DRC-clean scoped to the pair nets. Geometry matches the board's netclass
-(0.2mm track / 0.25mm pair gap / 0.2mm clearance).
+Electrically short legs (< ~5 connector setbacks) are NOT coupled: route_diff
+defers them to single-ended, so the lvds pairs route MIXED here (the long legs
+couple, the short IC-pin legs defer). Each scenario therefore runs a matching-
+width single-ended follow-up pass (route.py) - the real plan-pcb-routing flow -
+before asserting full multi-point connectivity. The follow-up MUST use the same
+track width as the coupled pass: mismatched widths would themselves cause
+clearance errors.
+
+Each scenario asserts the pair(s) routed, the multi-point leg plan is as
+expected, EVERY terminal is connected after the single-ended follow-up, and the
+result is DRC-clean scoped to the pair nets. Geometry matches the board's
+netclass (0.2mm track / 0.25mm pair gap / 0.2mm clearance).
 
 Also covers the issue #56 regression on
 `kicad_files/lvds_converter_dualclk_gnd.kicad_pcb` - the same board with a
 GND plane and stitching vias, one of which blocks the channel between R3 and
-IC4. Wrap-around legs must never cross earlier legs (shorts): with polarity
-fixing on the pair routes cleanly around the via; with --no-fix-polarity the
-CLK pair must FAIL HONESTLY (all chain orderings rejected, no segments
-committed) instead of shorting.
+IC4. The wrap-around-crossing failure mode must never produce a short. The
+short IC-pin legs now defer to single-ended (which sidesteps the forced
+crossing entirely), so both with and without polarity fixing the board routes
+to full connectivity, DRC-clean and crossing-free, after the single-ended
+follow-up. (Crossing rejection still guards any long, genuinely-coupled leg.)
 
 Run:
     python3 tests/test_multipoint_diff_route.py
@@ -63,15 +72,16 @@ CLEARANCE = "0.2"
 # expected swaps: None = don't check; [] = swaps must NOT occur; [names] =
 # exactly these pairs must have been polarity-swapped.
 #
-# With polarity fixing on (CLI default), legs compare pad-swap vs
-# connector-flip candidates by length: DATA's flip wins, CLK's pad swap wins
-# (it avoids a long wrap through IC4). With --no-fix-polarity, swaps must
-# never occur - only the opposite-side connector resolution.
+# The lvds pairs route MIXED: the long legs couple, the short IC-pin legs defer
+# to single-ended (< ~5 setbacks). A polarity pad swap only happens on a coupled
+# leg, so with the swap-candidate leg now deferred, no pad swap occurs on either
+# pair (polarity_swapped == [] everywhere). With --no-fix-polarity swaps must
+# never occur regardless.
 SCENARIOS = [
-    ("DATA multi-point (fix-polarity on: flip beats swap)",
+    ("DATA multi-point (fix-polarity on)",
      [(["/DATA+", "/DATA-"], 1)], {"3 terminals, 2 legs": 1}, [], []),
-    ("CLK multi-point (fix-polarity on: pad swap beats flips)",
-     [(["/CLK+", "/CLK-"], 1)], {"4 terminals, 3 legs": 1}, [], ["/CLK"]),
+    ("CLK multi-point (fix-polarity on)",
+     [(["/CLK+", "/CLK-"], 1)], {"4 terminals, 3 legs": 1}, [], []),
     ("DATA multi-point (--no-fix-polarity)",
      [(["/DATA+", "/DATA-"], 1)], {"3 terminals, 2 legs": 1},
      ["--no-fix-polarity"], []),
@@ -91,6 +101,19 @@ def route(board, nets, out, extra_args=()):
     txt = r.stdout + r.stderr
     m = re.search(r"JSON_SUMMARY: (\{.*\})", txt)
     return (json.loads(m.group(1)) if m else None), txt
+
+
+def single_ended_followup(board, nets):
+    """Finish any electrically-short legs the diff pass deferred, with a
+    single-ended route.py pass at the SAME track width as the coupled pass.
+    Mismatched widths between coupled and single-ended copper would themselves
+    cause clearance errors, so this mirrors GEOM's width/clearance/layers."""
+    fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff_se_")
+    os.close(fd)
+    cmd = ([sys.executable, "route.py", board, out, "--nets"] + nets +
+           ["--track-width", "0.2", "--clearance", CLEARANCE, "--layers", "F.Cu", "B.Cu"])
+    subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
+    return out
 
 
 def is_connected(board, nets):
@@ -119,6 +142,7 @@ def scenario(name, runs, expect_legs, extra_args, expect_swapped, verbose):
         swaps_ok = True
         all_swapped = []
         all_txt = ""
+        deferred = False
         for nets, expect_routed in runs:
             fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff_")
             os.close(fd)
@@ -137,6 +161,8 @@ def scenario(name, runs, expect_legs, extra_args, expect_swapped, verbose):
             all_swapped += summary.get("polarity_swapped_pairs", [])
             # Target swaps never apply to multi-point pairs
             swaps_ok = swaps_ok and summary.get("target_swaps") == []
+            if summary.get("single_ended_followup_nets"):
+                deferred = True
             board = out  # next run routes on this output
 
         if expect_swapped is not None:
@@ -154,6 +180,13 @@ def scenario(name, runs, expect_legs, extra_args, expect_swapped, verbose):
             log.append("multi-point leg plan as expected")
 
         final = outs[-1]
+        # route_diff deferred electrically-short legs to single-ended; finish
+        # them with a matching-width single-ended pass before checking that every
+        # multi-point terminal is connected (the real plan-pcb-routing flow).
+        if deferred:
+            final = single_ended_followup(final, all_nets)
+            outs.append(final)
+            log.append("ran single-ended follow-up for deferred short legs")
         conn = is_connected(final, all_nets)
         clean = drc_clean(final, all_nets)
         log.append(f"connected(all terminals)={conn}  drc_clean(pair-scoped)={clean}")
@@ -166,7 +199,10 @@ def scenario(name, runs, expect_legs, extra_args, expect_swapped, verbose):
 
 
 def _pair_segments_and_crossings(board_path, net_names):
-    """(segment count, proper same-layer crossing count) for the given nets."""
+    """(segment count, proper same-layer DIFFERENT-net crossing count) for the
+    given nets. Only different-net crossings are shorts (the #56 failure mode);
+    a same-net self-crossing is permitted by KiCad and the single-ended follow-up
+    can introduce one harmlessly, so it is not counted."""
     from kicad_parser import parse_kicad_pcb
 
     pcb = parse_kicad_pcb(board_path)
@@ -188,19 +224,23 @@ def _pair_segments_and_crossings(board_path, net_names):
             min(abs(d1), abs(d2), abs(d3), abs(d4)) > eps
 
     n_cross = sum(1 for i in range(len(segs)) for j in range(i + 1, len(segs))
-                  if segs[i].layer == segs[j].layer and crosses(segs[i], segs[j]))
+                  if segs[i].net_id != segs[j].net_id
+                  and segs[i].layer == segs[j].layer and crosses(segs[i], segs[j]))
     return len(segs), n_cross
 
 
 def gnd_obstacle_scenario_fix_on(verbose):
     """Issue #56 board, polarity fixing ON: both pairs route around the
-    blocking stitching via with zero crossings."""
+    blocking stitching via with zero crossings (short legs defer to single-ended;
+    the single-ended follow-up completes them cleanly)."""
     name = "GND-via obstacle (fix-polarity on: routes clean, no crossings)"
     log = []
-    fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
-    os.close(fd)
+    outs = []
     try:
         nets = ["/CLK+", "/CLK-", "/DATA+", "/DATA-"]
+        fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
+        os.close(fd)
+        outs.append(out)
         summary, txt = route(GND_BOARD, nets, out)
         if verbose:
             print(txt)
@@ -208,50 +248,65 @@ def gnd_obstacle_scenario_fix_on(verbose):
             return name, False, ["route_diff produced no summary"]
         routed_ok = summary.get("successful") == 2 and summary.get("failed") == 0
         log.append(f"routed: {summary.get('successful')}/2 failed={summary.get('failed')}")
-        n_segs, n_cross = _pair_segments_and_crossings(out, nets)
+        final = out
+        if summary.get("single_ended_followup_nets"):
+            final = single_ended_followup(out, nets)
+            outs.append(final)
+            log.append("ran single-ended follow-up for deferred short legs")
+        n_segs, n_cross = _pair_segments_and_crossings(final, nets)
         log.append(f"pair segments={n_segs} crossings={n_cross}")
-        conn = is_connected(out, nets)
-        clean = drc_clean(out, nets)
+        conn = is_connected(final, nets)
+        clean = drc_clean(final, nets)
         log.append(f"connected={conn}  drc_clean(pair-scoped)={clean}")
         return name, (routed_ok and n_cross == 0 and conn and clean), log
     finally:
-        if os.path.exists(out):
-            os.remove(out)
+        for o in outs:
+            if os.path.exists(o):
+                os.remove(o)
 
 
 def gnd_obstacle_scenario_no_fix(verbose):
-    """Issue #56 board, --no-fix-polarity: every CLK chain ordering needs a
-    crossing, so the pair must FAIL HONESTLY - crossing legs rejected, all
-    legs ripped, nothing committed. DATA (unaffected by the via) routes."""
-    name = "GND-via obstacle (--no-fix-polarity: CLK fails honestly, no shorts)"
+    """Issue #56 board, --no-fix-polarity: the legs the blocking via would force
+    to cross are electrically short, so they defer to single-ended instead of
+    crossing. Even without polarity fixing the board therefore routes to full
+    connectivity, DRC-clean and crossing-free, after the single-ended follow-up
+    (no shorts). Crossing rejection still guards any long, genuinely-coupled leg."""
+    name = "GND-via obstacle (--no-fix-polarity: defers short legs, no shorts)"
     log = []
-    fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
-    os.close(fd)
+    outs = []
     try:
         nets = ["/CLK+", "/CLK-", "/DATA+", "/DATA-"]
+        fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
+        os.close(fd)
+        outs.append(out)
         summary, txt = route(GND_BOARD, nets, out, ["--no-fix-polarity"])
         if verbose:
             print(txt)
         if summary is None:
             return name, False, ["route_diff produced no summary"]
-        outcome_ok = (summary.get("failed_diff_pairs") == ["/CLK"]
-                      and summary.get("routed_diff_pairs") == ["/DATA"])
+        # No pair may be a hard failure (a long coupled leg that could not route
+        # without crossing would still fail honestly; here the obstructed legs
+        # are short and defer instead).
+        no_failure = not summary.get("failed_diff_pairs")
         log.append(f"routed={summary.get('routed_diff_pairs')} "
-                   f"failed={summary.get('failed_diff_pairs')}")
-        rejected = ("crosses an earlier leg" in txt) or ("crosses itself" in txt)
-        log.append(f"crossing legs rejected in output: {rejected}")
-        # The honest failure must leave NOTHING behind: zero CLK segments
-        # (every attempt's legs ripped), so no shorts can have been committed
-        clk_segs, clk_cross = _pair_segments_and_crossings(out, ["/CLK+", "/CLK-"])
-        log.append(f"CLK segments left on board={clk_segs} crossings={clk_cross}")
-        data_conn = is_connected(out, ["/DATA+", "/DATA-"])
-        data_clean = drc_clean(out, ["/DATA+", "/DATA-"])
-        log.append(f"DATA connected={data_conn}  drc_clean={data_clean}")
-        return name, (outcome_ok and rejected and clk_segs == 0
-                      and data_conn and data_clean), log
+                   f"failed={summary.get('failed_diff_pairs')} "
+                   f"deferred={summary.get('single_ended_followup_nets')}")
+        final = out
+        if summary.get("single_ended_followup_nets"):
+            final = single_ended_followup(out, nets)
+            outs.append(final)
+            log.append("ran single-ended follow-up for deferred short legs")
+        # No crossing shorts anywhere, full connectivity, DRC-clean.
+        n_segs, n_cross = _pair_segments_and_crossings(final, nets)
+        conn = is_connected(final, nets)
+        clean = drc_clean(final, nets)
+        log.append(f"pair segments={n_segs} crossings={n_cross}  "
+                   f"connected={conn}  drc_clean={clean}")
+        return name, (no_failure and n_cross == 0 and conn and clean), log
     finally:
-        if os.path.exists(out):
-            os.remove(out)
+        for o in outs:
+            if os.path.exists(o):
+                os.remove(o)
 
 
 def main():

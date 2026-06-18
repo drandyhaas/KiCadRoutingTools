@@ -92,6 +92,10 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    the watchdog wrapper, e.g.
    `bash /Users/andy/Documents/KiCadRoutingTools/tests/stress/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
    It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
+   Separately, the board-mutating tools self-record their invocations to
+   `<run-dir>/redo_commands.sh` (run_board.sh sets `REDO_MANIFEST`) so the whole
+   run can later be replayed deterministically with no LLM via `redo_stress_test.py`
+   (issue #132; see `tests/stress/README.md`). Nothing extra to do for recording.
    Up to 4 boards run concurrently — in practice most jobs sit well under the
    4 GB cap most of the time, so 4-in-flight is fine on an 8 GB machine; the
    per-job watchdog still backstops any board that spikes. Keep an eye on RAM.
@@ -125,6 +129,12 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
      AND to route_disconnected_planes (its per-pad repair connects the fine-pitch
      plane balls). Keep the standard via for general route.py and the bulk
      route_planes pour (#99/#122).
+   - PLANE REPAIR (Step 5): run route_disconnected_planes with the SAME signal
+     params as Step 3 (clearance/via/track-width/grid + `--power-nets`/
+     `--power-nets-widths` + `--no-bga-zone` if used) AND `--rip-blocker-nets
+     --reroute-ripped-nets`, so a plane-net pad blocked by a signal trace (e.g. a
+     connector GND pin) is connected by tracing to an adjacent same-net pad,
+     ripping the blocker and re-routing it at the right width (#112).
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.
@@ -139,6 +149,17 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    Always exclude plane nets from fanout/routing with `"!GND"`-style patterns
    (match the board's actual net names, e.g. "!/GND", "!AGND" — check the
    power listing first).
+   NET-COVERAGE INVARIANT (mandatory, plan-pcb-routing Step 5b): every net you
+   exclude from the signal route with `!X` MUST be poured by the plane step's
+   `--nets`. The exclusion set and the plane-net set must be IDENTICAL — diff
+   them before routing. A net in neither (excluded from routing, not poured)
+   silently gets ZERO copper and the run "completes" with it fully unrouted
+   (this dropped ottercast_audio's GNDA 0/23). Secondary grounds (AGND/GNDA/
+   DGND tied to GND through one 0Ω/ferrite — find the tie in the power listing)
+   get their OWN pour region (Voronoi-share an inner layer is fine), NOT merged
+   into GND and NOT left out. COVERAGE GATE at the end: `check_connected.py`'s
+   "Unrouted net with N pads" list must be empty except for justified single-pad/
+   NC nets — any multi-pad net there is a coverage defect to fix, not a stat to report.
 5. Fanout: only for BGA/PGA/QFN/QFP components per the skill's depth rule.
    Through-hole connectors/DIPs don't need fanout.
    FIX VERIFICATION (issues #79/#80, fixed): fanout tools now write name-style
@@ -218,7 +239,22 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    --no-bga-zone`).
 10. One retry round allowed: if routing fails some nets, re-run the failed nets
    per the skill's "Diagnose and Retry" table (use the same output->input
-   chaining). Record both attempts.
+   chaining). Record both attempts. If the failures are CONGESTION (rippable
+   churn, many fails clustered in one channel, or "boxed in by static obstacles"
+   at fine pitch), route signals at the FAB FLOOR (skill: "Route signals at the
+   FAB floor by default"). KEY POINTS: (a) thinner is monotonically better on
+   dense boards — more nets complete AND faster (ottercast: 0.127mm=122 nets/2.7s
+   vs 0.2mm=103 nets/6.5s), so route thin from the start, no widen-back sweep.
+   (b) The fab floor is the fab's PHYSICAL track minimum (JLC 0.0889mm/3.5mil;
+   0.127mm/5mil = safe zero-cost default), NOT the board's min_track_width and NOT
+   the "manufacturing floor" track that --design-rules prints (it clamps track to
+   max(board_min, JLC) so it can read 0.2 — that clamp is the bug; the via and
+   clearance floors it prints are fine). Going BELOW the board's min_track_width is
+   intended — the human ottercast board routes 0.127mm under its own 0.2mm
+   constraint. (c) Re-run the WHOLE signal step thin (not just failed nets — their
+   blockers are the already-routed wider tracks), keep power/impedance nets wide,
+   add a finer --grid-step for fine-pitch escapes; if still congested step the
+   width down further toward 0.0889.
 11. Verification (always, on the final board):
     - `check_drc.py <final> --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee drc.log`
       (manufacturing floor from `--design-rules`, per step 7; note the flags used)

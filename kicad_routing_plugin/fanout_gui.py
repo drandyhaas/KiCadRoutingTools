@@ -1102,6 +1102,7 @@ class FanoutTab(wx.Panel):
         # Get shared parameters from Basic tab
         shared = self.get_shared_params() if self.get_shared_params else {}
         track_width = shared.get('track_width', defaults.QFN_TRACK_WIDTH)
+        clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
 
         # Get extension from config (QFN-specific parameter)
         extension = config.get('extension', defaults.QFN_EXTENSION)
@@ -1119,6 +1120,7 @@ class FanoutTab(wx.Panel):
                 layer=component_layer,
                 track_width=track_width,
                 extension=extension,
+                clearance=clearance,
             )
 
             self._apply_fanout_results(

@@ -94,7 +94,9 @@ def iter_pad_blocked_cells(
     margin: float,
     grid_step: float,
     corner_radius: float = 0.0,
-    corner_buffer: float = None
+    corner_buffer: float = None,
+    off_x: float = 0.0,
+    off_y: float = 0.0
 ):
     """
     Generate grid cells that should be blocked for a pad.
@@ -108,6 +110,10 @@ def iter_pad_blocked_cells(
         margin: Blocking margin in mm (e.g., track_width/2 + clearance)
         grid_step: Grid step size in mm
         corner_radius: Corner radius for roundrect pads (0 for rectangular)
+        off_x, off_y: pad center's sub-cell offset in mm
+            (pad.global_x - pad_gx*grid_step). Measures distance from the REAL
+            pad center, not the quantized cell, so a track can't sit a sub-cell
+            inside the clearance on the rounding side (issue #70). 0 = legacy.
 
     Yields:
         (gx, gy) tuples for each blocked cell
@@ -119,8 +125,9 @@ def iter_pad_blocked_cells(
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
     if corner_buffer is None:
         corner_buffer = grid_step / 2
-    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step))
-    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step))
+    # +1 cell so the bbox still covers the region once shifted by the sub-cell offset.
+    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step)) + 1
+    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step)) + 1
     margin_sq = margin * margin
     buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
 
@@ -132,8 +139,9 @@ def iter_pad_blocked_cells(
 
     for ex in range(-expand_x, expand_x + 1):
         for ey in range(-expand_y, expand_y + 1):
-            cell_x = ex * grid_step
-            cell_y = ey * grid_step
+            # Cell center relative to the REAL pad center (issue #70).
+            cell_x = ex * grid_step - off_x
+            cell_y = ey * grid_step - off_y
             abs_x, abs_y = abs(cell_x), abs(cell_y)
 
             # Use buffered margin in corner/diagonal regions where grid discretization
@@ -153,16 +161,26 @@ def pad_blocked_cells_array(
     grid_step: float,
     corner_radius: float = 0.0,
     corner_buffer: float = None,
+    off_x: float = 0.0,
+    off_y: float = 0.0,
 ):
     """Vectorized twin of iter_pad_blocked_cells: returns an (N, 2) int32
-    array of blocked (gx, gy) cells, in the same row-major (ex, ey) order
-    and with bit-identical float comparisons (same IEEE operations on the
-    same values), so the produced cell set matches the generator exactly.
+    array of blocked (gx, gy) cells.
+
+    off_x/off_y are the pad center's sub-cell offset in mm
+    (real_center - quantized_cell, i.e. pad.global_x - pad_gx*grid_step). When
+    given, cell distances are measured from the REAL pad center rather than the
+    quantized grid cell, so a track centerline cannot sit a sub-cell closer to
+    the pad than the clearance on the side the pad rounds toward -- the residual
+    sub-cell PAD-SEGMENT violations of issue #70. With off_x=off_y=0 the result
+    is unchanged (bit-identical to iter_pad_blocked_cells).
     """
     if corner_buffer is None:
         corner_buffer = grid_step / 2
-    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step))
-    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step))
+    # +1 cell so the bbox still covers the disk once shifted by the <=half-cell
+    # sub-cell offset.
+    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step)) + 1
+    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step)) + 1
     margin_sq = margin * margin
     buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
 
@@ -174,8 +192,11 @@ def pad_blocked_cells_array(
     ey = np.arange(-expand_y, expand_y + 1, dtype=np.int64)
     # Match the generator's loop order: ex outer, ey inner
     exg, eyg = np.meshgrid(ex, ey, indexing="ij")
-    cell_x = exg.astype(np.float64) * grid_step
-    cell_y = eyg.astype(np.float64) * grid_step
+    # Cell center relative to the REAL pad center: a cell sits at (gx+ex)*step,
+    # and the real pad center is pad_gx*step + off_x, so the offset along the
+    # axis is ex*step - off_x.
+    cell_x = exg.astype(np.float64) * grid_step - off_x
+    cell_y = eyg.astype(np.float64) * grid_step - off_y
     abs_x = np.abs(cell_x)
     abs_y = np.abs(cell_y)
 

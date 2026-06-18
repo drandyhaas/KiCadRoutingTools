@@ -30,6 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -242,6 +243,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     else:
         print("Using provided PCB data...")
 
+    # Issue #8: snapshot the input board's copper per net BEFORE any routing.
+    # The final connectivity reconciliation reports against the copper that will
+    # be WRITTEN (this original copper + the write-list's new copper), not against
+    # pcb_data -- which accumulates orphan copper from rip/reroute that never
+    # reaches the write-list and would make a net look connected when the output
+    # has it split (glasgow /IO_Banks/IO_Buffer_A/P1).
+    _orig_seg_by_net: Dict[int, list] = {}
+    for _s in pcb_data.segments:
+        _orig_seg_by_net.setdefault(_s.net_id, []).append(_s)
+    _orig_via_by_net: Dict[int, list] = {}
+    for _v in pcb_data.vias:
+        _orig_via_by_net.setdefault(_v.net_id, []).append(_v)
+
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
         layers = DEFAULT_4_LAYER_STACK
@@ -362,6 +376,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Find net IDs and filter already-routed nets
     net_ids = resolve_net_ids(pcb_data, net_names)
+    # Every net in this run's --nets filter, by name (not just the routable ones
+    # resolve_net_ids keeps). The dead-end sweep uses this so it also cleans
+    # inherited stubs on in-filter nets it did not actively route -- single-pad,
+    # already-connected, or failed nets -- while still excluding nets the user
+    # left out (GND / power planes routed in a later stage). Issue #84.
+    _scope_names = set(net_names or [])
+    sweep_scope_ids = {nid for nid, net in pcb_data.nets.items()
+                       if net.name in _scope_names} or set(net_ids)
     if not net_ids:
         print("No valid nets to route!")
         if return_results:
@@ -716,6 +738,39 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         cancel_check=cancel_check,
     )
 
+    # Issue #134: nets whose stale copper would have shorted another net on
+    # restore were left ripped instead of re-added (collision-safe restore).
+    # Now that the board is stable, give them one clean reroute pass so the fix
+    # does not cost completion. Only runs when a refusal actually happened, so
+    # boards without the collision are unaffected.
+    if state.collision_refused_net_ids:
+        recover = []
+        for nid in sorted(state.collision_refused_net_ids):
+            if nid in routed_results or nid not in pcb_data.nets:
+                continue
+            if len(pcb_data.pads_by_net.get(nid, [])) < 2:
+                continue
+            if nid in state.diff_pair_by_net_id:
+                pair_name, pair = state.diff_pair_by_net_id[nid]
+                if (pair.p_net_id in state.queued_net_ids
+                        or pair.n_net_id in state.queued_net_ids):
+                    continue
+                state.reroute_queue.append(('diff_pair', pair_name, pair))
+                state.queued_net_ids.add(pair.p_net_id)
+                state.queued_net_ids.add(pair.n_net_id)
+                recover.append(pair_name)
+            else:
+                if nid in state.queued_net_ids:
+                    continue
+                state.reroute_queue.append(('single', pcb_data.nets[nid].name, nid))
+                state.queued_net_ids.add(nid)
+                recover.append(pcb_data.nets[nid].name)
+        if recover:
+            print(f"Issue #134 recovery: re-routing {len(recover)} net(s) left ripped "
+                  f"to avoid a short: {', '.join(recover)}")
+            run_reroute_loop(state, route_index_start=route_index,
+                             cancel_check=cancel_check)
+
     # Final progress update
     if progress_callback:
         progress_callback(total_routes, total_routes, "Routing complete")
@@ -736,13 +791,106 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             failed_single.append(net_name)
             failed_single_ids.append(net_id)
 
+    # Keep only each net's authoritative result in the write-list. routed_results
+    # holds one result per net; rip-reroute paths (restore_net, layer-swap) can
+    # leave a superseded duplicate of a net's result still in `results`, and its
+    # copper is then written alongside the authoritative one -- stacking coincident
+    # same-net vias (#87). Dropping by identity is safe now that the Phase-3 commit
+    # reconciles each net's result against its actual copper, so the authoritative
+    # result is the complete one (a dropped tap is flagged and re-routed, not lost).
+    _authoritative = {id(r) for r in routed_results.values()}
+    _stale = [r for r in results if id(r) not in _authoritative]
+    if _stale:
+        results[:] = [r for r in results if id(r) in _authoritative]
+        print(f"Dropped {len(_stale)} superseded rip-reroute result(s) from the write-list")
+
+    # Close small gaps where a route stopped a fraction of a track width short of
+    # its same-net pad/via/trace (issue #84): extend the stub with a short
+    # connector when it clears other nets, so the copper physically touches
+    # instead of relying on a connectivity tolerance to bridge a gap KiCad's DRC
+    # would flag. Runs on the full routed board before the phantom/dead-end passes.
+    _snapped = snap_stub_gaps(results, pcb_data, sweep_scope_ids, config)
+    if _snapped:
+        print(f"Closed {_snapped} stub gap(s) to same-net copper")
+
+    # Reconcile the write-list against the actual board so the output can never
+    # contain copper that was ripped off and not restored (issue #133). See
+    # drop_phantom_copper for the full rationale.
+    _phantom_segs, _phantom_vias = drop_phantom_copper(results, pcb_data)
+    if _phantom_segs or _phantom_vias:
+        print(f"Dropped {_phantom_segs} phantom segment(s) and {_phantom_vias} "
+              f"phantom via(s) not on the board from the write-list")
+
+    # Final dead-end sweep (issue #84): trim copper that dead-ends -- tap tails
+    # superseded by rip-and-reroute, spurs left when a blocker was ripped, and
+    # fanout/escape stubs a net routed away from or never completed -- which
+    # collapse_appendices' per-commit pass does not reach. Runs after the phantom
+    # drop so it only sees real board copper. Scoped to the nets this run routed
+    # so untouched planes / excluded nets are never altered. Routed dead ends are
+    # dropped from `results`; original input-file dead ends are returned to strip
+    # from the output file.
+    _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, sweep_scope_ids)
+    if _de_segs or _de_vias:
+        print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
+              f"{_de_vias} unsupported via(s)")
+
+    # Count total vias from results
+    total_vias = sum(len(r.get('new_vias', [])) for r in results)
+
+    # Issue #8: reconcile the reported success counts with the FINAL segment
+    # graph -- i.e. the board that will actually be written. This runs AFTER the
+    # stale-result drop, snap, phantom drop and dead-end sweep (and pcb_data was
+    # synced to the write-list at the stale drop), so pcb_data now matches the
+    # output. A net's pads are reconciled at Phase-3 commit, but its copper can
+    # change afterwards (a later net's rip-up, the recovery reroute, a dropped
+    # superseded result) and leave it split, or a multi-pad net may be routed
+    # with a result that never tracked every pad -- either way it would ship as
+    # phantom success (neo6502 /GPIO4, glasgow /IO_Banks/IO_Buffer_A/P1). Use the
+    # AUTHORITATIVE union-find (check_net_connectivity -- the model
+    # filter_already_routed and check_connected.py use); the stricter geometric
+    # pad-group split wrongly splits genuinely-connected power/bus nets.
+    from check_connected import check_net_connectivity
+    # Per-net copper as it will be WRITTEN: the input board's original copper
+    # plus the write-list's new copper. NOT pcb_data, which also holds orphan
+    # copper from rip/reroute that never reaches the write-list (issue #8).
+    _segs_by_net: Dict[int, list] = {nid: list(lst) for nid, lst in _orig_seg_by_net.items()}
+    _vias_by_net: Dict[int, list] = {nid: list(lst) for nid, lst in _orig_via_by_net.items()}
+    for _r0 in results:
+        for _s in _r0.get('new_segments', []):
+            _segs_by_net.setdefault(_s.net_id, []).append(_s)
+        for _v in _r0.get('new_vias', []):
+            _vias_by_net.setdefault(_v.net_id, []).append(_v)
+    _zones_by_net: Dict[int, list] = {}
+    for _z in getattr(pcb_data, 'zones', []) or []:
+        _zones_by_net.setdefault(_z.net_id, []).append(_z)
+    for _nid, _res in routed_results.items():
+        if _nid in state.diff_pair_by_net_id:
+            continue  # diff pairs report via their own path
+        _pads = pcb_data.pads_by_net.get(_nid, [])
+        if len(_pads) < 2:
+            continue
+        _r = check_net_connectivity(
+            _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
+            _pads, _zones_by_net.get(_nid, []), tolerance=0.02)
+        _dp = _r.get('disconnected_pads') or []
+        if _dp:
+            _res['failed_pads_info'] = [
+                {'x': _p[0], 'y': _p[1],
+                 'component_ref': _p[3] if len(_p) > 3 else '?',
+                 'pad_number': '?'}
+                for _p in _dp]
+        elif _res.get('failed_pads_info'):
+            # Authoritatively connected now: drop a stale (stricter-model or
+            # pre-rip) failure flag so the net is not reported as a phantom fail.
+            _res['failed_pads_info'] = []
+
     # Collect multi-point tap routing stats and failed pad details
     tap_pads_connected = 0
     tap_pads_total = 0
     tap_edges_routed = 0
     tap_edges_failed = 0
     multipoint_nets = 0
-    failed_multipoint = []  # List of {net_name, net_id, failed_pads: [{pad_idx, x, y, component_ref, pad_number}]}
+    failed_multipoint = []  # List of {net_name, net_id, failed_pads: [...]}
     for net_id, result in routed_results.items():
         if result.get('is_multipoint'):
             multipoint_nets += 1
@@ -750,30 +898,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             tap_pads_total += result.get('tap_pads_total', 0)
             tap_edges_routed += result.get('tap_edges_routed', 0)
             tap_edges_failed += result.get('tap_edges_failed', 0)
-            # Collect failed pad details for this net
-            failed_pads_info = result.get('failed_pads_info', [])
-            if failed_pads_info:
-                net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
-                failed_multipoint.append({
-                    'net_name': net_name,
-                    'net_id': net_id,
-                    'failed_pads': failed_pads_info
-                })
-    # Derive final counts set-based from this run's scope rather than the
-    # loop counters: a multipoint net with unconnected tap pads is not fully
-    # routed, a net ripped during Phase 3 whose re-route failed never reaches
-    # the failure counter, and on re-chained boards the loop counters don't
-    # include skipped already-routed nets - mixing them produced negative
-    # "successful" values like -2215 (issue #87).
+        # Collect failed pad details for any net with unreached pads. Issue #8:
+        # non-multipoint multi-pad nets can also end disconnected (glasgow P1),
+        # so this is no longer gated on is_multipoint.
+        failed_pads_info = result.get('failed_pads_info', [])
+        if failed_pads_info:
+            net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+            failed_multipoint.append({
+                'net_name': net_name,
+                'net_id': net_id,
+                'failed_pads': failed_pads_info
+            })
+    # Derive final counts set-based from this run's scope rather than the loop
+    # counters (issue #87): a net with unconnected pads is not fully routed, and
+    # a net ripped during Phase 3 whose re-route failed never reaches the failure
+    # counter.
     scope_ids = {nid for _, nid in single_ended_nets}
     failed_multipoint_ids = {m['net_id'] for m in failed_multipoint}
     fully_routed_ids = {nid for nid in scope_ids
                         if nid in routed_results and nid not in failed_multipoint_ids}
     successful = len(fully_routed_ids)
     failed = len(scope_ids) - successful
-
-    # Count total vias from results
-    total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
     # Print human-readable summary
     print("\n" + "=" * 60)
@@ -860,6 +1005,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'all_segment_modifications': all_segment_modifications,
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
+            # Original-file dead-end copper the caller (GUI) should delete from the
+            # live board, mirroring the writer's strip (issue #84).
+            'segments_to_remove': dead_end_input_segments,
         }
     else:
         # Write output file using extracted output_writer module
@@ -877,7 +1025,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             exclusion_zone_lines=exclusion_zone_lines,
             boundary_debug_labels=boundary_debug_labels,
             skip_routing=skip_routing,
-            add_teardrops=add_teardrops
+            add_teardrops=add_teardrops,
+            segments_to_remove=dead_end_input_segments
         )
 
     # Update schematics with swap info if directory specified
@@ -916,6 +1065,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
 if __name__ == "__main__":
     import argparse
+    from redo_record import record_invocation
+    record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 
     parser = argparse.ArgumentParser(
         description="Batch PCB Router - Routes single-ended nets using Rust-accelerated A*. For differential pairs, use route_diff.py.",

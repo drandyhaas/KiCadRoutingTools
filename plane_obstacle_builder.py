@@ -15,7 +15,8 @@ from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
-                          add_user_keepout_obstacles, add_rule_area_keepout_obstacles)
+                          add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
+                          block_via_cells_near_drills)
 
 import sys
 import os
@@ -461,7 +462,9 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     else:
         corner_radius = 0
 
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
+                                                   off_x=pad.global_x - gx * coord.grid_step,
+                                                   off_y=pad.global_y - gy * coord.grid_step):
         obstacles.add_blocked_via(cell_gx, cell_gy)
 
 
@@ -655,8 +658,6 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     if config.hole_to_hole_clearance <= 0:
         return
 
-    coord = GridCoord(config.grid_step)
-
     # Collect drill holes
     drill_holes = []
 
@@ -674,23 +675,24 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))
 
-    # Group drill holes by radius for batched blocking
-    from collections import defaultdict
-    radius_groups: Dict[float, List[Tuple[int, int]]] = defaultdict(list)
-    for hx, hy, drill_dia in drill_holes:
-        required_dist = drill_dia / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        radius_sq = (required_dist / config.grid_step) ** 2
-        gx, gy = coord.to_grid(hx, hy)
-        radius_groups[radius_sq].append((gx, gy))
-
-    for radius_sq, centers in radius_groups.items():
-        circle_offsets = _precompute_circle_offsets(radius_sq)
-        _batch_block_circles_via(obstacles, centers, circle_offsets)
+    # Enforce the keepout by REAL mm distance from each drill centre (shared with
+    # the signal router) rather than a disk centred on the quantized drill cell,
+    # so a stitching via cannot land a sub-cell inside the minimum (issue #70).
+    block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
+                                config.hole_to_hole_clearance, config.grid_step)
 
 
 def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
-                        coord: GridCoord, hole_to_hole_clearance: float, via_drill: float):
-    """Block the area around a newly placed via for hole-to-hole clearance.
+                        coord: GridCoord, hole_to_hole_clearance: float, via_drill: float,
+                        via_size: float = None, clearance: float = None):
+    """Block the area around a newly placed via so the next same-net via clears it.
+
+    A second via must clear this one on BOTH measures: drill hole-to-hole AND
+    via-ring copper-to-copper. Blocking only the drill distance
+    (via_drill + hole_to_hole) is smaller than the copper distance
+    (via_size + clearance) for these planes, so it let the pour drop a second
+    stitching via close enough to trip same-net via-via copper DRC (the GND/+3V3
+    overlaps). When via_size/clearance are given, block the larger of the two.
 
     Args:
         obstacles: The obstacle map to update
@@ -698,11 +700,15 @@ def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
         coord: Grid coordinate converter
         hole_to_hole_clearance: Minimum clearance between drill holes
         via_drill: Drill diameter of the via
+        via_size: Via outer (copper) diameter; with clearance, also enforce via-via copper clearance
+        clearance: Copper-to-copper clearance
     """
     gx, gy = coord.to_grid(via_x, via_y)
-    # Required distance: (this_drill/2) + (other_drill/2) + clearance
-    # Since we're placing vias of the same size, it's: via_drill + clearance
+    # Drill hole-to-hole: (this_drill/2)+(other_drill/2)+clearance = via_drill + clearance
     required_dist = via_drill + hole_to_hole_clearance
+    # Via-ring copper-to-copper (same-size vias): (size/2)+(size/2)+clearance = via_size + clearance
+    if via_size is not None and clearance is not None:
+        required_dist = max(required_dist, via_size + clearance)
     radius_sq = (required_dist / coord.grid_step) ** 2
     block_circle(obstacles, gx, gy, radius_sq, via_mode=True)
 
@@ -768,7 +774,9 @@ def build_routing_obstacle_map(
                         corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
                     else:
                         corner_radius = 0
-                    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+                    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
+                                                                   off_x=pad.global_x - gx * coord.grid_step,
+                                                                   off_y=pad.global_y - gy * coord.grid_step):
                         obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
                     pad_count += 1
     if verbose:

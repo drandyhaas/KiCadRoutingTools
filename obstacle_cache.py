@@ -238,6 +238,9 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
     """
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    # Sub-cell offset of the real pad center from its grid cell (issue #70).
+    off_x = pad.global_x - gx * coord.grid_step
+    off_y = pad.global_y - gy * coord.grid_step
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     margin = config.track_width / 2 + config.clearance + extra_clearance
@@ -254,7 +257,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # Batched rasterization (issue #35): same cell sets as the generator
     # (pad_blocked_cells_array is bit-identical to iter_pad_blocked_cells)
     cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
-                                    config.grid_step, corner_radius)
+                                    config.grid_step, corner_radius,
+                                    off_x=off_x, off_y=off_y)
     for layer in expanded_layers:
         layer_idx = layer_map.get(layer)
         if layer_idx is not None:
@@ -268,7 +272,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         # Add half grid step buffer to account for grid quantization errors
         via_margin = config.via_size / 2 + config.clearance + config.grid_step / 2
         blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
-                                                    via_margin, config.grid_step, corner_radius))
+                                                    via_margin, config.grid_step, corner_radius,
+                                                    off_x=off_x, off_y=off_y))
 
 
 def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: GridRouteConfig,

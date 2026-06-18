@@ -197,11 +197,16 @@ for fine-pitch boards (#111/#115):**
 Use the printed flags as-is:
 
 - **Routing** (`route.py`, `qfn_fanout.py`, `bga_fanout.py`, `route_planes.py`):
-  `--track-width` and `--clearance` from the **Default class** (track width is a
-  per-class minimum — keep it for current/impedance), but **`--via-size`/`--via-drill`
+  `--clearance` from the **Default class**, but **`--via-size`/`--via-drill`
   from the working floor**, NOT the net-class `via_diameter`. Emitting the net-class
   via everywhere is #115 — it's a max-like default, far too big for fine-pitch
   escape (e.g. a 0.4 mm QFN/BGA needs the small working via the original used).
+  For `--track-width`, the net-class value is only a starting point and is *not* a
+  hard minimum: on dense/congested boards route ordinary signals at the **fab
+  physical floor** instead (thinner is both more complete and faster — see "Route
+  signals at the FAB floor by default" in Diagnose and Retry). Keep the net-class
+  width only for current-carrying nets (`--power-nets`) and impedance-controlled
+  nets.
 - **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
   inter-ball channel is too narrow to fit a track at the net-class clearance on
   more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls
@@ -330,6 +335,52 @@ Report to user:
 - Identified GND nets and pad counts
 - Identified power nets and pad counts
 - Recommended strategy (plane vs wide traces) with layer assignments
+
+## Step 5b: Net-Coverage Reconciliation (mandatory — do not skip)
+
+The stages partition every routable net by glob pattern, and the patterns are
+**not** reconciled automatically. The failure mode this step prevents: a net is
+*excluded* from one stage (`!X`) but never *claimed* by a later one, so it
+silently gets zero copper and the run "completes" with it fully unrouted. This
+is exactly how `GNDA` (an analog ground tied to `GND` through a single 0Ω/
+ferrite) was dropped — excluded from the signal route as a "power net", yet never
+added to the plane step's `--nets`, ending with 0/23 pads connected while the run
+reported success.
+
+**The invariant: every routable net (≥2 pads, not no-connect) must be claimed by
+exactly one stage. A net excluded from any stage MUST be claimed by a later one.**
+
+Before running any command, write the net-handling ledger and reconcile it
+mechanically — do not eyeball it:
+
+1. **Assign every routable net to one handler:**
+   - `fanout + signal route` — ordinary signals (the `"*"` selection minus exclusions)
+   - `diff-pair route` — detected pairs
+   - `plane / pour` — every net you exclude from the signal route with `!X`
+   - `wide trace` — power carried *inside* the route selection via `--power-nets` (NOT excluded)
+
+2. **Diff the two pattern lists.** The set of signal-route exclusions (`!A !B …`)
+   MUST be identical to the set of nets the plane step pours (`--nets A B …`).
+   A net in the symmetric difference is a plan bug — it is excluded from routing
+   but not poured (→ it will be unrouted), or poured but not excluded (→ routed as
+   tracks, defeating the plane). Print both and assert the difference is empty:
+   ```python
+   route_exclusions = {"GND", "+3V3"}   # the !X you will pass route.py
+   plane_nets       = {"GND", "+3V3"}   # the --nets you will pass route_planes.py
+   orphans = route_exclusions ^ plane_nets       # symmetric difference
+   assert not orphans, f"Net-coverage gap: {sorted(orphans)} handled by no stage"
+   ```
+   Do not proceed until `orphans` is empty.
+
+3. **Secondary grounds / split rails** (`AGND`, `GNDA`, `DGND`, `VREF`, or any rail
+   tied to its parent through a single 0Ω resistor or ferrite bead — find the tie
+   with `list_nets.py`: the part with one pad on each net). These are real,
+   separate nets. Pour each as **its own local region** (Voronoi-sharing an inner
+   layer with the main ground is fine) and let the single tie component join it to
+   the parent. **Never** merge it into the parent plane (that shorts the split and
+   defeats its purpose — a green connectivity check then hides an electrical error)
+   and **never** leave it out (that leaves it unrouted). Give each its own `--nets`
+   entry in the plane step, so it appears in BOTH lists in step 2 above.
 
 ## Step 6: Generate Routing Plan
 
@@ -460,9 +511,24 @@ Adjust `--gnd-via-distance` based on the board's highest signal speed:
 
 ### Step 5: Repair Disconnected Plane Regions
 Signal traces and GND return vias may have cut through planes. This step
-reconnects any isolated copper islands.
+reconnects any isolated copper islands AND repairs pad-level plane connections.
+A net ripped here to clear a blocked pad is re-routed, so it MUST get the same
+routing parameters the **signal route (Step 2)** used, or it re-routes wrong (or
+fails). Carry over Step 2's clearance/via/track-width/grid, its `--no-bga-zone`,
+and — critically — the **same `--power-nets`/`--power-nets-widths`** (the wide-
+trace power nets from the power-net strategy, e.g. `+12V -12V` at 0.5/0.5): if a
+wide power net is the blocker, it must re-route at its wide width, not the signal
+default. Enable `--rip-blocker-nets --reroute-ripped-nets`: a plane-net pad that
+can't reach its plane (e.g. a tiny connector GND pin blocked by a signal trace)
+is then connected by tracing to an adjacent same-net pad, ripping the blocker and
+re-routing it (restoring any net that can't re-route). These map to the plugin's
+Planes repair tab "Rip up blocking nets" / "Auto-reroute ripped nets" checkboxes
+(and the plan passes the power-nets/widths through to that tab as well).
 
 python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5.kicad_pcb \
+    --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
+    --rip-blocker-nets --reroute-ripped-nets \
+    --power-nets <PWR...> --power-nets-widths <W...> [--no-bga-zone] \
     2>&1 | tee /tmp/step5_plane_repair.txt
 
 ### Step 6: Verify Results
@@ -477,6 +543,18 @@ python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance <floor> --hole-to
 python3 -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
 python3 -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
 ```
+
+**Coverage gate (mandatory — close the loop on Step 5b).** `check_connected.py`
+already lists every net with ≥2 pads but no copper and no covering zone as
+"Unrouted net with N pads" (it accounts for plane zones and ignores genuine
+single-pad / no-connect nets). After planes + repair, **this unrouted list must
+be empty** except for entries you can individually justify in writing (true
+single-pad nets, deliberate no-connects). A fully-unrouted multi-pad net is a
+coverage defect, NOT a shortfall to report-and-accept: it means a net fell
+through the stage partition (Step 5b). For each one, go back and handle it —
+route it, or add it to the plane step (a secondary ground gets its own pour
+region per Step 5b) — then re-verify. Do not declare the board done while the
+list has unjustified entries.
 
 ### Alternative: VCC as Wide Traces (No Plane)
 
@@ -769,6 +847,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 
 ## Important Notes
 
+0. **Net-coverage invariant (Step 5b)** - Every routable net must be claimed by exactly one stage; a net excluded from one stage (`!X`) MUST appear in a later stage's selection. Reconcile the route-exclusion set against the plane `--nets` set before routing (symmetric difference empty), and confirm `check_connected.py`'s unrouted list is empty at the end. This is the guard against a net (e.g. a secondary ground like GNDA) being silently dropped by every stage.
 1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the plane vias will handle it
 2. **Fanout ALL non-plane nets** - Use `--nets "*" "!GND" "!VCC"` to fan out all nets except those handled by planes. Do NOT use `"/*"` alone as it misses nets with non-hierarchical names like `Net-(U9-Pad1)`. Unconnected nets are automatically filtered out.
 3. **Order matters** - Fanout, then diff pairs, then signals (always excluding plane nets with `"!GND" "!VCC"` exclusions), then planes + GND return vias, then repair. Signals route first because stitching vias can relocate around tracks, but a diff pair cannot relocate around a badly placed via
@@ -851,9 +930,10 @@ After running routing commands:
 
 | Failure Pattern | Likely Cause | Solution |
 |-----------------|--------------|----------|
-| "no rippable blockers found" | Route blocked by non-rippable obstacle | Use `--no-bga-zone` |
+| "no rippable blockers found" | Route blocked by non-rippable obstacle | Use `--no-bga-zone`; if pads are "boxed in by static obstacles", shrink geometry / finer grid (see "Congestion escalation" below) |
 | "Re-route FAILED: no path found" | Ripped net couldn't find new path | Increase `--max-iterations` |
-| Many multipoint pads failed on same component | Congested area | Use `--max-ripup 10` or higher |
+| Many multipoint pads failed on same component | Congested area | Use `--max-ripup 10` or higher; shrink geometry toward the fab floor (see below) |
+| Many failures cluster in one channel/region | Tracks too fat for the channel | **Congestion escalation**: re-route the failed nets at smaller track/via/clearance down to the fab floor (see below) |
 | Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zone` |
 
 ```bash
@@ -871,12 +951,81 @@ python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
    - `--max-iterations 1000000` (default 200000) - 5x more search iterations
    - `--stub-proximity-radius 10 --stub-proximity-cost 3.0` - Spread out fanout stubs (optional, for aesthetics)
 
+#### Route signals at the FAB floor by default (thin is faster AND more complete)
+
+**`track_width` and `via_diameter` are NOT DRC floors** (Step 4), and — this is
+the subtlety — **the fab floor is NOT the board's `min_track_width` constraint
+either.** Three different numbers get confused here; keep them straight:
+
+- **Board `min_track_width`** (from `.kicad_pro`, e.g. ottercast = 0.2 mm) — the
+  author's self-imposed DRC rule. Often conservative. Note `list_nets
+  --design-rules` reports its "manufacturing floor" track as `max(this, JLC min)`,
+  so it currently **clamps the track floor to this constraint** (0.2) and does NOT
+  surface the finer fab capability — do not treat that printed track number as the
+  real floor (it's right for clearance/via, just not for track).
+- **Fab physical track minimum** (JLC ≈ **0.0889 mm / 3.5 mil** standard; **0.127
+  mm / 5 mil** is the safe no-extra-cost width) — the actual floor. **This is the
+  target.** It can be *below* the board's `min_track_width`: the human ottercast
+  board routes most signals at 0.127 mm, under its own 0.2 mm constraint, which is
+  exactly why it fits channels our 0.2 mm net-class tracks can't.
+
+For ordinary signals there is **no benefit to routing fat** and a real cost.
+Measured on ottercast_audio (signal pass, same clearance/grid, width only):
+
+| Signal track width | Multipoint nets routed | Pads connected | Time |
+|--------------------|------------------------|----------------|------|
+| **0.127 (5 mil)**  | **122**                | **360/376**    | **2.69 s** |
+| 0.15               | 118                    | 354/376        | 2.93 s |
+| 0.20 (net-class)   | 103                    | 323/376        | 6.52 s |
+
+Thinner is **monotonically better on both axes** — more nets complete *and* it
+finishes faster (fat tracks cause ripup churn). So don't route fat and escalate;
+**route the signal step at the fab floor from the start, and if still congested
+go DOWN toward the fab physical minimum** (0.2 → 0.127 → 0.0889), not toward the
+board's conservative `min_track_width`. There is no "knee" above the fab floor to
+hunt for.
+
+1. **Take the fab floor**, not the board constraint: the fab's physical track
+   minimum (JLC 0.0889 mm / 3.5 mil; use 0.127 mm / 5 mil for a zero-cost,
+   high-yield default). Going below the board's `min_track_width` is intended here
+   — it's what the human did. (Keep DRC honest separately: grade at the clearance
+   floor from `--design-rules`; a thinner track only *increases* clearance to
+   neighbours, so it never creates a clearance violation.)
+2. **Route the whole signal step at that width** (re-route everything, not just the
+   failed nets — a victim is blocked by the *successful* wide tracks already in its
+   channel, so thinning only the failures leaves the channel full):
+   ```bash
+   python3 -X utf8 route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
+       --nets "*" "!GND" "!VCC" \
+       --track-width <fab floor, e.g. 0.127 or 0.0889> --clearance <floor, e.g. 0.1> \
+       --via-size <floor via, e.g. 0.30> --via-drill <floor drill, e.g. 0.15> \
+       --no-bga-zone --max-ripup 10 --max-iterations 1000000 \
+       2>&1 | tee /tmp/route_signal.txt
+   ```
+   A finer `--grid-step` (0.05, or 0.025 for sub-0.4 mm pitch) is the complementary
+   lever — a corridor that exists geometrically still needs a grid line on it to be
+   found; pair it with the thin width at fine-pitch escapes ("boxed in by static
+   obstacles"). If still congested, step the width down further toward the fab
+   physical minimum and re-route.
+3. **Keep only the nets that NEED width wide — by rule, not by sweep.**
+   Power/high-current nets stay wide via `--power-nets`/`--power-nets-widths`, and
+   impedance-controlled nets keep their calculated width (`--impedance`, or
+   `route_diff.py` for pairs). Everything else routes at the fab floor. You do
+   **not** need to find which signals are "genuinely congested": there's no reason
+   to widen an ordinary signal at all, so the question never arises (and a net that
+   passes wide can itself be the blocker of another, so a per-net width guess is
+   unsound regardless).
+
 3. **If swaps occurred** (polarity or target swaps):
    - Tell the user how many swaps were made
    - Ask if they want to sync the schematic
    - If yes, ask for the KiCad project directory path
    - Re-run the routing command with `--schematic-dir` added
 4. Run verification: invoke `/review-routed-board` (falls back to the raw DRC and connectivity checks)
+4b. **Apply the coverage gate (Step 6):** if `check_connected.py` lists any
+   fully-unrouted multi-pad net, the board is NOT done — handle each (route or
+   pour it) and re-verify before summarizing. Do not present an unrouted net as
+   an accepted shortfall.
 5. Summarize the final state of the board
 6. **Offer to clean up intermediate files**:
    - List the intermediate `.kicad_pcb` files created (e.g., `board_step1.kicad_pcb`, `board_step2.kicad_pcb`, etc.)

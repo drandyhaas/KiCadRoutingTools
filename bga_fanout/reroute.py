@@ -60,10 +60,15 @@ def segments_clear_of_pads(segments: List[Dict],
     return True
 
 
-def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16) -> bool:
-    """True if the segment passes through pad's bounding box (sampled)."""
-    hx = pad.size_x / 2.0
-    hy = pad.size_y / 2.0
+def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
+    """True if the segment passes through pad's bounding box (sampled).
+
+    margin expands the box (clearance + track half-width) to turn the raw
+    overlap test into a clearance test; default 0.0 keeps the true-short
+    semantics most callers rely on.
+    """
+    hx = pad.size_x / 2.0 + margin
+    hy = pad.size_y / 2.0 + margin
     px, py = pad.global_x, pad.global_y
     for t in range(samples + 1):
         f = t / samples
@@ -75,8 +80,13 @@ def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16) -> bool:
 
 
 def segments_clear_of_foreign_pads(segments: List[Dict], layer: str, net_id: int,
-                                   foreign_pads, layer_map: Dict[str, int]) -> bool:
-    """True if no segment (on `layer`) crosses a foreign pad on another net."""
+                                   foreign_pads, layer_map: Dict[str, int],
+                                   margin: float = 0.0) -> bool:
+    """True if no segment (on `layer`) crosses a foreign pad on another net.
+
+    margin (clearance + track half-width) turns the raw crossing test into a
+    clearance test; default 0.0 preserves the true-short semantics.
+    """
     if not foreign_pads:
         return True
     for seg in segments:
@@ -88,7 +98,7 @@ def segments_clear_of_foreign_pads(segments: List[Dict], layer: str, net_id: int
             th = pad.drill > 0
             if not th and layer not in (pad.layers or []):
                 continue
-            if _seg_hits_pad(x1, y1, x2, y2, pad):
+            if _seg_hits_pad(x1, y1, x2, y2, pad, margin=margin):
                 return False
     return True
 
@@ -141,12 +151,14 @@ def route_segments(route: 'FanoutRoute') -> List[Dict]:
 
 
 def _route_jog_clears_pads(route: 'FanoutRoute', obstacles, cfg,
-                           layer_map: Dict[str, int], foreign_pads) -> bool:
+                           layer_map: Dict[str, int], foreign_pads,
+                           margin: float = 0.0) -> bool:
     """True if dropping the exit jog tail makes the route pad-clear.
 
     The 45 jog past the BGA exit is decorative (it does not affect
     connectivity). When the ONLY pad crossing is in that tail, we can drop it
-    instead of moving/removing the whole route.
+    instead of moving/removing the whole route. margin>0 makes this a clearance
+    check (catch a jog that merely grazes within clearance, not just overlaps).
     """
     if route.jog_end is None:
         return False  # nothing to drop
@@ -154,19 +166,106 @@ def _route_jog_clears_pads(route: 'FanoutRoute', obstacles, cfg,
     route.jog_end = None
     route.jog_extension = None
     try:
-        # Use the raw pad-overlap check (true short), consistent with the repair
-        # trigger - we only need the actual overlap gone, not full clearance.
         segs = route_segments(route)
         clear = segments_clear_of_foreign_pads(segs, route.layer, route.net_id,
-                                               foreign_pads, layer_map)
+                                               foreign_pads, layer_map, margin=margin)
     finally:
         if not clear:
             route.jog_end, route.jog_extension = saved_end, saved_ext
     return clear
 
 
+def clear_escapes_of_foreign_pads(routes: List['FanoutRoute'], tracks: List[Dict],
+                                  grid: 'BGAGrid', track_width: float, clearance: float,
+                                  foreign_pads, layer_map: Dict[str, int],
+                                  net_names: Dict[int, str] = None):
+    """Make axial escapes clear breakout-region foreign pads without rerouting.
+
+    The pad-aware repair triggers only on true crossings (deliberately, to keep
+    legally-spaced routes). This handles the remaining within-CLEARANCE grazes
+    (issue #123 PAD-SEGMENT) on a route's outer escape, in escalating, always
+    connectivity-safe steps:
+
+      1. Trim the decorative 45 exit jog if that alone clears the route.
+      2. Otherwise pull the exit_pos inward along the escape axis to the longest
+         length that clears the pad - but never inside the BGA zone (the free
+         end must stay outside so the router can land on it).
+      3. If even the minimum exit (just outside the zone) still grazes, the ball
+         cannot be fanned out here: drop it and warn (a smaller via/track or a
+         component nudge is needed).
+
+    Returns (n_fixed, dropped_net_names). Diff-pair legs are handled per-leg;
+    dropping one leg is left to the caller's diff-pair handling.
+    """
+    if not foreign_pads:
+        return 0, []
+    net_names = net_names or {}
+    margin = clearance + track_width / 2
+    eps = 0.001
+    n_fixed = 0
+    dropped: List[str] = []
+
+    for route in routes:
+        if route_clear_of_foreign_pads(route, foreign_pads, layer_map, margin=margin):
+            continue  # already clear at full clearance
+
+        # Step 1: jog trim.
+        if _route_jog_clears_pads(route, None, None, layer_map, foreign_pads, margin=margin):
+            _rebuild_track_for_route(tracks, route, track_width)
+            n_fixed += 1
+            continue
+
+        # Step 2: shorten the outer escape along its axis, floored at the zone edge.
+        d = route.escape_dir
+        if d in ('left', 'right', 'up', 'down'):
+            saved_exit, saved_jog = route.exit_pos, route.jog_end
+            saved_ext, saved_stub = route.jog_extension, route.stub_end
+            ex, ey = route.exit_pos
+            if d == 'right':
+                bound, cur, vary = grid.max_x, ex, 'x'
+            elif d == 'left':
+                bound, cur, vary = grid.min_x, ex, 'x'
+            elif d == 'down':
+                bound, cur, vary = grid.max_y, ey, 'y'
+            else:  # up
+                bound, cur, vary = grid.min_y, ey, 'y'
+            sign = 1.0 if cur > bound else -1.0
+            min_coord = bound + sign * eps  # just outside the zone
+            # Walk inward from current exit toward the zone edge; keep the jog off.
+            # For edge pads stub_end IS the exit (the grazing segment is
+            # pad->stub_end), so move both; for channel routes stub_end sits at
+            # the channel inside the zone and must stay put.
+            route.jog_end = None
+            route.jog_extension = None
+            n_steps = max(1, int(abs(cur - min_coord) / (clearance / 2)) + 1)
+            fixed = False
+            for i in range(1, n_steps + 1):
+                c = cur - sign * (abs(cur - min_coord)) * (i / n_steps)
+                new_pt = (c, ey) if vary == 'x' else (ex, c)
+                route.exit_pos = new_pt
+                if route.is_edge:
+                    route.stub_end = new_pt
+                if route_clear_of_foreign_pads(route, foreign_pads, layer_map, margin=margin):
+                    _rebuild_track_for_route(tracks, route, track_width)
+                    n_fixed += 1
+                    fixed = True
+                    break
+            if fixed:
+                continue
+            # Step 3: cannot clear even at the zone edge -> restore and drop.
+            route.exit_pos, route.jog_end = saved_exit, saved_jog
+            route.jog_extension, route.stub_end = saved_ext, saved_stub
+
+        nm = net_names.get(route.net_id) or (route.pad.net_name if route.pad else None)
+        if nm and nm not in dropped:
+            dropped.append(nm)
+
+    return n_fixed, dropped
+
+
 def route_clear_of_foreign_pads(route: 'FanoutRoute',
-                                foreign_pads, layer_map: Dict[str, int]) -> bool:
+                                foreign_pads, layer_map: Dict[str, int],
+                                margin: float = 0.0) -> bool:
     """Geometric guard: True if no route segment crosses a foreign pad.
 
     `foreign_pads` is a precomputed list of pads belonging to OTHER components
@@ -174,7 +273,8 @@ def route_clear_of_foreign_pads(route: 'FanoutRoute',
     a BGA ball - those are excluded from the shared obstacle map (their net is a
     fanned net) yet a DIFFERENT net's stub must still not cross them. A pad is
     only a blocker for a route on a different net. Through-hole pads block all
-    layers; SMD pads block only their own copper layers.
+    layers; SMD pads block only their own copper layers. margin>0 turns the raw
+    crossing test into a clearance test.
     """
     if not foreign_pads:
         return True
@@ -188,7 +288,7 @@ def route_clear_of_foreign_pads(route: 'FanoutRoute',
             th = pad.drill > 0
             if not th and layer not in (pad.layers or []):
                 continue
-            if _seg_hits_pad(x1, y1, x2, y2, pad):
+            if _seg_hits_pad(x1, y1, x2, y2, pad, margin=margin):
                 return False
     return True
 

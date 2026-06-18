@@ -19,7 +19,10 @@ from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
-from diff_pair_multipoint import get_diff_pair_terminals, route_multipoint_diff_pair
+from diff_pair_multipoint import (
+    get_diff_pair_terminals, route_multipoint_diff_pair,
+    leg_electrically_short, diff_pair_min_coupled_length,
+)
 from routing_context import build_diff_pair_obstacles, restore_ripped_net
 from terminal_colors import RED, GREEN, RESET
 
@@ -111,14 +114,31 @@ def route_diff_pairs(
         # Multi-point pairs (3+ pad-pair terminals) are routed as a chain of
         # legs - a pair cannot tap mid-track without P/N crossing
         terminals = get_diff_pair_terminals(pcb_data, pair.p_net_id, pair.n_net_id)
+
+        # A 2-terminal pair is a single leg: if it is electrically short, coupling
+        # gains nothing (and tangles through clustered connector pads), so leave
+        # the whole pair for the single-ended follow-up pass.
+        if len(terminals) == 2 and leg_electrically_short(terminals[0], terminals[1], config):
+            print(f"  Electrically short ({diff_pair_min_coupled_length(config):.1f}mm "
+                  f"coupled floor) - routing single-ended instead of coupled")
+            state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
+            state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
+            total_time += time.time() - start_time
+            continue
+
         if len(terminals) > 2:
             leg_results, merged, peeled = route_multipoint_diff_pair(state, pair, pair_name, terminals)
             elapsed = time.time() - start_time
             total_time += elapsed
+            if leg_results is None:
+                # Genuine multi-point failure (a coupled leg could not route).
+                print(f"  {RED}MULTI-POINT ROUTE FAILED ({len(terminals) - 1} legs needed){RESET}")
+                failed += 1
+                continue
             results.extend(leg_results)
             if peeled:
-                # Far-apart terminal pads were dropped from the coupled chain;
-                # connect them single-ended afterward (issue #121).
+                # Terminals dropped from the coupled chain - far-apart (issue
+                # #121) and/or electrically-short legs - connect single-ended.
                 state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
                 state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
             if merged is not None:
@@ -147,8 +167,11 @@ def route_diff_pairs(
                 invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
                 invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
             else:
-                print(f"  {RED}MULTI-POINT ROUTE FAILED ({len(terminals) - 1} legs needed){RESET}")
-                failed += 1
+                # No leg was coupled - every leg was electrically short and
+                # deferred (peeled set above). Not a failure: the single-ended
+                # follow-up pass connects the whole pair.
+                print(f"  All {len(terminals) - 1} legs electrically short - "
+                      f"whole pair left for single-ended")
             continue
 
         # Build complete obstacle map for diff pair routing
@@ -555,7 +578,7 @@ def route_diff_pairs(
                                            routed_results, diff_pair_by_net_id, remaining_net_ids,
                                            results, config, track_proximity_cache, layer_map,
                                            state.working_obstacles, state.net_obstacles_cache,
-                                           state.ripped_route_layer_costs, state.ripped_route_via_positions)
+                                           state.ripped_route_layer_costs, state.ripped_route_via_positions, refused_sink=state.collision_refused_net_ids)
                                 if was_in_results:
                                     successful += 1
                                 ripped_items.pop()
@@ -693,7 +716,7 @@ def route_diff_pairs(
                                        routed_results, diff_pair_by_net_id, remaining_net_ids,
                                        results, config, track_proximity_cache, layer_map,
                                        state.working_obstacles, state.net_obstacles_cache,
-                                       state.ripped_route_layer_costs, state.ripped_route_via_positions)
+                                       state.ripped_route_layer_costs, state.ripped_route_via_positions, refused_sink=state.collision_refused_net_ids)
                             if was_in_results:
                                 successful += 1
 

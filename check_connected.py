@@ -327,7 +327,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         for layer in expanded_layers:
             if layer not in copper_layers:
                 continue
-            pad_size = 0.4  # Default pad connection tolerance
+            # Connection tolerance is size/4 (below). Use the pad's real size so a
+            # track landing inside a large through-hole/connector pad (but not at
+            # its center) is credited as connected, matching KiCad -- the residual
+            # over-report on hand-routed boards. Floored at 0.4 so small pads keep
+            # the previous 0.1mm tolerance (no regression on router output, whose
+            # tracks land at pad centers).
+            pad_size = max(pad.size_x, pad.size_y, 0.4)
             all_points.append((pad.global_x, pad.global_y, layer, point_id, pad_size))
             point_info[point_id] = ('pad', pad_idx, layer, pad.global_x, pad.global_y, pad.component_ref)
             pad_ids.append(point_id)

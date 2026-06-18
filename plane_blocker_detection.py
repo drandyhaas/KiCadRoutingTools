@@ -59,7 +59,9 @@ def _re_add_pad_obstacles_for_net(
             else:
                 corner_radius = 0
 
-            for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+            for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
+                                                           off_x=pad.global_x - gx * coord.grid_step,
+                                                           off_y=pad.global_y - gy * coord.grid_step):
                 obstacles.add_blocked_cell(cell_gx, cell_gy, 0)  # layer_idx=0 for single-layer maps
 
 
