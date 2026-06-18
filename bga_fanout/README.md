@@ -7,10 +7,12 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 - **Generic BGA support** - Works with any BGA package pitch and size
 - **Any placement angle** - The grid/channel/escape logic is global-axis-based, so a
   BGA placed at a non-orthogonal angle (anything other than 0/90/180/270°) is routed
-  by rotating the board into the footprint's own frame, running the pipeline there, and
-  mapping the resulting tracks/vias back (issue #137). Orthogonal placements are
-  unaffected. (Foreign-pad clearance near a diagonally-placed part is modelled in the
-  rotated frame and is approximate for rotated rectangular neighbours.)
+  by rigidly rotating the whole board into the footprint's own frame, running the
+  pipeline there, and mapping the resulting tracks/vias back (issue #137). The transform
+  is an isometry, so the result is identical to solving the un-rotated board; orthogonal
+  placements skip it entirely and are unaffected. Foreign-pad clearance is exact, including
+  for rotated rectangular neighbours (both the routing obstacle map and the explicit
+  pad-collision test honour each pad's rotation).
 - **Differential pair routing** - P/N pairs routed together on same layer
 - **Collision-free routing** - Automatic layer assignment to avoid conflicts
 - **Multi-layer support** - Distributes routes evenly across available layers
