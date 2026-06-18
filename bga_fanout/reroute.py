@@ -4,6 +4,7 @@ Rerouting and collision resolution for BGA fanout routing.
 Functions for resolving collisions and rerouting signals through alternate channels.
 """
 
+import math
 from typing import List, Dict, Tuple, Optional, Set
 
 from kicad_parser import PCBData, Footprint
@@ -61,20 +62,31 @@ def segments_clear_of_pads(segments: List[Dict],
 
 
 def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
-    """True if the segment passes through pad's bounding box (sampled).
+    """True if the segment passes through the pad's rectangle (sampled).
 
     margin expands the box (clearance + track half-width) to turn the raw
     overlap test into a clearance test; default 0.0 keeps the true-short
     semantics most callers rely on.
+
+    Honors pad.rect_rotation: for a tilted pad each sample point is rotated into
+    the pad's own frame, so the true (rotated) rectangle is tested rather than its
+    axis-aligned bounding box - exact for diagonal pads (e.g. a part placed at a
+    non-orthogonal angle, or a foreign pad seen in a rotated fanout frame).
     """
     hx = pad.size_x / 2.0 + margin
     hy = pad.size_y / 2.0 + margin
     px, py = pad.global_x, pad.global_y
+    rr = getattr(pad, 'rect_rotation', 0.0)
+    if rr:
+        rad = math.radians(rr)
+        c, s = math.cos(rad), math.sin(rad)
     for t in range(samples + 1):
         f = t / samples
-        x = x1 + (x2 - x1) * f
-        y = y1 + (y2 - y1) * f
-        if abs(x - px) <= hx and abs(y - py) <= hy:
+        dx = x1 + (x2 - x1) * f - px
+        dy = y1 + (y2 - y1) * f - py
+        if rr:
+            dx, dy = dx * c + dy * s, -dx * s + dy * c  # into the pad's frame
+        if abs(dx) <= hx and abs(dy) <= hy:
             return True
     return False
 

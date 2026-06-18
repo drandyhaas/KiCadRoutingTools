@@ -1396,7 +1396,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     layer_idxs = [layer_map[layer] for layer in expanded_layers if layer in layer_map]
     cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
                                     config.grid_step, corner_radius, corner_buffer,
-                                    off_x, off_y)
+                                    off_x, off_y, rotation_deg=pad.rect_rotation)
     if skip_cell is not None and len(cells):
         keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in cells),
                            dtype=bool, count=len(cells))
@@ -1409,7 +1409,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         via_margin = config.via_size / 2 + clearance + extra_clearance
         via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                             config.grid_step, corner_radius, corner_buffer,
-                                            off_x, off_y)
+                                            off_x, off_y, rotation_deg=pad.rect_rotation)
         if skip_cell is not None and len(via_cells):
             keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in via_cells),
                                dtype=bool, count=len(via_cells))

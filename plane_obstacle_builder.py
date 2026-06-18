@@ -120,7 +120,9 @@ def _point_in_pad_copper(pad: Pad, x: float, y: float, extra: float = 0.0) -> bo
     """
     dx = x - pad.global_x
     dy = y - pad.global_y
-    rot = math.radians(pad.rotation or 0.0)
+    # size_x/size_y are board-resolved; the rectangle's residual tilt is
+    # rect_rotation (0 for orthogonal pads), not the total pad rotation.
+    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
     cos_r = math.cos(rot)
     sin_r = math.sin(rot)
     lx = dx * cos_r + dy * sin_r
@@ -464,7 +466,8 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
 
     for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
                                                    off_x=pad.global_x - gx * coord.grid_step,
-                                                   off_y=pad.global_y - gy * coord.grid_step):
+                                                   off_y=pad.global_y - gy * coord.grid_step,
+                                                   rotation_deg=pad.rect_rotation):
         obstacles.add_blocked_via(cell_gx, cell_gy)
 
 
@@ -776,7 +779,8 @@ def build_routing_obstacle_map(
                         corner_radius = 0
                     for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
                                                                    off_x=pad.global_x - gx * coord.grid_step,
-                                                                   off_y=pad.global_y - gy * coord.grid_step):
+                                                                   off_y=pad.global_y - gy * coord.grid_step,
+                                                                   rotation_deg=pad.rect_rotation):
                         obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
                     pad_count += 1
     if verbose:

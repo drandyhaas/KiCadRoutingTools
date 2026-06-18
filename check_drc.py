@@ -346,6 +346,16 @@ def segment_to_rect_distance(x1: float, y1: float, x2: float, y2: float,
     return min_dist, closest_pt
 
 
+def _into_pad_frame(x: float, y: float, pad: Pad,
+                    cos_r: float, sin_r: float) -> Tuple[float, float]:
+    """Rotate a global point into a diagonal pad's local frame about its center
+    (R(-rect_rotation)), so the axis-aligned rect-distance routines apply."""
+    dx = x - pad.global_x
+    dy = y - pad.global_y
+    return (pad.global_x + dx * cos_r + dy * sin_r,
+            pad.global_y - dx * sin_r + dy * cos_r)
+
+
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
                                clearance_margin: float = 0.05) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
@@ -376,12 +386,26 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
     else:
         corner_radius = 0.0
 
-    # Calculate distance from segment to rectangular pad (with optional rounded corners)
+    # Calculate distance from segment to rectangular pad (with optional rounded
+    # corners). For diagonal pads, rotate the segment into the pad's local frame
+    # so the axis-aligned rect distance is exact (distance is rotation-invariant).
+    sx0, sy0, ex0, ey0 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        sx0, sy0 = _into_pad_frame(sx0, sy0, pad, cos_r, sin_r)
+        ex0, ey0 = _into_pad_frame(ex0, ey0, pad, cos_r, sin_r)
     dist_to_pad, closest_pt = segment_to_rect_distance(
-        seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+        sx0, sy0, ex0, ey0,
         pad.global_x, pad.global_y, pad.size_x / 2, pad.size_y / 2,
         corner_radius
     )
+    if pad.rect_rotation and closest_pt is not None:
+        # Report the closest point back in the global frame (R(+rect_rotation)).
+        cdx = closest_pt[0] - pad.global_x
+        cdy = closest_pt[1] - pad.global_y
+        closest_pt = (pad.global_x + cdx * cos_r - cdy * sin_r,
+                      pad.global_y + cdx * sin_r + cdy * cos_r)
 
     # Required clearance: segment half-width + clearance
     # (dist_to_pad is already edge-to-edge from pad)
@@ -425,9 +449,14 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     else:
         corner_radius = 0.0
 
-    # Distance from via center to pad edge (accounts for rounded corners)
+    # Distance from via center to pad edge (accounts for rounded corners).
+    # For diagonal pads, rotate the via center into the pad's local frame.
+    vx, vy = via.x, via.y
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        vx, vy = _into_pad_frame(vx, vy, pad, math.cos(rad), math.sin(rad))
     dist_to_pad = point_to_rect_distance(
-        via.x, via.y,
+        vx, vy,
         pad.global_x, pad.global_y,
         pad.size_x / 2, pad.size_y / 2,
         corner_radius

@@ -21,6 +21,7 @@ from typing import List, Dict, Optional, Tuple, Set
 
 from kicad_parser import PCBData, Pad, Via, Segment
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import point_in_pad_rect
 from plane_obstacle_builder import (
     build_via_obstacle_map,
     build_routing_obstacle_map,
@@ -345,8 +346,7 @@ def try_tap_pad(
     # A via landing inside the pad's own copper connects it directly (via-in-pad)
     # -- no trace needed. find_via_position may return an off-centre but still
     # in-pad position when the exact centre is blocked (issue #99).
-    in_pad = (abs(via_pos[0] - pad.global_x) <= pad.size_x / 2 + 1e-6 and
-              abs(via_pos[1] - pad.global_y) <= pad.size_y / 2 + 1e-6)
+    in_pad = point_in_pad_rect(via_pos[0], via_pos[1], pad, 1e-6)
     if pad_layer and not in_pad:
         # Capture the search frontier on failure so a caller doing rip-up can
         # identify which net is blocking the via->pad trace (route_disconnected_

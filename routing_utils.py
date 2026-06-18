@@ -16,6 +16,79 @@ import numpy as np
 from kicad_parser import Segment, POSITION_DECIMALS
 
 
+# --- Rotation-aware pad-rectangle geometry -------------------------------------
+# A pad's size_x/size_y are board-resolved (axis-aligned for orthogonal pads);
+# any residual tilt is carried in pad.rect_rotation (0 for the common case, a
+# value in (-90,90] for non-orthogonally-placed pads). These helpers test the
+# pad's TRUE rectangle at any angle. All reduce to the plain axis-aligned test
+# when rect_rotation == 0, so orthogonal pads are unaffected.
+
+def _to_pad_frame(x: float, y: float, pad) -> Tuple[float, float]:
+    """Offset of (x, y) from the pad centre, expressed in the pad's own frame."""
+    dx = x - pad.global_x
+    dy = y - pad.global_y
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rr:
+        rad = math.radians(rr)
+        c, s = math.cos(rad), math.sin(rad)
+        return dx * c + dy * s, -dx * s + dy * c
+    return dx, dy
+
+
+def point_in_pad_rect(x: float, y: float, pad, margin: float = 0.0) -> bool:
+    """True if (x, y) lies within the pad rectangle expanded by `margin`."""
+    lx, ly = _to_pad_frame(x, y, pad)
+    return abs(lx) <= pad.size_x / 2 + margin and abs(ly) <= pad.size_y / 2 + margin
+
+
+def point_to_pad_rect_dist(x: float, y: float, pad, margin: float = 0.0) -> float:
+    """Distance from (x, y) to the pad rectangle (+margin); 0.0 if inside."""
+    lx, ly = _to_pad_frame(x, y, pad)
+    ox = max(abs(lx) - (pad.size_x / 2 + margin), 0.0)
+    oy = max(abs(ly) - (pad.size_y / 2 + margin), 0.0)
+    return math.hypot(ox, oy)
+
+
+def into_pad_frame_point(x: float, y: float, pad) -> Tuple[float, float]:
+    """Rotate a board point about the pad centre into the pad's axis-aligned
+    frame, returned in absolute board coordinates. Lets a routine that tests an
+    axis-aligned pad rectangle (e.g. segment_to_rect_distance) stay exact for a
+    tilted pad: rotate the query geometry with this, keep the pad axis-aligned."""
+    lx, ly = _to_pad_frame(x, y, pad)
+    return pad.global_x + lx, pad.global_y + ly
+
+
+def filter_cells_in_pad_rect(cells: "np.ndarray", grid_step: float, pad,
+                             margin: float = 0.0) -> "np.ndarray":
+    """Filter an (N, 2+) int grid-cell array to rows whose board position lies in
+    the pad rectangle (+margin), honoring rect_rotation. No-op (returns the input)
+    for axis-aligned pads, so orthogonal keepouts are unchanged."""
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if not rr or len(cells) == 0:
+        return cells
+    bx = cells[:, 0] * grid_step - pad.global_x
+    by = cells[:, 1] * grid_step - pad.global_y
+    rad = math.radians(rr)
+    c, s = math.cos(rad), math.sin(rad)
+    lx = bx * c + by * s
+    ly = -bx * s + by * c
+    mask = (np.abs(lx) <= pad.size_x / 2 + margin) & (np.abs(ly) <= pad.size_y / 2 + margin)
+    return cells[mask]
+
+
+def pad_rect_halfspan(pad, margin: float = 0.0) -> Tuple[float, float]:
+    """Axis-aligned bounding-box half-extents (in x, y) of the pad rectangle
+    rotated by rect_rotation, plus `margin`. Used to size a search/keepout box
+    that fully contains the (possibly tilted) pad."""
+    hx, hy = pad.size_x / 2, pad.size_y / 2
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rr:
+        rad = math.radians(rr)
+        c, s = abs(math.cos(rad)), abs(math.sin(rad))
+        return hx * c + hy * s + margin, hx * s + hy * c + margin
+    return hx + margin, hy + margin
+
+
 def build_layer_map(layers: List[str]) -> Dict[str, int]:
     """
     Build a mapping from layer names to indices.
@@ -96,13 +169,17 @@ def iter_pad_blocked_cells(
     corner_radius: float = 0.0,
     corner_buffer: float = None,
     off_x: float = 0.0,
-    off_y: float = 0.0
+    off_y: float = 0.0,
+    rotation_deg: float = 0.0
 ):
     """
     Generate grid cells that should be blocked for a pad.
 
     Yields (gx, gy) tuples for all cells within margin distance of the pad edge.
     Uses rectangular-with-rounded-corners shape matching the actual pad geometry.
+
+    rotation_deg rotates the rectangle in the global frame (pad.rect_rotation)
+    for diagonal pads; 0 (the common axis-aligned case) is unchanged.
 
     Args:
         pad_gx, pad_gy: Pad center in grid coordinates
@@ -125,9 +202,17 @@ def iter_pad_blocked_cells(
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
     if corner_buffer is None:
         corner_buffer = grid_step / 2
+    rotated = abs(rotation_deg) > 1e-9 and abs(abs(rotation_deg) - 180.0) > 1e-9
+    if rotated:
+        _rrad = math.radians(rotation_deg)
+        _rc, _rs = math.cos(_rrad), math.sin(_rrad)
+        gext_x = abs(half_width * _rc) + abs(half_height * _rs)
+        gext_y = abs(half_width * _rs) + abs(half_height * _rc)
+    else:
+        gext_x, gext_y = half_width, half_height
     # +1 cell so the bbox still covers the region once shifted by the sub-cell offset.
-    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step)) + 1
-    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step)) + 1
+    expand_x = int(math.ceil((gext_x + margin + corner_buffer) / grid_step)) + 1
+    expand_y = int(math.ceil((gext_y + margin + corner_buffer) / grid_step)) + 1
     margin_sq = margin * margin
     buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
 
@@ -142,6 +227,10 @@ def iter_pad_blocked_cells(
             # Cell center relative to the REAL pad center (issue #70).
             cell_x = ex * grid_step - off_x
             cell_y = ey * grid_step - off_y
+            if rotated:
+                # Rotate global offset into the pad's local frame: R(-rotation).
+                cell_x, cell_y = (cell_x * _rc + cell_y * _rs,
+                                  -cell_x * _rs + cell_y * _rc)
             abs_x, abs_y = abs(cell_x), abs(cell_y)
 
             # Use buffered margin in corner/diagonal regions where grid discretization
@@ -163,6 +252,7 @@ def pad_blocked_cells_array(
     corner_buffer: float = None,
     off_x: float = 0.0,
     off_y: float = 0.0,
+    rotation_deg: float = 0.0,
 ):
     """Vectorized twin of iter_pad_blocked_cells: returns an (N, 2) int32
     array of blocked (gx, gy) cells.
@@ -174,13 +264,26 @@ def pad_blocked_cells_array(
     the pad than the clearance on the side the pad rounds toward -- the residual
     sub-cell PAD-SEGMENT violations of issue #70. With off_x=off_y=0 the result
     is unchanged (bit-identical to iter_pad_blocked_cells).
+
+    rotation_deg rotates the (half_width x half_height) rectangle in the global
+    frame -- for diagonal pads (pad.rect_rotation). 0 (axis-aligned, the common
+    case) takes the original bit-identical code path.
     """
     if corner_buffer is None:
         corner_buffer = grid_step / 2
+    rotated = abs(rotation_deg) > 1e-9 and abs(abs(rotation_deg) - 180.0) > 1e-9
+    if rotated:
+        _rrad = math.radians(rotation_deg)
+        _rc, _rs = math.cos(_rrad), math.sin(_rrad)
+        # Global half-extent of the rotated rect, so the search bbox covers it.
+        gext_x = abs(half_width * _rc) + abs(half_height * _rs)
+        gext_y = abs(half_width * _rs) + abs(half_height * _rc)
+    else:
+        gext_x, gext_y = half_width, half_height
     # +1 cell so the bbox still covers the disk once shifted by the <=half-cell
     # sub-cell offset.
-    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step)) + 1
-    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step)) + 1
+    expand_x = int(math.ceil((gext_x + margin + corner_buffer) / grid_step)) + 1
+    expand_y = int(math.ceil((gext_y + margin + corner_buffer) / grid_step)) + 1
     margin_sq = margin * margin
     buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
 
@@ -197,6 +300,11 @@ def pad_blocked_cells_array(
     # axis is ex*step - off_x.
     cell_x = exg.astype(np.float64) * grid_step - off_x
     cell_y = eyg.astype(np.float64) * grid_step - off_y
+    if rotated:
+        # Rotate global cell offsets into the pad's local frame: R(-rotation).
+        lx = cell_x * _rc + cell_y * _rs
+        ly = -cell_x * _rs + cell_y * _rc
+        cell_x, cell_y = lx, ly
     abs_x = np.abs(cell_x)
     abs_y = np.abs(cell_y)
 

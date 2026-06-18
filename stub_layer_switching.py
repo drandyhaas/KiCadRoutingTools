@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig
+from routing_utils import point_to_pad_rect_dist
 from connectivity import get_stub_segments, get_stub_direction
 from geometry_utils import segments_intersect_2d, point_to_segment_distance_seg
 from typing import Set
@@ -609,9 +610,7 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
                 continue
             if abs(pad.global_x - pad_x) > 2.0 or abs(pad.global_y - pad_y) > 2.0:
                 continue
-            dx = max(abs(pad_x - pad.global_x) - pad.size_x / 2, 0.0)
-            dy = max(abs(pad_y - pad.global_y) - pad.size_y / 2, 0.0)
-            d = math.hypot(dx, dy)
+            d = point_to_pad_rect_dist(pad_x, pad_y, pad)
             if d < via_r + config.clearance:
                 net = pcb_data.nets.get(pnid)
                 nm = net.name if net else f"net {pnid}"
@@ -652,15 +651,12 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
                     continue
                 if not (bminx <= pad.global_x <= bmaxx and bminy <= pad.global_y <= bmaxy):
                     continue
-                hx, hy = pad.size_x / 2, pad.size_y / 2
                 # min distance from the (sampled) segment to the pad rectangle
                 best = float('inf')
                 for i in range(n + 1):
                     t = i / n
                     qx, qy = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
-                    dx = max(abs(qx - pad.global_x) - hx, 0.0)
-                    dy = max(abs(qy - pad.global_y) - hy, 0.0)
-                    d = math.hypot(dx, dy)
+                    d = point_to_pad_rect_dist(qx, qy, pad)
                     if d < best:
                         best = d
                 if best < clear_dist:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Orchestration status for the stress-test corpus (set 1 + set 2).
+# Orchestration status for the stress-test corpus (set 1 + set 2 + set 3 ...).
 #
 # Classifies every board from DISK so a context-summarized parent can resume
 # cold (see RUNBOOK.md "Driving the run"):
@@ -13,23 +13,30 @@
 # the corpus changes. Override the data root with $1 or $STRESS_ROOT.
 ROOT="${1:-${STRESS_ROOT:-$HOME/Documents/kicad_stress_test}}"
 
-SET1=$(ls "$ROOT"/boards_unrouted/*.kicad_pcb 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.kicad_pcb$//')
-SET2=$(ls "$ROOT"/boards_unrouted_set2/*.kicad_pcb 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.kicad_pcb$//')
-total=$(( $(echo "$SET1" | grep -c .) + $(echo "$SET2" | grep -c .) ))
+# Pairs across set 1 (boards_unrouted/) and every set N (boards_unrouted_setN/).
+PAIRS=""
+for d in "$ROOT"/boards_unrouted "$ROOT"/boards_unrouted_set*; do
+  [ -d "$d" ] || continue
+  case "$d" in *_set*) s="${d##*_set}";; *) s=1;; esac
+  for f in "$d"/*.kicad_pcb; do
+    [ -e "$f" ] || continue
+    PAIRS="$PAIRS $(basename "$f" .kicad_pcb):$s"
+  done
+done
+total=$(echo $PAIRS | wc -w | tr -d ' ')
 
 done_n=0; run_n=0; todo_n=0
 done_l=""; run_l=""; todo_l=""
-check() { # $1 board, $2 set(1|2)
+check() { # $1 board, $2 set(1|2|3...)
   local b=$1 s=$2 resdir rundir
-  if [ "$s" = "1" ]; then resdir="$ROOT/results"; rundir="runs/$b"; else resdir="$ROOT/results_set2"; rundir="runs_set2/$b"; fi
+  if [ "$s" = "1" ]; then resdir="$ROOT/results"; rundir="runs/$b"; else resdir="$ROOT/results_set$s"; rundir="runs_set$s/$b"; fi
   if [ -f "$resdir/$b.json" ]; then done_n=$((done_n+1)); done_l="$done_l $b"; return; fi
   if pgrep -f "$rundir" >/dev/null 2>&1; then run_n=$((run_n+1)); run_l="$run_l ${b}[s$s]"; return; fi
   if [ -d "$ROOT/$rundir" ] && [ -n "$(find "$ROOT/$rundir" -mmin -15 2>/dev/null | head -1)" ]; then
     run_n=$((run_n+1)); run_l="$run_l ${b}[s$s,idle?]"; return; fi
   todo_n=$((todo_n+1)); todo_l="$todo_l ${b}[s$s]"
 }
-for b in $SET1; do check "$b" 1; done
-for b in $SET2; do check "$b" 2; done
+for pair in $PAIRS; do check "${pair%%:*}" "${pair##*:}"; done
 echo "DONE ($done_n/$total):$done_l"
 echo "RUNNING ($run_n):$run_l"
 echo "TODO ($todo_n):$todo_l"

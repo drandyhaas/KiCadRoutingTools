@@ -149,6 +149,39 @@ def build_base_obstacle_map(pcb_data, config, nets_to_route, extra_clearance=0.0
     return obstacles
 ```
 
+### Pad Rotation (Python rasterization vs. the orthogonal grid)
+
+The Rust router is purely **cell-based**: `GridObstacleMap` stores only blocked
+`(gx, gy, layer)` cells — it has no concept of a pad, its size, shape, or rotation.
+All pad geometry is rasterized into blocked cells **in Python**
+(`pad_blocked_cells_array` / `iter_pad_blocked_cells` in `routing_utils.py`) and
+handed to Rust as a flat array via `add_blocked_cells_batch`.
+
+A pad's `size_x`/`size_y` are board-resolved (axis-aligned for orthogonal pads);
+any residual tilt for a non-orthogonally-placed part is carried in
+`Pad.rect_rotation` (0 for the common case). The rasterizers honour it, so a tilted
+pad blocks the cells its **true rotated rectangle** covers (plus the clearance
+margin) — represented on the orthogonal grid as the staircase of cells it overlaps,
+exactly as circles/ovals always have been. The grid never stored true shapes; it
+quantizes whatever cells Python marks, so no Rust change is needed and a finer
+`--grid-step` tightens the approximation. The *exact* geometry still lives in the
+continuous Python checks (`check_drc.py`, `check_pads.py`, the fanout/clearance
+helpers in `routing_utils.py`).
+
+**Performance.** Every rotation-aware helper short-circuits to the original
+axis-aligned path when `rect_rotation == 0`, so orthogonal boards (the vast
+majority) pay essentially nothing. Measured per-step (redo harness, same machine):
+
+| board | non-orthogonal pads | total routing time Δ |
+|-------|--------------------|----------------------|
+| lpddr4_testbed | 0 / 677 | **−0.6%** (noise — routing is bit-identical) |
+| hackrf_one | 191 / 1623 | **+4.2%** (concentrated in the heavy signal route) |
+
+So there is no measurable slowdown on orthogonal boards; the only cost is a few
+percent on boards with many genuinely tilted pads, where the extra trig is doing
+necessary work (and part of hackrf's delta is the more-accurate geometry slightly
+changing the A* search, not pure overhead).
+
 ### Clearance Expansion
 
 Obstacles are expanded by track clearance to ensure DRC compliance. Track widths can vary based on:

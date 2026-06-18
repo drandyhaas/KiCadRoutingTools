@@ -14,6 +14,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect
 from geometry_utils import UnionFind
 from bresenham_utils import walk_line
 from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
@@ -529,17 +530,21 @@ def _block_pad_cells(
     coord: GridCoord,
     clearance: float
 ):
-    """Block grid cells for a pad with clearance."""
-    half_w = pad.size_x / 2 + clearance
-    half_h = pad.size_y / 2 + clearance
+    """Block grid cells for a pad with clearance (honors pad rotation)."""
+    half_w, half_h = pad_rect_halfspan(pad, clearance)
 
     min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)
     max_gx, _ = coord.to_grid(pad.global_x + half_w, 0)
     _, min_gy = coord.to_grid(0, pad.global_y - half_h)
     _, max_gy = coord.to_grid(0, pad.global_y + half_h)
 
+    rotated = bool(getattr(pad, 'rect_rotation', 0.0))
     for gx in range(min_gx, max_gx + 1):
         for gy in range(min_gy, max_gy + 1):
+            if rotated:
+                bx, by = coord.to_float(gx, gy)
+                if not point_in_pad_rect(bx, by, pad, clearance):
+                    continue
             blocked.add((gx, gy))
 
 
@@ -1198,8 +1203,7 @@ def build_base_obstacles(
 
             # Block rectangular area around pad with clearance for track routing
             pad_expansion_mm = track_width / 2 + config.clearance
-            half_w = pad.size_x / 2 + pad_expansion_mm
-            half_h = pad.size_y / 2 + pad_expansion_mm
+            half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
             min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)
             max_gx, _ = coord.to_grid(pad.global_x + half_w, 0)
             _, min_gy = coord.to_grid(0, pad.global_y - half_h)
@@ -1209,13 +1213,13 @@ def build_base_obstacles(
             if gx_range.size > 0 and gy_range.size > 0:
                 gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
                 rect_cells = np.column_stack([gx_grid.ravel(), gy_grid.ravel()])
+                rect_cells = filter_cells_in_pad_rect(rect_cells, coord.grid_step, pad, pad_expansion_mm)
                 for layer_idx in pad_layers_on:
                     layer_col = np.full((rect_cells.shape[0], 1), layer_idx, dtype=np.int32)
                     obstacles.add_blocked_cells_batch(np.hstack([rect_cells, layer_col]))
             # Also block vias around pad - need more clearance for via size
             via_expansion_mm = config.via_size / 2 + track_via_clearance
-            via_half_w = pad.size_x / 2 + via_expansion_mm
-            via_half_h = pad.size_y / 2 + via_expansion_mm
+            via_half_w, via_half_h = pad_rect_halfspan(pad, via_expansion_mm)
             via_min_gx, _ = coord.to_grid(pad.global_x - via_half_w, 0)
             via_max_gx, _ = coord.to_grid(pad.global_x + via_half_w, 0)
             _, via_min_gy = coord.to_grid(0, pad.global_y - via_half_h)
@@ -1225,6 +1229,7 @@ def build_base_obstacles(
             if via_gx_range.size > 0 and via_gy_range.size > 0:
                 via_gx_grid, via_gy_grid = np.meshgrid(via_gx_range, via_gy_range)
                 via_rect_cells = np.column_stack([via_gx_grid.ravel(), via_gy_grid.ravel()])
+                via_rect_cells = filter_cells_in_pad_rect(via_rect_cells, coord.grid_step, pad, via_expansion_mm)
                 obstacles.add_blocked_vias_batch(via_rect_cells)
 
     # Block areas outside the board outline (supports non-rectangular boards)

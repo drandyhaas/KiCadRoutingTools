@@ -28,7 +28,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map, square_offsets, circle_offsets
+from routing_utils import build_layer_map, square_offsets, circle_offsets, pad_rect_halfspan
 from bresenham_utils import walk_line
 
 _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
@@ -333,8 +333,8 @@ def analyze_static_blockers(
 
             # Calculate pad expansion (matches obstacle_map.py formula)
             # margin = track_width/2 + clearance (route needs half-width from center + clearance from pad edge)
-            pad_half_w = pad.size_x / 2
-            pad_half_h = pad.size_y / 2
+            # rotated-rect bbox so a tilted pad's blocked cells are covered
+            pad_half_w, pad_half_h = pad_rect_halfspan(pad)
             margin = config.track_width / 2 + config.clearance
             expand_x = max(1, coord.to_grid_dist(pad_half_w + margin))
             expand_y = max(1, coord.to_grid_dist(pad_half_h + margin))

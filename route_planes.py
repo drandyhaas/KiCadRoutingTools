@@ -24,6 +24,7 @@ import numpy as np
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION
 from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
+from routing_utils import point_in_pad_rect, pad_rect_halfspan
 from route import batch_route
 from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
 from connectivity import compute_mst_segments
@@ -202,18 +203,23 @@ def find_via_position(
     # (BGA balls, decoupling caps) with no room to tap externally, especially
     # with the smaller fine-pitch via (issue #99). Self-gating: when via-in-pad
     # is disabled the whole pad area is blocked in the obstacle map.
-    pad_half_w_grid = max(1, coord.to_grid_dist(pad.size_x / 2))
-    pad_half_h_grid = max(1, coord.to_grid_dist(pad.size_y / 2))
+    _phw, _phh = pad_rect_halfspan(pad)  # rotated-rect bbox bound
+    pad_half_w_grid = max(1, coord.to_grid_dist(_phw))
+    pad_half_h_grid = max(1, coord.to_grid_dist(_phh))
+    _rotated = bool(getattr(pad, 'rect_rotation', 0.0))
     for r in range(1, max(pad_half_w_grid, pad_half_h_grid) + 1):
         for dx in range(-r, r + 1):
             for dy in range(-r, r + 1):
                 if abs(dx) != r and abs(dy) != r:
                     continue  # ring edge only
                 if abs(dx) > pad_half_w_grid or abs(dy) > pad_half_h_grid:
-                    continue  # outside pad boundary
+                    continue  # outside pad bbox
                 gx, gy = pad_gx + dx, pad_gy + dy
+                bx, by = coord.to_float(gx, gy)
+                if _rotated and not point_in_pad_rect(bx, by, pad):
+                    continue  # outside the (rotated) pad copper
                 if not obstacles.is_via_blocked(gx, gy):
-                    return coord.to_float(gx, gy)
+                    return (bx, by)
 
     # Spiral search outward
     max_radius_grid = coord.to_grid_dist(max_search_radius)
@@ -233,8 +239,7 @@ def find_via_position(
         margin = 1.5 * config.via_size + config.clearance
         for pad_info in pending_pads:
             p = pad_info['pad']
-            half_w = p.size_x / 2 + margin
-            half_h = p.size_y / 2 + margin
+            half_w, half_h = pad_rect_halfspan(p, margin)
             min_gx = coord.to_grid(p.global_x - half_w, 0)[0]
             max_gx = coord.to_grid(p.global_x + half_w, 0)[0]
             min_gy = coord.to_grid(0, p.global_y - half_h)[1]
@@ -1955,8 +1960,10 @@ def create_plane(
             # Search from pad center outward within pad bounds
             # Skipped when same_net_pad_clearance >= 0 (caller wants vias outside same-net pads).
             pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
-            pad_half_w_grid = max(1, coord.to_grid_dist(pad.size_x / 2))
-            pad_half_h_grid = max(1, coord.to_grid_dist(pad.size_y / 2))
+            _phw, _phh = pad_rect_halfspan(pad)  # rotated-rect bbox bound
+            pad_half_w_grid = max(1, coord.to_grid_dist(_phw))
+            pad_half_h_grid = max(1, coord.to_grid_dist(_phh))
+            _rotated = bool(getattr(pad, 'rect_rotation', 0.0))
 
             via_in_pad = None
             if same_net_pad_clearance >= 0:
@@ -1976,13 +1983,16 @@ def create_plane(
                         for dy in range(-r, r + 1):
                             if abs(dx) != r and abs(dy) != r:
                                 continue  # Only check ring edge
-                            # Check if within pad boundary
+                            # Check if within pad bbox
                             if abs(dx) > pad_half_w_grid or abs(dy) > pad_half_h_grid:
                                 continue
                             gx, gy = pad_gx + dx, pad_gy + dy
+                            bx, by = gx * config.grid_step, gy * config.grid_step
+                            if _rotated and not point_in_pad_rect(bx, by, pad):
+                                continue  # outside the (rotated) pad copper
                             if not obstacles.is_via_blocked(gx, gy):
                                 # Convert grid back to world coordinates
-                                via_in_pad = (gx * config.grid_step, gy * config.grid_step)
+                                via_in_pad = (bx, by)
                                 break
 
             if via_in_pad:

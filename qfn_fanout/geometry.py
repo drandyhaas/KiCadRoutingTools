@@ -17,20 +17,15 @@ def calculate_fanout_stub(pad_info: PadInfo, layout: QFNLayout,
     Calculate fanout stub with two segments: straight then 45 degrees.
 
     Returns (corner_pos, end_pos):
-    - corner_pos: where straight segment ends and 45 degrees begins
+    - corner_pos: where the straight segment ends and the 45 deg fan begins
     - end_pos: final fanned-out endpoint
 
-    The straight segment extends perpendicular to the chip edge (uniform for all pads).
-    The 45 degree diagonal length varies by position:
-    - Center pads: diagonal length = 0
-    - Corner pads: diagonal length = max_diagonal_length
-    - Linear interpolation in between
-
-    Args:
-        pad_info: Analyzed pad information
-        layout: QFN layout parameters
-        straight_length: Length of straight stub (pad_length / 2, uniform for all)
-        max_diagonal_length: Max diagonal length for corner pads (chip_width / 3)
+    Works entirely in GLOBAL board coordinates from the pad's escape vector
+    (pad_info.escape_direction, the pad's outward long axis) and the along-edge
+    tangent perpendicular to it, so it is correct for any board rotation or
+    internal pad orientation. The straight segment escapes along the lead; the
+    45 deg fan spreads tips toward the corners (length grows with distance from
+    the edge midpoint).
     """
     pad = pad_info.pad
     pad_x, pad_y = pad.global_x, pad.global_y
@@ -39,49 +34,28 @@ def calculate_fanout_stub(pad_info: PadInfo, layout: QFNLayout,
     if side == 'center':
         return ((pad_x, pad_y), (pad_x, pad_y))
 
-    # Escape direction perpendicular to edge
+    # Escape vector (global, unit) and along-edge tangent perpendicular to it.
     esc_x, esc_y = pad_info.escape_direction
+    tan_x, tan_y = -esc_y, esc_x
 
-    # Corner point: end of straight segment
+    # Corner point: end of straight segment (escape past the pad).
     corner_x = pad_x + esc_x * straight_length
     corner_y = pad_y + esc_y * straight_length
 
-    # Calculate position along edge (0 = center, 1 = corner)
-    if side in ('top', 'bottom'):
-        half_width = layout.width / 2
-        offset_from_center = abs(pad_x - layout.center_x)
-        edge_position = offset_from_center / half_width if half_width > 0 else 0
-    else:
-        half_height = layout.height / 2
-        offset_from_center = abs(pad_y - layout.center_y)
-        edge_position = offset_from_center / half_height if half_height > 0 else 0
+    # Signed offset along the edge from the package center (projection on tangent).
+    off = (pad_x - layout.center_global_x) * tan_x + (pad_y - layout.center_global_y) * tan_y
+    half_edge = (layout.width if side in ('top', 'bottom') else layout.height) / 2
+    edge_position = min(abs(off) / half_edge, 1.0) if half_edge > 0 else 0.0
 
     # Diagonal length: 0 at center, max_diagonal_length at corners
     diagonal_length = edge_position * max_diagonal_length
-
     if diagonal_length < 0.01:
-        # No 45 degree segment needed (center pads)
         return ((corner_x, corner_y), (corner_x, corner_y))
 
-    # True 45 degrees means equal movement in escape direction and fan direction
-    # Distance along 45 degree line = diagonal_length, so each component = diagonal_length / sqrt(2)
+    # True 45 deg: equal movement along escape and along the edge tangent.
     diag_component = diagonal_length / math.sqrt(2)
-
-    if side in ('top', 'bottom'):
-        # Horizontal edge - fan left/right based on position
-        offset_from_center = pad_x - layout.center_x
-        fan_dir = 1 if offset_from_center >= 0 else -1
-
-        # True 45 degrees: equal dx and dy
-        end_x = corner_x + fan_dir * diag_component
-        end_y = corner_y + esc_y * diag_component
-    else:
-        # Vertical edge - fan up/down based on position
-        offset_from_center = pad_y - layout.center_y
-        fan_dir = 1 if offset_from_center >= 0 else -1
-
-        # True 45 degrees: equal dx and dy
-        end_x = corner_x + esc_x * diag_component
-        end_y = corner_y + fan_dir * diag_component
+    fan_dir = 1.0 if off >= 0 else -1.0
+    end_x = corner_x + esc_x * diag_component + fan_dir * tan_x * diag_component
+    end_y = corner_y + esc_y * diag_component + fan_dir * tan_y * diag_component
 
     return ((corner_x, corner_y), (end_x, end_y))

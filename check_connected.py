@@ -191,7 +191,9 @@ def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
     membership test). Used to credit an offset via-in-pad as connected (#89)."""
     dx = px - pad.global_x
     dy = py - pad.global_y
-    rot = math.radians(pad.rotation or 0.0)
+    # size_x/size_y are board-resolved; the rectangle's residual tilt is
+    # rect_rotation (0 for orthogonal pads), not the total pad rotation.
+    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
     c, s = math.cos(-rot), math.sin(-rot)
     lx = dx * c - dy * s
     ly = dx * s + dy * c

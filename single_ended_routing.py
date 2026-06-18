@@ -11,7 +11,7 @@ from terminal_colors import RED, YELLOW, RESET
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map
+from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
     get_net_endpoints,
     get_multipoint_net_pads,
@@ -192,9 +192,12 @@ def _identify_blocking_obstacles(
 
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
 
-            # Compute pad expansion
-            pad_half_x = pad.size_x / 2 if hasattr(pad, 'size_x') else 0.5
-            pad_half_y = pad.size_y / 2 if hasattr(pad, 'size_y') else 0.5
+            # Compute pad expansion (rotated-rect bbox so a tilted pad's blocked
+            # cells are still attributed to it)
+            if hasattr(pad, 'size_x'):
+                pad_half_x, pad_half_y = pad_rect_halfspan(pad)
+            else:
+                pad_half_x = pad_half_y = 0.5
             pad_expansion_x = max(1, coord.to_grid_dist(pad_half_x + config.clearance + config.track_width / 2))
             pad_expansion_y = max(1, coord.to_grid_dist(pad_half_y + config.clearance + config.track_width / 2))
 

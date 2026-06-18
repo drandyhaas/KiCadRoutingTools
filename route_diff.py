@@ -869,6 +869,8 @@ Examples:
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
+    parser.add_argument("--output", metavar="FILE",
+                        help="Output KiCad PCB file (named alias for the positional output_file)")
     parser.add_argument("net_patterns", nargs="*", help="Net names or wildcard patterns to route (default: '*' = all nets)")
     parser.add_argument("--nets", "-n", nargs="+", help="Net names or wildcard patterns to route (alternative to positional args)")
     parser.add_argument("--overwrite", "-O", action="store_true",
@@ -1039,6 +1041,12 @@ Examples:
                         help="Add teardrop settings to all pads in output file")
 
     args = parser.parse_args()
+
+    # --output is a named alias for the positional output_file; reject giving both differently.
+    if args.output is not None:
+        if args.output_file is not None and args.output_file != args.output:
+            parser.error("specify the output path once: positional output_file OR --output, not both")
+        args.output_file = args.output
 
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:

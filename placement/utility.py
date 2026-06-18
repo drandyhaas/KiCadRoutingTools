@@ -2,6 +2,7 @@
 Utility functions for component placement.
 """
 
+import math
 from typing import Tuple
 
 from kicad_parser import Footprint
@@ -21,9 +22,17 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, fl
     min_y = float('inf')
     max_y = float('-inf')
 
+    # size_x/size_y are board-resolved; in the footprint's LOCAL frame the pad is
+    # tilted by rect_rotation + the footprint rotation, so the local-axis bbox
+    # half-extents follow from that combined angle (exact for any placement angle;
+    # reduces to size/2 for an axis-aligned pad in an unrotated footprint).
     for pad in footprint.pads:
-        half_sx = pad.size_x / 2
-        half_sy = pad.size_y / 2
+        local_tilt = math.radians((getattr(pad, 'rect_rotation', 0.0) or 0.0)
+                                  + (footprint.rotation or 0.0))
+        c, s = abs(math.cos(local_tilt)), abs(math.sin(local_tilt))
+        hx, hy = pad.size_x / 2, pad.size_y / 2
+        half_sx = hx * c + hy * s
+        half_sy = hx * s + hy * c
         min_x = min(min_x, pad.local_x - half_sx)
         max_x = max(max_x, pad.local_x + half_sx)
         min_y = min(min_y, pad.local_y - half_sy)

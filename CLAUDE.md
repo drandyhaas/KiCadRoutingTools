@@ -106,7 +106,12 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pad.net_name` - Net name (e.g., '/PC-A7')
 - `pad.global_x`, `pad.global_y` - Absolute position
 - `pad.local_x`, `pad.local_y` - Position relative to footprint
-- `pad.size_x`, `pad.size_y` - Pad dimensions
+- `pad.size_x`, `pad.size_y` - Pad dimensions in board space (resolved from the
+  pad's absolute angle; swapped for ~90° pads so they're axis-aligned)
+- `pad.rect_rotation` - Residual rect tilt (deg, in (-90,90]); 0 for axis-aligned
+  pads, non-zero only for pads on non-orthogonal angles. Obstacle/DRC geometry
+  rotates the pad rectangle by this. Run `check_pads.py` before fanout to catch
+  mis-modelled (overlapping) pad geometry.
 - `pad.shape` - 'circle', 'oval', 'rect', etc.
 - `pad.layers` - List of layer names
 - `pad.drill` - Drill diameter (0 for SMD, >0 for through-hole)

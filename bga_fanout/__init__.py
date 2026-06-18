@@ -1507,10 +1507,41 @@ def generate_bga_fanout(footprint: Footprint,
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
 
+    # Non-orthogonally-placed parts (issue #137): the grid/escape logic below is
+    # global-axis-bound, so rotate the whole board into this footprint's frame
+    # (where its balls are axis-aligned), run the pipeline, and map the resulting
+    # tracks/vias back. Orthogonal placements skip this and are unaffected.
+    from bga_fanout.rotate_frame import (is_orthogonal, to_axis_aligned_frame,
+                                         back_transform_results)
+    if not is_orthogonal(footprint.rotation):
+        print(f"  {footprint.reference} placed at {footprint.rotation:.1f}° - routing "
+              f"in the footprint frame and mapping back (issue #137)")
+        rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
+        tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
+            rp.footprints[footprint.reference], rp,
+            net_filter=net_filter, diff_pair_patterns=diff_pair_patterns, layers=layers,
+            track_width=track_width, clearance=clearance, diff_pair_gap=diff_pair_gap,
+            exit_margin=exit_margin, primary_escape=primary_escape,
+            force_escape_direction=force_escape_direction, rebalance_escape=rebalance_escape,
+            via_size=via_size, via_drill=via_drill, check_for_previous=check_for_previous,
+            no_inner_top_layer=no_inner_top_layer, escape_method=escape_method)
+        back_transform_results(tracks, vias_to_add, vias_to_remove, back)
+        return tracks, vias_to_add, vias_to_remove, failed_nets
+
     grid = analyze_bga_grid(footprint)
     if grid is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a BGA")
         return [], [], [], []
+
+    # Sanity-check pad geometry before escaping (see qfn_fanout): overlapping
+    # same-footprint pads mean the pad rotation/size is modelled wrong.
+    from check_pads import find_pad_overlaps
+    _ov = find_pad_overlaps(pcb_data, component=footprint.reference)
+    if _ov:
+        print(f"  WARNING: {footprint.reference} has {len(_ov)} overlapping "
+              f"different-net pad pair(s) - pad geometry looks wrong, fanout "
+              f"may be placed across pads. Run: python3 check_pads.py <board> "
+              f"--component {footprint.reference}")
 
     print(f"BGA Grid Analysis for {footprint.reference}:")
     print(f"  Pitch: {grid.pitch_x:.2f} x {grid.pitch_y:.2f} mm")

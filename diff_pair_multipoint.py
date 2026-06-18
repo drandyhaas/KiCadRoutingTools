@@ -208,7 +208,8 @@ def _fake_pad(ref_pad: Pad, x: float, y: float, layer: str) -> Pad:
         component_ref=ref_pad.component_ref, pad_number=ref_pad.pad_number,
         global_x=x, global_y=y, local_x=x, local_y=y,
         size_x=ref_pad.size_x, size_y=ref_pad.size_y, shape=ref_pad.shape,
-        layers=[layer], net_id=ref_pad.net_id, net_name=ref_pad.net_name)
+        layers=[layer], net_id=ref_pad.net_id, net_name=ref_pad.net_name,
+        rect_rotation=getattr(ref_pad, 'rect_rotation', 0.0))
 
 
 def _candidate_relocation_layers(state, terminals, obstacles, max_layers=3):

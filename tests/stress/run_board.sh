@@ -6,7 +6,7 @@
 # concise FINDINGS.md into the board's run dir. Decouples board execution from
 # the harness notification stream — the queue manager just watches files.
 #
-# Usage: run_board.sh <board> <set:1|2> [model]
+# Usage: run_board.sh <board> <set:1|2|3...> [model]
 set -u
 BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-sonnet}"
 # Repo root is derived from this script's own location (tests/stress/run_board.sh),
@@ -14,7 +14,7 @@ BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-sonnet}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${STRESS_ROOT:-$HOME/Documents/kicad_stress_test}"
 REPO="${STRESS_REPO:-$(cd "$SELF/../.." && pwd)}"
-if [ "$SET" = "2" ]; then SFX="_set2"; else SFX=""; fi
+if [ "$SET" = "1" ]; then SFX=""; else SFX="_set$SET"; fi
 RUNDIR="$ROOT/runs${SFX}/$BOARD"
 RESULT="$ROOT/results${SFX}/$BOARD.json"
 mkdir -p "$RUNDIR"
