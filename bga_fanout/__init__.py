@@ -1512,6 +1512,16 @@ def generate_bga_fanout(footprint: Footprint,
         print(f"Warning: {footprint.reference} doesn't appear to be a BGA")
         return [], [], [], []
 
+    # Sanity-check pad geometry before escaping (see qfn_fanout): overlapping
+    # same-footprint pads mean the pad rotation/size is modelled wrong.
+    from check_pads import find_pad_overlaps
+    _ov = find_pad_overlaps(pcb_data, component=footprint.reference)
+    if _ov:
+        print(f"  WARNING: {footprint.reference} has {len(_ov)} overlapping "
+              f"different-net pad pair(s) - pad geometry looks wrong, fanout "
+              f"may be placed across pads. Run: python3 check_pads.py <board> "
+              f"--component {footprint.reference}")
+
     print(f"BGA Grid Analysis for {footprint.reference}:")
     print(f"  Pitch: {grid.pitch_x:.2f} x {grid.pitch_y:.2f} mm")
     print(f"  Grid: {len(grid.rows)} rows x {len(grid.cols)} columns")

@@ -6,9 +6,15 @@ Creates escape routing for QFN (Quad Flat No-leads) and QFP (Quad Flat Package) 
 
 - **Generic package support** - Works with any QFN/QFP package regardless of pin count or size
 - **Automatic geometry detection** - Analyzes pad positions and sizes to determine layout
+- **Rotation-agnostic** - Edge classification runs in the footprint's local frame and the
+  escape follows each pad's own long axis, so packages placed at any board angle (including
+  non-orthogonal, e.g. an LQFP144 at -135°) fan out correctly. The previous global-bounding-
+  box edge detection saw a rotated part as a diamond and escaped almost none of its pads.
 - **Two-segment stubs** - Straight segment + 45-degree fan-out for optimal endpoint separation
 - **Side detection** - Automatically determines which side each pad is on
 - **Collision validation** - Checks endpoint spacing after generation
+- **Pad-geometry sanity check** - Runs `check_pads.py` on the component first; if its pads
+  overlap (a sign the pad rotation/size is modelled wrong) it warns before escaping.
 
 ## Usage
 

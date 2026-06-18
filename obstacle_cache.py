@@ -258,7 +258,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # (pad_blocked_cells_array is bit-identical to iter_pad_blocked_cells)
     cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
                                     config.grid_step, corner_radius,
-                                    off_x=off_x, off_y=off_y)
+                                    off_x=off_x, off_y=off_y,
+                                    rotation_deg=pad.rect_rotation)
     for layer in expanded_layers:
         layer_idx = layer_map.get(layer)
         if layer_idx is not None:
@@ -273,7 +274,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         via_margin = config.via_size / 2 + config.clearance + config.grid_step / 2
         blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
                                                     via_margin, config.grid_step, corner_radius,
-                                                    off_x=off_x, off_y=off_y))
+                                                    off_x=off_x, off_y=off_y,
+                                                    rotation_deg=pad.rect_rotation))
 
 
 def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: GridRouteConfig,

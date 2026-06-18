@@ -438,6 +438,15 @@ python check_connected.py kicad_files/output.kicad_pcb --routed-only
 # Connection is judged by actual copper extent (via radius, pad size, trace
 # half-width), so T-junction taps and copper-overlap joints are not miscounted.
 python check_orphan_stubs.py kicad_files/output.kicad_pcb
+
+# Pad-geometry sanity check: flags same-footprint, different-net pads whose copper
+# overlaps (a short). A non-zero result almost always means a pad's rotation/size
+# is modelled wrong - the usual cause is a QFN/QFP/BGA placed at a non-orthogonal
+# angle. The fanout tools run this automatically on their component first; run it
+# yourself before fanout (or board-wide) as a standalone check:
+python check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
+python check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
+python check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
 ```
 
 ### 5. Power Net Analysis

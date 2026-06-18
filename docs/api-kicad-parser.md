@@ -111,9 +111,16 @@ section. Used for accurate length/time matching.
 | `pinfunction` | str | Pin function from the schematic (`'TX'`, `'~RESET'`) |
 | `pintype` | str | Pin electrical type (`'passive'`, `'input'`, `'power_in'`) |
 | `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
+| `rect_rotation` | float | Residual rectangle tilt in the global frame, in (-90, 90]. `0` for axis-aligned pads (the common case); non-zero only for pads on non-orthogonal angles. |
 
-When a pad is rotated near 90° (45°–135°), `size_x`/`size_y` are swapped so
-they always describe board-space dimensions.
+Pad dimensions are resolved into board space using the pad's **absolute** angle
+(the KiCad `(at … angle)` already includes the footprint rotation; applying the
+footprint rotation a second time would make adjacent pad copper overlap). For
+near-orthogonal pads (0/90/180/270°) `size_x`/`size_y` are swapped as needed so
+they are board-axis-aligned and `rect_rotation` is `0`. A genuinely diagonal pad
+keeps its given dimensions and carries the tilt in `rect_rotation`; the obstacle
+map and DRC rotate the pad rectangle by that angle. `check_pads.py` flags pads
+whose resolved copper overlaps a different-net neighbour (a modelling error).
 
 ### `Segment`
 
@@ -375,5 +382,6 @@ parser returning nested lists, for ad-hoc digging.
 - **`board_info.stackup` is on `board_info`**, not on `PCBData` directly,
   and is an empty list when the board file has no stackup section (impedance
   functions then fall back to FR4 defaults).
-- **Rotated pad sizes are pre-swapped** — don't apply rotation to
-  `size_x`/`size_y` yourself.
+- **Rotated pad sizes are resolved for you** — `size_x`/`size_y` are already
+  board-axis-aligned for orthogonal pads; for diagonal pads apply
+  `rect_rotation` to the rectangle (don't re-derive a swap from `rotation`).

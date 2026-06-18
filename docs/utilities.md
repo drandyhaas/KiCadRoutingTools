@@ -255,6 +255,59 @@ New orphans in file 2: 0
 Removed orphans (fixed): 2
 ```
 
+## Pad Geometry Checker (`check_pads.py`)
+
+Reports same-footprint, different-net pads whose copper **overlaps** - a short, and
+almost always a sign that the pad's rotation or size is being modelled wrong. The
+classic trigger is a QFN/QFP/BGA placed at a non-orthogonal board angle: if the pad
+rectangles are mis-oriented, adjacent pads collide here and any fanout escapes its
+stubs across them. Run this before fanout as a sanity check (the fanout tools also run
+it automatically on their component and warn).
+
+### Usage
+
+```bash
+python check_pads.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --component, -c REF   Restrict the check to one footprint reference
+  --cross-footprint     Also check overlaps across different footprints
+                        (broader, noisier board-level short check)
+  --tolerance MM        Minimum overlap depth to report (default 0.05)
+  --quiet, -q           Print only the PASS/FAIL summary line
+```
+
+Only pads that share a copper layer are compared, so edge-connector fingers on opposite
+sides and a part's top/bottom ground pads never false-trip. Net-0 (no-connection) pads -
+fiducials, mechanical pads - are ignored. The exit code is the number of overlapping
+pairs (0 = clean), so it gates a pipeline.
+
+### Examples
+
+```bash
+# Whole board, checked per footprint
+python check_pads.py board.kicad_pcb
+
+# One footprint (e.g. before fanning it out)
+python check_pads.py board.kicad_pcb --component U23
+
+# Broader board-level short check across all footprints
+python check_pads.py board.kicad_pcb --cross-footprint
+```
+
+### Output
+
+```
+FAILED: 2 overlapping different-net pad pair(s):
+  U23.92 (SCL) <-> U23.93 (SDA)  overlap 0.480 mm  at (142.00,148.45)
+  ...
+Likely a pad-rotation modelling error - fix before running fanout.
+```
+
+```
+OK: no overlapping different-net pads (tolerance 0.05 mm)
+```
+
 ## Net Analyzer (`list_nets.py`)
 
 Analyzes nets in a PCB file. Can list nets on a component, detect differential pairs, identify power/ground nets, and report the board's net-class design rules.

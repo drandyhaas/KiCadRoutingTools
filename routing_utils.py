@@ -96,13 +96,17 @@ def iter_pad_blocked_cells(
     corner_radius: float = 0.0,
     corner_buffer: float = None,
     off_x: float = 0.0,
-    off_y: float = 0.0
+    off_y: float = 0.0,
+    rotation_deg: float = 0.0
 ):
     """
     Generate grid cells that should be blocked for a pad.
 
     Yields (gx, gy) tuples for all cells within margin distance of the pad edge.
     Uses rectangular-with-rounded-corners shape matching the actual pad geometry.
+
+    rotation_deg rotates the rectangle in the global frame (pad.rect_rotation)
+    for diagonal pads; 0 (the common axis-aligned case) is unchanged.
 
     Args:
         pad_gx, pad_gy: Pad center in grid coordinates
@@ -125,9 +129,17 @@ def iter_pad_blocked_cells(
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
     if corner_buffer is None:
         corner_buffer = grid_step / 2
+    rotated = abs(rotation_deg) > 1e-9 and abs(abs(rotation_deg) - 180.0) > 1e-9
+    if rotated:
+        _rrad = math.radians(rotation_deg)
+        _rc, _rs = math.cos(_rrad), math.sin(_rrad)
+        gext_x = abs(half_width * _rc) + abs(half_height * _rs)
+        gext_y = abs(half_width * _rs) + abs(half_height * _rc)
+    else:
+        gext_x, gext_y = half_width, half_height
     # +1 cell so the bbox still covers the region once shifted by the sub-cell offset.
-    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step)) + 1
-    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step)) + 1
+    expand_x = int(math.ceil((gext_x + margin + corner_buffer) / grid_step)) + 1
+    expand_y = int(math.ceil((gext_y + margin + corner_buffer) / grid_step)) + 1
     margin_sq = margin * margin
     buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
 
@@ -142,6 +154,10 @@ def iter_pad_blocked_cells(
             # Cell center relative to the REAL pad center (issue #70).
             cell_x = ex * grid_step - off_x
             cell_y = ey * grid_step - off_y
+            if rotated:
+                # Rotate global offset into the pad's local frame: R(-rotation).
+                cell_x, cell_y = (cell_x * _rc + cell_y * _rs,
+                                  -cell_x * _rs + cell_y * _rc)
             abs_x, abs_y = abs(cell_x), abs(cell_y)
 
             # Use buffered margin in corner/diagonal regions where grid discretization
@@ -163,6 +179,7 @@ def pad_blocked_cells_array(
     corner_buffer: float = None,
     off_x: float = 0.0,
     off_y: float = 0.0,
+    rotation_deg: float = 0.0,
 ):
     """Vectorized twin of iter_pad_blocked_cells: returns an (N, 2) int32
     array of blocked (gx, gy) cells.
@@ -174,13 +191,26 @@ def pad_blocked_cells_array(
     the pad than the clearance on the side the pad rounds toward -- the residual
     sub-cell PAD-SEGMENT violations of issue #70. With off_x=off_y=0 the result
     is unchanged (bit-identical to iter_pad_blocked_cells).
+
+    rotation_deg rotates the (half_width x half_height) rectangle in the global
+    frame -- for diagonal pads (pad.rect_rotation). 0 (axis-aligned, the common
+    case) takes the original bit-identical code path.
     """
     if corner_buffer is None:
         corner_buffer = grid_step / 2
+    rotated = abs(rotation_deg) > 1e-9 and abs(abs(rotation_deg) - 180.0) > 1e-9
+    if rotated:
+        _rrad = math.radians(rotation_deg)
+        _rc, _rs = math.cos(_rrad), math.sin(_rrad)
+        # Global half-extent of the rotated rect, so the search bbox covers it.
+        gext_x = abs(half_width * _rc) + abs(half_height * _rs)
+        gext_y = abs(half_width * _rs) + abs(half_height * _rc)
+    else:
+        gext_x, gext_y = half_width, half_height
     # +1 cell so the bbox still covers the disk once shifted by the <=half-cell
     # sub-cell offset.
-    expand_x = int(math.ceil((half_width + margin + corner_buffer) / grid_step)) + 1
-    expand_y = int(math.ceil((half_height + margin + corner_buffer) / grid_step)) + 1
+    expand_x = int(math.ceil((gext_x + margin + corner_buffer) / grid_step)) + 1
+    expand_y = int(math.ceil((gext_y + margin + corner_buffer) / grid_step)) + 1
     margin_sq = margin * margin
     buffered_margin_sq = (margin + corner_buffer) * (margin + corner_buffer)
 
@@ -197,6 +227,11 @@ def pad_blocked_cells_array(
     # axis is ex*step - off_x.
     cell_x = exg.astype(np.float64) * grid_step - off_x
     cell_y = eyg.astype(np.float64) * grid_step - off_y
+    if rotated:
+        # Rotate global cell offsets into the pad's local frame: R(-rotation).
+        lx = cell_x * _rc + cell_y * _rs
+        ly = -cell_x * _rs + cell_y * _rc
+        cell_x, cell_y = lx, ly
     abs_x = np.abs(cell_x)
     abs_y = np.abs(cell_y)
 

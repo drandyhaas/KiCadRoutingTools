@@ -89,6 +89,17 @@ def generate_qfn_fanout(footprint: Footprint,
         print(f"Warning: {footprint.reference} doesn't appear to be a QFN/QFP")
         return [], [], []
 
+    # Sanity-check pad geometry before escaping: overlapping same-footprint pads
+    # mean the pad rotation/size is modelled wrong, so the stubs would be placed
+    # across neighbouring pads (issue: rotated-package fanout). Warn loudly.
+    from check_pads import find_pad_overlaps
+    _ov = find_pad_overlaps(pcb_data, component=footprint.reference)
+    if _ov:
+        print(f"  WARNING: {footprint.reference} has {len(_ov)} overlapping "
+              f"different-net pad pair(s) - pad geometry looks wrong, fanout "
+              f"stubs may cross pads. Run: python3 check_pads.py <board> "
+              f"--component {footprint.reference}")
+
     print(f"QFN/QFP Layout Analysis for {footprint.reference}:")
     print(f"  Center: ({layout.center_x:.2f}, {layout.center_y:.2f})")
     print(f"  Bounding box: X[{layout.min_x:.2f}, {layout.max_x:.2f}], Y[{layout.min_y:.2f}, {layout.max_y:.2f}]")
@@ -164,8 +175,12 @@ def generate_qfn_fanout(footprint: Footprint,
     # if even the straight escape itself grazes a pad, drop that stub and warn.
     from bga_fanout.reroute import _seg_hits_pad
     margin = clearance + track_width / 2
-    fp_lo_x, fp_hi_x = layout.min_x - 3.0, layout.max_x + 3.0
-    fp_lo_y, fp_hi_y = layout.min_y - 3.0, layout.max_y + 3.0
+    # Global bbox of this part's pads (layout.min_* are in the footprint LOCAL
+    # frame now, so they can't bound the global foreign-pad search window).
+    _gxs = [p.global_x for p in footprint.pads]
+    _gys = [p.global_y for p in footprint.pads]
+    fp_lo_x, fp_hi_x = min(_gxs) - 3.0, max(_gxs) + 3.0
+    fp_lo_y, fp_hi_y = min(_gys) - 3.0, max(_gys) + 3.0
     foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist
                     if p.component_ref != footprint.reference
                     and fp_lo_x <= p.global_x <= fp_hi_x and fp_lo_y <= p.global_y <= fp_hi_y]

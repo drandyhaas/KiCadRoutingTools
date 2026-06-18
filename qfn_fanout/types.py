@@ -10,7 +10,13 @@ from kicad_parser import Pad
 
 @dataclass
 class QFNLayout:
-    """Represents the QFN package layout derived from pad analysis."""
+    """Represents the QFN package layout derived from pad analysis.
+
+    All bbox/center coordinates are in the footprint's LOCAL frame (pad rows are
+    axis-aligned there regardless of how the part is rotated on the board). The
+    fp_* fields carry the footprint placement so stub geometry computed in the
+    local frame can be transformed back to global board coordinates.
+    """
     center_x: float
     center_y: float
     min_x: float
@@ -21,6 +27,11 @@ class QFNLayout:
     height: float
     pad_pitch: float
     edge_tolerance: float  # How close to edge to be considered "on edge"
+    fp_x: float = 0.0          # footprint origin, global (for local->global)
+    fp_y: float = 0.0
+    fp_rotation: float = 0.0   # footprint rotation, degrees
+    center_global_x: float = 0.0   # package center in global board coords
+    center_global_y: float = 0.0
 
 
 @dataclass

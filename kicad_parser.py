@@ -51,6 +51,10 @@ class Pad:
     drill: float = 0.0  # Drill size for through-hole pads (0 for SMD)
     pintype: str = ""
     roundrect_rratio: float = 0.0  # Corner radius ratio for roundrect pads
+    rect_rotation: float = 0.0  # Residual rect tilt in global frame for non-
+    # orthogonal pads (deg, in (-90,90]). 0 for axis-aligned pads (the common
+    # case) where the rotation is already baked into size_x/size_y. The
+    # obstacle/DRC geometry rotates the pad rectangle by this angle.
 
 
 @dataclass
@@ -213,6 +217,39 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
     global_y = fp_y + (pad_local_x * sin_r + pad_local_y * cos_r)
 
     return global_x, global_y
+
+
+# Tolerance (deg) within which a pad rotation is treated as axis-aligned and
+# baked into size_x/size_y rather than carried as a residual rect_rotation.
+_PAD_ORTHO_TOL = 1.0
+
+
+def _resolve_pad_rect(size_x: float, size_y: float,
+                      pad_rotation_deg: float) -> Tuple[float, float, float]:
+    """Resolve a pad rectangle (given in the pad's own frame) into board space.
+
+    pad_rotation_deg is the pad's ABSOLUTE orientation: the KiCad pad ``(at ...)``
+    angle already includes the footprint rotation (verified physically -- using
+    pad+footprint here makes adjacent pad copper overlap on rotated parts), and
+    pcbnew's GetOrientationDegrees() is likewise absolute. The footprint rotation
+    still applies to the pad POSITION (see local_to_global) but NOT a second time
+    to its orientation.
+
+    Returns (size_x, size_y, rect_rotation): board-axis-aligned dimensions for
+    orthogonal pads (0/90/180/270°, the overwhelmingly common case) with
+    rect_rotation 0; for genuine diagonal pads the dimensions are left as given
+    and rect_rotation carries the residual tilt in the GLOBAL frame, folded to
+    (-90, 90]. The global frame negates the KiCad angle (see local_to_global), so
+    the geometric tilt is -pad_rotation.
+    """
+    t = pad_rotation_deg % 180.0  # rect is symmetric under 180°
+    if abs(t - 90.0) <= _PAD_ORTHO_TOL:
+        return size_y, size_x, 0.0           # ~90°: swap to board axes
+    if t <= _PAD_ORTHO_TOL or t >= 180.0 - _PAD_ORTHO_TOL:
+        return size_x, size_y, 0.0           # ~0/180°: already board-aligned
+    g = (-pad_rotation_deg) % 180.0          # global-frame tilt, folded to [0,180)
+    rect_rotation = g if g <= 90.0 else g - 180.0
+    return size_x, size_y, rect_rotation
 
 
 def find_matching_paren(content: str, open_idx: int) -> int:
@@ -1066,13 +1103,16 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             else:
                 size_x = size_y = 0.5  # default
 
-            # Apply only pad rotation to get board-space dimensions
-            # The pad rotation already accounts for orientation relative to footprint,
-            # and footprint rotation transforms coordinates but the size in local
-            # footprint space after pad rotation gives the board-space dimensions
-            pad_rot_normalized = pad_rotation % 180
-            if 45 < pad_rot_normalized < 135:  # Close to 90°
-                size_x, size_y = size_y, size_x
+            # Resolve the pad rectangle into board space. size_x/size_y are in
+            # the pad's own frame; its absolute board orientation is
+            # total_rotation (pad + footprint), NOT pad_rotation alone — keying
+            # the swap on pad_rotation misses pads whose footprint supplies the
+            # 90° (e.g. a -135° footprint with a 225° pad lands at total 90° and
+            # was left un-swapped, modelled 90° off its real shape). For the
+            # common orthogonal cases bake the rotation into the dimensions so
+            # all downstream axis-aligned geometry stays exact; genuine diagonal
+            # pads keep a residual rect_rotation the obstacle/DRC geometry applies.
+            size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
             # Extract layers - use findall to get all quoted layer names
             layers_section = re.search(r'\(layers\s+([^)]+)\)', pad_text)
@@ -1137,7 +1177,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 pinfunction=pinfunction,
                 pintype=pintype,
                 drill=drill_size,
-                roundrect_rratio=roundrect_rratio
+                roundrect_rratio=roundrect_rratio,
+                rect_rotation=rect_rotation
             )
 
             footprint.pads.append(pad)
@@ -1780,10 +1821,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
             total_rotation = (pad_rotation + fp_rotation) % 360
 
-            # Apply only pad rotation to get board-space dimensions
-            pad_rot_normalized = pad_rotation % 180
-            if 45 < pad_rot_normalized < 135:
-                size_x, size_y = size_y, size_x
+            # Resolve the pad rectangle into board space (keyed on the absolute
+            # total rotation, not pad_rotation alone — see the text-parser path).
+            size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
             # Pin metadata
             try:
@@ -1826,7 +1866,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 pinfunction=pinfunction,
                 pintype=pintype,
                 drill=drill,
-                roundrect_rratio=roundrect_rratio
+                roundrect_rratio=roundrect_rratio,
+                rect_rotation=rect_rotation
             )
 
             footprint.pads.append(pad_obj)
