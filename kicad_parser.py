@@ -228,6 +228,35 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
 _PAD_ORTHO_TOL = 1.0
 
 
+def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
+    """Half-extent (|x|, |y|) of a custom pad's real copper in the pad's local
+    frame, from its (primitives ...) block. A custom pad's (size ...) is only the
+    anchor; gr_poly/gr_circle/gr_line primitives can reach well beyond it (e.g. a
+    resistor pad whose copper extends +0.56mm past the anchor). Modelling only the
+    anchor under-blocks the obstacle map, so tracks graze the real copper (#70
+    dig). Returns (0, 0) if there are no primitives. Coordinates are pad-local
+    (un-rotated); _resolve_pad_rect then orients the enclosing rect like any pad.
+    """
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return 0.0, 0.0
+    prim = pad_text[pm.start():]
+    xs, ys = [], []
+    for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
+        xs.append(float(m.group(1))); ys.append(float(m.group(2)))
+    # gr_circle: (center x y) (end x y) -> radius reaches center +/- r on both axes
+    for m in re.finditer(r'\(gr_circle\s+\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
+        cx, cy, ex, ey = map(float, m.groups())
+        r = math.hypot(ex - cx, ey - cy)
+        xs += [cx - r, cx + r]; ys += [cy - r, cy + r]
+    if not xs:
+        return 0.0, 0.0
+    # primitive stroke width thickens the copper; add half of the largest.
+    widths = [float(w) for w in re.findall(r'\(width\s+(-?[\d.]+)\)', prim)]
+    hw = (max(widths) / 2.0) if widths else 0.0
+    return max(abs(min(xs)), abs(max(xs))) + hw, max(abs(min(ys)), abs(max(ys))) + hw
+
+
 def _resolve_pad_rect(size_x: float, size_y: float,
                       pad_rotation_deg: float) -> Tuple[float, float, float]:
     """Resolve a pad rectangle (given in the pad's own frame) into board space.
@@ -1107,6 +1136,18 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             else:
                 size_x = size_y = 0.5  # default
 
+            # Custom pads: enclose the real primitive copper, not just the anchor
+            # (size ...). Use a centred rect around the connection point that
+            # covers the full local extent -- conservative (may over-block the
+            # empty side of an asymmetric pad) but DRC-safe; modelling only the
+            # anchor lets tracks graze copper that reaches past it.
+            if pad_shape == 'custom':
+                ext_x, ext_y = _custom_pad_local_extent(pad_text)
+                if ext_x > 0:
+                    size_x = max(size_x, 2.0 * ext_x)
+                if ext_y > 0:
+                    size_y = max(size_y, 2.0 * ext_y)
+
             # Resolve the pad rectangle into board space. size_x/size_y are in
             # the pad's own frame; its absolute board orientation is
             # total_rotation (pad + footprint), NOT pad_rotation alone — keying
@@ -1832,9 +1873,23 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
             total_rotation = (pad_rotation + fp_rotation) % 360
 
-            # Resolve the pad rectangle into board space (keyed on the absolute
-            # total rotation, not pad_rotation alone — see the text-parser path).
-            size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
+            # Custom pads: GetSize() is only the anchor; enclose the real copper
+            # via the effective bounding box, centred on the connection point so
+            # all copper is covered (mirrors the text-parser path / #70 dig). The
+            # bbox is already board-axis-aligned, so skip the rect rotation.
+            if shape == 'custom':
+                try:
+                    bb = pad.GetBoundingBox()
+                    pos = pad.GetPosition()
+                    hx = max(abs(to_mm(bb.GetLeft() - pos.x)), abs(to_mm(bb.GetRight() - pos.x)))
+                    hy = max(abs(to_mm(bb.GetTop() - pos.y)), abs(to_mm(bb.GetBottom() - pos.y)))
+                    size_x, size_y, rect_rotation = max(size_x, 2 * hx), max(size_y, 2 * hy), 0.0
+                except Exception:
+                    size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
+            else:
+                # Resolve the pad rectangle into board space (keyed on the absolute
+                # total rotation, not pad_rotation alone — see the text-parser path).
+                size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
             # Pin metadata
             try:
