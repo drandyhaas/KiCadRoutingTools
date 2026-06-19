@@ -795,9 +795,12 @@ def build_routing_obstacle_map(
             continue
         if seg.layer != route_layer:
             continue
-        # Clearance needed: our track half-width + existing segment half-width + clearance
+        # Clearance needed: our track half-width + existing segment half-width + clearance.
+        # Round the expansion UP (ceil): flooring leaves the blocked halo short of the
+        # real clearance envelope, so connection traces route within clearance of signal
+        # copper (#146 — the dominant plane-vs-signal DRC source on dense boards).
         seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
+        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
         seg_count += 1
     if verbose:
@@ -810,7 +813,7 @@ def build_routing_obstacle_map(
         if via.net_id == exclude_net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
-        via_expansion = coord.to_grid_dist(via.size / 2 + config.track_width / 2 + config.clearance)
+        via_expansion = coord.to_grid_dist_safe(via.size / 2 + config.track_width / 2 + config.clearance)
         for ex in range(-via_expansion, via_expansion + 1):
             for ey in range(-via_expansion, via_expansion + 1):
                 if ex*ex + ey*ey <= via_expansion * via_expansion:
