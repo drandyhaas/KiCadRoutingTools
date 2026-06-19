@@ -813,10 +813,19 @@ def build_routing_obstacle_map(
         if via.net_id == exclude_net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
-        via_expansion = coord.to_grid_dist_safe(via.size / 2 + config.track_width / 2 + config.clearance)
-        for ex in range(-via_expansion, via_expansion + 1):
-            for ey in range(-via_expansion, via_expansion + 1):
-                if ex*ex + ey*ey <= via_expansion * via_expansion:
+        # Block cells by REAL distance to the via centre (not the grid-quantised
+        # cell) plus a half-cell buffer for the routed track's own discretisation,
+        # so a sub-cell via offset can't let a 0.3 mm plane trace sit inside the
+        # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
+        # to ~half a cell on the via side.
+        r_mm = via.size / 2 + config.track_width / 2 + config.clearance + config.grid_step / 2
+        rg = coord.to_grid_dist_safe(r_mm)
+        r_sq = r_mm * r_mm
+        for ex in range(-rg, rg + 1):
+            for ey in range(-rg, rg + 1):
+                ddx = (gx + ex) * config.grid_step - via.x
+                ddy = (gy + ey) * config.grid_step - via.y
+                if ddx * ddx + ddy * ddy <= r_sq:
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
         via_count += 1
     if verbose:
