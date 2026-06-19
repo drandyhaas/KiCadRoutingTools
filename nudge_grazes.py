@@ -87,18 +87,15 @@ class _Model:
 
     def __init__(self, pcb, clearance, grid_step):
         self.clr = clearance
-        self.grid = grid_step
         self.max_move = grid_step / 2.0
         self.buffer = min(grid_step * 0.02, self.max_move * 0.1)
         rl = pcb.board_info.copper_layers or ['F.Cu', 'B.Cu']
-        self.net_name = {nid: n.name for nid, n in pcb.nets.items()}
 
         self.seg = [[s.start_x, s.start_y, s.end_x, s.end_y] for s in pcb.segments]
-        self.seg_orig = [tuple(c) for c in self.seg]   # None for jog-inserted segments
+        self.seg_orig = [tuple(c) for c in self.seg]
         self.sw = [s.width for s in pcb.segments]
         self.slayer = [s.layer for s in pcb.segments]
         self.snet = [s.net_id for s in pcb.segments]
-        self.alive = [True] * len(self.seg)
 
         self.via = [[v.x, v.y] for v in pcb.vias]
         self.via_orig = [tuple(c) for c in self.via]
@@ -119,8 +116,6 @@ class _Model:
         cs = self.cell
         pad_margin = self.clr + self.max_move
         for i, (sx, sy, ex, ey) in enumerate(self.seg):
-            if not self.alive[i]:
-                continue
             for c in self._bbox_cells(sx, sy, ex, ey, self.sw[i] / 2 + self.clr + self.max_move):
                 seg_cells[(self.slayer[i],) + c].append(i)
         for i, (x, y) in enumerate(self.via):
@@ -152,20 +147,9 @@ class _Model:
         return out
 
     # ---- coincidence groups + pad anchors ----
-    def add_segment(self, sx, sy, ex, ey, width, layer, net):
-        """Append a jog-inserted segment (orig=None marks it as 'added')."""
-        self.seg.append([sx, sy, ex, ey])
-        self.seg_orig.append(None)
-        self.sw.append(width)
-        self.slayer.append(layer)
-        self.snet.append(net)
-        self.alive.append(True)
-
     def build_groups(self):
         groups = defaultdict(list)
         for i, (sx, sy, ex, ey) in enumerate(self.seg):
-            if not self.alive[i]:
-                continue
             groups[_key(sx, sy)].append(('s', i, 0))
             groups[_key(ex, ey)].append(('s', i, 1))
         for i, (x, y) in enumerate(self.via):
@@ -199,34 +183,18 @@ class _Model:
     # ---- overlap of one piece against nearby OTHER-net copper (live coords) ----
     def seg_overlap_sum(self, i):
         sx, sy, ex, ey = self.seg[i]
-        return self.seg_overlap_at(sx, sy, ex, ey, self.sw[i], self.slayer[i], self.snet[i], skip=i)
-
-    def seg_overlap_at(self, sx, sy, ex, ey, w, layer, net, skip=None, count=False, thresh=0.0):
-        """Other-net clearance overlap for a segment of the given geometry.
-        count=False -> sum of overlap depths; count=True -> number of violating
-        pairs whose overlap exceeds `thresh` (thresh=0 counts every violation;
-        thresh=max_move counts only genuine >1/2-step ones). Used to validate
-        jogs, which must never raise the violation count (or the genuine count)."""
+        w, layer, net = self.sw[i], self.slayer[i], self.snet[i]
         half = w / 2
         pad = half + self.clr + self.max_move
         total = 0.0
-
-        def add(ov):
-            nonlocal total
-            if count:
-                if ov > thresh:
-                    total += 1
-            else:
-                total += ov
-
         for j in self._cands(self.seg_cells, (layer,), sx, sy, ex, ey, pad):
-            if j == skip or not self.alive[j] or self.snet[j] == net:
+            if j == i or self.snet[j] == net:
                 continue
             ox, oy, oex, oey = self.seg[j]
             d = _seg_seg_dist(sx, sy, ex, ey, ox, oy, oex, oey)
             req = half + self.sw[j] / 2 + self.clr
             if d < req:
-                add(req - d)
+                total += req - d
         for j in self._cands(self.via_cells, (), sx, sy, ex, ey, pad):
             if self.vnet[j] == net:
                 continue
@@ -234,7 +202,7 @@ class _Model:
             d = point_to_segment_distance(vx, vy, sx, sy, ex, ey)
             req = self.vsize[j] / 2 + half + self.clr
             if d < req:
-                add(req - d)
+                total += req - d
         for j in self._cands(self.pad_cells, (layer,), sx, sy, ex, ey, pad):
             p = self.pads[j]
             if p.net == net:
@@ -242,7 +210,7 @@ class _Model:
             d = p.dist_to_seg(sx, sy, ex, ey)
             req = half + self.clr
             if d < req:
-                add(req - d)
+                total += req - d
         return total
 
     def via_overlap_sum(self, i):
@@ -260,7 +228,7 @@ class _Model:
                 total += req - d
         # vias block all copper layers -> check segments/pads on every layer
         for j in self._all_layer_seg_cands(vx, vy, pad):
-            if not self.alive[j] or self.snet[j] == net:
+            if self.snet[j] == net:
                 continue
             sx, sy, ex, ey = self.seg[j]
             d = point_to_segment_distance(vx, vy, sx, sy, ex, ey)
@@ -384,48 +352,8 @@ def _nudge_pass(m: _Model):
         elif e_ok:
             sh = [(ex, ey, dx, dy)]
         else:
-            return False
-        return atomic(sh, touched_of([_key(x, y) for (x, y, _, _) in sh]))
-
-    def try_jog(i, ux, uy, overlap, actual, required, cpt):
-        """When an endpoint can't move (anchored to a pad), insert ONE new vertex
-        at the overlap point and offset it away from the obstacle, splitting the
-        track A-B into A-V'-B. Both original (anchored) ends stay put."""
-        nonlocal accepted
-        if not m.alive[i]:
-            return False
-        sx, sy, ex, ey = m.seg[i]
-        w, layer, net = m.sw[i], m.slayer[i], m.snet[i]
-        seglen = math.hypot(ex - sx, ey - sy)
-        if seglen < 4 * m.grid:
-            return False
-        tx, ty = (ex - sx) / seglen, (ey - sy) / seglen
-        s_c = (cpt[0] - sx) * tx + (cpt[1] - sy) * ty   # overlap point along A->B
-        if s_c <= m.grid or s_c >= seglen - m.grid:      # too close to an end -> skip
-            return False
-        amt = min(overlap + m.buffer, cap)
-        vx, vy = cpt[0] + ux * amt, cpt[1] + uy * amt    # offset vertex
-        # Validate on violation COUNT: a jog may only REMOVE violations, never
-        # split one graze into two still-counted ones.
-        pre = m.seg_overlap_at(sx, sy, ex, ey, w, layer, net, skip=i, count=True)
-        post = (m.seg_overlap_at(sx, sy, vx, vy, w, layer, net, skip=i, count=True)
-                + m.seg_overlap_at(vx, vy, ex, ey, w, layer, net, skip=i, count=True))
-        if post < pre - 1e-9:
-            m.alive[i] = False
-            m.add_segment(sx, sy, vx, vy, w, layer, net)
-            m.add_segment(vx, vy, ex, ey, w, layer, net)
-            accepted += 1
-            # Refresh the index/groups so later moves+jogs in THIS pass see the
-            # new geometry (the new vertex is not in the pass-start index).
-            m.build_index()
-            m.build_groups()
-            m._layers_present_seg = set(m.slayer)
-            return True
-        return False
-
-    def fix_seg(i, ux, uy, ov, actual, required, cpt):
-        if not move_seg(i, ux, uy, ov) and m.jog:
-            try_jog(i, ux, uy, ov, actual, required, cpt)
+            return
+        atomic(sh, touched_of([_key(x, y) for (x, y, _, _) in sh]))
 
     def move_via(i, ux, uy, overlap):
         amt = min(overlap + m.buffer, cap)
@@ -435,17 +363,14 @@ def _nudge_pass(m: _Model):
         atomic([(vx, vy, ux * amt, uy * amt)], touched_of([_key(vx, vy)]))
 
     # --- segment victims ---
-    n_seg0 = len(m.seg)
-    for i in range(n_seg0):
-        if not m.alive[i]:
-            continue
+    for i in range(len(m.seg)):
         sx, sy, ex, ey = m.seg[i]
         w, layer, net = m.sw[i], m.slayer[i], m.snet[i]
         half = w / 2
         pad = half + m.clr + cap
         # vs segments
         for j in m._cands(m.seg_cells, (layer,), sx, sy, ex, ey, pad):
-            if j == i or not m.alive[j] or m.snet[j] == net:
+            if j == i or m.snet[j] == net:
                 continue
             ox, oy, oex, oey = m.seg[j]
             d = _seg_seg_dist(sx, sy, ex, ey, ox, oy, oex, oey)
@@ -455,12 +380,8 @@ def _nudge_pass(m: _Model):
                 ocp = closest_point_on_segment(cpt[0], cpt[1], ox, oy, oex, oey)
                 u = _unit_away(ocp, cpt)
                 if u:
-                    fix_seg(i, u[0], u[1], ov, d, half + m.sw[j] / 2 + m.clr, cpt)
-                    if not m.alive[i]:
-                        break
+                    move_seg(i, u[0], u[1], ov)
                     sx, sy, ex, ey = m.seg[i]
-        if not m.alive[i]:
-            continue
         # vs vias
         for j in m._cands(m.via_cells, (), sx, sy, ex, ey, pad):
             if m.vnet[j] == net:
@@ -472,12 +393,8 @@ def _nudge_pass(m: _Model):
                 cpt = closest_point_on_segment(vx, vy, sx, sy, ex, ey)
                 u = _unit_away((vx, vy), cpt)
                 if u:
-                    fix_seg(i, u[0], u[1], ov, d, m.vsize[j] / 2 + half + m.clr, cpt)
-                    if not m.alive[i]:
-                        break
+                    move_seg(i, u[0], u[1], ov)
                     sx, sy, ex, ey = m.seg[i]
-        if not m.alive[i]:
-            continue
         # vs pads
         for j in m._cands(m.pad_cells, (layer,), sx, sy, ex, ey, pad):
             p = m.pads[j]
@@ -488,9 +405,7 @@ def _nudge_pass(m: _Model):
             if 1e-6 < ov <= cap and cpt:
                 u = _unit_away((p.cx, p.cy), cpt)
                 if u:
-                    fix_seg(i, u[0], u[1], ov, d, half + m.clr, cpt)
-                    if not m.alive[i]:
-                        break
+                    move_seg(i, u[0], u[1], ov)
                     sx, sy, ex, ey = m.seg[i]
 
     # --- via victims (vs vias and pads; via-seg is handled as seg victim) ---
@@ -523,14 +438,9 @@ def _nudge_pass(m: _Model):
     return accepted
 
 
-def nudge_board(input_file, output_file, clearance, grid_step=0.1, max_passes=8,
-                jog=False, verbose=True):
+def nudge_board(input_file, output_file, clearance, grid_step=0.1, max_passes=8, verbose=True):
     pcb = parse_kicad_pcb(input_file)
     m = _Model(pcb, clearance, grid_step)
-    # Jog (split a both-ends-anchored track and offset the middle) is OFF by
-    # default: it clears a few extra sub-cell grazes but the inserted connectors
-    # tend to introduce a similar number of larger violations -- net marginal.
-    m.jog = jog
     total = 0
     for p in range(max_passes):
         n = _nudge_pass(m)
@@ -539,25 +449,14 @@ def nudge_board(input_file, output_file, clearance, grid_step=0.1, max_passes=8,
             print(f"  pass {p+1}: nudged {n} joint(s)")
         if n == 0:
             break
-    changed_segs, killed_segs, added_segs = {}, set(), []
-    for i in range(len(m.seg)):
-        orig = m.seg_orig[i]
-        if orig is None:                       # jog-inserted segment
-            if m.alive[i]:
-                sx, sy, ex, ey = m.seg[i]
-                added_segs.append((sx, sy, ex, ey, m.sw[i], m.slayer[i],
-                                   m.net_name.get(m.snet[i]), m.snet[i]))
-        elif not m.alive[i]:                   # original replaced by a jog
-            killed_segs.add(orig)
-        elif tuple(m.seg[i]) != orig:          # original nudged in place
-            changed_segs[orig] = tuple(m.seg[i])
+    changed_segs = {m.seg_orig[i]: tuple(m.seg[i])
+                    for i in range(len(m.seg)) if tuple(m.seg[i]) != m.seg_orig[i]}
     changed_vias = {m.via_orig[i]: tuple(m.via[i])
                     for i in range(len(m.via)) if tuple(m.via[i]) != m.via_orig[i]}
-    _write_back(input_file, output_file, changed_segs, changed_vias, killed_segs, added_segs)
+    _write_back(input_file, output_file, changed_segs, changed_vias)
     if verbose:
         print(f"Nudged {total} joint(s); rewrote {len(changed_segs)} segment end(s), "
-              f"{len(changed_vias)} via(s), {len(added_segs)} jog segment(s) "
-              f"({len(killed_segs)} split). Wrote {output_file}")
+              f"{len(changed_vias)} via(s). Wrote {output_file}")
     return total
 
 
@@ -565,9 +464,7 @@ def _fmt(v):
     return f"{v:.6f}"
 
 
-def _write_back(input_file, output_file, changed_segs, changed_vias,
-                killed_segs=frozenset(), added_segs=()):
-    from kicad_writer import generate_segment_sexpr
+def _write_back(input_file, output_file, changed_segs, changed_vias):
     with open(input_file, 'r', encoding='utf-8') as f:
         text = f.read()
     num = r'-?\d+\.?\d*'
@@ -579,8 +476,6 @@ def _write_back(input_file, output_file, changed_segs, changed_vias,
         if not sm or not em:
             return block
         key = (float(sm.group(1)), float(sm.group(2)), float(em.group(1)), float(em.group(2)))
-        if key in killed_segs:                 # replaced by a jog -> drop the block
-            return ''
         new = changed_segs.get(key)
         if not new:
             return block
@@ -600,14 +495,6 @@ def _write_back(input_file, output_file, changed_segs, changed_vias,
 
     text = re.sub(r'\(segment\b(?:[^()]|\([^()]*\))*\)', seg_repl, text)
     text = re.sub(r'\(via\b(?:[^()]|\([^()]*\))*\)', via_repl, text)
-
-    if added_segs:
-        blocks = [generate_segment_sexpr((sx, sy), (ex, ey), w, layer, nid, net_name=name)
-                  for (sx, sy, ex, ey, w, layer, name, nid) in added_segs]
-        ins = '\n' + '\n'.join(blocks) + '\n'
-        last = text.rstrip().rfind(')')
-        text = text[:last] + ins + text[last:]
-
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(text)
 
@@ -619,11 +506,8 @@ def main():
     ap.add_argument('--clearance', type=float, required=True, help='Design clearance floor (mm)')
     ap.add_argument('--grid-step', type=float, default=0.1, help='Routing grid step (mm); move cap = half this')
     ap.add_argument('--max-passes', type=int, default=8)
-    ap.add_argument('--jog', action='store_true',
-                    help='Also split both-ends-anchored tracks and offset the middle '
-                         '(marginal; can add a few larger violations -- off by default)')
     args = ap.parse_args()
-    nudge_board(args.input, args.output, args.clearance, args.grid_step, args.max_passes, args.jog)
+    nudge_board(args.input, args.output, args.clearance, args.grid_step, args.max_passes)
 
 
 if __name__ == '__main__':
