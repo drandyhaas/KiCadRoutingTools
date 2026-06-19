@@ -36,6 +36,69 @@ except ImportError:
     VisualRouter = None
 
 
+def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
+    """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT
+    net. The pad is treated as its full board-axis rect (rounded corners ignored
+    -> a slight under-estimate, i.e. conservative)."""
+    best = 1e9
+    for nid, pads in pcb_data.pads_by_net.items():
+        if nid == net_id:
+            continue
+        for pad in pads:
+            if layer not in pad.layers and '*.Cu' not in pad.layers:
+                continue
+            dx = max(abs(x - pad.global_x) - pad.size_x / 2.0, 0.0)
+            dy = max(abs(y - pad.global_y) - pad.size_y / 2.0, 0.0)
+            d = math.hypot(dx, dy)
+            if d < best:
+                best = d
+    return best
+
+
+def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+    """Min foreign-pad edge distance sampled along a (short, terminal) segment."""
+    n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
+    best = 1e9
+    for i in range(n + 1):
+        t = i / n
+        d = _pt_foreign_pad_dist(pcb_data, net_id, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, layer)
+        if d < best:
+            best = d
+    return best
+
+
+def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
+                             pcb_data, net_id, config, layer_names):
+    """#4: route.py is on-grid, but a route's TERMINAL connects to an off-grid pad
+    or fanout escape. When the terminal grid cell lands inside a foreign pad's
+    clearance (a quantised stand-in for the real, off-grid endpoint) but the EXACT
+    endpoint -- and the segment from the neighbour point to it -- clear that pad,
+    replace pts[term_idx] with the exact endpoint so the terminal segment runs to
+    the clean point and the grazing grid-cell vertex disappears. Returns True if
+    merged (caller then skips the separate connection stub). Uses explicit path
+    indices, not coordinate matching, so float noise can't pick the wrong segment."""
+    if original is None or len(path) < 2:
+        return False
+    if path[term_idx][2] != path[neighbor_idx][2]:
+        return False  # via at the very endpoint -> leave it on grid
+    ox, oy, ol = original
+    if layer_names[path[term_idx][2]] != ol:
+        return False
+    fx, fy = pts[term_idx]
+    if abs(ox - fx) < 1e-9 and abs(oy - fy) < 1e-9:
+        return False  # exact endpoint already is the grid cell
+    margin = config.clearance + config.get_net_track_width(net_id, ol) / 2.0
+    if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol) >= margin:
+        return False  # grid cell already clear -> nothing to fix
+    if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol) < margin:
+        return False  # exact endpoint also too close (placement) -> can't fix here
+    nx, ny = pts[neighbor_idx]
+    if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol) < margin - 1e-6:
+        return False  # merged terminal segment would graze -> keep grid + stub
+    pts[term_idx] = (ox, oy)
+    return True
+
+
 def print_route_stats(stats: dict, print_prefix: str = "  "):
     """Print A* routing statistics in a readable format.
 
@@ -676,9 +739,19 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     new_segments = []
     new_vias = []
 
+    # Per-point float positions. Connect the two TERMINAL segments to the EXACT
+    # off-grid endpoint instead of its grid-cell stand-in when that cell grazes a
+    # foreign pad but the exact endpoint clears it (#4 off-grid connection graze).
+    pts = [coord.to_float(p[0], p[1]) for p in path]
+    merge_start = _merge_terminal_to_exact(path, 0, 1, start_original, pts,
+                                           pcb_data, net_id, config, layer_names)
+    merge_end = _merge_terminal_to_exact(path, len(path) - 1, len(path) - 2, end_original, pts,
+                                         pcb_data, net_id, config, layer_names)
+
     # Add connecting segment from original start to first path point if needed
-    if start_original:
-        first_grid_x, first_grid_y = coord.to_float(path_start[0], path_start[1])
+    # (skipped when merged: the first path segment now ends at the exact point)
+    if start_original and not merge_start:
+        first_grid_x, first_grid_y = pts[0]
         orig_x, orig_y, orig_layer = start_original
         if abs(orig_x - first_grid_x) > 0.001 or abs(orig_y - first_grid_y) > 0.001:
             seg = Segment(
@@ -694,15 +767,16 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         gx1, gy1, layer1 = path[i]
         gx2, gy2, layer2 = path[i + 1]
 
-        x1, y1 = coord.to_float(gx1, gy1)
-        x2, y2 = coord.to_float(gx2, gy2)
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
 
         if layer1 != layer2:
             # Check if layer change is at an existing through-hole pad
             # If so, skip creating a via - the pad provides the layer transition
             if (gx1, gy1) not in through_hole_positions:
+                vx, vy = coord.to_float(gx1, gy1)  # via stays on the grid cell
                 via = Via(
-                    x=x1, y=y1,
+                    x=vx, y=vy,
                     size=config.via_size,
                     drill=config.via_drill,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
@@ -722,8 +796,9 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                 new_segments.append(seg)
 
     # Add connecting segment from last path point to original end if needed
-    if end_original:
-        last_grid_x, last_grid_y = coord.to_float(path_end[0], path_end[1])
+    # (skipped when merged: the last path segment now ends at the exact point)
+    if end_original and not merge_end:
+        last_grid_x, last_grid_y = pts[-1]
         orig_x, orig_y, orig_layer = end_original
         if abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001:
             seg = Segment(
@@ -1864,7 +1939,8 @@ def route_multipoint_main(
         path, coord, layer_names, net_id, config,
         (pad_a[3], pad_a[4], layer_names[pad_a[2]]),  # start_original
         (pad_b[3], pad_b[4], layer_names[pad_b[2]]),  # end_original
-        through_hole_positions
+        through_hole_positions,
+        pcb_data
     )
     if necked_down:
         # Both endpoints are pads: neck the start side too
@@ -2253,7 +2329,8 @@ def route_multipoint_taps(
             path, coord, layer_names, net_id, config,
             (tap_x, tap_y, tap_layer),  # start_original (actual tap point used)
             (tgt_x, tgt_y, path_end_layer),  # end_original (target pad on actual reached layer)
-            through_hole_positions
+            through_hole_positions,
+            pcb_data
         )
         if necked_down:
             segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
@@ -2326,7 +2403,8 @@ def _path_to_segments_vias(
     config: GridRouteConfig,
     start_original: Tuple[float, float, str],
     end_original: Tuple[float, float, str],
-    through_hole_positions: Set[Tuple[int, int]] = None
+    through_hole_positions: Set[Tuple[int, int]] = None,
+    pcb_data: PCBData = None
 ) -> Tuple[List[Segment], List[Via]]:
     """
     Convert a grid path to Segment and Via objects.
@@ -2358,9 +2436,21 @@ def _path_to_segments_vias(
     path_start = path[0]
     path_end = path[-1]
 
+    # Per-point float positions. Route the two TERMINAL segments to the EXACT
+    # off-grid endpoint instead of its grid-cell stand-in when that cell grazes a
+    # foreign pad but the exact endpoint clears it (#4 off-grid connection graze).
+    pts = [coord.to_float(p[0], p[1]) for p in path]
+    merge_start = merge_end = False
+    if pcb_data is not None:
+        merge_start = _merge_terminal_to_exact(path, 0, 1, start_original, pts,
+                                               pcb_data, net_id, config, layer_names)
+        merge_end = _merge_terminal_to_exact(path, len(path) - 1, len(path) - 2, end_original, pts,
+                                             pcb_data, net_id, config, layer_names)
+
     # Add connecting segment from original start to first path point if needed
-    if start_original:
-        first_grid_x, first_grid_y = coord.to_float(path_start[0], path_start[1])
+    # (skipped when merged: the first path segment now ends at the exact point)
+    if start_original and not merge_start:
+        first_grid_x, first_grid_y = pts[0]
         orig_x, orig_y, orig_layer = start_original
         # Use the actual path layer, not the original pad layer
         # (through-hole pads may have orig_layer=F.Cu but router chose In1.Cu)
@@ -2380,8 +2470,8 @@ def _path_to_segments_vias(
         gx1, gy1, layer1 = path[i]
         gx2, gy2, layer2 = path[i + 1]
 
-        x1, y1 = coord.to_float(gx1, gy1)
-        x2, y2 = coord.to_float(gx2, gy2)
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
 
         if layer1 != layer2:
             # Check if layer change is at an existing through-hole pad
@@ -2390,8 +2480,9 @@ def _path_to_segments_vias(
                 # No via needed - existing through-hole pad connects all layers
                 pass
             else:
+                vx, vy = coord.to_float(gx1, gy1)  # via stays on the grid cell
                 via = Via(
-                    x=x1, y=y1,
+                    x=vx, y=vy,
                     size=config.via_size,
                     drill=config.via_drill,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
@@ -2411,8 +2502,9 @@ def _path_to_segments_vias(
                 segments.append(seg)
 
     # Add connecting segment from last path point to original end if needed
-    if end_original:
-        last_grid_x, last_grid_y = coord.to_float(path_end[0], path_end[1])
+    # (skipped when merged: the last path segment now ends at the exact point)
+    if end_original and not merge_end:
+        last_grid_x, last_grid_y = pts[-1]
         orig_x, orig_y, orig_layer = end_original
         # Use the actual path layer, not the original pad layer
         path_end_layer = layer_names[path_end[2]]
