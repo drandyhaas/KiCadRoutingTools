@@ -1721,6 +1721,7 @@ def create_plane(
         via_drill=via_drill,
         grid_step=grid_step,
         hole_to_hole_clearance=hole_to_hole_clearance,
+        board_edge_clearance=board_edge_clearance,
         layers=all_layers,
         layer_costs=layer_costs
     )
