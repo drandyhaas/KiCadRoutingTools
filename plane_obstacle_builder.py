@@ -509,7 +509,7 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     via_edge_clearance = edge_clearance + config.via_size / 2
-    via_expand = coord.to_grid_dist(via_edge_clearance)
+    via_expand = coord.to_grid_dist_safe(via_edge_clearance)
 
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
@@ -590,7 +590,7 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     track_edge_clearance = edge_clearance + config.track_width / 2
-    track_expand = coord.to_grid_dist(track_edge_clearance)
+    track_expand = coord.to_grid_dist_safe(track_edge_clearance)
 
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)

@@ -1108,7 +1108,7 @@ def build_base_obstacles(
     obstacles = GridObstacleMap(num_layers)
 
     # Block other nets' vias as hard obstacles on ALL layers (vias are through-hole)
-    via_radius = coord.to_grid_dist(track_via_clearance)
+    via_radius = coord.to_grid_dist_safe(track_via_clearance)
     other_via_centers = []
     for via in pcb_data.vias:
         if via.net_id in exclude_net_ids:
@@ -1140,7 +1140,7 @@ def build_base_obstacles(
         )
 
     # Block via placement near holes for hole-to-hole clearance
-    hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + config.via_drill))
+    hole_clearance_grid = max(1, coord.to_grid_dist_safe(hole_to_hole_clearance + config.via_drill))
 
     # Block via placement near ALL vias (including same-net) for hole-to-hole clearance
     # Via reuse is handled separately by snapping routes to existing vias
@@ -1157,7 +1157,7 @@ def build_base_obstacles(
         for pad in pads:
             if '*.Cu' in pad.layers and pad.drill > 0:  # Through-hole pad with drill
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                pad_hole_clearance_grid = max(1, coord.to_grid_dist(hole_to_hole_clearance + pad.drill / 2 + config.via_drill / 2))
+                pad_hole_clearance_grid = max(1, coord.to_grid_dist_safe(hole_to_hole_clearance + pad.drill / 2 + config.via_drill / 2))
                 if pad_hole_clearance_grid not in pad_centers_by_radius:
                     pad_centers_by_radius[pad_hole_clearance_grid] = []
                 pad_centers_by_radius[pad_hole_clearance_grid].append((gx, gy))
@@ -1175,11 +1175,11 @@ def build_base_obstacles(
         if layer_idx is None:
             continue
         seg_expansion_mm = track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
+        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
         _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
         # Also block vias along this segment - must include segment width for proper clearance
         via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
-        via_seg_expansion_grid = max(1, coord.to_grid_dist(via_seg_expansion_mm))
+        via_seg_expansion_grid = max(1, coord.to_grid_dist_safe(via_seg_expansion_mm))
         _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_grid)
 
     # Block pads from non-plane nets on their respective layers
@@ -1260,9 +1260,9 @@ def add_route_to_obstacles(
 
     # Block segments on their layers and also block vias along segments
     route_expansion_mm = track_width + clearance
-    route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
+    route_expansion_grid = max(1, coord.to_grid_dist_safe(route_expansion_mm))
     via_seg_expansion_mm = config.via_size / 2 + track_width / 2 + clearance
-    via_seg_expansion_grid = max(1, coord.to_grid_dist(via_seg_expansion_mm))
+    via_seg_expansion_grid = max(1, coord.to_grid_dist_safe(via_seg_expansion_mm))
 
     for i in range(len(route_points) - 1):
         p1, p2 = route_points[i], route_points[i + 1]
@@ -1276,9 +1276,9 @@ def add_route_to_obstacles(
             _block_line_vias(obstacles, gx1, gy1, gx2, gy2, via_seg_expansion_grid)
 
     # Block vias on all layers (through-hole) for track routing clearance
-    via_radius = coord.to_grid_dist(via_clearance)
+    via_radius = coord.to_grid_dist_safe(via_clearance)
     # Block via placement with hole-to-hole clearance (prevents new vias too close to these)
-    hole_clearance_radius = coord.to_grid_dist(hole_to_hole_clearance + config.via_drill)
+    hole_clearance_radius = coord.to_grid_dist_safe(hole_to_hole_clearance + config.via_drill)
 
     if via_positions:
         via_grid_centers = [coord.to_grid(vx, vy) for vx, vy in via_positions]
