@@ -102,6 +102,12 @@ get_copper_layers_from_segments(segments, existing_segments=None) -> List[str]
 Both return new lists (inputs are not mutated) and expect **one net at a
 time** — pass that net's existing segments/vias/pads, not the whole board's.
 
+`collapse_appendices` now only runs `fix_self_intersections`; its old
+short-appendix trim (sliding a short dead-end spur onto its junction) was
+removed as redundant with the whole-net post-route dead-end trim
+`sweep_dead_ends` (issue #148). The name and signature are unchanged, so its
+call sites still work; `pads`/`debug_lines` are now accepted but unused.
+
 ## `geometry_utils.py`
 
 Pure functions; no PCB context needed.

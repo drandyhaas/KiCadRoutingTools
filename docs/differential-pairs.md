@@ -21,11 +21,18 @@ The router recognizes common differential pair naming conventions:
 | Convention | Example P | Example N |
 |------------|-----------|-----------|
 | `_P` / `_N` suffix | `LVDS_CLK_P` | `LVDS_CLK_N` |
+| `_PX` / `_NX` indexed suffix | `FE_CLK_P0`, `FE_CLK_P1` | `FE_CLK_N0`, `FE_CLK_N1` |
 | `_t` / `_c` suffix (case-insensitive) | `DQS0_t_A`, `CK_T` | `DQS0_c_A`, `CK_C` |
 | `_tX` / `_cX` (no-separator channel) | `DQS0_TA` | `DQS0_CA` |
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
-| `DP` / `DM`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DPLUS` | `USB_DM`, `USB_DMINUS` |
+| `DP` / `DM` / `DN`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DPLUS` | `USB_DM`, `USB_DN`, `USB_DMINUS` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
+
+For the indexed `_PX` / `_NX` convention the trailing index is kept in the base
+name, so each index pairs only with its own twin (`FE_CLK_P0` pairs with
+`FE_CLK_N0`, never with `FE_CLK_N1`). For the `DP`/`DM`/`DN` USB convention, the
+`P` half is positive and both `N` and `M` are treated as the negative half (so
+`/USB_DP` pairs with either `/USB_DN` or `/USB_DM`).
 
 KiCad auto-named nets such as `Net-(U12-USB_D+)` / `Net-(U12-USB_D-)` are
 recognized too: the wrapping `Net-(…)` is peeled before the suffix is matched.
@@ -64,6 +71,12 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
 ```
 
 Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
+
+A `--nets` (or positional) pattern token may list several patterns separated by
+commas, e.g. `--nets "/DVI_CK_P,/DVI_CK_N"`; the token is split so each pattern
+is matched on its own rather than as a single glob containing a comma (which
+would match nothing). `route_diff.py` also warns loudly about any pattern that
+matches no real net on the board, instead of silently dropping it (issue #143).
 
 **Escape layers (4+ layer boards):** `--layers` defaults to `F.Cu B.Cu` only.
 When a pair was escaped onto an INNER layer by `bga_fanout.py`, `route_diff.py`

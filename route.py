@@ -824,7 +824,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Final dead-end sweep (issue #84): trim copper that dead-ends -- tap tails
     # superseded by rip-and-reroute, spurs left when a blocker was ripped, and
     # fanout/escape stubs a net routed away from or never completed -- which
-    # collapse_appendices' per-commit pass does not reach. Runs after the phantom
+    # the per-commit clean (collapse_appendices, now just a self-intersection
+    # fix since #148) does not reach. Runs after the phantom
     # drop so it only sees real board copper. Scoped to the nets this run routed
     # so untouched planes / excluded nets are never altered. Routed dead ends are
     # dropped from `results`; original input-file dead ends are returned to strip

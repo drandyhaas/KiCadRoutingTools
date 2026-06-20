@@ -445,8 +445,9 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
     net (the other end stays joined to the rest), and it exposes the next
     segment of a spur chain, so this iterates to a fixpoint.
 
-    Unlike ``collapse_appendices`` (single pass, only appendices <= 1 mm anchored
-    to a junction) this removes dead ends of any length and unwinds whole spurs.
+    This is the whole-net post-route dead-end trim (#84): it removes dead ends of
+    any length and unwinds whole spurs (the per-commit ``collapse_appendices``
+    short-spur pass it superseded was removed as redundant in #148).
 
     Args:
         prunable: segments eligible for removal (one net).
@@ -803,8 +804,9 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                     tol: float = 0.05) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
 
-    ``collapse_appendices`` runs per route-commit and only trims short appendices
-    anchored to a junction, so dead ends survive on nets that otherwise route
+    ``collapse_appendices`` runs per route-commit but now only fixes
+    self-intersections (its short-appendix trim was removed in #148 as redundant
+    with this sweep), so dead ends survive on nets that otherwise route
     100% and pass DRC + connectivity: a tap tail superseded by a rip-and-reroute,
     a spur left when a blocker was ripped, and -- the dominant source -- fanout /
     escape stubs from earlier pipeline stages that a net routed away from or never
@@ -1294,8 +1296,9 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     # so the dead copper is not left on the board to block following routes. Only
     # the segments being added are prunable; the net's copper already on the board
     # anchors junctions/escapes but is not removed here (the final sweep handles
-    # board-wide settle). collapse_appendices above only trims short junction
-    # appendices; this unwinds longer spurs and chains via prune_dead_end_segments.
+    # board-wide settle). collapse_appendices above now only fixes
+    # self-intersections (#148); this unwinds dead-end spurs and chains via
+    # prune_dead_end_segments.
     all_zones = getattr(pcb_data, 'zones', []) or []
     pruned_segments = []
     for net_id in net_ids:

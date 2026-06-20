@@ -268,7 +268,8 @@ def run_phase3_tap_routing(
                 print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                 # IMPORTANT: Update completed_result['new_segments'] to match what's in pcb_data
-                # add_route_to_pcb_data cleans segments via collapse_appendices, updating
+                # add_route_to_pcb_data cleans segments via collapse_appendices (now just
+                # a self-intersection fix, #148), updating
                 # tap_result['new_segments']. We need completed_result to have the cleaned
                 # segments for correct rip-up later. Combine cleaned main (lm_segments)
                 # with cleaned tap (tap_result['new_segments']).
@@ -753,7 +754,8 @@ def _reroute_phase3_ripped_nets(
                         print(f"    Re-routed {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                         # IMPORTANT: Update tap_result['new_segments'] to match what's in pcb_data
-                        # add_route_to_pcb_data cleans segments via collapse_appendices, updating
+                        # add_route_to_pcb_data cleans segments via collapse_appendices (now
+                        # just a self-intersection fix, #148), updating
                         # tap_result_data['new_segments']. We need tap_result to have the cleaned
                         # segments for correct rip-up later. Combine cleaned main (from result)
                         # with cleaned tap (from tap_result_data).

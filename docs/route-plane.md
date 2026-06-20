@@ -578,7 +578,7 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--max-search-radius` | 10.0 | Max radius to search for a via position during pad repair (mm) |
 | `--rip-blocker-nets` | off | Connect a pad that can't reach its plane by tracing to a nearby same-net pad, ripping the signal net(s) blocking that trace (see below) |
 | `--max-rip-nets` | 3 | Maximum blocker nets to rip per pad |
-| `--reroute-ripped-nets` | off | Re-route the ripped nets after the repair (else they are excluded from output and listed for a later pass) |
+| `--reroute-ripped-nets` | off | Re-route every net the board still leaves unrouted after the repair — selected the same way `route.py` decides what to route (2+ pads, not fully connected, zone-aware), not just the nets ripped during this run's repair phase (issue #141). Without it, ripped nets are excluded from output and listed for a later pass |
 | `--power-nets` | — | Power net names needing wider tracks when re-routing ripped nets |
 | `--power-nets-widths` | — | Track width (mm) per `--power-nets` entry, for re-routing ripped nets |
 | `--no-bga-zone` | off | Disable BGA auto-exclusion zones when re-routing ripped nets (match the signal run) |

@@ -320,7 +320,10 @@ python list_nets.py input.kicad_pcb [OPTIONS]
 Options:
   --component, -c REF   Component reference (e.g., U1)
   --pads                Show pad-to-net assignments
-  --diff-pairs, -d      Detect differential pairs
+  --diff-pairs, -d      Detect differential pairs (a name-based P/N pair is
+                        suppressed when both nets land on a single
+                        crystal/oscillator footprint, since a 2-terminal
+                        resonator is not a differential signal — issue #145)
   --power, -p           Show power/ground nets with pad counts
   --design-rules, -r    Show net-class clearance/track/via/diff-pair rules
                         and the CLI flags to pass them to the routing tools
@@ -475,7 +478,15 @@ Options:
   --primary-escape    Primary escape direction: horizontal or vertical (default: horizontal)
   --check-for-previous  Skip pads that already have fanouts
   --no-inner-top-layer  Prevent inner pads from using F.Cu
+  --grid-step         Routing grid step in mm (default: 0.1). Escape stub ends
+                      are snapped to this grid so the router gets on-grid
+                      terminals; MATCH the --grid-step you pass to route.py
 ```
+
+Escape stub ends are snapped to the `--grid-step` grid, and the decorative
+end-jog is validated against the full obstacle map (foreign pads + tracks +
+vias): a jog that would extend into a foreign obstacle is dropped, leaving an
+on-grid stub end the router can launch from (issue #149).
 
 ### Example
 
@@ -515,7 +526,14 @@ Options:
   --pattern GLOB      Net pattern to fanout
   --stub-length FLOAT Stub length in mm (default: 0.3)
   --layer LAYER       Target layer (default: F.Cu)
+  --grid-step         Routing grid step in mm (default: 0.1). Fanned stub ends
+                      are snapped to this grid so the router gets on-grid
+                      terminals; MATCH the --grid-step you pass to route.py
 ```
+
+Fanned stub ends are snapped to the `--grid-step` grid, and the end-jog is
+validated against the full obstacle map (foreign pads + tracks + vias): if it
+would extend into a foreign obstacle the fan is shortened instead (issue #149).
 
 ### Example
 

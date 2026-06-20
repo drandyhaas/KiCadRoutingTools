@@ -208,7 +208,11 @@ move_copper_text_to_silkscreen(content: str) -> str
 
 Moves `gr_text` from `F.Cu`/`B.Cu` to the matching silkscreen layer so text
 doesn't collide with routed copper. `write_routed_output` and
-`add_tracks_*` call this automatically.
+`add_tracks_*` call this automatically. A companion
+`move_copper_graphics_to_silkscreen(content)` does the same for net-less copper
+logos/artwork (graphic polys, lines, arcs). The GUI plugin mirrors both moves on
+apply (via `kicad_routing_plugin/gui_utils.move_copper_graphics_to_silkscreen_board`)
+so its output matches the CLI writer (issue #146).
 
 ```python
 add_teardrops_to_pads(content: str, best_length_ratio=0.5, max_length=1.0,

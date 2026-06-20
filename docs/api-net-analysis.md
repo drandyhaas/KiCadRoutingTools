@@ -77,12 +77,18 @@ name. Recognized suffix conventions:
 | Style | Example pair |
 |-------|--------------|
 | `_P` / `_N` | `LVDS0_P`, `LVDS0_N` |
+| `_PX` / `_NX` (indexed, index kept in base) | `FE_CLK_P0`, `FE_CLK_N0` |
 | `P` / `N` (no underscore) | `CLKP`, `CLKN` |
 | `+` / `-` | `USB+`, `USB-` |
 | `_t` / `_c` (DDR true/complement, case-insensitive) | `DQS0_t`, `DQS0_c`, `CK_T`, `CK_C` |
 | `_t_X` / `_c_X` (with channel suffix) | `DQS0_t_A`, `DQS0_c_A` |
 | `_tX` / `_cX` (no-separator channel) | `DQS0_TA`, `DQS0_CA` |
-| `DP` / `DM`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DM` |
+| `DP` / `DM` / `DN`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DM`, `USB_DN` |
+
+For the indexed `_PX` / `_NX` style the trailing index stays in the base name,
+so `FE_CLK_P0` pairs only with `FE_CLK_N0` (never `FE_CLK_N1`). For the USB
+`DP`/`DM`/`DN` style, `P` is positive and both `M` and `N` are the negative
+half, so `/USB_DP` pairs with either `/USB_DM` or `/USB_DN`.
 
 KiCad's `Net-(<ref>-<pin>)` auto-names are unwrapped first, so a buried suffix
 like `Net-(U12-USB_D+)` / `Net-(U12-USB_D-)` still pairs.
