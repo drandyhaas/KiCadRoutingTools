@@ -2230,9 +2230,9 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     if len(bi_b.stackup) != len(bi_f.stackup):
         diffs.append(f"Stackup layer count: board={len(bi_b.stackup)} file={len(bi_f.stackup)}")
 
-    # --- Compare nets ---
-    board_net_ids = set(from_board.nets.keys())
-    file_net_ids = set(from_file.nets.keys())
+    # --- Compare nets (net 0 = unconnected pseudo-net; one path may list it) ---
+    board_net_ids = set(from_board.nets.keys()) - {0}
+    file_net_ids = set(from_file.nets.keys()) - {0}
     if board_net_ids != file_net_ids:
         only_board = board_net_ids - file_net_ids
         only_file = file_net_ids - board_net_ids
@@ -2271,15 +2271,27 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
         if len(bf.pads) != len(ff.pads):
             diffs.append(f"Footprint {ref} pad count: board={len(bf.pads)} file={len(ff.pads)}")
         else:
-            # Compare individual pads (sorted by pad number for consistency)
-            b_pads = sorted(bf.pads, key=lambda p: p.pad_number)
-            f_pads = sorted(ff.pads, key=lambda p: p.pad_number)
+            # Pair pads by POSITION, not pad_number: pad numbers are not unique
+            # (empty "" thermal/mechanical pads, repeated connector pads), so
+            # sorting+zipping on pad_number misaligns a roundrect pad against a
+            # circle pad and cascades into spurious diffs. Position is unique per
+            # pad and identical (to ~1um) between the board and file parses.
+            def _pad_key(p):
+                # Include layers: a footprint can stack pads at one position+number
+                # (separate copper / paste / mask apertures), so position+number
+                # alone is not unique and would pair non-deterministically.
+                return (round(p.global_x, 3), round(p.global_y, 3), p.pad_number,
+                        tuple(sorted(p.layers)))
+            b_pads = sorted(bf.pads, key=_pad_key)
+            f_pads = sorted(ff.pads, key=_pad_key)
             for bp, fp in zip(b_pads, f_pads):
-                if bp.pad_number != fp.pad_number:
-                    diffs.append(f"Footprint {ref} pad number mismatch: board={bp.pad_number} file={fp.pad_number}")
-                    continue
                 if not close(bp.global_x, fp.global_x) or not close(bp.global_y, fp.global_y):
-                    diffs.append(f"Pad {ref}:{bp.pad_number} position: board=({bp.global_x:.3f},{bp.global_y:.3f}) file=({fp.global_x:.3f},{fp.global_y:.3f})")
+                    diffs.append(f"Footprint {ref} pad pairing mismatch (position): "
+                                 f"board {bp.pad_number}@({bp.global_x:.3f},{bp.global_y:.3f}) "
+                                 f"vs file {fp.pad_number}@({fp.global_x:.3f},{fp.global_y:.3f})")
+                    continue
+                if bp.pad_number != fp.pad_number:
+                    diffs.append(f"Pad @({bp.global_x:.3f},{bp.global_y:.3f}) number: board={bp.pad_number} file={fp.pad_number}")
                 if bp.net_id != fp.net_id:
                     diffs.append(f"Pad {ref}:{bp.pad_number} net_id: board={bp.net_id} file={fp.net_id}")
                 if bp.shape != fp.shape:
@@ -2299,11 +2311,13 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 bc = getattr(bp, 'local_clearance', 0.0); fc = getattr(fp, 'local_clearance', 0.0)
                 if not close(bc, fc):
                     diffs.append(f"Pad {ref}:{bp.pad_number} local_clearance: board={bc:.3f} file={fc:.3f}")
-                # Roundrect corner ratio - the pad obstacle/DRC geometry rounds the
-                # rectangle corners by this, so a mismatch changes the modelled copper.
-                brr = getattr(bp, 'roundrect_rratio', 0.0); frr = getattr(fp, 'roundrect_rratio', 0.0)
-                if not close(brr, frr):
-                    diffs.append(f"Pad {ref}:{bp.pad_number} roundrect_rratio: board={brr:.3f} file={frr:.3f}")
+                # Roundrect corner ratio - only consumed (and only meaningful) for
+                # roundrect pads; pcbnew returns a default ratio on every pad shape,
+                # so comparing it on circle/rect pads is pure noise.
+                if bp.shape == 'roundrect' and fp.shape == 'roundrect':
+                    brr = getattr(bp, 'roundrect_rratio', 0.0); frr = getattr(fp, 'roundrect_rratio', 0.0)
+                    if not close(brr, frr):
+                        diffs.append(f"Pad {ref}:{bp.pad_number} roundrect_rratio: board={brr:.3f} file={frr:.3f}")
                 if not close(bp.drill, fp.drill):
                     diffs.append(f"Pad {ref}:{bp.pad_number} drill: board={bp.drill:.3f} file={fp.drill:.3f}")
                 # Compare layers (as sets since order may differ)
