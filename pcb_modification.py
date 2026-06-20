@@ -370,16 +370,14 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
                         max_appendix_length: float = 1.0, vias: List[Via] = None,
                         pads: List = None, debug_lines: bool = False) -> List[Segment]:
-    """Collapse short appendix segments by moving dead-end vertices to junction points.
+    """Clean a freshly-routed net's segments before they are committed.
 
-    An appendix is a short segment where one endpoint is a dead-end (degree 1) and
-    the other endpoint is a junction (degree >= 2). We collapse it by moving the
-    dead-end to nearly coincide with the junction (offset by 0.001mm).
+    Fixes same-net self-intersections (straightens/deletes self-crossings; #147).
 
-    Only collapses segments where the dead-end doesn't connect to existing segments, vias, or pads.
-    Also fixes self-intersections where new segments cross existing segments.
-
-    If debug_lines is True, endpoint degrees are counted across all layers.
+    Historically this ALSO collapsed short dead-end "appendix" spurs onto their
+    junction, but that pass was removed (issue #148): the whole-net post-route
+    dead-end trim sweep_dead_ends (#84) covers the same spurs, so the per-commit
+    collapse was redundant. The name is kept for its call sites.
     """
     if not segments:
         return segments
@@ -387,216 +385,13 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     # First fix self-intersections with existing segments
     segments = fix_self_intersections(segments, existing_segments, max_appendix_length, vias)
 
-    # Build map of existing segment endpoints by layer (store actual coordinates for proximity check)
-    existing_endpoints = {}
-    # Also build map of full existing segments by layer (for point-on-segment check)
-    existing_segs_by_layer = {}
-    if existing_segments:
-        for seg in existing_segments:
-            if seg.layer not in existing_endpoints:
-                existing_endpoints[seg.layer] = []
-                existing_segs_by_layer[seg.layer] = []
-            existing_endpoints[seg.layer].append((seg.start_x, seg.start_y))
-            existing_endpoints[seg.layer].append((seg.end_x, seg.end_y))
-            existing_segs_by_layer[seg.layer].append(seg)
-
-    # Build map of via locations by layer (store actual coordinates and size for proximity check)
-    via_locations = {}
-    if vias:
-        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
-        for via in vias:
-            # Through-hole vias connect all layers
-            if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
-                via_layers = all_copper_layers
-            elif via.layers:
-                via_layers = via.layers
-            else:
-                via_layers = all_copper_layers
-            via_size = getattr(via, 'size', 0.6)  # Default via size if not available
-            for layer in via_layers:
-                if layer not in via_locations:
-                    via_locations[layer] = []
-                via_locations[layer].append((via.x, via.y, via_size))
-
-    # Build map of pad locations by layer (store coordinates and size)
-    pad_locations = {}
-    if pads:
-        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
-        for pad in pads:
-            # Get pad position
-            pad_x = getattr(pad, 'global_x', getattr(pad, 'x', 0))
-            pad_y = getattr(pad, 'global_y', getattr(pad, 'y', 0))
-            # Get pad size for proximity check
-            pad_size_x = getattr(pad, 'size_x', 0.5)
-            pad_size_y = getattr(pad, 'size_y', 0.5)
-            pad_size = max(pad_size_x, pad_size_y)
-            # Expand wildcard layers like "*.Cu" to actual routing layers
-            pad_layers = getattr(pad, 'layers', [])
-            if any('*' in layer for layer in pad_layers):
-                pad_layers = all_copper_layers
-            for layer in pad_layers:
-                if layer not in pad_locations:
-                    pad_locations[layer] = []
-                pad_locations[layer].append((pad_x, pad_y, pad_size))
-
-    # Process each layer separately
-    layer_segments = {}
-    for seg in segments:
-        if seg.layer not in layer_segments:
-            layer_segments[seg.layer] = []
-        layer_segments[seg.layer].append(seg)
-
-    result_segments = []
-
-    def point_near_any(px, py, points_list, tolerance):
-        """Check if point is within tolerance of any point in list."""
-        for ex, ey in points_list:
-            if math.sqrt((px - ex)**2 + (py - ey)**2) < tolerance:
-                return True
-        return False
-
-    def point_near_any_via(px, py, vias_list):
-        """Check if point lands on any via's copper (within via radius)."""
-        for vx, vy, via_size in vias_list:
-            # The via's copper extends size/2 from centre; a segment ending
-            # anywhere on it is connected. The old size/4 test misjudged
-            # edge landings as dead ends and collapsed live connections.
-            tolerance = via_size / 2 + 0.05
-            if math.sqrt((px - vx)**2 + (py - vy)**2) < tolerance:
-                return True
-        return False
-
-    def point_near_any_pad(px, py, pads_list):
-        """Check if point lands on any pad's copper (within max half-extent)."""
-        for pad_x, pad_y, pad_size in pads_list:
-            # pad_size is max(size_x, size_y); copper reaches size/2 from
-            # centre along the long axis. The old size/4 test judged a tap
-            # landing near the end of an elongated pad (0.8 mm from a 1.6 mm
-            # pad's centre) as a dead end and collapsed the live connection
-            # to 0.001 mm. Over-keeping is harmless (an orphan stub at
-            # worst); over-collapsing breaks connectivity.
-            tolerance = pad_size / 2 + 0.05
-            if math.sqrt((px - pad_x)**2 + (py - pad_y)**2) < tolerance:
-                return True
-        return False
-
-    def point_on_any_segment(px, py, segs_list, tolerance):
-        """Check if point lies on any segment (not just endpoints).
-
-        Returns True if the point is within tolerance of any segment's line.
-        This catches tap points that are in the middle of existing segments.
-        """
-        for seg in segs_list:
-            # Vector from segment start to end
-            dx = seg.end_x - seg.start_x
-            dy = seg.end_y - seg.start_y
-            seg_len_sq = dx * dx + dy * dy
-            if seg_len_sq < 0.0001:  # Degenerate segment
-                continue
-            # Vector from segment start to point
-            px_rel = px - seg.start_x
-            py_rel = py - seg.start_y
-            # Project point onto segment line (parametric t)
-            t = (px_rel * dx + py_rel * dy) / seg_len_sq
-            # Check if projection is within segment bounds (with small margin)
-            if t < -0.01 or t > 1.01:
-                continue
-            # Calculate closest point on segment
-            closest_x = seg.start_x + t * dx
-            closest_y = seg.start_y + t * dy
-            # Check distance from point to closest point on segment
-            dist = math.sqrt((px - closest_x)**2 + (py - closest_y)**2)
-            if dist < tolerance:
-                return True
-        return False
-
-    # When debug_lines is enabled, build endpoint degree map across ALL layers
-    # because debug_lines puts turn segments on different layers but they still connect
-    global_endpoint_counts = None
-    if debug_lines:
-        global_endpoint_counts = {}
-        for seg in segments:
-            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
-            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-            global_endpoint_counts[start_key] = global_endpoint_counts.get(start_key, 0) + 1
-            global_endpoint_counts[end_key] = global_endpoint_counts.get(end_key, 0) + 1
-
-    for layer, layer_segs in layer_segments.items():
-        layer_existing = existing_endpoints.get(layer, [])
-        layer_existing_segs = existing_segs_by_layer.get(layer, [])
-        layer_vias = via_locations.get(layer, [])
-        layer_pads = pad_locations.get(layer, [])
-
-        # Build per-layer endpoint counts (used when not in debug_lines mode)
-        layer_endpoint_counts = None
-        if not debug_lines:
-            layer_endpoint_counts = {}
-            for seg in layer_segs:
-                start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
-                end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-                layer_endpoint_counts[start_key] = layer_endpoint_counts.get(start_key, 0) + 1
-                layer_endpoint_counts[end_key] = layer_endpoint_counts.get(end_key, 0) + 1
-
-        # Find and collapse appendices
-        for seg in layer_segs:
-            length = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
-
-            if length > max_appendix_length:
-                result_segments.append(seg)
-                continue
-
-            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
-            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-            endpoint_counts = global_endpoint_counts if debug_lines else layer_endpoint_counts
-            start_degree = endpoint_counts.get(start_key, 0)
-            end_degree = endpoint_counts.get(end_key, 0)
-
-            # Check if endpoints connect to existing segments (with proximity tolerance), vias, or pads
-            # Use track width / 4 as proximity tolerance for segments, via/pad size / 4 for vias/pads
-            # Also check if point lies ON an existing segment (for tap points in middle of segments)
-            proximity_tol = seg.width / 4
-            start_connects_existing = (point_near_any(seg.start_x, seg.start_y, layer_existing, proximity_tol) or
-                                       point_on_any_segment(seg.start_x, seg.start_y, layer_existing_segs, proximity_tol) or
-                                       point_near_any_via(seg.start_x, seg.start_y, layer_vias) or
-                                       point_near_any_pad(seg.start_x, seg.start_y, layer_pads))
-            end_connects_existing = (point_near_any(seg.end_x, seg.end_y, layer_existing, proximity_tol) or
-                                     point_on_any_segment(seg.end_x, seg.end_y, layer_existing_segs, proximity_tol) or
-                                     point_near_any_via(seg.end_x, seg.end_y, layer_vias) or
-                                     point_near_any_pad(seg.end_x, seg.end_y, layer_pads))
-
-            # Appendix: one end is dead-end (degree 1, not connected to existing/vias/pads),
-            # other is junction (degree >= 2 OR connected to existing/vias/pads)
-            if (start_degree == 1 and not start_connects_existing and
-                (end_degree >= 2 or end_connects_existing)):
-                # Collapse: move start to nearly coincide with end (junction point)
-                new_seg = Segment(
-                    start_x=seg.end_x + 0.001,
-                    start_y=seg.end_y,
-                    end_x=seg.end_x,
-                    end_y=seg.end_y,
-                    width=seg.width,
-                    layer=seg.layer,
-                    net_id=seg.net_id
-                )
-                result_segments.append(new_seg)
-            elif (end_degree == 1 and not end_connects_existing and
-                  (start_degree >= 2 or start_connects_existing)):
-                # Collapse: move end to nearly coincide with start (junction point)
-                new_seg = Segment(
-                    start_x=seg.start_x,
-                    start_y=seg.start_y,
-                    end_x=seg.start_x + 0.001,
-                    end_y=seg.start_y,
-                    width=seg.width,
-                    layer=seg.layer,
-                    net_id=seg.net_id
-                )
-                result_segments.append(new_seg)
-            else:
-                # Not an appendix or connects to existing - keep as is
-                result_segments.append(seg)
-
-    return result_segments
+    # Appendix-collapse removed (issue #148): sweep_dead_ends (#84) - the whole-net
+    # post-route dead-end trim - covers the same short dead-end spurs this used to
+    # slide onto their junction, so the per-commit collapse was redundant churn
+    # (validated A/B across the set-3 corpus). Only the self-intersection fix
+    # (kept; #147) remains. `pads`/`debug_lines` are accepted for call-site
+    # compatibility and now unused.
+    return segments
 
 
 def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
