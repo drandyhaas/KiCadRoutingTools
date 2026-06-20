@@ -14,10 +14,17 @@ class StdoutRedirector:
 
     def write(self, text):
         if text:
-            # Write to original stdout
+            # Write to original stdout. Guard against a non-ASCII glyph (arrows,
+            # Ω, ...) that a cp1252 Windows console can't encode, so a log line
+            # never crashes the run (issue #152, GUI analog of route.py's UTF-8
+            # reconfigure).
             if self.original:
-                self.original.write(text)
-            # Also send to callback
+                try:
+                    self.original.write(text)
+                except UnicodeEncodeError:
+                    enc = getattr(self.original, 'encoding', None) or 'ascii'
+                    self.original.write(text.encode(enc, errors='replace').decode(enc, errors='replace'))
+            # Also send to callback (the wx log control handles Unicode fine)
             self.callback(text)
 
     def flush(self):
