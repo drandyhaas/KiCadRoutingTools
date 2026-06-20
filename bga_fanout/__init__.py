@@ -55,6 +55,7 @@ from bga_fanout.reroute import (
     repair_pad_crossings,
     route_clear_of_foreign_pads,
     clear_escapes_of_foreign_pads,
+    segments_clear_of_pads,
 )
 from obstacle_map import build_base_obstacle_map, build_layer_map
 from routing_config import GridRouteConfig
@@ -84,7 +85,11 @@ def calculate_jog_ends_for_routes(
     layers: List[str],
     jog_length: float,
     track_width: float,
-    diff_pair_gap: float
+    diff_pair_gap: float,
+    grid_step: float = 0.0,
+    obstacles=None,
+    cfg=None,
+    layer_map: Dict[str, int] = None
 ) -> None:
     """
     Calculate jog_end positions for each route based on layer.
@@ -159,10 +164,27 @@ def calculate_jog_ends_for_routes(
             jog_length,
             is_diff_pair=route.pair_id is not None,
             is_outside_track=is_outside,
-            pair_spacing=pair_spacing
+            pair_spacing=pair_spacing,
+            grid_step=grid_step
         )
         route.jog_end = jog_end
         route.jog_extension = extension
+
+        # Issue #149 part 2: validate the decorative end-jog against the FULL
+        # obstacle map (foreign pads + existing copper + vias) AT CREATION, and
+        # drop it if it would extend into a foreign obstacle. The jog does not
+        # affect connectivity, so dropping it is connectivity-safe and avoids the
+        # reroute cascade of rejecting whole candidates.
+        if obstacles is not None and jog_end is not None:
+            tail = []
+            if extension is not None:
+                tail.append({'start': route.exit_pos, 'end': extension})
+                tail.append({'start': extension, 'end': jog_end})
+            else:
+                tail.append({'start': route.exit_pos, 'end': jog_end})
+            if not segments_clear_of_pads(tail, route.layer, obstacles, cfg, layer_map):
+                route.jog_end = None
+                route.jog_extension = None
 
 
 def print_route_statistics(routes: List[FanoutRoute]) -> None:
@@ -1468,7 +1490,8 @@ def generate_bga_fanout(footprint: Footprint,
                         via_drill: float = 0.3,
                         check_for_previous: bool = False,
                         no_inner_top_layer: bool = False,
-                        escape_method: str = 'channel') -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        escape_method: str = 'channel',
+                        grid_step: float = 0.0) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -1524,7 +1547,8 @@ def generate_bga_fanout(footprint: Footprint,
             exit_margin=exit_margin, primary_escape=primary_escape,
             force_escape_direction=force_escape_direction, rebalance_escape=rebalance_escape,
             via_size=via_size, via_drill=via_drill, check_for_previous=check_for_previous,
-            no_inner_top_layer=no_inner_top_layer, escape_method=escape_method)
+            no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
+            grid_step=grid_step)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
@@ -1832,8 +1856,11 @@ def generate_bga_fanout(footprint: Footprint,
         jog_length = min(grid.pitch_x, grid.pitch_y) / 2
         print(f"  Jog length: {jog_length:.2f} mm")
 
-        # Calculate jog_end for each route based on layer
-        calculate_jog_ends_for_routes(routes, layers, jog_length, track_width, diff_pair_gap)
+        # Calculate jog_end for each route based on layer (snapped to the routing
+        # grid when grid_step is set, issue #149); the obstacle map drops a
+        # decorative end-jog that would extend into a foreign pad/track/via.
+        calculate_jog_ends_for_routes(routes, layers, jog_length, track_width, diff_pair_gap,
+                                      grid_step, obstacles, obstacle_cfg, obstacle_layer_map)
 
         # Generate tracks
         tracks, edge_count, inner_count = generate_tracks_from_routes(routes, track_width, layers[0])
@@ -2076,6 +2103,10 @@ def main():
                              'under the pad field on inner layers, escaping fully-populated '
                              'arrays (e.g. ulx3s 22x22) the channel router cannot. Use a small '
                              'via/track for dense pitches (e.g. via 0.35, track 0.12 at 0.8mm).')
+    parser.add_argument('--grid-step', type=float, default=0.1,
+                        help='Routing grid step in mm (default: 0.1). Escape stub ends are '
+                             'snapped to this grid so the router gets on-grid terminals (issue '
+                             '#149); MATCH the --grid-step you pass to route.py.')
 
     args = parser.parse_args()
 
@@ -2123,7 +2154,8 @@ def main():
         via_drill=args.via_drill,
         check_for_previous=args.check_for_previous,
         no_inner_top_layer=args.no_inner_top_layer,
-        escape_method=args.escape_method
+        escape_method=args.escape_method,
+        grid_step=args.grid_step
     )
 
     if tracks:

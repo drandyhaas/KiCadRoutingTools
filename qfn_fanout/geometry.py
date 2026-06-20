@@ -12,6 +12,7 @@ from qfn_fanout.types import QFNLayout, PadInfo
 
 def calculate_fanout_stub(pad_info: PadInfo, layout: QFNLayout,
                           straight_length: float, max_diagonal_length: float,
+                          grid_step: float = 0.0,
                           ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
     """
     Calculate fanout stub with two segments: straight then 45 degrees.
@@ -47,15 +48,24 @@ def calculate_fanout_stub(pad_info: PadInfo, layout: QFNLayout,
     half_edge = (layout.width if side in ('top', 'bottom') else layout.height) / 2
     edge_position = min(abs(off) / half_edge, 1.0) if half_edge > 0 else 0.0
 
-    # Diagonal length: 0 at center, max_diagonal_length at corners
+    # Diagonal length: 0 at center, max_diagonal_length at corners. A near-zero
+    # fan collapses to the straight escape (end == corner).
     diagonal_length = edge_position * max_diagonal_length
     if diagonal_length < 0.01:
-        return ((corner_x, corner_y), (corner_x, corner_y))
+        end_x, end_y = corner_x, corner_y
+    else:
+        # True 45 deg: equal movement along escape and along the edge tangent.
+        diag_component = diagonal_length / math.sqrt(2)
+        fan_dir = 1.0 if off >= 0 else -1.0
+        end_x = corner_x + esc_x * diag_component + fan_dir * tan_x * diag_component
+        end_y = corner_y + esc_y * diag_component + fan_dir * tan_y * diag_component
 
-    # True 45 deg: equal movement along escape and along the edge tangent.
-    diag_component = diagonal_length / math.sqrt(2)
-    fan_dir = 1.0 if off >= 0 else -1.0
-    end_x = corner_x + esc_x * diag_component + fan_dir * tan_x * diag_component
-    end_y = corner_y + esc_y * diag_component + fan_dir * tan_y * diag_component
+    # Land the stub end on the routing grid (issue #149) so the router gets an
+    # on-grid terminal and a foreign track on the nearest cell can't graze this
+    # end by a sub-cell amount. Grid anchored at the origin. (Center pads return
+    # early above with no stub, so there is nothing off-grid to snap there.)
+    if grid_step > 0:
+        end_x = round(end_x / grid_step) * grid_step
+        end_y = round(end_y / grid_step) * grid_step
 
     return ((corner_x, corner_y), (end_x, end_y))

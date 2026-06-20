@@ -1112,6 +1112,7 @@ class FanoutTab(wx.Panel):
                 check_for_previous=config['check_for_previous'],
                 no_inner_top_layer=config['no_inner_top_layer'],
                 escape_method=config.get('escape_method', 'channel'),
+                grid_step=shared.get('grid_step', defaults.GRID_STEP),
             )
 
             self._apply_fanout_results(
@@ -1164,6 +1165,7 @@ class FanoutTab(wx.Panel):
                 track_width=track_width,
                 extension=extension,
                 clearance=clearance,
+                grid_step=shared.get('grid_step', defaults.GRID_STEP),
             )
 
             self._apply_fanout_results(

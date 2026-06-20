@@ -82,7 +82,8 @@ def calculate_jog_end(exit_pos: Tuple[float, float],
                       jog_length: float,
                       is_diff_pair: bool = False,
                       is_outside_track: bool = False,
-                      pair_spacing: float = 0.0) -> Tuple[Tuple[float, float], Optional[Tuple[float, float]]]:
+                      pair_spacing: float = 0.0,
+                      grid_step: float = 0.0) -> Tuple[Tuple[float, float], Optional[Tuple[float, float]]]:
     """
     Calculate the end position of the 45° jog at the exit.
 
@@ -162,5 +163,13 @@ def calculate_jog_end(exit_pos: Tuple[float, float],
     else:  # up
         # Walking up, left is left (-X), right is right (+X)
         jog_end = (ex + jog_direction * diag, ey - diag)
+
+    # Land the stub end on the routing grid (issue #149) so the router has an
+    # on-grid terminal and a foreign track on the nearest cell can't graze this
+    # end by a sub-cell amount. The grid is anchored at the origin (the router's
+    # grid nodes are integer multiples of grid_step).
+    if grid_step > 0:
+        jog_end = (round(jog_end[0] / grid_step) * grid_step,
+                   round(jog_end[1] / grid_step) * grid_step)
 
     return jog_end, extension_point

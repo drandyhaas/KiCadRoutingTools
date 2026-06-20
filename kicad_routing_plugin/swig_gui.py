@@ -1233,6 +1233,9 @@ class RoutingDialog(wx.Dialog):
                 'via_drill': self.via_drill.GetValue(),
                 'layers': self._get_selected_layers(),
                 'diff_pair_gap': self.differential_tab.diff_pair_gap.GetValue(),
+                # Escape stub ends are snapped to this grid so the router gets
+                # on-grid terminals (issue #149); use the Basic tab's grid step.
+                'grid_step': self.grid_step.GetValue(),
             }
 
         return FanoutTab(
