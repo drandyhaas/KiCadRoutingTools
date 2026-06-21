@@ -135,10 +135,16 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
      route_planes pour (#99/#122).
    - PLANE REPAIR (Step 5): run route_disconnected_planes with the SAME signal
      params as Step 3 (clearance/via/track-width/grid + `--power-nets`/
-     `--power-nets-widths` + `--no-bga-zone` if used) AND `--rip-blocker-nets
-     --reroute-ripped-nets`, so a plane-net pad blocked by a signal trace (e.g. a
-     connector GND pin) is connected by tracing to an adjacent same-net pad,
-     ripping the blocker and re-routing it at the right width (#112).
+     `--power-nets-widths` + `--no-bga-zone` if used) AND `--rip-blocker-nets`, so
+     a plane-net pad blocked by a signal trace (e.g. a connector GND pin) is
+     connected by tracing to an adjacent same-net pad, ripping the blocker out of
+     the way (#112). The ripped blockers are LEFT UNROUTED here -- this step no
+     longer re-routes them (its in-step restore-on-failure shorted nets; #141
+     reverted, `--reroute-ripped-nets` is a deprecated no-op).
+   - RECONNECT (Step 5c): after plane repair, run a final route.py pass (same
+     signal params + `--power-nets`/`--power-nets-widths`) to reconnect the nets
+     Step 5 ripped. route.py routes against the live obstacle map with safe
+     rip-up/restore, so it reconnects them without shorts.
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.

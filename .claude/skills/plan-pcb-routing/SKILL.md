@@ -564,7 +564,8 @@ corresponding layer (GND→B.Cu, VCC→F.Cu). Through-hole PGA/BGA pads
 automatically connect to planes on their layer; SMD pads get vias routed to
 the plane. `--add-gnd-vias` also places return-current vias near the signal
 vias that now exist. If signal tracks boxed in a power pad, add
-`--rip-blocker-nets` to rip and re-route the blockers.
+`--rip-blocker-nets` to rip the blockers out of the way (they are left unrouted
+and reconnected by the Step 5c route.py pass).
 
 > **Note to user:** GND return vias improve signal integrity for high-speed
 > signals. Based on the speed analysis, this board has [speed_tier] signals,
@@ -587,24 +588,40 @@ Adjust `--gnd-via-distance` based on the board's highest signal speed:
 ### Step 5: Repair Disconnected Plane Regions
 Signal traces and GND return vias may have cut through planes. This step
 reconnects any isolated copper islands AND repairs pad-level plane connections.
-A net ripped here to clear a blocked pad is re-routed, so it MUST get the same
-routing parameters the **signal route (Step 2)** used, or it re-routes wrong (or
-fails). Carry over Step 2's clearance/via/track-width/grid, its `--no-bga-zone`,
-and — critically — the **same `--power-nets`/`--power-nets-widths`** (the wide-
-trace power nets from the power-net strategy, e.g. `+12V -12V` at 0.5/0.5): if a
-wide power net is the blocker, it must re-route at its wide width, not the signal
-default. Enable `--rip-blocker-nets --reroute-ripped-nets`: a plane-net pad that
-can't reach its plane (e.g. a tiny connector GND pin blocked by a signal trace)
-is then connected by tracing to an adjacent same-net pad, ripping the blocker and
-re-routing it (restoring any net that can't re-route). These map to the plugin's
-Planes repair tab "Rip up blocking nets" / "Auto-reroute ripped nets" checkboxes
-(and the plan passes the power-nets/widths through to that tab as well).
+With `--rip-blocker-nets`, a plane-net pad that can't reach its plane (e.g. a tiny
+connector GND pin blocked by a signal trace) is connected by tracing to an
+adjacent same-net pad, **ripping the blocking net out of the way**. The ripped
+blockers are **left UNROUTED here** — they are reconnected by the route.py pass in
+Step 5c, NOT inside this step. (Re-routing them in-step is unsafe: a ripped net
+that fails to re-route had its original copper restored on top of whatever had
+meanwhile been routed through its freed corridor, shorting them — the restore
+bypasses the obstacle map. Issue #141 reverted; `--reroute-ripped-nets` and the
+plugin's "Auto-reroute ripped nets" checkbox are now deprecated no-ops.) Carry
+over Step 2's clearance/via/track-width/grid and `--no-bga-zone`.
 
-python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5.kicad_pcb \
+python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5_repair.kicad_pcb \
     --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
-    --rip-blocker-nets --reroute-ripped-nets \
+    --rip-blocker-nets \
     --power-nets <PWR...> --power-nets-widths <W...> [--no-bga-zone] \
     2>&1 | tee /tmp/step5_plane_repair.txt
+
+### Step 5c: Reconnect the nets plane-repair left unrouted (mandatory if Step 5 ripped any)
+route_disconnected_planes lists the blockers it ripped and left unrouted. Reconnect
+them with a final route.py pass using the **same parameters as the Step 2 signal
+route** — clearance/via/track-width/grid, `--no-bga-zone`, and the **same
+`--power-nets`/`--power-nets-widths`** so a wide power net re-routes at its wide
+width, not the signal default. route.py routes against the live obstacle map
+(planes + repairs included) with safe rip-up/restore, so it reconnects them without
+the shorts the old in-step reroute caused. This produces the canonical final board
+`board_step5.kicad_pcb`. (If Step 5 reports it ripped nothing, you may skip this and
+rename board_step5_repair.kicad_pcb -> board_step5.kicad_pcb.)
+
+python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
+    --nets "*" "!GND" "!<other_plane_nets...>" \
+    --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
+    --max-ripup 10 [--no-bga-zone] \
+    --power-nets <PWR...> --power-nets-widths <W...> \
+    2>&1 | tee /tmp/step5c_reconnect.txt
 
 ### Step 6: Verify Results
 Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
@@ -845,7 +862,7 @@ consolidating routing corridors.
 
 - Multiple nets can share one plane layer (Voronoi partitioning): `--nets GND VCC --plane-layers In2.Cu In2.Cu`
 - `--same-net-pad-clearance <mm>` forces plane vias outside same-net pads with that edge-to-edge clearance (default places at pad center when possible)
-- `--rip-blocker-nets` rips up interfering routed nets to maximize via placement, then re-routes them
+- `--rip-blocker-nets` rips up interfering routed nets to maximize via placement and leaves them unrouted (reconnect with a route.py pass afterward — Step 5c). `--reroute-ripped-nets` is a deprecated no-op.
 
 ### Net Ordering Strategies
 

@@ -296,8 +296,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.rip_blocker_check.SetToolTip("Remove nets that block via placement, then retry (uses Max Rip-up from Basic tab)")
         ripup_sizer.Add(self.rip_blocker_check, 0, wx.ALL, 5)
 
-        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets")
-        self.reroute_ripped_check.SetToolTip("Automatically re-route ripped nets after plane creation")
+        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets (deprecated)")
+        self.reroute_ripped_check.SetToolTip(
+            "Deprecated / no-op (issue #141 reverted): ripped nets are left unrouted. "
+            "Run the routing tab afterward to reconnect them (it handles rip-up/restore "
+            "safely, without the shorts the in-step reroute caused).")
         ripup_sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
@@ -430,10 +433,11 @@ class RepairPlanesOptionsPanel(wx.Panel):
             "ripping the signal net(s) blocking it (uses Max Rip-up from the Basic tab).")
         sizer.Add(self.rip_blocker_check, 0, wx.LEFT | wx.TOP, 5)
 
-        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets")
+        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets (deprecated)")
         self.reroute_ripped_check.SetToolTip(
-            "Automatically re-route the ripped nets after the repair (deletes their old "
-            "tracks and adds the re-routed ones).")
+            "Deprecated / no-op (issue #141 reverted): ripped nets are left unrouted. "
+            "Run the routing tab afterward to reconnect them (it handles rip-up/restore "
+            "safely, without the shorts the in-step reroute caused).")
         sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.TOP, 5)
 
         # Info text

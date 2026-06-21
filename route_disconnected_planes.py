@@ -473,8 +473,22 @@ def route_planes(
             unique_nets[net_id] = (net_name, set())
         unique_nets[net_id][1].add(plane_layer)
 
+    # --reroute-ripped-nets is deprecated (issue #141 reverted). This step used to
+    # rip signal blockers, route plane/pad repairs into the freed space, then
+    # re-route the ripped nets -- but a ripped net that FAILED to re-route had its
+    # ORIGINAL copper restored on top of whatever had meanwhile been routed through
+    # its corridor, creating P-to-N shorts the obstacle map never saw (a restore
+    # bypasses it). Rerouting is now left to a route.py pass run AFTER this step,
+    # which handles rip-up/restore safely. We still rip blockers for pad repair and
+    # leave them UNROUTED (stripped) for that route.py pass to reconnect.
+    if reroute_ripped_nets:
+        print("Note: --reroute-ripped-nets is deprecated and now a no-op. Ripped nets "
+              "are left unrouted; run route.py afterward to reconnect them (it does "
+              "rip-up/restore safely).")
+        reroute_ripped_nets = False
+
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
-    # signal nets are, and they are re-routed afterward.
+    # signal nets are, and they are left unrouted for a subsequent route.py pass.
     plane_net_ids = set(unique_nets.keys())
     ripped_net_ids: List[int] = []
     distant_radius = min(max_search_radius, DISTANT_PAD_TRACE_RADIUS) if rip_blocker_nets else 0.0
@@ -644,28 +658,6 @@ def route_planes(
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
     kv10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
-
-    # Issue #141: --reroute-ripped-nets should also pick up nets the earlier
-    # route_planes pass ripped (and left unrouted), not just nets we ripped here.
-    # Use the SAME selection route.py/batch_route uses to decide what to route -
-    # filter_already_routed (2+ pads, not fully connected; zone-aware) - so the set
-    # of nets we re-route matches what route.py would route. Plane nets (connected
-    # via their zone) and nets we already ripped this pass are excluded.
-    if reroute_ripped_nets:
-        import io, contextlib
-        from routing_common import filter_already_routed
-        already = plane_net_ids | set(ripped_net_ids)
-        candidates = [(net.name, nid) for nid, net in pcb_data.nets.items()
-                      if nid > 0 and nid not in already]
-        # filter_already_routed prints a line per already-routed net; over a whole
-        # board that is dozens of lines of noise, so swallow its stdout here.
-        with contextlib.redirect_stdout(io.StringIO()):
-            nets_to_route, _ = filter_already_routed(pcb_data, candidates, config)
-        if nets_to_route:
-            names = [n for n, _ in nets_to_route]
-            print(f"\nAlso re-routing {len(nets_to_route)} net(s) left unrouted by the "
-                  f"plane pass (issue #141): {', '.join(names)}")
-            ripped_net_ids.extend(nid for _, nid in nets_to_route)
 
     # GUI (return_results): apply via pcbnew, so re-route the ripped nets IN MEMORY
     # and hand their copper + ids back (the caller deletes the ripped tracks and
@@ -869,8 +861,9 @@ Examples:
     parser.add_argument("--max-rip-nets", type=int, default=3,
                         help="Maximum number of blocker nets to rip per pad (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
-                        help="Automatically re-route the ripped nets after the repair pass "
-                             "(otherwise they are excluded from output and listed for a later pass).")
+                        help="DEPRECATED / no-op (issue #141 reverted): ripped nets are always "
+                             "left unrouted now -- run route.py afterward to reconnect them "
+                             "(it handles rip-up/restore safely). Accepted for compatibility.")
     parser.add_argument("--power-nets", nargs="+", default=None,
                         help="Power net names that need wider tracks when re-routing ripped nets.")
     parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,
