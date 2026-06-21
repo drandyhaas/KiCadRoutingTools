@@ -314,6 +314,7 @@ def find_differential_pairs(pcb_data):
     from net_queries import extract_diff_pair_base
 
     net_names = [n.name for n in pcb_data.nets.values() if n.name]
+    name2net = {n.name: n for n in pcb_data.nets.values() if n.name}
 
     # Key by (base, style) so a net only pairs within its own convention.
     halves = {}  # (base, style) -> {True: pos_name, False: neg_name}
@@ -327,10 +328,40 @@ def find_differential_pairs(pcb_data):
     found_pairs = []
     for (base, style), sides in halves.items():
         if True in sides and False in sides:
+            # Issue #145: a P/N name on a 2-terminal crystal/oscillator (e.g.
+            # watchy /32K_P+/32K_N on Y1) is not a differential signal - skip it.
+            if _is_two_terminal_resonator_pair(pcb_data, name2net, sides[True], sides[False]):
+                continue
             found_pairs.append((sides[True], sides[False]))
 
     found_pairs.sort()
     return found_pairs
+
+
+def _is_two_terminal_resonator_pair(pcb_data, name2net, pos_name, neg_name):
+    """True if both nets land on a single crystal/oscillator footprint - a
+    2-terminal resonator, not a real differential signal (issue #145).
+
+    Identified as a footprint that BOTH nets connect to and that is crystal-like
+    either by name (crystal/xtal/resonator/oscillator) or by a Y*/X* reference,
+    with a small pad count (<=4, allowing a case-ground crystal). A real diff
+    pair never shares a single small crystal-like part."""
+    import re
+
+    def refs_of(net_name):
+        net = name2net.get(net_name)
+        return {p.component_ref for p in net.pads if p.component_ref} if net else set()
+
+    for ref in refs_of(pos_name) & refs_of(neg_name):
+        fp = pcb_data.footprints.get(ref)
+        if not fp or len(fp.pads) > 4:
+            continue
+        fp_name = (fp.footprint_name or '').lower()
+        name_xtal = any(k in fp_name for k in ('crystal', 'xtal', 'resonator', 'oscillator'))
+        ref_xtal = bool(re.match(r'^[XY]\d', ref))
+        if name_xtal or ref_xtal:
+            return True
+    return False
 
 
 def find_power_nets(pcb_data):

@@ -135,7 +135,8 @@ def apply_diff_pair_layer_swaps(
     all_swap_vias: List,
     verbose: bool = False,
     all_swap_segments: Optional[List] = None,
-    probe_obstacles=None
+    probe_obstacles=None,
+    bare_pad_swaps: Optional[Dict] = None
 ) -> Tuple[int, Dict, Dict]:
     """
     Apply upfront layer swap optimization for diff pairs.
@@ -685,6 +686,15 @@ def apply_diff_pair_layer_swaps(
                 applied_swaps.add(pair_name)
                 solo_switch_count += 1
                 total_layer_swaps += 1
+                # Record the synthesized copper so the caller can UNDO this swap
+                # if the pair later fails to route: the bare-pad target stub can
+                # pin the pair into a forced P/N crossing, yet the same pair
+                # routes cleanly to the bare pads with a plain via (issue #142).
+                if bare_pad_swaps is not None:
+                    bare_pad_swaps[pair_name] = {
+                        'vias': [via_p, via_n],
+                        'stubs': [stub_p, stub_n],
+                    }
                 print(f"  Bare-pad target swap: {pair_name} ({tgt_layer} pad -> {fan_layer} stub), added 2 pad via(s)")
                 continue
 

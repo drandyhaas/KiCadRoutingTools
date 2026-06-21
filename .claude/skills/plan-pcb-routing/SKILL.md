@@ -63,26 +63,42 @@ to fix the stackup first.
 
 ## Step 3: Check for Components Needing Fanout
 
-Identify BGA, QFN, QFP, PGA, and other array packages that benefit from escape routing:
+Identify BGA, QFN, QFP, PGA, LGA, and other array packages that benefit from escape routing:
 
 ```python
 for ref, fp in pcb.footprints.items():
     name_upper = fp.footprint_name.upper()
     pad_count = len(fp.pads)
 
-    # Check for array packages
-    needs_fanout = any([
-        'BGA' in name_upper,
-        'PGA' in name_upper,
-        'QFN' in name_upper,
-        'QFP' in name_upper,
-        'LQFP' in name_upper,
-        'TQFP' in name_upper,
-    ])
+    # Check for array / fine-pitch land/no-lead packages by name. Note 'QFP'
+    # already matches LQFP/TQFP/VQFP, 'QFN' matches VQFN/WQFN/HVQFN, and 'BGA'
+    # matches FBGA/UFBGA/TFBGA, so only distinct families need listing.
+    needs_fanout = any(k in name_upper for k in (
+        'BGA',          # ball grid array
+        'PGA',          # pin grid array (through-hole)
+        'LGA',          # land grid array (interior lands, e.g. LGA-12) - issue #144
+        'CSP', 'WLCSP', 'WLP',  # wafer-level / chip-scale = micro-BGA, sub-0.5mm
+        'CGA',          # column grid array
+        'QFN', 'DFN',   # quad / dual no-lead (exposed-pad)
+        'QFP',          # quad flat pack
+    ))
 
-    # Also flag high pin-count components
-    if pad_count > 40:
-        needs_fanout = True
+    # Fine-pitch arrays strand even at low pad count: trigger by PITCH + interior
+    # pads, not just pad_count > 40 (issue #144: LGA-12 at 0.5mm has only 12 pads
+    # but its center lands box in). Compute the min pad-to-pad spacing and whether
+    # any pad is interior (not on the bounding-box edge).
+    if not needs_fanout and pad_count >= 6:
+        xs = sorted({round(p.local_x, 3) for p in fp.pads})
+        ys = sorted({round(p.local_y, 3) for p in fp.pads})
+        def _min_step(v):
+            return min((b - a for a, b in zip(v, v[1:])), default=999)
+        pitch = min(_min_step(xs), _min_step(ys))
+        minx, maxx, miny, maxy = xs[0], xs[-1], ys[0], ys[-1]
+        has_interior = any(minx < round(p.local_x, 3) < maxx and
+                           miny < round(p.local_y, 3) < maxy for p in fp.pads)
+        # Fine pitch (<=0.6mm) with interior pads, OR a large multi-row part.
+        if (pitch <= 0.6 and has_interior) or pad_count > 40:
+            needs_fanout = True
 
     if needs_fanout:
         # Analyze pad arrangement
@@ -101,12 +117,16 @@ for ref, fp in pcb.footprints.items():
 |--------------|------|-------|
 | BGA (SMD grid) | `bga_fanout.py` | Escape routing for ball grid arrays |
 | PGA (through-hole grid) | `bga_fanout.py` | Same tool works for PGA |
-| QFN/QFP (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad flat packages |
+| LGA / WLCSP / CGA (land/chip-scale grid) | `bga_fanout.py` | Grid escape; interior lands strand without it (issue #144) |
+| QFN/QFP/DFN (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad/dual no-lead and flat packages |
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
 
-### When to Use Fanout for BGA/PGA
+### When to Use Fanout for BGA/PGA/LGA
 
-**Rule: Use fanout for any BGA/PGA with more than 2 pins depth from outside to center.**
+**Rule: Use fanout for any grid array (BGA/PGA/LGA/WLCSP/CGA) with more than 2 pins
+depth from outside to center, OR any fine-pitch (<=0.5mm) array with interior pads
+regardless of pin count** — a small LGA-12/WLCSP at 0.5mm pitch boxes its center
+lands in even though it has well under 40 pads (issue #144).
 
 **Important:** Calculate ACTUAL depth by counting pads from the edge toward center, not grid size.
 Many PGA/BGA packages (especially FPGAs/CPLDs) have hollow centers with only perimeter pins populated.
@@ -320,6 +340,27 @@ Report to user when presenting the plan:
   low-frequency I2C/UART/GPIO). GND return vias are included in the plan but are optional
   for this board. Want me to remove the step?"
 
+`/find-high-speed-nets` ALSO reports **controlled-impedance nets** (its Step 4.5):
+RF/antenna feeds (radio/PA/LNA -> SMA/U.FL/chip-antenna = **50 ohm single-ended**,
+or 100 ohm if balanced), DDR SSTL, and the impedance-controlled diff interfaces.
+Thread these into the plan:
+
+- **Differential** impedance nets stay in the diff-pair step (Step 2) — just add
+  `route_diff.py --impedance <ohms>`.
+- **Single-ended** impedance nets (RF 50, DDR SSTL 40) get a **dedicated
+  `route.py --impedance` pass placed AFTER diff pairs and BEFORE the general
+  signal route** (Step 2b below). They must then be **excluded from the general
+  signal route** (`"*" "!GND" "!VCC" "!RF"`) and counted in the Step 5b ledger as
+  claimed by the impedance step — otherwise a later rip-up re-routes them at the
+  wrong width.
+- Impedance width is computed from the **stackup**: if the board has only KiCad's
+  default stackup, lead the report with that warning and run `/recommend-stackup`
+  first (an RF feed routed at a wrong width is electrically useless).
+- For an RF/antenna feed also recommend (in words) a `User.2` keepout around the
+  antenna region and `--keepout`, and route it short/direct on an outer layer.
+
+If no controlled-impedance nets are found, omit Step 2b.
+
 ## Step 5: Review Power and Ground Net Strategy (delegate to /recommend-plane-mappings)
 
 Which nets deserve planes and on which copper layers is the
@@ -356,18 +397,22 @@ mechanically — do not eyeball it:
 1. **Assign every routable net to one handler:**
    - `fanout + signal route` — ordinary signals (the `"*"` selection minus exclusions)
    - `diff-pair route` — detected pairs
-   - `plane / pour` — every net you exclude from the signal route with `!X`
+   - `impedance SE route (Step 2b)` — single-ended controlled-impedance nets (RF/antenna
+     50 ohm, DDR SSTL 40 ohm); excluded from the signal route, NOT poured
+   - `plane / pour` — every net you exclude from the signal route with `!X` that a plane pours
    - `wide trace` — power carried *inside* the route selection via `--power-nets` (NOT excluded)
 
-2. **Diff the two pattern lists.** The set of signal-route exclusions (`!A !B …`)
-   MUST be identical to the set of nets the plane step pours (`--nets A B …`).
-   A net in the symmetric difference is a plan bug — it is excluded from routing
-   but not poured (→ it will be unrouted), or poured but not excluded (→ routed as
-   tracks, defeating the plane). Print both and assert the difference is empty:
+2. **Diff the pattern lists.** The set of signal-route exclusions (`!A !B …`) MUST
+   equal the nets the plane step pours PLUS the single-ended impedance nets routed
+   in Step 2b. A net in the symmetric difference is a plan bug — excluded from
+   routing but handled by no later stage (→ unrouted), or poured/impedance-routed
+   but not excluded (→ also routed as ordinary tracks, defeating it). Print and
+   assert the difference is empty:
    ```python
-   route_exclusions = {"GND", "+3V3"}   # the !X you will pass route.py
-   plane_nets       = {"GND", "+3V3"}   # the --nets you will pass route_planes.py
-   orphans = route_exclusions ^ plane_nets       # symmetric difference
+   route_exclusions = {"GND", "+3V3", "RF"}     # the !X you will pass route.py
+   plane_nets       = {"GND", "+3V3"}           # the --nets you pass route_planes.py
+   impedance_se     = {"RF"}                     # nets routed in Step 2b (route.py --impedance)
+   orphans = route_exclusions ^ (plane_nets | impedance_se)   # symmetric difference
    assert not orphans, f"Net-coverage gap: {sorted(orphans)} handled by no stage"
    ```
    Do not proceed until `orphans` is empty.
@@ -391,14 +436,25 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
    nets that planes will handle (`"*" "!GND" "!VCC"`).
 2. **Differential Pairs** - The most constrained routes claim their channels before
-   anything else can block them (if present). May peel far-apart "terminal" pads
-   (e.g. spread-out test points) off the coupled chain and leave them for the
-   signal-routing step (reported as `single_ended_followup_nets`, issue #121).
-3. **Signal Routing** - All remaining nets, **excluding the plane nets**
-   (`--nets "*" "!GND" "!VCC"`). Routing them as tracks now would defeat the
-   planes step - the exclusions are mandatory whenever a later step gives those
-   nets planes. This step also finishes any diff-pair pads peeled off in step 2,
-   so keep the diff-pair nets in its selection (the `"*"` covers them).
+   anything else can block them (if present). Add `--impedance <ohms>` for the
+   controlled ones (USB/Ethernet/LVDS/balanced-RF; from `/find-high-speed-nets`).
+   May peel far-apart "terminal" pads (e.g. spread-out test points) off the coupled
+   chain and leave them for the signal-routing step (reported as
+   `single_ended_followup_nets`, issue #121).
+2b. **Impedance-controlled single-ended nets** (only if `/find-high-speed-nets`
+   found any - RF/antenna feeds = 50 ohm, DDR SSTL = 40 ohm). A dedicated
+   `route.py --impedance <ohms>` pass, routed here - after diff pairs, before the
+   bulk signal route - because they need a stackup-derived width and a short,
+   direct path over a clean ground reference, so (like diff pairs) they must claim
+   their channel before the bulk signals fill the area. Route an RF feed on an
+   outer layer (`--layers F.Cu`); requires a real stackup (see Step 2 stackup
+   check). These nets are then EXCLUDED from step 3.
+3. **Signal Routing** - All remaining nets, **excluding the plane nets AND any
+   single-ended impedance nets from step 2b** (`--nets "*" "!GND" "!VCC" "!RF"`).
+   Routing the plane nets as tracks would defeat the planes step; re-routing the
+   impedance nets here would drop their controlled width - both exclusions are
+   mandatory. This step also finishes any diff-pair pads peeled off in step 2, so
+   keep the diff-pair nets in its selection (the `"*"` covers them).
 4. **Power Planes** - Create GND and VCC planes together. Stitching vias adapt
    around the routed signals; the reverse is not true - a stitching via placed
    early can block the only clean channel for a diff pair (issue #56). If signal
@@ -463,11 +519,27 @@ short, add the fine-pitch escape via and/or a smaller `--track-width`. Only proc
 to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood and
 accepted).
 
-### Step 2: Route All Signal Nets (excluding plane nets)
+### Step 2b: Impedance-Controlled Single-Ended Nets (only if any were found; runs before the Step 2 signal route)
+ONLY when `/find-high-speed-nets` reported single-ended controlled-impedance nets
+(RF/antenna feed = 50 ohm, DDR SSTL = 40 ohm). Route them in their own
+`--impedance` pass, after diff pairs and BEFORE the general signal route, so they
+claim a clean, short, direct channel at the stackup-derived width. Requires a real
+stackup (run `/recommend-stackup` first if the board has KiCad's default). Route an
+RF feed on an outer layer over the GND plane; recommend a `User.2` keepout +
+`--keepout` around any antenna region (user draws it).
+
+python3 -X utf8 route.py board_diff.kicad_pcb board_step2b.kicad_pcb \
+    --nets RF --impedance 50 --layers F.Cu \
+    --clearance <floor> --no-bga-zone \
+    2>&1 | tee /tmp/step2b_impedance.txt
+
+### Step 2: Route All Signal Nets (excluding plane nets + impedance nets)
 Routes all remaining unrouted nets EXCEPT the nets that get planes in the
 next step - the `"!GND" "!VCC"` exclusions are mandatory here, otherwise the
 power nets get routed as ordinary tracks and the planes step has nothing to
-do. Routing signals before planes means the plane stitching vias (placed
+do - AND any single-ended impedance nets already routed in Step 2b
+(`"!RF"`), so the bulk pass cannot re-route them off their controlled width.
+Routing signals before planes means the plane stitching vias (placed
 next) adapt around the signals instead of blocking them.
 
 For boards with BGA/PGA components, use `--no-bga-zone` to allow the router
@@ -481,6 +553,9 @@ python3 -X utf8 route.py board_step1.kicad_pcb board_step2.kicad_pcb \
     --max-ripup 10 \
     --max-iterations 1000000 \
     2>&1 | tee /tmp/step2_routing.txt
+
+(When Step 2b ran, add its impedance nets to the exclusions, e.g.
+`--nets "*" "!GND" "!VCC" "!RF"`, and route from `board_step2b.kicad_pcb`.)
 
 ### Step 3: Create Power Planes (GND and VCC) + GND Return Vias
 Creates power planes in a single call, after signal routing so the stitching

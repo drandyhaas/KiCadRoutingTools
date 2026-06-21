@@ -455,6 +455,10 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     half_height = pad.size_y / 2
     # Add half grid step buffer to account for grid quantization errors
     clearance = config.clearance if clearance_override is None else clearance_override
+    # Honor a per-pad local clearance override (fiducial keep-clear rings etc.)
+    # unless an explicit same-net override was supplied.
+    if clearance_override is None:
+        clearance = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
     margin = config.via_size / 2 + clearance + config.grid_step / 2
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
     if pad.shape in ('circle', 'oval'):
@@ -509,7 +513,7 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     via_edge_clearance = edge_clearance + config.via_size / 2
-    via_expand = coord.to_grid_dist(via_edge_clearance)
+    via_expand = coord.to_grid_dist_safe(via_edge_clearance)
 
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
@@ -590,7 +594,7 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     track_edge_clearance = edge_clearance + config.track_width / 2
-    track_expand = coord.to_grid_dist(track_edge_clearance)
+    track_expand = coord.to_grid_dist_safe(track_edge_clearance)
 
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
@@ -769,7 +773,12 @@ def build_routing_obstacle_map(
                     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                     half_width = pad.size_x / 2
                     half_height = pad.size_y / 2
-                    margin = config.track_width / 2 + config.clearance
+                    # Honor a per-pad local clearance override (e.g. fiducial
+                    # keep-clear rings carry a clearance far larger than the
+                    # board global), else copper routes within the pad's
+                    # required clearance (no-net fiducial DRC, upduino #146).
+                    pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                    margin = config.track_width / 2 + pad_clr
                     # Corner radius based on pad shape
                     if pad.shape in ('circle', 'oval'):
                         corner_radius = min(half_width, half_height)
@@ -795,9 +804,12 @@ def build_routing_obstacle_map(
             continue
         if seg.layer != route_layer:
             continue
-        # Clearance needed: our track half-width + existing segment half-width + clearance
+        # Clearance needed: our track half-width + existing segment half-width + clearance.
+        # Round the expansion UP (ceil): flooring leaves the blocked halo short of the
+        # real clearance envelope, so connection traces route within clearance of signal
+        # copper (#146 — the dominant plane-vs-signal DRC source on dense boards).
         seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
+        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
         seg_count += 1
     if verbose:
@@ -810,10 +822,19 @@ def build_routing_obstacle_map(
         if via.net_id == exclude_net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
-        via_expansion = coord.to_grid_dist(via.size / 2 + config.track_width / 2 + config.clearance)
-        for ex in range(-via_expansion, via_expansion + 1):
-            for ey in range(-via_expansion, via_expansion + 1):
-                if ex*ex + ey*ey <= via_expansion * via_expansion:
+        # Block cells by REAL distance to the via centre (not the grid-quantised
+        # cell) plus a half-cell buffer for the routed track's own discretisation,
+        # so a sub-cell via offset can't let a 0.3 mm plane trace sit inside the
+        # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
+        # to ~half a cell on the via side.
+        r_mm = via.size / 2 + config.track_width / 2 + config.clearance + config.grid_step / 2
+        rg = coord.to_grid_dist_safe(r_mm)
+        r_sq = r_mm * r_mm
+        for ex in range(-rg, rg + 1):
+            for ey in range(-rg, rg + 1):
+                ddx = (gx + ex) * config.grid_step - via.x
+                ddy = (gy + ey) * config.grid_step - via.y
+                if ddx * ddx + ddy * ddy <= r_sq:
                     obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
         via_count += 1
     if verbose:

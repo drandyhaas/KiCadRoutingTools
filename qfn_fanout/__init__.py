@@ -58,7 +58,8 @@ def generate_qfn_fanout(footprint: Footprint,
                         layer: str = "F.Cu",
                         track_width: float = 0.1,
                         extension: float = 0.1,
-                        clearance: float = 0.1) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        clearance: float = 0.1,
+                        grid_step: float = 0.0) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -154,7 +155,7 @@ def generate_qfn_fanout(footprint: Footprint,
         # pad_width is the dimension perpendicular to the chip edge (escape direction)
         straight_length = pad_info.pad_width / 2 + extension
         corner_pos, stub_end = calculate_fanout_stub(
-            pad_info, layout, straight_length, max_diagonal_length
+            pad_info, layout, straight_length, max_diagonal_length, grid_step
         )
 
         stub = FanoutStub(
@@ -174,7 +175,22 @@ def generate_qfn_fanout(footprint: Footprint,
     # (connectivity-neutral - the straight segment still escapes the chip), and
     # if even the straight escape itself grazes a pad, drop that stub and warn.
     from bga_fanout.reroute import _seg_hits_pad
+    from obstacle_map import build_base_obstacle_map, build_layer_map, check_line_clearance
+    from routing_config import GridRouteConfig
     margin = clearance + track_width / 2
+
+    # Full obstacle map so a stub is checked against foreign TRACKS and VIAS too,
+    # not just foreign pads (issue #149 part 2). The part's own nets are excluded
+    # (nets_to_route) so same-net taps stay legal; extra_clearance = track half so
+    # the cell test is a clearance test. Checked at stub-creation time (below), so
+    # a stub/fan that would extend into a foreign obstacle is shortened or dropped.
+    _obs_cfg = GridRouteConfig(layers=list(pcb_data.board_info.copper_layers or [layer]),
+                               track_width=track_width, clearance=clearance)
+    _obs_layer_map = build_layer_map(_obs_cfg.layers)
+    _fanned_net_ids = [p.net_id for p in footprint.pads if p.net_id]
+    _obstacles = build_base_obstacle_map(pcb_data, _obs_cfg, nets_to_route=_fanned_net_ids,
+                                         extra_clearance=track_width / 2)
+    _obs_layer_idx = _obs_layer_map.get(layer)
     # Global bbox of this part's pads (layout.min_* are in the footprint LOCAL
     # frame now, so they can't bound the global foreign-pad search window).
     _gxs = [p.global_x for p in footprint.pads]
@@ -186,6 +202,11 @@ def generate_qfn_fanout(footprint: Footprint,
                     and fp_lo_x <= p.global_x <= fp_hi_x and fp_lo_y <= p.global_y <= fp_hi_y]
 
     def _seg_grazes(p1, p2, net_id):
+        # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
+        if _obs_layer_idx is not None and not check_line_clearance(
+                _obstacles, p1[0], p1[1], p2[0], p2[1], _obs_layer_idx, _obs_cfg):
+            return True
+        # Foreign pads, geometric + rotation-exact (issue #123).
         for pad in foreign_pads:
             if pad.net_id == net_id:
                 continue
@@ -322,6 +343,10 @@ def main():
                              'would graze a foreign pad are shortened or dropped')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
+    parser.add_argument('--grid-step', type=float, default=0.1,
+                        help='Routing grid step in mm (default: 0.1). Fanned stub ends are '
+                             'snapped to this grid so the router gets on-grid terminals (issue '
+                             '#149); MATCH the --grid-step you pass to route.py.')
 
     args = parser.parse_args()
 
@@ -373,7 +398,8 @@ def main():
         layer=layer,
         track_width=args.width,
         extension=args.extension,
-        clearance=args.clearance
+        clearance=args.clearance,
+        grid_step=args.grid_step
     )
 
     if tracks:

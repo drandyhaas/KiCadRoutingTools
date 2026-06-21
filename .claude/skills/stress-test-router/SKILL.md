@@ -50,7 +50,10 @@ bash tests/stress/stress_status.sh        # monitor: DONE/RUNNING/TODO + free sl
 
 Each worker (`run_board.sh <board> <set> [model]`) routes one board per
 `RUNBOOK.md` and writes `$STRESS_DIR/results[_set2]/<board>.json` plus a
-`FINDINGS.md`. The headless workers run `claude -p --dangerously-skip-permissions`,
+`FINDINGS.md`. It also captures the agent transcript (`transcript.jsonl`) and
+auto-derives `agent_narrative.md` — a compact routing decision trail (the agent's
+narration paired with the actual route/diff/plane/fanout commands) via
+`tests/stress/extract_narrative.py`. The headless workers run `claude -p --dangerously-skip-permissions`,
 which the harness blocks by default — authorize it once with a Bash allow-rule
 for `bash tests/stress/run_board.sh:*` / `bash tests/stress/run_queue.sh:*` in
 `.claude/settings.local.json` (gitignored, so a checkout never inherits it), or
@@ -102,6 +105,15 @@ fresh results JSON, keeping ~4 in flight and refilling off `stress_status.sh`:
 
 A subagent must never end its turn while a routing process is still running (the
 run gets orphaned — RUNBOOK rule 12).
+
+When driving by hand (the subagent path doesn't write `transcript.jsonl`), generate
+the narrative afterward from the sub-agent's transcript:
+
+```bash
+python3 tests/stress/extract_narrative.py \
+  ~/.claude/projects/<project-slug>/subagents/agent-<id>.jsonl \
+  -o "$STRESS_DIR/runs[_setN]/<board>/agent_narrative.md" --board "<board> (set N)"
+```
 
 ## Step 3: Aggregate
 

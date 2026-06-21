@@ -276,7 +276,11 @@ auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.5)
 ```
 
 Classification uses the footprint name first, then pad arrangement (grid vs
-perimeter) and pad shapes. The geometry path only declares `BGA` for a genuine
+perimeter) and pad shapes. Land-grid and chip-scale families are classified as
+`BGA` by name so they get fanout + BGA exclusion zones: `LGA` (land grid array,
+e.g. LGA-12), `CSP` / `WLCSP` / `WLP` (wafer-level / chip-scale = micro-BGA),
+and `CGA` (column grid array), alongside `BGA` / `FBGA` / `LFBGA` (issue #144).
+The geometry path only declares `BGA` for a genuine
 ball/pin matrix: >=16 pads, near-uniform pad size, and >=3 rows *and* >=3
 columns each holding several pads. That last test rejects wide-pitch
 through-hole headers (e.g. a 2-row `RPi_Pico_SMD_TH`) and connector arrays,
@@ -338,7 +342,13 @@ compare_pcb_data(from_board: PCBData, from_file: PCBData,
 
 Compares two parses (e.g. live-board vs file) and returns human-readable
 difference strings; empty list means they match. Useful to validate
-`build_pcb_data_from_board` against `parse_kicad_pcb`.
+`build_pcb_data_from_board` against `parse_kicad_pcb` (this is what the GUI's
+**Validate PCB Data** button runs). Coverage spans the fields the router
+actually consumes: board info (layers, bounds, stackup), nets, footprint and
+per-pad geometry (position, size, `rect_rotation`, `roundrect_rratio`,
+`local_clearance`, drill, layers), track and via geometry (matched as a
+multiset, not just counts), zones, board outline/cutouts, keepout zones, and
+guide paths.
 
 ```python
 save_extracted_data(pcb_data: PCBData, output_path: str)

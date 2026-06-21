@@ -75,6 +75,71 @@ def move_copper_text_to_silkscreen(content: str) -> str:
     return ''.join(result_parts)
 
 
+# Graphic primitives that make up copper logos/artwork (no net). Functional copper
+# is zones / segments / vias / pads — never standalone graphics — so moving these
+# off copper is safe and only affects decoration.
+_COPPER_GRAPHIC_TAGS = (
+    'fp_poly', 'gr_poly', 'fp_line', 'gr_line', 'fp_circle', 'gr_circle',
+    'fp_arc', 'gr_arc', 'fp_rect', 'gr_rect', 'fp_curve', 'gr_curve',
+)
+
+
+def move_copper_graphics_to_silkscreen(content: str) -> str:
+    """Move graphic primitives (logos / artwork drawn as polys, lines, arcs, ...)
+    from copper layers to silkscreen, mirroring move_copper_text_to_silkscreen:
+    F.Cu -> F.SilkS, B.Cu -> B.SilkS.
+
+    A net-less copper graphic (e.g. a copper OSHW logo) is not modelled as an
+    obstacle by the router, so plane pours and routed copper run straight over it
+    and short against it (orangecrab: one F.Cu logo shorted ~30 plane traces/vias).
+    Relocating it to silkscreen preserves it visually while taking it out of copper.
+    """
+    count = 0
+    for tag in _COPPER_GRAPHIC_TAGS:
+        token = '(' + tag
+        tlen = len(token)
+        result_parts = []
+        last_end = 0
+        i = 0
+        while True:
+            start = content.find(token, i)
+            if start == -1:
+                break
+            # Require a token boundary so '(gr_line' doesn't match '(gr_linex'.
+            nxt = content[start + tlen: start + tlen + 1]
+            if nxt and (nxt.isalnum() or nxt == '_'):
+                i = start + tlen
+                continue
+            depth = 0
+            end = start
+            for j in range(start, len(content)):
+                if content[j] == '(':
+                    depth += 1
+                elif content[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end = j + 1
+                        break
+            block = content[start:end]
+            layer_match = re.search(r'\(layer\s+"(F\.Cu|B\.Cu)"\)', block)
+            if layer_match:
+                layer = layer_match.group(1)
+                new_layer = 'F.SilkS' if layer == 'F.Cu' else 'B.SilkS'
+                block = block.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
+                count += 1
+            result_parts.append(content[last_end:start])
+            result_parts.append(block)
+            last_end = end
+            i = end
+        result_parts.append(content[last_end:])
+        content = ''.join(result_parts)
+
+    if count > 0:
+        print(f"  Moved {count} copper graphic(s)/logo(s) to silkscreen")
+
+    return content
+
+
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
                            width: float, layer: str, net_id: int,
                            net_name: str = None) -> str:
@@ -262,6 +327,9 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
+    # Move copper logos/artwork to silkscreen too (net-less copper graphics would
+    # otherwise short against routed/poured copper).
+    content = move_copper_graphics_to_silkscreen(content)
 
     # Generate segment S-expressions
     segments = []
@@ -335,6 +403,9 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
+    # Move copper logos/artwork to silkscreen too (net-less copper graphics would
+    # otherwise short against routed/poured copper).
+    content = move_copper_graphics_to_silkscreen(content)
 
     # Remove existing vias if specified
     if remove_vias:

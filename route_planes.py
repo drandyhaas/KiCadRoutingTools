@@ -1456,7 +1456,7 @@ def _write_output_and_reroute(
                         if not res.get('connected', False):
                             still_broken.append(rid)
                     if still_broken:
-                        restored_ids, vias_removed = restore_failed_reroute_nets(
+                        restored_ids, vias_removed, segs_removed = restore_failed_reroute_nets(
                             input_file=input_file,
                             output_file=output_file,
                             broken_net_ids=still_broken,
@@ -1464,14 +1464,15 @@ def _write_output_and_reroute(
                             net_id_to_name=kicad_v10_names,
                             via_size=via_size,
                             clearance=clearance,
+                            plane_segments=all_new_segments,
                         )
                         if restored_ids:
                             names = [pcb_data.nets[r].name if r in pcb_data.nets
                                      else f"net_{r}" for r in restored_ids]
                             print(f"Issue #88: {len(restored_ids)} ripped net(s) failed to "
                                   f"re-route; RESTORED their original trace (removed "
-                                  f"{vias_removed} colliding plane via(s)) rather than leave "
-                                  f"them disconnected:")
+                                  f"{vias_removed} colliding plane via(s), {segs_removed} "
+                                  f"colliding segment(s)) rather than leave them disconnected:")
                             print(f"  {', '.join(names)}")
                         unrestorable = [r for r in still_broken if r not in restored_ids]
                         if unrestorable:
@@ -1721,6 +1722,7 @@ def create_plane(
         via_drill=via_drill,
         grid_step=grid_step,
         hole_to_hole_clearance=hole_to_hole_clearance,
+        board_edge_clearance=board_edge_clearance,
         layers=all_layers,
         layer_costs=layer_costs
     )

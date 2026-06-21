@@ -17,7 +17,9 @@ results JSON, deriving ALL state from disk — so it's safe to Ctrl-C and restar
 (it skips finished boards and won't double-launch running ones). Each worker is
 `tests/stress/run_board.sh <board> <set> [model]`: a non-interactive agent that
 follows THIS runbook, writes the results JSON + `FINDINGS.md` into the run dir,
-and drops a `.worker_done` marker (`ok`/`NORESULT`). This replaces the older
+captures `transcript.jsonl` and derives `agent_narrative.md` (a compact routing
+decision trail, via `extract_narrative.py`), and drops a `.worker_done` marker
+(`ok`/`NORESULT`). This replaces the older
 manual approach (a parent launching one background `Agent` per board and
 refilling on notifications) — the queue manager removes the drop-/stale-prone
 notification stream entirely.
@@ -33,14 +35,16 @@ notification stream entirely.
 
 **Monitoring:** `bash tests/stress/stress_status.sh` — prints DONE/RUNNING/TODO
 across all 30 boards plus free slots. (For detail: `QUEUE_STATUS.txt` is the
-manager heartbeat; `runs[_set2]/<board>/worker.log` is a worker's log — note
-`claude -p` buffers its own stdout to the end, but the per-tool `*.log` files in
-the run dir update live.)
+manager heartbeat; `runs[_set2]/<board>/worker.log` holds the wrapper markers +
+stderr, the per-tool `*.log` files update live, and after the run
+`agent_narrative.md` is the readable routing decision trail derived from
+`transcript.jsonl`.)
 
 **State signals** (what the queue and `stress_status.sh` use):
 - DONE: results JSON exists.
-- RUNNING: a process matches the run-dir path, OR the run dir was touched <15 min
-  ago (covers the gap between a worker's commands). Naive checks mislead — pgrep
+- RUNNING: a process matches the run-dir path, OR the run dir was touched <45 min
+  ago (covers the gap between a worker's commands AND a long single signal-route
+  step on a big board that writes no intermediate files). Naive checks mislead — pgrep
   on tool names is noisy and case-sensitive (KiCad's interpreter is `Python`,
   wrapped by run_limited.sh), and run-dir mtimes go quiet during a long route —
   so don't rely on those alone.
@@ -282,8 +286,10 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
     command exceeds the 10-min foreground cap, keep waiting in foreground:
     repeatedly run `until ! pgrep -f "<unique-cmd-fragment>" >/dev/null; do
     sleep 10; done` (each up to 10 min) until the process exits, then read its
-    log and continue. If a command shows no log growth for >15 min, kill it
-    and record it as a hang.
+    log and continue. Big/dense boards (FPGA/USB3-class: daisho, large BGAs)
+    can legitimately spend 30-60+ min in a single signal-route step — that is
+    slow progress, NOT a hang. Only kill a command once it shows no log growth
+    AND no output-file size change for >45 min, and record it as a hang.
 13. If a tool crashes (traceback), capture the full traceback in the JSON
     issues list. A crash is a valuable finding, not a failure of your task —
     continue with remaining steps if possible.

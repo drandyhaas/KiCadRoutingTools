@@ -532,7 +532,16 @@ impl GridRouter {
                 false
             };
 
-            if can_place_via && !via_too_close && !obstacles.is_via_blocked(current.gx, current.gy) {
+            // A free via is an existing same-net hole (via-in-pad / through-hole pad);
+            // changing layers through it is always legal and adds no new drill, so it
+            // overrides both the via-blocked veto and the path's via-too-close test.
+            // Without this, the same cell can be flagged free_via AND via_blocked at
+            // once (its own clearance ring blocks the center), and the via branch is
+            // skipped before is_free_via is ever read -- forcing a redundant via to be
+            // dropped a couple cells away beside a perfectly good via-in-pad.
+            let free_here = obstacles.is_free_via(current.gx, current.gy);
+            if can_place_via && (!via_too_close || free_here)
+                && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer {
                         continue;
@@ -851,7 +860,16 @@ impl GridRouter {
                 })
             } else { false };
 
-            if can_place_via && !via_too_close && !obstacles.is_via_blocked(current.gx, current.gy) {
+            // A free via is an existing same-net hole (via-in-pad / through-hole pad);
+            // changing layers through it is always legal and adds no new drill, so it
+            // overrides both the via-blocked veto and the path's via-too-close test.
+            // Without this, the same cell can be flagged free_via AND via_blocked at
+            // once (its own clearance ring blocks the center), and the via branch is
+            // skipped before is_free_via is ever read -- forcing a redundant via to be
+            // dropped a couple cells away beside a perfectly good via-in-pad.
+            let free_here = obstacles.is_free_via(current.gx, current.gy);
+            if can_place_via && (!via_too_close || free_here)
+                && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer { continue; }
 

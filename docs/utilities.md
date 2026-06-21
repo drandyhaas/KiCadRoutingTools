@@ -320,7 +320,10 @@ python list_nets.py input.kicad_pcb [OPTIONS]
 Options:
   --component, -c REF   Component reference (e.g., U1)
   --pads                Show pad-to-net assignments
-  --diff-pairs, -d      Detect differential pairs
+  --diff-pairs, -d      Detect differential pairs (a name-based P/N pair is
+                        suppressed when both nets land on a single
+                        crystal/oscillator footprint, since a 2-terminal
+                        resonator is not a differential signal — issue #145)
   --power, -p           Show power/ground nets with pad counts
   --design-rules, -r    Show net-class clearance/track/via/diff-pair rules
                         and the CLI flags to pass them to the routing tools
@@ -475,7 +478,15 @@ Options:
   --primary-escape    Primary escape direction: horizontal or vertical (default: horizontal)
   --check-for-previous  Skip pads that already have fanouts
   --no-inner-top-layer  Prevent inner pads from using F.Cu
+  --grid-step         Routing grid step in mm (default: 0.1). Escape stub ends
+                      are snapped to this grid so the router gets on-grid
+                      terminals; MATCH the --grid-step you pass to route.py
 ```
+
+Escape stub ends are snapped to the `--grid-step` grid, and the decorative
+end-jog is validated against the full obstacle map (foreign pads + tracks +
+vias): a jog that would extend into a foreign obstacle is dropped, leaving an
+on-grid stub end the router can launch from (issue #149).
 
 ### Example
 
@@ -515,7 +526,14 @@ Options:
   --pattern GLOB      Net pattern to fanout
   --stub-length FLOAT Stub length in mm (default: 0.3)
   --layer LAYER       Target layer (default: F.Cu)
+  --grid-step         Routing grid step in mm (default: 0.1). Fanned stub ends
+                      are snapped to this grid so the router gets on-grid
+                      terminals; MATCH the --grid-step you pass to route.py
 ```
+
+Fanned stub ends are snapped to the `--grid-step` grid, and the end-jog is
+validated against the full obstacle map (foreign pads + tracks + vias): if it
+would extend into a foreign obstacle the fan is shortened instead (issue #149).
 
 ### Example
 
@@ -648,6 +666,151 @@ This script runs a sequence of fanout and routing operations on the test board, 
 #### Cross-Platform
 
 This Python script replaces the previous PowerShell script and works on any platform (Linux, macOS, Windows).
+
+## Cycle Checker (`check_cycles.py`)
+
+Robustly detects **redundant copper loops (cycles)** per net. A routed signal net
+should be a **tree**; rip-reroute / failed-edge retry and overlapping fanout +
+routed copper can close loops (the "crazy" wandering traces and via stacks seen
+on dense boards). This reports the **cyclomatic number** (independent loops =
+`E - V + components`) per net, plus same-net **overlapping via pads**.
+
+The connectivity graph is geometry-correct (this is what makes it robust, and
+what a naive shared-endpoint graph misses):
+
+- tolerance endpoint matching (size-aware for vias/pads),
+- **T-junction** detection — an endpoint landing on another segment's *interior*
+  splits that segment, but only when the cluster actually has copper on that
+  layer (no false cross-layer junctions),
+- via / through-hole-pad **layer joins** (a via connects all copper at its spot).
+
+Copper pour / zone nets (planes) are meshes by design and are hidden unless
+`--all`. A non-zero loop count means redundant copper (a detour loop and/or
+fanout/route overlapping on the same line). Overlapping via pads (centre distance
+< sum of radii) are flagged as redundant via stacks.
+
+### Usage
+
+```bash
+python3 check_cycles.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --net NAME       Check one net by exact name (always shown, even if clean)
+  --nets PATTERN   Glob of net names to check (e.g. 'RAM_*')
+  --all            Also list zoned/plane nets (meshes, normally hidden)
+  --verbose        Also list the overlapping via-pad coordinates / per-net detail
+```
+
+Exits non-zero if any signal net has loops or overlapping vias (usable in CI).
+
+### Examples
+
+```bash
+# Whole board: list every signal net with loops or overlapping vias
+python3 check_cycles.py routed.kicad_pcb
+
+# Focus one net (the wandering loop you saw in the layout)
+python3 check_cycles.py routed.kicad_pcb --net RAM_D8
+
+# All RAM data lines, with via-overlap coordinates
+python3 check_cycles.py routed.kicad_pcb --nets 'RAM_D*' --verbose
+```
+
+### Output
+
+```
+net                           segs  vias  loops  comp  ovlVias
+--------------------------------------------------------------
+RAM_LDM                         28     4     13     1        1  <== LOOPS  <== 1 OVERLAPPING VIA PAIR(S)
+...
+signal nets with loops: 116; total independent loops: 615; nets with overlapping vias: 11
+```
+
+`loops` is the cyclomatic number (0 = tree). `comp` is the number of connected
+copper components for the net (should be 1 for a fully-routed net). The
+`prune_redundant_cycles` finalization pass in `route.py` removes the simple
+shared-endpoint loops; loops that remain here are typically **overlapping
+collinear copper** (a fanout stub and the route on top of it) or **via stacks**,
+which that pass does not yet handle.
+
+## DRC Settings Fixer (`fix_kicad_drc_settings.py`)
+
+Rewrites a board's **project file** (`.kicad_pro`) so that a manual DRC in the
+KiCad GUI shows only the routing-relevant errors instead of stock-default noise.
+
+KiCad stores DRC *design rules* and *violation severities* in the `.kicad_pro`,
+not in the `.kicad_pcb`. A freshly written board gets a project with KiCad's
+defaults, which produce two kinds of noise:
+
+1. **`min_hole_clearance` defaults to 0.25 mm** — far stricter than the copper
+   clearance the board was routed to — so every fanout via drill near another
+   net's copper fires a "Hole clearance" violation (often hundreds). These are
+   spurious at the real manufacturing floor; `check_drc.py` never reports them.
+2. **Placement / fabrication categories** (courtyard overlaps, solder-mask
+   bridges) fire as errors even though they are not routing problems.
+3. **Footprint / library categories** (`annular_width`, `lib_footprint_issues`,
+   `lib_footprint_mismatch`) are inherited from the source board's footprints —
+   the router neither creates nor fixes them — yet they often dominate the report
+   (e.g. ~200 annular + ~150 library markers on the orangecrab stress board).
+
+The script sets `min_hole_clearance` to the board's copper-clearance floor and
+sets the courtyard / solder-mask / footprint severities to `ignore`. `clearance`,
+`shorting_items` and `unconnected_items` are left untouched (KiCad shows
+unconnected items in their own tab).
+
+> **Close the board in KiCad before running.** KiCad keeps the project in memory
+> and overwrites an externally-edited `.kicad_pro` on save/close, reverting the
+> fix. Run the script with the board closed, then reopen.
+
+### Usage
+
+```bash
+python3 fix_kicad_drc_settings.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --hole-clearance MM   Hole-clearance floor (default: the project's copper
+                        clearance -- the Default netclass, else rules.min_clearance)
+  --keep-courtyards     Do not ignore the courtyard categories
+  --keep-mask           Do not ignore solder_mask_bridge
+  --keep-footprint      Do not ignore footprint/library categories
+                        (annular_width, lib_footprint_issues, lib_footprint_mismatch)
+  --ignore CAT [CAT...] Additional severity categories to set to "ignore"
+  --ignore-warnings     Set EVERY category currently at "warning" severity to
+                        "ignore" (hides all warning markers; errors untouched)
+  --dry-run             Print what would change without writing
+```
+
+The board must already have a sibling `.kicad_pro` (any board opened or saved in
+KiCad has one). If it is missing, open the board in KiCad once to generate it,
+then re-run. The script is idempotent and accepts either the `.kicad_pcb` or the
+`.kicad_pro` path.
+
+### Examples
+
+```bash
+# Default: hole clearance -> copper floor; ignore courtyard, solder-mask and
+# footprint/library (annular_width, lib_footprint_*) noise
+python3 fix_kicad_drc_settings.py routed.kicad_pcb
+
+# Preview without writing
+python3 fix_kicad_drc_settings.py routed.kicad_pcb --dry-run
+
+# Pin the hole-clearance floor explicitly
+python3 fix_kicad_drc_settings.py routed.kicad_pcb --hole-clearance 0.1
+
+# Also silence every warning-severity marker (track_dangling, silk_*, etc.)
+python3 fix_kicad_drc_settings.py routed.kicad_pcb --ignore-warnings
+
+# Keep courtyard checks, ignore only the mask bridges plus one extra category
+python3 fix_kicad_drc_settings.py routed.kicad_pcb --keep-courtyards --ignore starved_thermal
+```
+
+### Output
+
+Prints each change (`min_hole_clearance: 0.25 -> 0.0889 mm`,
+`severity[courtyards_overlap]: error -> ignore`, …) and a reminder to reopen the
+board. On a typical dense BGA board this turns a ~300-violation DRC into the few
+dozen genuine routing errors (clearance + shorts + real sub-floor hole clearance).
 
 ## Common Workflows
 

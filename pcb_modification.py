@@ -370,16 +370,14 @@ def fix_self_intersections(segments: List[Segment], existing_segments: List[Segm
 def collapse_appendices(segments: List[Segment], existing_segments: List[Segment] = None,
                         max_appendix_length: float = 1.0, vias: List[Via] = None,
                         pads: List = None, debug_lines: bool = False) -> List[Segment]:
-    """Collapse short appendix segments by moving dead-end vertices to junction points.
+    """Clean a freshly-routed net's segments before they are committed.
 
-    An appendix is a short segment where one endpoint is a dead-end (degree 1) and
-    the other endpoint is a junction (degree >= 2). We collapse it by moving the
-    dead-end to nearly coincide with the junction (offset by 0.001mm).
+    Fixes same-net self-intersections (straightens/deletes self-crossings; #147).
 
-    Only collapses segments where the dead-end doesn't connect to existing segments, vias, or pads.
-    Also fixes self-intersections where new segments cross existing segments.
-
-    If debug_lines is True, endpoint degrees are counted across all layers.
+    Historically this ALSO collapsed short dead-end "appendix" spurs onto their
+    junction, but that pass was removed (issue #148): the whole-net post-route
+    dead-end trim sweep_dead_ends (#84) covers the same spurs, so the per-commit
+    collapse was redundant. The name is kept for its call sites.
     """
     if not segments:
         return segments
@@ -387,216 +385,13 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     # First fix self-intersections with existing segments
     segments = fix_self_intersections(segments, existing_segments, max_appendix_length, vias)
 
-    # Build map of existing segment endpoints by layer (store actual coordinates for proximity check)
-    existing_endpoints = {}
-    # Also build map of full existing segments by layer (for point-on-segment check)
-    existing_segs_by_layer = {}
-    if existing_segments:
-        for seg in existing_segments:
-            if seg.layer not in existing_endpoints:
-                existing_endpoints[seg.layer] = []
-                existing_segs_by_layer[seg.layer] = []
-            existing_endpoints[seg.layer].append((seg.start_x, seg.start_y))
-            existing_endpoints[seg.layer].append((seg.end_x, seg.end_y))
-            existing_segs_by_layer[seg.layer].append(seg)
-
-    # Build map of via locations by layer (store actual coordinates and size for proximity check)
-    via_locations = {}
-    if vias:
-        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
-        for via in vias:
-            # Through-hole vias connect all layers
-            if via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers:
-                via_layers = all_copper_layers
-            elif via.layers:
-                via_layers = via.layers
-            else:
-                via_layers = all_copper_layers
-            via_size = getattr(via, 'size', 0.6)  # Default via size if not available
-            for layer in via_layers:
-                if layer not in via_locations:
-                    via_locations[layer] = []
-                via_locations[layer].append((via.x, via.y, via_size))
-
-    # Build map of pad locations by layer (store coordinates and size)
-    pad_locations = {}
-    if pads:
-        all_copper_layers = get_copper_layers_from_segments(segments, existing_segments)
-        for pad in pads:
-            # Get pad position
-            pad_x = getattr(pad, 'global_x', getattr(pad, 'x', 0))
-            pad_y = getattr(pad, 'global_y', getattr(pad, 'y', 0))
-            # Get pad size for proximity check
-            pad_size_x = getattr(pad, 'size_x', 0.5)
-            pad_size_y = getattr(pad, 'size_y', 0.5)
-            pad_size = max(pad_size_x, pad_size_y)
-            # Expand wildcard layers like "*.Cu" to actual routing layers
-            pad_layers = getattr(pad, 'layers', [])
-            if any('*' in layer for layer in pad_layers):
-                pad_layers = all_copper_layers
-            for layer in pad_layers:
-                if layer not in pad_locations:
-                    pad_locations[layer] = []
-                pad_locations[layer].append((pad_x, pad_y, pad_size))
-
-    # Process each layer separately
-    layer_segments = {}
-    for seg in segments:
-        if seg.layer not in layer_segments:
-            layer_segments[seg.layer] = []
-        layer_segments[seg.layer].append(seg)
-
-    result_segments = []
-
-    def point_near_any(px, py, points_list, tolerance):
-        """Check if point is within tolerance of any point in list."""
-        for ex, ey in points_list:
-            if math.sqrt((px - ex)**2 + (py - ey)**2) < tolerance:
-                return True
-        return False
-
-    def point_near_any_via(px, py, vias_list):
-        """Check if point lands on any via's copper (within via radius)."""
-        for vx, vy, via_size in vias_list:
-            # The via's copper extends size/2 from centre; a segment ending
-            # anywhere on it is connected. The old size/4 test misjudged
-            # edge landings as dead ends and collapsed live connections.
-            tolerance = via_size / 2 + 0.05
-            if math.sqrt((px - vx)**2 + (py - vy)**2) < tolerance:
-                return True
-        return False
-
-    def point_near_any_pad(px, py, pads_list):
-        """Check if point lands on any pad's copper (within max half-extent)."""
-        for pad_x, pad_y, pad_size in pads_list:
-            # pad_size is max(size_x, size_y); copper reaches size/2 from
-            # centre along the long axis. The old size/4 test judged a tap
-            # landing near the end of an elongated pad (0.8 mm from a 1.6 mm
-            # pad's centre) as a dead end and collapsed the live connection
-            # to 0.001 mm. Over-keeping is harmless (an orphan stub at
-            # worst); over-collapsing breaks connectivity.
-            tolerance = pad_size / 2 + 0.05
-            if math.sqrt((px - pad_x)**2 + (py - pad_y)**2) < tolerance:
-                return True
-        return False
-
-    def point_on_any_segment(px, py, segs_list, tolerance):
-        """Check if point lies on any segment (not just endpoints).
-
-        Returns True if the point is within tolerance of any segment's line.
-        This catches tap points that are in the middle of existing segments.
-        """
-        for seg in segs_list:
-            # Vector from segment start to end
-            dx = seg.end_x - seg.start_x
-            dy = seg.end_y - seg.start_y
-            seg_len_sq = dx * dx + dy * dy
-            if seg_len_sq < 0.0001:  # Degenerate segment
-                continue
-            # Vector from segment start to point
-            px_rel = px - seg.start_x
-            py_rel = py - seg.start_y
-            # Project point onto segment line (parametric t)
-            t = (px_rel * dx + py_rel * dy) / seg_len_sq
-            # Check if projection is within segment bounds (with small margin)
-            if t < -0.01 or t > 1.01:
-                continue
-            # Calculate closest point on segment
-            closest_x = seg.start_x + t * dx
-            closest_y = seg.start_y + t * dy
-            # Check distance from point to closest point on segment
-            dist = math.sqrt((px - closest_x)**2 + (py - closest_y)**2)
-            if dist < tolerance:
-                return True
-        return False
-
-    # When debug_lines is enabled, build endpoint degree map across ALL layers
-    # because debug_lines puts turn segments on different layers but they still connect
-    global_endpoint_counts = None
-    if debug_lines:
-        global_endpoint_counts = {}
-        for seg in segments:
-            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
-            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-            global_endpoint_counts[start_key] = global_endpoint_counts.get(start_key, 0) + 1
-            global_endpoint_counts[end_key] = global_endpoint_counts.get(end_key, 0) + 1
-
-    for layer, layer_segs in layer_segments.items():
-        layer_existing = existing_endpoints.get(layer, [])
-        layer_existing_segs = existing_segs_by_layer.get(layer, [])
-        layer_vias = via_locations.get(layer, [])
-        layer_pads = pad_locations.get(layer, [])
-
-        # Build per-layer endpoint counts (used when not in debug_lines mode)
-        layer_endpoint_counts = None
-        if not debug_lines:
-            layer_endpoint_counts = {}
-            for seg in layer_segs:
-                start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
-                end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-                layer_endpoint_counts[start_key] = layer_endpoint_counts.get(start_key, 0) + 1
-                layer_endpoint_counts[end_key] = layer_endpoint_counts.get(end_key, 0) + 1
-
-        # Find and collapse appendices
-        for seg in layer_segs:
-            length = math.sqrt((seg.end_x - seg.start_x)**2 + (seg.end_y - seg.start_y)**2)
-
-            if length > max_appendix_length:
-                result_segments.append(seg)
-                continue
-
-            start_key = (round(seg.start_x, 4), round(seg.start_y, 4))
-            end_key = (round(seg.end_x, 4), round(seg.end_y, 4))
-            endpoint_counts = global_endpoint_counts if debug_lines else layer_endpoint_counts
-            start_degree = endpoint_counts.get(start_key, 0)
-            end_degree = endpoint_counts.get(end_key, 0)
-
-            # Check if endpoints connect to existing segments (with proximity tolerance), vias, or pads
-            # Use track width / 4 as proximity tolerance for segments, via/pad size / 4 for vias/pads
-            # Also check if point lies ON an existing segment (for tap points in middle of segments)
-            proximity_tol = seg.width / 4
-            start_connects_existing = (point_near_any(seg.start_x, seg.start_y, layer_existing, proximity_tol) or
-                                       point_on_any_segment(seg.start_x, seg.start_y, layer_existing_segs, proximity_tol) or
-                                       point_near_any_via(seg.start_x, seg.start_y, layer_vias) or
-                                       point_near_any_pad(seg.start_x, seg.start_y, layer_pads))
-            end_connects_existing = (point_near_any(seg.end_x, seg.end_y, layer_existing, proximity_tol) or
-                                     point_on_any_segment(seg.end_x, seg.end_y, layer_existing_segs, proximity_tol) or
-                                     point_near_any_via(seg.end_x, seg.end_y, layer_vias) or
-                                     point_near_any_pad(seg.end_x, seg.end_y, layer_pads))
-
-            # Appendix: one end is dead-end (degree 1, not connected to existing/vias/pads),
-            # other is junction (degree >= 2 OR connected to existing/vias/pads)
-            if (start_degree == 1 and not start_connects_existing and
-                (end_degree >= 2 or end_connects_existing)):
-                # Collapse: move start to nearly coincide with end (junction point)
-                new_seg = Segment(
-                    start_x=seg.end_x + 0.001,
-                    start_y=seg.end_y,
-                    end_x=seg.end_x,
-                    end_y=seg.end_y,
-                    width=seg.width,
-                    layer=seg.layer,
-                    net_id=seg.net_id
-                )
-                result_segments.append(new_seg)
-            elif (end_degree == 1 and not end_connects_existing and
-                  (start_degree >= 2 or start_connects_existing)):
-                # Collapse: move end to nearly coincide with start (junction point)
-                new_seg = Segment(
-                    start_x=seg.start_x,
-                    start_y=seg.start_y,
-                    end_x=seg.start_x + 0.001,
-                    end_y=seg.start_y,
-                    width=seg.width,
-                    layer=seg.layer,
-                    net_id=seg.net_id
-                )
-                result_segments.append(new_seg)
-            else:
-                # Not an appendix or connects to existing - keep as is
-                result_segments.append(seg)
-
-    return result_segments
+    # Appendix-collapse removed (issue #148): sweep_dead_ends (#84) - the whole-net
+    # post-route dead-end trim - covers the same short dead-end spurs this used to
+    # slide onto their junction, so the per-commit collapse was redundant churn
+    # (validated A/B across the set-3 corpus). Only the self-intersection fix
+    # (kept; #147) remains. `pads`/`debug_lines` are accepted for call-site
+    # compatibility and now unused.
+    return segments
 
 
 def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
@@ -650,8 +445,9 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
     net (the other end stays joined to the rest), and it exposes the next
     segment of a spur chain, so this iterates to a fixpoint.
 
-    Unlike ``collapse_appendices`` (single pass, only appendices <= 1 mm anchored
-    to a junction) this removes dead ends of any length and unwinds whole spurs.
+    This is the whole-net post-route dead-end trim (#84): it removes dead ends of
+    any length and unwinds whole spurs (the per-commit ``collapse_appendices``
+    short-spur pass it superseded was removed as redundant in #148).
 
     Args:
         prunable: segments eligible for removal (one net).
@@ -1008,8 +804,9 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                     tol: float = 0.05) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
 
-    ``collapse_appendices`` runs per route-commit and only trims short appendices
-    anchored to a junction, so dead ends survive on nets that otherwise route
+    ``collapse_appendices`` runs per route-commit but now only fixes
+    self-intersections (its short-appendix trim was removed in #148 as redundant
+    with this sweep), so dead ends survive on nets that otherwise route
     100% and pass DRC + connectivity: a tap tail superseded by a rip-and-reroute,
     a spur left when a blocker was ripped, and -- the dominant source -- fanout /
     escape stubs from earlier pipeline stages that a net routed away from or never
@@ -1093,6 +890,314 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
 
     segs_removed = len(removed_routed_ids) + len(original_to_remove)
     return segs_removed, len(removed_via_ids), original_to_remove
+
+
+def _pt_seg_dist(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Shortest distance from point (px,py) to segment (x1,y1)-(x2,y2)."""
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0.0 and dy == 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
+    """Neck any routed segment wider than its layer default that VIOLATES clearance
+    with a foreign-net pad on its layer.
+
+    A wide power trunk that ROUTES SUCCESSFULLY at full width (necked_down=False,
+    so the routing-time neck-down never runs) keeps its full width into a fanout
+    via-in-pad terminal; the router exempts the terminal region, so the wide copper
+    overlaps the neighbouring foreign pad on a fine-pitch part (VSYS->U7.D1 shorting
+    GND pad U7.C1). Necking the offending segment to the layer default restores
+    clearance without moving the centreline, so connectivity is preserved.
+
+    Only segments that (a) violate at full width AND (b) clear at the default width
+    are necked -- a legitimately-clear wide trunk is left alone, and a violation
+    necking can't fix is left for the DRC report. Returns the count necked.
+    """
+    from net_queries import expand_pad_layers
+    from collections import defaultdict
+    pads_by_layer = defaultdict(list)
+    for fp in pcb_data.footprints.values():
+        for pad in fp.pads:
+            for layer in expand_pad_layers(pad.layers, config.layers):
+                pads_by_layer[layer].append(pad)
+    clr = config.clearance
+    necked = 0
+    for r in results:
+        for seg in r.get('new_segments', []):
+            default_w = config.get_track_width(seg.layer)
+            if seg.width <= default_w + 1e-9:
+                continue
+            for pad in pads_by_layer.get(seg.layer, []):
+                if pad.net_id == seg.net_id or pad.net_id == 0:
+                    continue
+                d = _pt_seg_dist(pad.global_x, pad.global_y,
+                                 seg.start_x, seg.start_y, seg.end_x, seg.end_y)
+                # Bounding-circle pad half (conservative: never misses a violation).
+                pad_half = max(pad.size_x, pad.size_y) / 2.0
+                if (d - pad_half - seg.width / 2.0 < clr
+                        and d - pad_half - default_w / 2.0 >= clr):
+                    seg.width = default_w
+                    necked += 1
+                    break
+    return necked
+
+
+def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
+                      foreign, clearance: float):
+    """Reduce one net's routed copper to a spanning tree (forest if split).
+
+    Builds a spanning tree by union-find over the segments, so every segment that
+    would close a cycle (endpoints already connected) is REDUNDANT and removed,
+    while every structural (bridge) segment is kept -- connectivity is preserved
+    exactly. Nodes are keyed by (x, y, layer); vias and through-hole pads join the
+    layer-nodes at their location (a via/TH pad connects all copper there), so
+    cross-layer connectivity is modelled and inter-layer loops are found.
+
+    Segments are processed non-grazing-and-short first, so a segment that grazes
+    foreign copper (within ``clearance``) is the one left as the redundant cycle
+    edge and dropped (removing a graze that sits on a loop, e.g. the RAM_A9 short,
+    for free). Returns (kept, removed)."""
+    if len(net_segs) < 3:
+        return net_segs, []
+    tol = 0.02  # endpoint coincidence tolerance (mm), matching check_connected
+
+    def grazes(s):
+        hw = s.width / 2.0
+        for cx, cy, rad, n, layers in foreign:
+            if n == net_id:
+                continue
+            if layers is not None and s.layer not in layers:
+                continue
+            if _pt_seg_dist(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y) < rad + hw + clearance:
+                return True
+        return False
+
+    # --- Phase 1: cluster segment endpoints into NODES (real connectivity) ---
+    # Each segment contributes two "ports" (its endpoints). Ports coincide (same
+    # node) when they match on the same layer, OR are bridged across layers by a
+    # via / through-hole pad (joined by its copper size, like KiCad). This mirrors
+    # check_net_connectivity so the via-pad-to-trace touch that exact-match misses
+    # is captured -- without it the net looks split and loops are missed.
+    ports = []  # (x, y, layer, seg_index, end 0/1)
+    for i, s in enumerate(net_segs):
+        ports.append((s.start_x, s.start_y, s.layer, i, 0))
+        ports.append((s.end_x, s.end_y, s.layer, i, 1))
+
+    pp = list(range(len(ports)))
+
+    def pfind(x):
+        while pp[x] != x:
+            pp[x] = pp[pp[x]]
+            x = pp[x]
+        return x
+
+    def punion(a, b):
+        ra, rb = pfind(a), pfind(b)
+        if ra != rb:
+            pp[ra] = rb
+
+    n = len(ports)
+    for a in range(n):
+        xa, ya, la = ports[a][0], ports[a][1], ports[a][2]
+        for b in range(a + 1, n):
+            if ports[b][2] == la and abs(ports[b][0] - xa) < tol and abs(ports[b][1] - ya) < tol:
+                punion(a, b)
+
+    # Vias and through-hole pads bridge layers: union all ports within the
+    # connector's copper reach (size/4, >= tol), regardless of layer.
+    def join_near(cx, cy, reach):
+        near = [i for i in range(n) if math.hypot(ports[i][0] - cx, ports[i][1] - cy) < reach]
+        for j in near[1:]:
+            punion(near[0], j)
+
+    for v in (net_vias or []):
+        join_near(v.x, v.y, max(getattr(v, 'size', 0.6) / 4.0, tol))
+    for pad in (net_pads or []):
+        if getattr(pad, 'drill', 0) and pad.drill > 0:
+            reach = max(max(pad.size_x, pad.size_y) / 4.0, tol)
+            join_near(getattr(pad, 'global_x', 0.0), getattr(pad, 'global_y', 0.0), reach)
+
+    # --- Phase 2: T-junction-aware spanning tree; redundant segments removed ---
+    # A segment "touches" its two endpoint clusters AND any cluster that lies on
+    # its INTERIOR (a T-junction). A segment running collinear on top of another
+    # lands on the other's interior, so overlapping copper is caught the same way.
+    # Keeping a segment connects every node it touches; a segment all of whose
+    # touched nodes are already connected adds no connectivity -- it is a loop /
+    # overlap and is removed. Processed non-grazing-and-short first so a grazing or
+    # overlapping segment is the redundant one dropped.
+    from collections import defaultdict
+    from check_connected import point_on_segment, points_match
+
+    reps = {}
+    rep_layers = defaultdict(set)
+    for i in range(n):
+        r = pfind(i)
+        reps.setdefault(r, (ports[i][0], ports[i][1]))
+        rep_layers[r].add(ports[i][2])
+    rep_items = list(reps.items())
+
+    touched = []
+    for i, s in enumerate(net_segs):
+        ra, rb = pfind(2 * i), pfind(2 * i + 1)
+        nodes = {ra, rb}
+        if ra != rb:
+            for r, (cx, cy) in rep_items:
+                if r == ra or r == rb or s.layer not in rep_layers[r]:
+                    continue
+                if point_on_segment(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y, tol) \
+                   and not points_match(cx, cy, s.start_x, s.start_y, tol) \
+                   and not points_match(cx, cy, s.end_x, s.end_y, tol):
+                    nodes.add(r)
+        touched.append(nodes)
+
+    cpar = {r: r for r in reps}
+
+    def cfind(x):
+        while cpar[x] != x:
+            cpar[x] = cpar[cpar[x]]
+            x = cpar[x]
+        return x
+
+    order = sorted(range(len(net_segs)),
+                   key=lambda i: (grazes(net_segs[i]),
+                                  math.hypot(net_segs[i].end_x - net_segs[i].start_x,
+                                             net_segs[i].end_y - net_segs[i].start_y)))
+    kept, removed = [], []
+    for i in order:
+        roots = {cfind(r) for r in touched[i]}
+        if len(roots) <= 1:
+            removed.append(net_segs[i])  # adds no new connectivity -> redundant loop/overlap
+        else:
+            base = next(iter(touched[i]))
+            for r in touched[i]:
+                ra, rb = cfind(base), cfind(r)
+                if ra != rb:
+                    cpar[ra] = rb
+            kept.append(net_segs[i])
+
+    if not removed:
+        return kept, []
+    # Validate each PROPOSED removal against the authoritative connectivity oracle.
+    # The clustering above can over-merge (its tolerances differ from
+    # check_connected's), so a proposed-redundant segment may actually be
+    # load-bearing; checking each removal guarantees we never split the net. Drop
+    # grazing, then longer, candidates first.
+    from check_connected import check_net_connectivity
+    base = check_net_connectivity(net_id, net_segs, net_vias, net_pads)
+    if base.get('connected') is False:
+        return net_segs, []
+    base_comps = base.get('num_components') or 1
+    base_disc = len(base.get('disconnected_pads') or [])
+    cur = list(net_segs)
+    safe_removed = []
+    for s in sorted(removed, key=lambda s: (not grazes(s),
+                    -math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))):
+        trial = [x for x in cur if x is not s]
+        t = check_net_connectivity(net_id, trial, net_vias, net_pads)
+        if t.get('connected') and (t.get('num_components') or 1) <= base_comps \
+           and len(t.get('disconnected_pads') or []) <= base_disc:
+            cur = trial
+            safe_removed.append(s)
+    return cur, safe_removed
+
+
+def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
+                           clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+    """Enforce the per-net TREE invariant: remove redundant cycle edges (the cycle
+    analog of sweep_dead_ends).
+
+    A multipoint net is routed as an MST (a tree on pads), but the incremental
+    repair layer -- rip+restore and failed-edge retry -- re-adds obstacle-exempt
+    same-net copper to reconnect pads WITHOUT enforcing acyclicity, so cycles
+    accumulate (e.g. RAM_A9: 3 loops / 27 segments for a 3-pad net, with the short
+    sitting on a loop edge). This breaks every cycle by dropping a redundant
+    (non-bridge) segment, keeping all pads/vias connected, preferring to drop one
+    that grazes foreign copper. Nets with a copper pour/zone are skipped (planes
+    are meshes, not trees). Mirrors sweep_dead_ends' write-list sync; also drops
+    removed routed copper from pcb_data so the later passes see the tree.
+
+    Returns (segments_removed, nets_pruned, original_segments_to_remove)."""
+    from collections import defaultdict
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    # Foreign copper (other nets' pads + vias), built once for the grazing test.
+    copper = set(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    foreign = []
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            rad = max(p.size_x, p.size_y) / 2.0
+            if rad <= 0:
+                continue
+            if p.drill and p.drill > 0:
+                layers = None
+            else:
+                pl = set(p.layers or [])
+                on = frozenset(l for l in pl if l in copper)
+                layers = None if any(l == '*.Cu' for l in pl) else (on or None)
+            foreign.append((p.global_x, p.global_y, rad, p.net_id, layers))
+    for v in pcb_data.vias:
+        foreign.append((v.x, v.y, v.size / 2.0, v.net_id, None))
+
+    zoned_nets = {z.net_id for z in (getattr(pcb_data, 'zones', []) or [])}
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            segs_by_net[s.net_id].append(s)
+
+    removed_routed_ids = set()
+    original_to_remove = []
+    nets_pruned = 0
+    from check_connected import check_net_connectivity
+
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    for net_id, net_segs in segs_by_net.items():
+        if net_id in zoned_nets:  # planes / pours are meshes, not trees
+            continue
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_vias = vias_by_net.get(net_id, [])
+        kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
+                                          net_pads, foreign, clearance)
+        if not removed:
+            continue
+        # Safety: the cycle model uses tolerance clustering which can imperfectly
+        # merge nodes -- so VERIFY with the authoritative connectivity check that
+        # the prune did not split the net or strand a pad; if it did, revert this
+        # net (drop nothing). The pass can then only ever remove truly-redundant
+        # copper.
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads)
+        after = check_net_connectivity(net_id, kept, net_vias, net_pads)
+        if (before.get('connected') and not after.get('connected')) or \
+           len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or \
+           (after.get('num_components') or 1) > (before.get('num_components') or 1):
+            continue  # revert: keep all of this net's copper
+        nets_pruned += 1
+        for s in removed:
+            if id(s) in routed_seg_ids:
+                removed_routed_ids.add(id(s))
+            else:
+                original_to_remove.append(s)
+
+    if removed_routed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_routed_ids]
+    if removed_routed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_routed_ids and id(s) not in orig_ids]
+
+    return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
 
 
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
@@ -1191,8 +1296,9 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     # so the dead copper is not left on the board to block following routes. Only
     # the segments being added are prunable; the net's copper already on the board
     # anchors junctions/escapes but is not removed here (the final sweep handles
-    # board-wide settle). collapse_appendices above only trims short junction
-    # appendices; this unwinds longer spurs and chains via prune_dead_end_segments.
+    # board-wide settle). collapse_appendices above now only fixes
+    # self-intersections (#148); this unwinds dead-end spurs and chains via
+    # prune_dead_end_segments.
     all_zones = getattr(pcb_data, 'zones', []) or []
     pruned_segments = []
     for net_id in net_ids:

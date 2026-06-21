@@ -6,6 +6,9 @@
 # concise FINDINGS.md into the board's run dir. Decouples board execution from
 # the harness notification stream — the queue manager just watches files.
 #
+# Also captures the agent transcript (transcript.jsonl) and derives a compact
+# routing decision trail (agent_narrative.md) via extract_narrative.py.
+#
 # Usage: run_board.sh <board> <set:1|2|3...> [model]
 set -u
 BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-sonnet}"
@@ -60,13 +63,21 @@ When fully done:
   echo "[run_board] result=$RESULT"
 } > "$RUNDIR/worker.log"
 
+# Capture the agent transcript as JSONL (stream-json) so we can derive a routing
+# narrative; worker.log keeps the wrapper markers + stderr.
 ( cd "$RUNDIR" && claude -p "$PROMPT" \
     --model "$MODEL" \
     --dangerously-skip-permissions \
-    --add-dir "$ROOT" --add-dir "$REPO" ) >> "$RUNDIR/worker.log" 2>&1
+    --output-format stream-json --verbose \
+    --add-dir "$ROOT" --add-dir "$REPO" ) > "$RUNDIR/transcript.jsonl" 2>> "$RUNDIR/worker.log"
 rc=$?
 
 echo "[run_board] board=$BOARD exit=$rc end=$(date)" >> "$RUNDIR/worker.log"
+
+# Routing decision trail from the transcript (non-fatal — never fails the run).
+python3 "$REPO/tests/stress/extract_narrative.py" "$RUNDIR/transcript.jsonl" \
+    -o "$RUNDIR/agent_narrative.md" --board "$BOARD (set $SET)" >> "$RUNDIR/worker.log" 2>&1 || true
+
 if [ -f "$RESULT" ]; then echo "ok rc=$rc"       > "$RUNDIR/.worker_done";
 else                       echo "NORESULT rc=$rc" > "$RUNDIR/.worker_done"; fi
 exit $rc

@@ -324,11 +324,21 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     if dpm_match and (not dpm_match.group(1) or not dpm_match.group(1)[-1].isalpha()):
         return (dpm_match.group(1) + 'D', dpm_match.group(2).upper() == 'PLUS', 'DP')
 
-    # USB data lines: DP / DM (case-insensitive, e.g. USB_DP / USB_DM, D+ aliases).
-    # Same letter-boundary guard so words like 'LCDP' don't match.
-    dpm_match = re.match(r'^(.*?)D([PM])$', net_name, re.IGNORECASE)
+    # USB data lines: DP / DM / DN (case-insensitive, e.g. USB_DP / USB_DM,
+    # USB_DP / USB_DN, D+ aliases). P is positive; M and N are negative (issue
+    # #143: tigard names its USB pair /USB_DP + /USB_DN). Same letter-boundary
+    # guard so words like 'LCDP' or 'SDN' don't match.
+    dpm_match = re.match(r'^(.*?)D([PMN])$', net_name, re.IGNORECASE)
     if dpm_match and (not dpm_match.group(1) or not dpm_match.group(1)[-1].isalpha()):
         return (dpm_match.group(1) + 'D', dpm_match.group(2).upper() == 'P', 'DP')
+
+    # Indexed P/N pair: name_P0/name_N0, name_P1/name_N1 (issue #143: daisho's
+    # FE_CLK pairs CLK_P0/CLK_N0). Keep the trailing index in the base so each
+    # index pairs only with its own twin, never across indices.
+    idx_match = re.match(r'^(.+)_([PN])(\d+)$', net_name)
+    if idx_match:
+        base = idx_match.group(1) + '_X' + idx_match.group(3)
+        return (base, idx_match.group(2) == 'P', '_P')
 
     # Try _P/_N suffix (most common for LVDS)
     if net_name.endswith('_P'):
@@ -336,13 +346,15 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     if net_name.endswith('_N'):
         return (net_name[:-2], False, '_P')
 
-    # Try P/N suffix without underscore
+    # Try P/N suffix without underscore. Accept a digit, underscore, OR uppercase
+    # letter before the final P/N so SerDes/PCIe names pair (issue #151: TXP/TXN,
+    # SSRXP/SSRXN, REFCLKP/REFCLKN). A lowercase letter (e.g. WAKEn) is rejected,
+    # and pairing still needs both siblings to exist, so stray names don't pair.
     if net_name.endswith('P') and len(net_name) > 1:
-        # Check it's not just ending in P as part of name
-        if net_name[-2] in '0123456789_':
+        if net_name[-2] in '0123456789_' or net_name[-2].isupper():
             return (net_name[:-1], True, 'P')
     if net_name.endswith('N') and len(net_name) > 1:
-        if net_name[-2] in '0123456789_':
+        if net_name[-2] in '0123456789_' or net_name[-2].isupper():
             return (net_name[:-1], False, 'P')
 
     # Try +/- suffix

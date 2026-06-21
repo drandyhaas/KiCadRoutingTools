@@ -188,16 +188,16 @@ def route_single_ended_nets(
         if bus_groups:
             print(f"\n=== Bus Detection: Found {len(bus_groups)} bus group(s) ===")
             for bus in bus_groups:
-                direction = "targets→sources" if bus.clique_endpoint == "target" else "sources→targets"
+                direction = "targets->sources" if bus.clique_endpoint == "target" else "sources->targets"
                 print(f"  {bus.name}: {len(bus.net_ids)} nets ({direction})", end =" ")
                 net_names_list = [pcb_data.nets[nid].name for nid in bus.net_ids]
-                print(f"physical order: {' → '.join(net_names_list)}")
+                print(f"physical order: {' -> '.join(net_names_list)}")
 
                 if config.verbose:
                 # Show routing order with guide track and attraction info
                     route_order = get_bus_routing_order(bus)
                     route_names = [pcb_data.nets[nid].name for nid in route_order]
-                    print(f"    Routing order:  {' → '.join(route_names)}")
+                    print(f"    Routing order:  {' -> '.join(route_names)}")
                     print(f"    Guide track:    {route_names[0]} (routed first, no attraction)")
 
                     # Show attraction relationships

@@ -7,12 +7,13 @@ dramatically speeding up routing by avoiding redundant obstacle calculations.
 
 from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field
+import math
 import numpy as np
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map, iter_pad_blocked_cells, \
-    pad_blocked_cells_array, square_offsets, circle_offsets
+    pad_blocked_cells_array, segment_blocked_cells_array, square_offsets, circle_offsets
 from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 
@@ -106,19 +107,20 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
-    expansion_grid_by_layer = {}
+    expansion_mm_by_layer = {}
     via_block_grid_by_layer = {}
-    via_track_expansion_grid_list = []
+    layer_widths = []  # per-layer future-routing-track width (impedance / power)
     for layer_name in config.layers:
         # Use per-net width for power nets, otherwise layer width (impedance) or default
         layer_width = config.get_net_track_width(net_id, layer_name)
+        layer_widths.append(layer_width)
         expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
-        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        # Float keep-out half-width for the capsule segment stamp (no floor): the
+        # true perpendicular clearance, so off-grid / diagonal tracks are covered.
+        expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
+        # Segment via-block: future ROUTE via (config.via_size) near this net's copper.
         via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
-        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
-        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
-    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
 
     # Process segments
     for seg in pcb_data.segments:
@@ -127,17 +129,28 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
         via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
-        _collect_segment_obstacles(seg, coord, layer_idx, expansion_grid, via_block_grid,
+        _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm, via_block_grid,
                                     blocked_cells_set, blocked_vias_set)
 
-    # Process vias
+    # Process vias. Keep-out from the via's ACTUAL size, not config.via_size: a
+    # fanout via-in-pad is larger (e.g. 0.45 vs 0.3), and using config under-
+    # expanded it by ~half the size difference. At grid 0.1 that was masked by the
+    # off-grid offset (off_cells) of those vias; at grid 0.05 the same vias land
+    # on-grid (off_cells=0), exposing 74 track-via grazes. Matches the non-cache
+    # add_net_vias_as_obstacles, which already uses via.size.
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        _collect_via_obstacles(via, coord, num_layers, via_track_expansion_grid_list,
-                                via_via_expansion_grid, diagonal_margin,
+        vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
+        via_track_list = [max(1, coord.to_grid_dist_safe(
+            vs / 2 + lw / 2 + config.clearance + extra_clearance)) for lw in layer_widths]
+        # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
+        # Float radius (no floor) so the disc threshold blocks the true clearance.
+        via_via_radius = max(1.0, (vs / 2 + config.via_size / 2 + config.clearance) * coord.inv_step)
+        _collect_via_obstacles(via, coord, num_layers, via_track_list,
+                                via_via_radius, diagonal_margin,
                                 blocked_cells_set, blocked_vias_set)
 
     # Process pads
@@ -165,27 +178,31 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
 
 def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
-                                expansion_grid: int, via_block_grid: int,
+                                track_margin_mm: float, via_block_grid: int,
                                 blocked_cells: List["np.ndarray"],
                                 blocked_vias: List["np.ndarray"]):
-    """Collect segment obstacle cells into sets (no obstacle map modification)."""
+    """Collect segment obstacle cells into sets (no obstacle map modification).
+
+    The track keep-out is a capsule measured from the REAL float segment (handles
+    off-grid endpoints + diagonals); the via keep-out still uses the Bresenham line
+    (vias land on grid cells, and the diagonal margin already compensates there).
+    """
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
     is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
     effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
 
-    # Batched rasterization (issue #35): collect cell arrays; the caller
-    # deduplicates with np.unique, matching the old per-cell set semantics.
-    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
-
-    track_offs = square_offsets(expansion_grid)
-    cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
+    # Track blocking: capsule around the true segment (issue #70/B).
+    cells = segment_blocked_cells_array(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                                        track_margin_mm, coord.grid_step)
     rows = np.empty((len(cells), 3), dtype=np.int32)
     rows[:, :2] = cells
     rows[:, 2] = layer_idx
     blocked_cells.append(rows)
 
+    # Via blocking still rasterized along the Bresenham line (issue #35).
+    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
     via_offs = circle_offsets(via_block_range, effective_via_block_sq)
     blocked_vias.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
 
@@ -203,6 +220,15 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
     gx, gy = coord.to_grid(via.x, via.y)
     center = np.array([gx, gy], dtype=np.int32)
 
+    # Sub-grid offset of the real via centre from its quantized cell. An off-grid
+    # via (e.g. a BGA fanout via-in-pad) has its blocked disc centred on the
+    # ROUNDED cell, so foreign copper that clears the rounded centre still grazes
+    # the TRUE centre by up to the offset (issue #70). Grow each blocking radius by
+    # this offset so the disc covers the real via. On-grid (router-placed) vias
+    # have offset ~0 and are unchanged. Mirror of obstacle_map._add_via_obstacle.
+    off_cells = math.hypot(via.x - gx * coord.grid_step,
+                           via.y - gy * coord.grid_step) / coord.grid_step
+
     def add_layer_cells(offs, layer_idx):
         cells = center + offs
         rows = np.empty((len(cells), 3), dtype=np.int32)
@@ -214,18 +240,16 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
     if isinstance(via_track_expansion_grid, list):
         for layer_idx in range(num_layers):
             layer_expansion = via_track_expansion_grid[layer_idx]
-            effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
-            track_block_range = layer_expansion + 1
-            add_layer_cells(circle_offsets(track_block_range, effective_track_block_sq), layer_idx)
+            radius = layer_expansion + diagonal_margin + off_cells
+            add_layer_cells(circle_offsets(int(math.ceil(radius)), radius ** 2), layer_idx)
     else:
-        effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
-        track_block_range = via_track_expansion_grid + 1
-        offs = circle_offsets(track_block_range, effective_track_block_sq)
+        radius = via_track_expansion_grid + diagonal_margin + off_cells
+        offs = circle_offsets(int(math.ceil(radius)), radius ** 2)
         for layer_idx in range(num_layers):
             add_layer_cells(offs, layer_idx)
 
-    via_offs = circle_offsets(via_via_expansion_grid,
-                              via_via_expansion_grid * via_via_expansion_grid)
+    via_radius = via_via_expansion_grid + off_cells
+    via_offs = circle_offsets(int(math.ceil(via_radius)), via_radius * via_radius)
     blocked_vias.append(center + via_offs)
 
 

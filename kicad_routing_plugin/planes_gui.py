@@ -1182,7 +1182,8 @@ class PlanesTab(wx.Panel):
 
     def _apply_results_to_board(self):
         """Apply planes results (zones + stitch vias + tracks) via the IPC adapter."""
-        from kicad_ipc_adapter import apply_planes_results, get_board
+        from kicad_ipc_adapter import (apply_planes_results, get_board,
+                                        move_copper_graphics_to_silkscreen)
 
         new_vias = list(getattr(self, "_new_vias", []) or [])
         new_segments = list(getattr(self, "_new_segments", []) or [])
@@ -1201,6 +1202,15 @@ class PlanesTab(wx.Panel):
             wx.MessageBox("Board is no longer open", "Error",
                           wx.OK | wx.ICON_ERROR)
             return
+
+        # Relocate net-less copper logos/graphics to silkscreen (issue #146),
+        # matching the CLI plane writer: a copper logo is not a router obstacle,
+        # so the pour/repair copper added here would short against it. Done via
+        # the IPC adapter (kipy), not the SWIG pcbnew path. The ripped-net old
+        # copper is removed inside apply_planes_results below (ripped_net_ids=).
+        gfx_moved = move_copper_graphics_to_silkscreen(board)
+        if gfx_moved:
+            print(f"Moved {gfx_moved} copper graphic(s)/logo(s) to silkscreen")
 
         try:
             counts = apply_planes_results(

@@ -339,6 +339,45 @@ def pad_blocked_cells_array(
     return cells
 
 
+def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
+                                margin: float, grid_step: float) -> "np.ndarray":
+    """(N, 2) int32 cells whose centre is within ``margin`` mm of the TRUE float
+    segment (x1,y1)-(x2,y2) -- a capsule (fat line with rounded ends).
+
+    Replaces the walk_line(rounded endpoints) + square_offsets box stamp, which
+    rounded the endpoints to the grid and used a Chebyshev box: an off-grid track
+    (terminal connection to an off-grid pad, ~31% of segments) had its keep-out
+    shifted up to a half cell off its real centreline, and a diagonal track's box
+    staircase under-covered the perpendicular direction between steps. A foreign
+    track cleared the rounded stamp but grazed the real track (issue #70/B). Here
+    distances are measured from the real segment, so off-grid + diagonal are exact.
+    """
+    inv = 1.0 / grid_step
+    glo_x = int(math.floor((min(x1, x2) - margin) * inv))
+    ghi_x = int(math.ceil((max(x1, x2) + margin) * inv))
+    glo_y = int(math.floor((min(y1, y2) - margin) * inv))
+    ghi_y = int(math.ceil((max(y1, y2) + margin) * inv))
+    xs = np.arange(glo_x, ghi_x + 1, dtype=np.int32)
+    ys = np.arange(glo_y, ghi_y + 1, dtype=np.int32)
+    gxg, gyg = np.meshgrid(xs, ys, indexing="ij")
+    cx = gxg.astype(np.float64) * grid_step
+    cy = gyg.astype(np.float64) * grid_step
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 <= 0.0:
+        t = np.zeros_like(cx)
+    else:
+        t = ((cx - x1) * dx + (cy - y1) * dy) / l2
+        np.clip(t, 0.0, 1.0, out=t)
+    ddx = cx - (x1 + t * dx)
+    ddy = cy - (y1 + t * dy)
+    mask = (ddx * ddx + ddy * ddy) < margin * margin
+    out = np.empty((int(mask.sum()), 2), dtype=np.int32)
+    out[:, 0] = gxg[mask]
+    out[:, 1] = gyg[mask]
+    return out
+
+
 # Offset-pattern caches for batched rasterization. The patterns are tiny
 # (a few hundred cells) and reused for every segment/via on the board.
 _SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}

@@ -56,6 +56,10 @@ class Pad:
     # orthogonal pads (deg, in (-90,90]). 0 for axis-aligned pads (the common
     # case) where the rotation is already baked into size_x/size_y. The
     # obstacle/DRC geometry rotates the pad rectangle by this angle.
+    local_clearance: float = 0.0  # Per-pad clearance override (mm) from the
+    # pad's own (clearance ...) token. 0 means "no override, use the global
+    # clearance". Larger-than-global values (e.g. fiducial keep-clear rings)
+    # must widen the obstacle halo or copper routes within the pad's clearance.
 
 
 @dataclass
@@ -229,6 +233,35 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
 # Tolerance (deg) within which a pad rotation is treated as axis-aligned and
 # baked into size_x/size_y rather than carried as a residual rect_rotation.
 _PAD_ORTHO_TOL = 1.0
+
+
+def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
+    """Half-extent (|x|, |y|) of a custom pad's real copper in the pad's local
+    frame, from its (primitives ...) block. A custom pad's (size ...) is only the
+    anchor; gr_poly/gr_circle/gr_line primitives can reach well beyond it (e.g. a
+    resistor pad whose copper extends +0.56mm past the anchor). Modelling only the
+    anchor under-blocks the obstacle map, so tracks graze the real copper (#70
+    dig). Returns (0, 0) if there are no primitives. Coordinates are pad-local
+    (un-rotated); _resolve_pad_rect then orients the enclosing rect like any pad.
+    """
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return 0.0, 0.0
+    prim = pad_text[pm.start():]
+    xs, ys = [], []
+    for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
+        xs.append(float(m.group(1))); ys.append(float(m.group(2)))
+    # gr_circle: (center x y) (end x y) -> radius reaches center +/- r on both axes
+    for m in re.finditer(r'\(gr_circle\s+\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
+        cx, cy, ex, ey = map(float, m.groups())
+        r = math.hypot(ex - cx, ey - cy)
+        xs += [cx - r, cx + r]; ys += [cy - r, cy + r]
+    if not xs:
+        return 0.0, 0.0
+    # primitive stroke width thickens the copper; add half of the largest.
+    widths = [float(w) for w in re.findall(r'\(width\s+(-?[\d.]+)\)', prim)]
+    hw = (max(widths) / 2.0) if widths else 0.0
+    return max(abs(min(xs)), abs(max(xs))) + hw, max(abs(min(ys)), abs(max(ys))) + hw
 
 
 def _resolve_pad_rect(size_x: float, size_y: float,
@@ -1012,6 +1045,18 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             else:
                 size_x = size_y = 0.5  # default
 
+            # Custom pads: enclose the real primitive copper, not just the anchor
+            # (size ...). Use a centred rect around the connection point that
+            # covers the full local extent -- conservative (may over-block the
+            # empty side of an asymmetric pad) but DRC-safe; modelling only the
+            # anchor lets tracks graze copper that reaches past it.
+            if pad_shape == 'custom':
+                ext_x, ext_y = _custom_pad_local_extent(pad_text)
+                if ext_x > 0:
+                    size_x = max(size_x, 2.0 * ext_x)
+                if ext_y > 0:
+                    size_y = max(size_y, 2.0 * ext_y)
+
             # Resolve the pad rectangle into board space. size_x/size_y are in
             # the pad's own frame; its absolute board orientation is the pad
             # ``(at ...)`` angle, which already includes the footprint rotation
@@ -1065,6 +1110,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             rratio_match = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', pad_text)
             roundrect_rratio = float(rratio_match.group(1)) if rratio_match else 0.0
 
+            # Extract per-pad local clearance override, e.g. fiducial keep-clear
+            # rings carry (clearance 0.375). The leading "(" avoids matching the
+            # footprint's (pad_to_mask_clearance ...) token. 0 = no override.
+            clr_match = re.search(r'\(clearance\s+([\d.]+)\)', pad_text)
+            local_clearance = float(clr_match.group(1)) if clr_match else 0.0
+
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
 
@@ -1086,7 +1137,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 pintype=pintype,
                 drill=drill_size,
                 roundrect_rratio=roundrect_rratio,
-                rect_rotation=rect_rotation
+                rect_rotation=rect_rotation,
+                local_clearance=local_clearance
             )
 
             footprint.pads.append(pad)
@@ -1164,8 +1216,11 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     """Extract all track segments from PCB file."""
     segments = []
 
-    # Try KiCad 9 format first: (net <id>)
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # Try KiCad 9 format first: (net <id>). (locked yes) is optional and KiCad
+    # emits it between width/layer or layer/net, so allow it at both spots -
+    # otherwise a locked track parses to nothing, never becomes an obstacle, and
+    # the router lays copper straight through it (issue #150).
+    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(segment_pattern, content, re.DOTALL):
         segment = Segment(
@@ -1189,7 +1244,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
         # pattern and merge — mixed-style files are legal and each segment
         # matches exactly one pattern (issue #79).
-        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             segment = Segment(
@@ -2218,15 +2273,17 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
         pintype = getattr(pad, "pin_type", "") or ""
 
         # kipy Padstack: drill = DrillProperties { diameter: Vector2 }.
-        # `diameter.x` (== .y for round drills) is the bit diameter.
+        # Oval/slot drills have distinct x/y; take max(x, y) to match the text
+        # parser (issue #106) - using only .x under-reports a rotated slot's
+        # hole and risks hole-to-hole DRC.
         drill = 0.0
         drill_obj = getattr(padstack, "drill", None) or getattr(padstack, "drill_diameter", None)
         if drill_obj is not None:
             diameter = getattr(drill_obj, "diameter", None) or drill_obj
             if hasattr(diameter, "x_mm"):
-                drill = float(diameter.x_mm)
+                drill = max(float(diameter.x_mm), float(getattr(diameter, "y_mm", diameter.x_mm)))
             elif hasattr(diameter, "x"):
-                drill = _nm_to_mm(diameter.x)
+                drill = _nm_to_mm(max(diameter.x, getattr(diameter, "y", diameter.x)))
             else:
                 try:
                     drill = _nm_to_mm(diameter)
@@ -2677,9 +2734,9 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     if len(bi_b.stackup) != len(bi_f.stackup):
         diffs.append(f"Stackup layer count: board={len(bi_b.stackup)} file={len(bi_f.stackup)}")
 
-    # --- Compare nets ---
-    board_net_ids = set(from_board.nets.keys())
-    file_net_ids = set(from_file.nets.keys())
+    # --- Compare nets (net 0 = unconnected pseudo-net; one path may list it) ---
+    board_net_ids = set(from_board.nets.keys()) - {0}
+    file_net_ids = set(from_file.nets.keys()) - {0}
     if board_net_ids != file_net_ids:
         only_board = board_net_ids - file_net_ids
         only_file = file_net_ids - board_net_ids
@@ -2718,36 +2775,96 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
         if len(bf.pads) != len(ff.pads):
             diffs.append(f"Footprint {ref} pad count: board={len(bf.pads)} file={len(ff.pads)}")
         else:
-            # Compare individual pads (sorted by pad number for consistency)
-            b_pads = sorted(bf.pads, key=lambda p: p.pad_number)
-            f_pads = sorted(ff.pads, key=lambda p: p.pad_number)
+            # Pair pads by POSITION, not pad_number: pad numbers are not unique
+            # (empty "" thermal/mechanical pads, repeated connector pads), so
+            # sorting+zipping on pad_number misaligns a roundrect pad against a
+            # circle pad and cascades into spurious diffs. Position is unique per
+            # pad and identical (to ~1um) between the board and file parses.
+            def _pad_key(p):
+                # Include layers: a footprint can stack pads at one position+number
+                # (separate copper / paste / mask apertures), so position+number
+                # alone is not unique and would pair non-deterministically.
+                return (round(p.global_x, 3), round(p.global_y, 3), p.pad_number,
+                        tuple(sorted(p.layers)))
+            b_pads = sorted(bf.pads, key=_pad_key)
+            f_pads = sorted(ff.pads, key=_pad_key)
             for bp, fp in zip(b_pads, f_pads):
-                if bp.pad_number != fp.pad_number:
-                    diffs.append(f"Footprint {ref} pad number mismatch: board={bp.pad_number} file={fp.pad_number}")
-                    continue
                 if not close(bp.global_x, fp.global_x) or not close(bp.global_y, fp.global_y):
-                    diffs.append(f"Pad {ref}:{bp.pad_number} position: board=({bp.global_x:.3f},{bp.global_y:.3f}) file=({fp.global_x:.3f},{fp.global_y:.3f})")
+                    diffs.append(f"Footprint {ref} pad pairing mismatch (position): "
+                                 f"board {bp.pad_number}@({bp.global_x:.3f},{bp.global_y:.3f}) "
+                                 f"vs file {fp.pad_number}@({fp.global_x:.3f},{fp.global_y:.3f})")
+                    continue
+                if bp.pad_number != fp.pad_number:
+                    diffs.append(f"Pad @({bp.global_x:.3f},{bp.global_y:.3f}) number: board={bp.pad_number} file={fp.pad_number}")
                 if bp.net_id != fp.net_id:
                     diffs.append(f"Pad {ref}:{bp.pad_number} net_id: board={bp.net_id} file={fp.net_id}")
                 if bp.shape != fp.shape:
                     diffs.append(f"Pad {ref}:{bp.pad_number} shape: board={bp.shape} file={fp.shape}")
                 if not close(bp.size_x, fp.size_x) or not close(bp.size_y, fp.size_y):
                     diffs.append(f"Pad {ref}:{bp.pad_number} size: board=({bp.size_x:.3f},{bp.size_y:.3f}) file=({fp.size_x:.3f},{fp.size_y:.3f})")
+                # Residual rect tilt - the obstacle/DRC geometry rotates the pad
+                # rectangle by this, so a board/file mismatch (e.g. a custom or
+                # diagonal pad modelled differently by the two paths) changes the
+                # modelled copper footprint.
+                br = getattr(bp, 'rect_rotation', 0.0); fr = getattr(fp, 'rect_rotation', 0.0)
+                if not close(br, fr):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} rect_rotation: board={br:.2f} file={fr:.2f}")
+                # Per-pad local clearance override (fiducial keep-clear rings etc.).
+                # A pcbnew accessor that silently returns 0 would drop a keep-out the
+                # file parse honors - this surfaces that divergence.
+                bc = getattr(bp, 'local_clearance', 0.0); fc = getattr(fp, 'local_clearance', 0.0)
+                if not close(bc, fc):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} local_clearance: board={bc:.3f} file={fc:.3f}")
+                # Roundrect corner ratio - only consumed (and only meaningful) for
+                # roundrect pads; pcbnew returns a default ratio on every pad shape,
+                # so comparing it on circle/rect pads is pure noise.
+                if bp.shape == 'roundrect' and fp.shape == 'roundrect':
+                    brr = getattr(bp, 'roundrect_rratio', 0.0); frr = getattr(fp, 'roundrect_rratio', 0.0)
+                    if not close(brr, frr):
+                        diffs.append(f"Pad {ref}:{bp.pad_number} roundrect_rratio: board={brr:.3f} file={frr:.3f}")
                 if not close(bp.drill, fp.drill):
                     diffs.append(f"Pad {ref}:{bp.pad_number} drill: board={bp.drill:.3f} file={fp.drill:.3f}")
                 # Compare layers (as sets since order may differ)
                 if set(bp.layers) != set(fp.layers):
                     diffs.append(f"Pad {ref}:{bp.pad_number} layers: board={bp.layers} file={fp.layers}")
 
-    # --- Compare segments ---
-    if len(from_board.segments) != len(from_file.segments):
-        diffs.append(f"Segment count: board={len(from_board.segments)} file={len(from_file.segments)}")
+    # --- Compare segments (geometry, not just count) ---
+    # Existing tracks are routing obstacles, so a position/width/layer/net
+    # divergence changes what the router sees. Match as a multiset of canonical
+    # signatures (endpoint order normalised, coords quantised to ~1um) since the
+    # board and file orderings differ.
+    def _q(v):
+        return round(v, 3)
 
-    # --- Compare vias ---
-    if len(from_board.vias) != len(from_file.vias):
-        diffs.append(f"Via count: board={len(from_board.vias)} file={len(from_file.vias)}")
+    def _seg_sig(s):
+        ends = tuple(sorted([(_q(s.start_x), _q(s.start_y)), (_q(s.end_x), _q(s.end_y))]))
+        return (ends, _q(s.width), s.layer, s.net_id)
 
-    # --- Compare zones ---
+    def _multiset_diff(board_items, file_items, sig, label, fmt):
+        from collections import Counter
+        cb = Counter(sig(x) for x in board_items)
+        cf = Counter(sig(x) for x in file_items)
+        only_board = list((cb - cf).elements())
+        only_file = list((cf - cb).elements())
+        if only_board or only_file:
+            diffs.append(f"{label} count: board={len(board_items)} file={len(file_items)}; "
+                         f"{len(only_board)} only in board, {len(only_file)} only in file")
+            for s in only_board[:5]:
+                diffs.append(f"  {label} only in board: {fmt(s)}")
+            for s in only_file[:5]:
+                diffs.append(f"  {label} only in file: {fmt(s)}")
+
+    _multiset_diff(from_board.segments, from_file.segments, _seg_sig, "Segment",
+                   lambda s: f"ends={s[0]} w={s[1]} layer={s[2]} net={s[3]}")
+
+    # --- Compare vias (geometry, not just count) ---
+    def _via_sig(v):
+        return (_q(v.x), _q(v.y), _q(v.size), _q(v.drill), v.net_id, tuple(sorted(v.layers)))
+
+    _multiset_diff(from_board.vias, from_file.vias, _via_sig, "Via",
+                   lambda v: f"({v[0]},{v[1]}) size={v[2]} drill={v[3]} net={v[4]} layers={list(v[5])}")
+
+    # --- Compare zones (net/layer/vertex count) ---
     if len(from_board.zones) != len(from_file.zones):
         diffs.append(f"Zone count: board={len(from_board.zones)} file={len(from_file.zones)}")
     else:
@@ -2761,6 +2878,28 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 diffs.append(f"Zone layer mismatch: board={bz.layer} file={fz.layer}")
             if len(bz.polygon) != len(fz.polygon):
                 diffs.append(f"Zone net={bz.net_id} layer={bz.layer} vertex count: board={len(bz.polygon)} file={len(fz.polygon)}")
+
+    # --- Compare board outline / cutouts (used for edge & cutout obstacles) ---
+    bo_b = bi_b.board_outline or []
+    bo_f = bi_f.board_outline or []
+    if len(bo_b) != len(bo_f):
+        diffs.append(f"Board outline vertex count: board={len(bo_b)} file={len(bo_f)}")
+    cut_b = bi_b.board_cutouts or []
+    cut_f = bi_f.board_cutouts or []
+    if len(cut_b) != len(cut_f):
+        diffs.append(f"Board cutout count: board={len(cut_b)} file={len(cut_f)}")
+
+    # --- Compare keepout zones (routing obstacles) ---
+    kz_b = from_board.keepout_zones or []
+    kz_f = from_file.keepout_zones or []
+    if len(kz_b) != len(kz_f):
+        diffs.append(f"Keepout zone count: board={len(kz_b)} file={len(kz_f)}")
+
+    # --- Compare guide paths (used by guided routing) ---
+    gp_b = from_board.guide_paths or []
+    gp_f = from_file.guide_paths or []
+    if len(gp_b) != len(gp_f):
+        diffs.append(f"Guide path count: board={len(gp_b)} file={len(gp_f)}")
 
     return diffs
 
@@ -2897,8 +3036,12 @@ def detect_package_type(footprint: Footprint) -> str:
     """
     fp_name = footprint.footprint_name.upper()
 
-    # Check footprint name first
-    if 'BGA' in fp_name or 'FBGA' in fp_name or 'LFBGA' in fp_name:
+    # Check footprint name first. Grid/land-grid/chip-scale arrays all get BGA
+    # treatment (bga_fanout escape + BGA exclusion zone): LGA (land grid), CSP/
+    # WLCSP/WLP (wafer-level chip-scale = micro-BGA), CGA (column grid). Without
+    # this an LGA-12 etc. is too small for the geometric grid gate below and falls
+    # through to OTHER, so its interior lands get routed over (issue #144).
+    if any(k in fp_name for k in ('BGA', 'FBGA', 'LFBGA', 'LGA', 'CSP', 'WLCSP', 'WLP', 'CGA')):
         return 'BGA'
     if 'QFN' in fp_name or 'DFN' in fp_name or 'MLF' in fp_name:
         return 'QFN'

@@ -108,8 +108,17 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
         # For via-to-via: via size + routing via size + clearance
         via_via_mm = via_size / 2 + config.via_size / 2 + effective_clearance
-        via_via_expansion_grid = max(1, coord.to_grid_dist(via_via_mm))
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid)
+        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
+        # threshold is radius**2, so this blocks exactly the cells within the real
+        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
+        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
+        # required) -- a real cross-net via-via DRC violation the router never saw.
+        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
+        # diagonal_margin=0.25 to MATCH the per-net cache (_collect_via_obstacles):
+        # the base map holds the excluded nets' (GND/P3.3V) fanout vias, and without
+        # the diagonal margin a 45deg track grazes them a sub-cell under clearance.
+        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid,
+                          via_via_expansion_grid, diagonal_margin=0.25)
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
@@ -956,7 +965,12 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
         via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
         via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
-        via_via_expansion_grid = max(1, coord.to_grid_dist(via_via_mm))
+        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
+        # threshold is radius**2, so this blocks exactly the cells within the real
+        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
+        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
+        # required) -- a real cross-net via-via DRC violation the router never saw.
+        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
 
 
@@ -985,7 +999,12 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
         via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
         via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
         via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
-        via_via_expansion_grid = max(1, coord.to_grid_dist(via_via_mm))
+        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
+        # threshold is radius**2, so this blocks exactly the cells within the real
+        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
+        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
+        # required) -- a real cross-net via-via DRC violation the router never saw.
+        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
 
 
@@ -1112,11 +1131,23 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
         via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
         via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
-        via_via_expansion_grid = max(1, coord.to_grid_dist(via_via_mm))
+        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
+        # threshold is radius**2, so this blocks exactly the cells within the real
+        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
+        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
+        # required) -- a real cross-net via-via DRC violation the router never saw.
+        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
+
+        # Mirror _add_via_obstacle EXACTLY (incl. the sub-grid offset and float
+        # radius) so rip-up removes precisely the cells the add placed -- otherwise
+        # blocked cells leak across rip/reroute cycles and corrupt the map.
+        off_cells = math.hypot(via.x - gx * coord.grid_step,
+                               via.y - gy * coord.grid_step) / coord.grid_step
 
         # Track blocking - same for all layers
-        effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
-        track_block_range = via_track_expansion_grid + 1
+        radius = via_track_expansion_grid + diagonal_margin + off_cells
+        effective_track_block_sq = radius ** 2
+        track_block_range = int(math.ceil(radius))
         for layer_idx in range(num_layers):
             for ex in range(-track_block_range, track_block_range + 1):
                 for ey in range(-track_block_range, track_block_range + 1):
@@ -1124,9 +1155,12 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
                         cells_to_remove.append((gx + ex, gy + ey, layer_idx))
 
         # Via blocking cells
-        for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-            for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-                if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
+        via_radius = via_via_expansion_grid + off_cells
+        vr_range = int(math.ceil(via_radius))
+        vr_sq = via_radius * via_radius
+        for ex in range(-vr_range, vr_range + 1):
+            for ey in range(-vr_range, vr_range + 1):
+                if ex*ex + ey*ey <= vr_sq:
                     vias_to_remove.append((gx + ex, gy + ey))
 
     # Batch remove cells and vias
@@ -1149,16 +1183,25 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     # Via-via clearance: center-to-center distance must be >= via_size + clearance
     # So we block via placement within this radius of existing vias
-    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+    via_via_expansion_grid = max(1.0, (config.via_size + config.clearance) * coord.inv_step)
 
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
+        # Grow the ring by the via's sub-grid offset so an off-grid via-in-pad keeps
+        # a NEW same-net via the full hole-to-hole distance from its TRUE centre, not
+        # its rounded cell (issue #70 -- otherwise a route via lands a sub-cell too
+        # close to a BGA fanout via-in-pad). Mirror of the via-obstacle rasterizers.
+        off_cells = math.hypot(via.x - gx * coord.grid_step,
+                               via.y - gy * coord.grid_step) / coord.grid_step
+        radius = via_via_expansion_grid + off_cells
+        rng = int(math.ceil(radius))
+        radius_sq = radius * radius
         # Only block via placement, not track routing (tracks can pass through same-net vias)
-        for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-            for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-                if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
+        for ex in range(-rng, rng + 1):
+            for ey in range(-rng, rng + 1):
+                if ex*ex + ey*ey <= radius_sq:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
 
 
@@ -1208,18 +1251,24 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
 
 def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
                                         config: GridRouteConfig) -> Set[Tuple[int, int]]:
-    """Get grid positions of through-hole pads on this net.
+    """Get grid positions where this net already has a hole spanning all layers.
 
-    These positions can be used for layer transitions without placing a new via,
-    since the existing through-hole already connects all layers.
+    A layer change at one of these cells needs NO new via: an existing through-hole
+    pad OR an existing same-net via (fanout via-in-pad, a prior route's via, a board
+    via) already connects the layers. The router reuses the hole (see the free-via
+    override in the Rust router), and route conversion must SUPPRESS emitting its own
+    via there -- otherwise it stacks a second, near-coincident via beside the existing
+    one (an un-manufacturable hole-to-hole short). Each cell is to_grid(x, y), matching
+    the free-via registration, so the suppressed cell is exactly where the router
+    transitions.
 
     Args:
-        pcb_data: PCB data with pads_by_net
-        net_id: Net ID to get through-hole positions for
+        pcb_data: PCB data with pads_by_net and vias
+        net_id: Net ID to get hole positions for
         config: Grid routing config (for grid_step)
 
     Returns:
-        Set of (gx, gy) grid coordinates where through-hole pads exist
+        Set of (gx, gy) grid coordinates where a same-net through-hole exists
     """
     coord = GridCoord(config.grid_step)
     positions = set()
@@ -1229,6 +1278,13 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
         if pad.drill and pad.drill > 0:
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
             positions.add((gx, gy))
+
+    # Existing same-net vias are reusable holes too (see free-via reuse). Without
+    # this, only the multipoint tap path augmented the set, so the Phase-1 main edge
+    # and single-ended routes dropped a duplicate via onto an existing via-in-pad.
+    for via in pcb_data.vias:
+        if via.net_id == net_id:
+            positions.add(coord.to_grid(via.x, via.y))
 
     return positions
 
@@ -1311,28 +1367,40 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
     gx, gy = coord.to_grid(via.x, via.y)
     center = np.array([gx, gy], dtype=np.int32)
 
+    # Sub-grid offset: an off-grid via (e.g. a BGA fanout via-in-pad whose ball
+    # centre is not on the routing grid) has its blocked region centred on the
+    # ROUNDED cell, so foreign copper that clears the rounded centre still grazes
+    # the TRUE centre by up to the offset. Grow every blocking radius by this
+    # offset (in cells) so the blocked disc covers the real via position. On-grid
+    # vias (router-placed, at to_float of a cell) have offset ~0 and are unchanged,
+    # so routability is barely perturbed -- only off-grid pre-existing vias expand.
+    off_cells = math.hypot(via.x - gx * coord.grid_step,
+                           via.y - gy * coord.grid_step) / coord.grid_step
+
     # Batched rasterization (issue #35) - emits the same cell multiset as the
     # per-cell loops it replaces (each layer gets the full circle pattern).
     if isinstance(via_track_expansion_grid, list):
         # Per-layer blocking (impedance-controlled routing)
         for layer_idx in range(num_layers):
             layer_expansion = via_track_expansion_grid[layer_idx]
-            effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
-            track_block_range = layer_expansion + 1
+            radius = layer_expansion + diagonal_margin + off_cells
+            effective_track_block_sq = radius ** 2
+            track_block_range = int(math.ceil(radius))
             offs = circle_offsets(track_block_range, effective_track_block_sq)
             _batch_cells_one_layer(obstacles, center + offs, layer_idx, blocked_cells)
     else:
         # Single value for all layers (legacy behavior)
-        effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
-        track_block_range = via_track_expansion_grid + 1
+        radius = via_track_expansion_grid + diagonal_margin + off_cells
+        effective_track_block_sq = radius ** 2
+        track_block_range = int(math.ceil(radius))
         offs = circle_offsets(track_block_range, effective_track_block_sq)
         cells = center + offs
         for layer_idx in range(num_layers):
             _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
-    # Block cells for via placement
-    via_offs = circle_offsets(via_via_expansion_grid,
-                               via_via_expansion_grid * via_via_expansion_grid)
+    # Block cells for via placement (also grown by the sub-grid offset).
+    via_radius = via_via_expansion_grid + off_cells
+    via_offs = circle_offsets(int(math.ceil(via_radius)), via_radius * via_radius)
     _batch_vias(obstacles, center + via_offs, blocked_vias)
 
 
@@ -1368,6 +1436,13 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     clearance = clearance_override if clearance_override is not None else config.clearance
+    # A pad's own local clearance (e.g. fiducial keep-clear rings) is a hard
+    # keep-out floor -- honor it even when an inter-net effective-clearance
+    # override was supplied (the main signal-routing loop always passes one),
+    # so signal routes also stay outside it, not just plane copper.
+    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+    if lc > clearance:
+        clearance = lc
     margin = config.track_width / 2 + clearance + extra_clearance
     # Compute corner radius based on pad shape:
     # - circle/oval: use min dimension to model as stadium/capsule shape
@@ -1443,7 +1518,7 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
         via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance
         via_track_expansion_grid_by_layer.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
 
-    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+    via_via_expansion_grid = max(1.0, (config.via_size + config.clearance) * coord.inv_step)
 
     for i in range(len(path) - 1):
         gx1, gy1, layer1 = path[i]
@@ -1459,9 +1534,13 @@ def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, 
                     for ey in range(-track_block_range, track_block_range + 1):
                         if ex*ex + ey*ey <= effective_track_block_sq:
                             obstacles.add_blocked_cell(gx1 + ex, gy1 + ey, layer_idx)
-            for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-                for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-                    if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
+            # via_via_expansion_grid is a float radius (path vias are on-grid, so no
+            # sub-grid offset); ceil the loop bound, threshold on the true radius**2.
+            vv_range = int(math.ceil(via_via_expansion_grid))
+            vv_sq = via_via_expansion_grid * via_via_expansion_grid
+            for ex in range(-vv_range, vv_range + 1):
+                for ey in range(-vv_range, vv_range + 1):
+                    if ex*ex + ey*ey <= vv_sq:
                         obstacles.add_blocked_via(gx1 + ex, gy1 + ey)
         else:
             # Segment on same layer - add track obstacle using Bresenham
@@ -1608,9 +1687,14 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         via_track_mm = via_size / 2 + max_track_width / 2 + effective_clearance + extra_clearance
         via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
         via_via_mm = via_size / 2 + config.via_size / 2 + effective_clearance
-        via_via_expansion_grid = max(1, coord.to_grid_dist(via_via_mm))
+        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
+        # threshold is radius**2, so this blocks exactly the cells within the real
+        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
+        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
+        # required) -- a real cross-net via-via DRC violation the router never saw.
+        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
-                          blocked_cells=blocked_cells, blocked_vias=blocked_vias)
+                          diagonal_margin=0.25, blocked_cells=blocked_cells, blocked_vias=blocked_vias)
 
     # Add pads as obstacles (excluding nets we'll route)
     # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
@@ -1691,7 +1775,12 @@ def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
         via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
         via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
         via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
-        via_via_expansion_grid = max(1, coord.to_grid_dist(via_via_mm))
+        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
+        # threshold is radius**2, so this blocks exactly the cells within the real
+        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
+        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
+        # required) -- a real cross-net via-via DRC violation the router never saw.
+        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
                           diagonal_margin, blocked_cells, blocked_vias)
 

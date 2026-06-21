@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData, parse_kicad_pcb
-from kicad_writer import generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen, add_teardrops_to_pads
+from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
+                          move_copper_graphics_to_silkscreen, add_teardrops_to_pads)
 
 
 @dataclass
@@ -280,6 +281,7 @@ def write_plane_output(
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
+    content = move_copper_graphics_to_silkscreen(content)
 
     # Add teardrops to all pads if requested
     if add_teardrops:
@@ -408,6 +410,59 @@ def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]]
     return '\n'.join(result_lines), removed
 
 
+def _remove_segments_at(content: str, segs: List[Dict], tol: float = 2e-3) -> Tuple[str, int]:
+    """Remove `(segment ...)` elements whose start/end (either orientation) and
+    layer match any of `segs`. Used to drop plane connection/region traces that
+    would short against restored signal copper (#140), mirroring
+    `_remove_vias_at_positions` for the segment case.
+    """
+    if not segs:
+        return content, 0
+    targets = [((s['start'][0], s['start'][1]), (s['end'][0], s['end'][1]), s['layer']) for s in segs]
+
+    def _match(ax, ay, bx, by, layer) -> bool:
+        for (tx0, ty0), (tx1, ty1), tlayer in targets:
+            if tlayer != layer:
+                continue
+            fwd = abs(ax - tx0) < tol and abs(ay - ty0) < tol and abs(bx - tx1) < tol and abs(by - ty1) < tol
+            rev = abs(ax - tx1) < tol and abs(ay - ty1) < tol and abs(bx - tx0) < tol and abs(by - ty0) < tol
+            if fwd or rev:
+                return True
+        return False
+
+    lines = content.split('\n')
+    result_lines: List[str] = []
+    removed = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped == '(segment' or stripped.startswith('(segment '):
+            element_lines = [line]
+            open_parens = line.count('(') - line.count(')')
+            while open_parens > 0 and i + 1 < len(lines):
+                i += 1
+                element_lines.append(lines[i])
+                open_parens += lines[i].count('(') - lines[i].count(')')
+            element_text = '\n'.join(element_lines)
+            ms = re.search(r'\(start\s+(-?[\d.]+)\s+(-?[\d.]+)', element_text)
+            me = re.search(r'\(end\s+(-?[\d.]+)\s+(-?[\d.]+)', element_text)
+            ml = re.search(r'\(layer\s+"?([^")\s]+)', element_text)
+            drop = False
+            if ms and me and ml:
+                drop = _match(float(ms.group(1)), float(ms.group(2)),
+                              float(me.group(1)), float(me.group(2)), ml.group(1))
+            if drop:
+                removed += 1
+                i += 1
+                continue
+            result_lines.extend(element_lines)
+        else:
+            result_lines.append(line)
+        i += 1
+    return '\n'.join(result_lines), removed
+
+
 def restore_failed_reroute_nets(
     input_file: str,
     output_file: str,
@@ -416,7 +471,8 @@ def restore_failed_reroute_nets(
     net_id_to_name: Optional[Dict[int, str]],
     via_size: float,
     clearance: float,
-) -> Tuple[List[int], int]:
+    plane_segments: Optional[List[Dict]] = None,
+) -> Tuple[List[int], int, int]:
     """Issue #88: restore the ORIGINAL trace of ripped nets that failed to
     re-route, so they are never left disconnected (strictly worse than the
     input board).
@@ -474,10 +530,39 @@ def restore_failed_reroute_nets(
         if collides:
             remove_positions.append((pvx, pvy))
 
+    # A plane *segment* laid in the ripped net's vacated corridor likewise shorts
+    # the restored copper (it stays even after a colliding via is removed — the
+    # dominant DRC source on dense boards, #140). Drop plane segments that come
+    # within (own_half + restored_half + clearance) of the restored copper.
+    from rip_up_reroute import _seg_seg_dist_sq
+    remove_segs: List[Dict] = []
+    for ps in (plane_segments or []):
+        (psx0, psy0), (psx1, psy1) = ps['start'], ps['end']
+        ph = ps['width'] / 2.0
+        collides = False
+        for rs in restored_segs:
+            if rs['layer'] != ps['layer']:
+                continue
+            thresh = ph + rs['width'] / 2.0 + clearance
+            if _seg_seg_dist_sq(psx0, psy0, psx1, psy1,
+                                rs['start'][0], rs['start'][1],
+                                rs['end'][0], rs['end'][1]) < thresh * thresh:
+                collides = True
+                break
+        if not collides:
+            for rv in restored_vias:  # restored via spans all layers
+                thresh = ph + rv['size'] / 2.0 + clearance
+                if _pt_seg_dist_sq(rv['x'], rv['y'], psx0, psy0, psx1, psy1) < thresh * thresh:
+                    collides = True
+                    break
+        if collides:
+            remove_segs.append(ps)
+
     with open(output_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
     content, vias_removed = _remove_vias_at_positions(content, remove_positions)
+    content, segs_removed = _remove_segments_at(content, remove_segs)
 
     elements: List[str] = []
     for v in restored_vias:
@@ -498,4 +583,4 @@ def restore_failed_reroute_nets(
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    return restored_net_ids, vias_removed
+    return restored_net_ids, vias_removed, segs_removed

@@ -1331,6 +1331,9 @@ class RoutingDialog(wx.Dialog):
                 'via_drill': self.via_drill.GetValue(),
                 'layers': self._get_selected_layers(),
                 'diff_pair_gap': self.differential_tab.diff_pair_gap.GetValue(),
+                # Escape stub ends are snapped to this grid so the router gets
+                # on-grid terminals (issue #149); use the Basic tab's grid step.
+                'grid_step': self.grid_step.GetValue(),
             }
 
         return FanoutTab(
@@ -2702,7 +2705,7 @@ class RoutingDialog(wx.Dialog):
                 # Route each net class group with its own parameters
                 total_successful = 0
                 total_failed = 0
-                all_results = {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+                all_results = {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
 
                 class_names = list(config['nets_by_class'].keys())
                 total_classes = len(class_names)
@@ -2818,6 +2821,10 @@ class RoutingDialog(wx.Dialog):
                         all_results['all_swap_vias'].extend(results_data.get('all_swap_vias', []))
                         all_results['exclusion_zone_lines'].extend(results_data.get('exclusion_zone_lines', []))
                         all_results['boundary_debug_labels'].extend(results_data.get('boundary_debug_labels', []))
+                        # Original-board loop/dead-end segments flagged for removal
+                        # by cycle-prune (#4c1ac33) / dead-end sweep - must carry to
+                        # the apply step or they're never stripped in the per-class path.
+                        all_results['segments_to_remove'].extend(results_data.get('segments_to_remove', []))
 
                 successful = total_successful
                 failed = total_failed
@@ -2878,6 +2885,7 @@ class RoutingDialog(wx.Dialog):
             apply_routing_results,
             get_board,
             move_copper_text_to_silkscreen,
+            move_copper_graphics_to_silkscreen,
         )
 
         board = get_board()
@@ -2886,13 +2894,25 @@ class RoutingDialog(wx.Dialog):
             return
 
         # Move copper text to silkscreen if enabled (separate commit so it
-        # appears as its own undo step).
+        # appears as its own undo step). Pad/stub net swaps (target swaps) and
+        # stub layer mods are applied inside apply_routing_results below via the
+        # IPC adapter - no separate SWIG apply_swaps_to_board needed.
         text_moved = 0
         if config.get('move_copper_text', True):
             try:
                 text_moved = move_copper_text_to_silkscreen(board)
             except Exception as e:
                 print(f"Warning: failed to move copper text: {e}")
+            # The CLI writer pairs text + graphic relocations, so move copper
+            # logos/graphics too (issue #146) - else a net-less copper logo
+            # shorts the routed copper in GUI output but not the CLI's. Via the
+            # IPC adapter (kipy), not the SWIG pcbnew path.
+            try:
+                gfx_moved = move_copper_graphics_to_silkscreen(board)
+                if gfx_moved:
+                    print(f"Moved {gfx_moved} copper graphic(s)/logo(s) to silkscreen")
+            except Exception as e:
+                print(f"Warning: failed to move copper graphics: {e}")
 
         # Push tracks + vias (+ optional debug lines) as a single commit. The
         # adapter also strips the original-board dead-end copper the post-route

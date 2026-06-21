@@ -49,7 +49,8 @@ skips finished boards and won't double-launch running ones). Each worker
 (analysis -> fanout -> diff pairs -> signal routing -> power planes -> plane
 repair -> DRC/connectivity/orphan verification -> compare-to-original), writing
 `$STRESS_DIR/results[_set2]/<board>.json` (schema in the runbook) plus a
-`FINDINGS.md`. The full mechanism, fresh-machine prereqs (including the one-time
+`FINDINGS.md`, and an `agent_narrative.md` routing decision trail derived from the
+captured `transcript.jsonl` by `extract_narrative.py`. The full mechanism, fresh-machine prereqs (including the one-time
 permission authorization the headless workers need), and a manual fallback are
 in `RUNBOOK.md` → "Orchestration".
 

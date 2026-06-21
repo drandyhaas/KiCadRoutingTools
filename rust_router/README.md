@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.15.0**
+**Current Version: 0.15.1**
 
 ## Features
 
@@ -306,6 +306,7 @@ src/
 
 ## Version History
 
+- **0.15.1**: A free via (an existing same-net via-in-pad or through-hole pad, registered in `free_via_positions`) now overrides both the `is_via_blocked` veto and the path's via-too-close test when deciding whether to change layers. Previously the via branch was gated on `!is_via_blocked` *before* `is_free_via` was consulted, so a cell flagged as a free via could still be blocked by its own clearance ring (its center is added to `blocked_vias` by `add_net_vias_as_obstacles`). The router then refused to reuse the existing hole and dropped a redundant via a couple cells away beside a perfectly good via-in-pad (e.g. orangecrab RAM_A15/RAM_CS#/RAM_WE#). Reusing an existing same-net hole is always legal and adds no new drill, so the override is safe.
 - **0.15.0**: Changed bus routing attraction from proximity-based to direction-based. The router now only gives attraction bonus when moving in the same direction as the neighbor path was moving, not just for being near it. This prevents spiraling behavior where strong attraction could cause the router to circle around the neighbor path instead of making progress toward the target. Same direction = full bonus, 45° off = 70% bonus, perpendicular or opposite = no bonus. Bonus has quadratic distance falloff (stronger near the guide path). Python-side changes: bus detection now tracks `clique_endpoint` (source vs target clustering), routes from clustered endpoints using single-direction mode, and uses dense path sampling for direction vectors.
 - **0.14.0**: Added path attraction feature for bus routing. New `attraction_path`, `attraction_radius`, and `attraction_bonus` parameters to GridRouter. Routes can be attracted to a previously routed path (same layer only) using `set_attraction_path()`. Enables parallel routing of bus groups where each net follows its neighbor.
 - **0.13.0**: Added layer direction preference feature. New `layer_direction_preferences` parameter (list of u8: 0=horizontal, 1=vertical, 255=none) and `direction_preference_cost` parameter (penalty for non-preferred direction moves). Encourages horizontal routing on some layers and vertical on others, creating more organized, human-like routing patterns.

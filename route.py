@@ -30,7 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, neck_wide_segments_grazing_pads
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -824,15 +824,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Final dead-end sweep (issue #84): trim copper that dead-ends -- tap tails
     # superseded by rip-and-reroute, spurs left when a blocker was ripped, and
     # fanout/escape stubs a net routed away from or never completed -- which
-    # collapse_appendices' per-commit pass does not reach. Runs after the phantom
+    # the per-commit clean (collapse_appendices, now just a self-intersection
+    # fix since #148) does not reach. Runs after the phantom
     # drop so it only sees real board copper. Scoped to the nets this run routed
     # so untouched planes / excluded nets are never altered. Routed dead ends are
     # dropped from `results`; original input-file dead ends are returned to strip
     # from the output file.
+    # Enforce the per-net tree invariant (cycle analog of the dead-end sweep):
+    # rip-reroute / failed-edge retry re-adds same-net copper that closes loops
+    # (e.g. RAM_A9: 3 loops for a 3-pad net, with its short on a loop edge). Break
+    # every cycle by dropping a redundant non-bridge segment, preferring one that
+    # grazes foreign copper. Runs before the dead-end sweep so spurs left by a
+    # removed loop edge get trimmed. Scoped + zone-skipping like the dead-end sweep.
+    _cy_segs, _cy_nets, cycle_input_segments = prune_redundant_cycles(
+        results, pcb_data, sweep_scope_ids, clearance=config.clearance)
+    if _cy_segs:
+        print(f"Cycle prune: removed {_cy_segs} redundant loop segment(s) across {_cy_nets} net(s)")
+
     _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, sweep_scope_ids)
     if _de_segs or _de_vias:
         print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
               f"{_de_vias} unsupported via(s)")
+
+    # Neck wide power segments that overlap a foreign pad at a fine-pitch terminal
+    # (the router exempts terminals, so a full-width trunk into a via-in-pad can
+    # short the neighbour pad). Centreline unchanged, so connectivity is preserved.
+    _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
+    if _necked:
+        print(f"Width neck: narrowed {_necked} wide segment(s) grazing a foreign pad")
+    # Merge any original input-file loop edges into the writer's strip list.
+    if cycle_input_segments:
+        dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
@@ -1065,6 +1087,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
 if __name__ == "__main__":
     import argparse
+    import sys as _sys
+    # Windows consoles default to cp1252, which can't encode the non-ASCII glyphs
+    # some log lines use (e.g. arrows in bus order, Ω in impedance); reconfigure
+    # stdout/stderr to UTF-8 so a print never crashes the run (issue #152).
+    for _stream in (_sys.stdout, _sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 

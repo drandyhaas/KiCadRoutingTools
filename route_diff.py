@@ -330,6 +330,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_segment_modifications = []
     # Track all vias added during stub layer swapping
     all_swap_vias = []
+    # pair_name -> {'vias': [...], 'stubs': [...]} for bare-pad target swaps, so a
+    # failed pair can have its swap undone and be re-routed clean (issue #142).
+    bare_pad_swaps = {}
     # Track new stub segments synthesized by bare-pad target swaps
     all_swap_segments = []
     # Track total number of layer swaps applied
@@ -408,7 +411,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
-            all_swap_segments=all_swap_segments, probe_obstacles=swap_probe_obstacles
+            all_swap_segments=all_swap_segments, probe_obstacles=swap_probe_obstacles,
+            bare_pad_swaps=bare_pad_swaps
         )
 
     # Add stub swap vias to pcb_data so routing and length matching see them as obstacles
@@ -619,6 +623,51 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     failed += dp_failed
     total_time += dp_time
     total_iterations += dp_iterations
+
+    # ----- Bare-pad target swap fallback (issue #142) ---------------------
+    # A bare-pad target swap fans a surface connector pad onto an inner layer
+    # via a synthesized short stub. For some geometries that stub pins the pair
+    # into a forced P/N crossing, so the pair FAILS to route -- yet the very
+    # same pair routes cleanly straight to the bare pads with a plain via.
+    # Detect those failures, undo the swap (drop the synthesized vias + stubs),
+    # and re-route the affected pairs once.
+    retry_bare_pad = [
+        (pair_name, pair)
+        for pair_name, pair in diff_pair_ids_to_route
+        if pair_name in bare_pad_swaps
+        and not (pair.p_net_id in routed_results and pair.n_net_id in routed_results)
+        and not (pair.p_net_id in state.diff_pair_single_ended_nets
+                 or pair.n_net_id in state.diff_pair_single_ended_nets)
+    ]
+    if retry_bare_pad:
+        print("\n" + "=" * 60)
+        print(f"Retrying {len(retry_bare_pad)} pair(s) without bare-pad target swap "
+              f"(swap pinned a P/N crossing): "
+              + ", ".join(name for name, _ in retry_bare_pad))
+        print("=" * 60)
+
+        def _drop(obj_list, doomed):
+            doomed_ids = set(id(o) for o in doomed)
+            obj_list[:] = [o for o in obj_list if id(o) not in doomed_ids]
+
+        # The synthesized via/stub live on the pair's OWN nets, which are excluded
+        # from the obstacle maps while that pair routes - so dropping them from
+        # pcb_data (which reverts the pair's endpoints to the bare pads) is enough;
+        # no obstacle-map rebuild is needed.
+        for pair_name, _pair in retry_bare_pad:
+            info = bare_pad_swaps.pop(pair_name)
+            _drop(pcb_data.vias, info['vias'])
+            _drop(all_swap_vias, info['vias'])
+            _drop(pcb_data.segments, info['stubs'])
+            _drop(all_swap_segments, info['stubs'])
+
+        rb_s, rb_f, rb_t, rb_i, route_index = route_diff_pairs(state, retry_bare_pad)
+        # The retried pairs were already tallied as failures in the first pass;
+        # move any that now route from the failed column to the success column.
+        successful += rb_s
+        failed -= rb_s
+        total_time += rb_t
+        total_iterations += rb_i
 
     # Report nets whose far-apart (uncoupled) terminal pads were peeled off the
     # coupled chain (issue #121). Those pads are not a coupled differential
@@ -1067,9 +1116,25 @@ Examples:
     if args.nets:
         all_patterns.extend(args.nets)
 
+    # Accept comma-separated patterns inside one token, e.g.
+    # --nets "/DVI_CK_P,/DVI_CK_N" (issue #143): split so each is matched on its
+    # own instead of as a single glob containing a comma (which matches nothing).
+    all_patterns = [p.strip() for token in all_patterns for p in token.split(',') if p.strip()]
+
     # Default to "*" (all nets) if no patterns specified
     if not all_patterns:
         all_patterns = ["*"]
+
+    # Warn loudly about any pattern that matches no REAL net, instead of silently
+    # routing fewer pairs than asked for (issue #143). expand_net_patterns passes
+    # an exact name through even when the board has no such net, so check the
+    # expansion against the actual net names.
+    real_names = {n.name for n in pcb_data.nets.values() if n.name}
+    for pat in all_patterns:
+        if pat == "*":
+            continue
+        if not any(nm in real_names for nm in expand_net_patterns(pcb_data, [pat])):
+            print(f"WARNING: net pattern '{pat}' matched no net in this board.")
 
     # Expand patterns to net names
     net_names = expand_net_patterns(pcb_data, all_patterns)

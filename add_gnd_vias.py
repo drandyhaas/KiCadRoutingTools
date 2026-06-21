@@ -184,7 +184,11 @@ def add_gnd_vias_near_signal_vias(
                 y=best_pos[1],
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=config.layers,
+                # Through-hole span like every other routed via. A KiCad via is
+                # defined by its two outer copper layers; listing every plane
+                # layer (e.g. F/In1/In2/B for an inner-layer plane) is invalid
+                # and makes KiCad refuse to load the whole board.
+                layers=["F.Cu", "B.Cu"],
                 net_id=gnd_net_id,
                 free=True  # Prevent KiCad auto-assignment
             )
@@ -379,7 +383,8 @@ def add_gnd_vias_to_existing_board(
                 y=best_pos[1],
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=config.layers,
+                # Through-hole span like every other routed via (see above).
+                layers=["F.Cu", "B.Cu"],
                 net_id=gnd_net_id,
                 free=True
             )

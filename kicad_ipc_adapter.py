@@ -1022,6 +1022,53 @@ def move_copper_text_to_silkscreen(board) -> int:
     return len(moved)
 
 
+def move_copper_graphics_to_silkscreen(board) -> int:
+    """Move copper graphic shapes (logos/artwork drawn as polys, lines, arcs,
+    circles, rects, curves) from F.Cu/B.Cu onto the matching silkscreen layer.
+
+    The IPC analogue of kicad_writer.move_copper_graphics_to_silkscreen and the
+    SWIG GUI's gui_utils.move_copper_graphics_to_silkscreen_board (issue #146): a
+    net-less copper logo is not modelled as a router obstacle, so plane pours and
+    routed copper run straight over it and short against it. Relocating it to
+    silkscreen preserves it visually while taking it out of copper. Returns the
+    count moved; wrapped in its own commit so it is a separate undo step.
+
+    Mirrors move_copper_text_to_silkscreen but inverts the text filter, so only
+    PCB_SHAPE-equivalents (not text) are touched.
+    """
+    BoardLayer = _ensure_kipy().BoardLayer
+    moved = []
+    try:
+        items = board.get_shapes()
+    except AttributeError:
+        return 0
+    f_cu = BoardLayer.BL_F_Cu
+    b_cu = BoardLayer.BL_B_Cu
+    f_silk = BoardLayer.BL_F_SilkS
+    b_silk = BoardLayer.BL_B_SilkS
+    for item in items:
+        # Graphic shapes only - skip text (handled by move_copper_text_to_silkscreen).
+        if "Text" in type(item).__name__:
+            continue
+        layer = getattr(item, "layer", None)
+        if layer == f_cu:
+            item.layer = f_silk
+            moved.append(item)
+        elif layer == b_cu:
+            item.layer = b_silk
+            moved.append(item)
+    if not moved:
+        return 0
+    handle = board.begin_commit()
+    try:
+        board.update_items(moved)
+        board.push_commit(handle, "Move copper graphics to silkscreen")
+    except Exception:
+        board.drop_commit(handle)
+        raise
+    return len(moved)
+
+
 def clear_user_layer_graphics(board, layer_name: str) -> int:
     """Remove graphic shapes on a User layer, as its own undo step.
 
