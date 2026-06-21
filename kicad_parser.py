@@ -2263,6 +2263,33 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
                 except (TypeError, ValueError):
                     pad_rotation = 0.0
 
+        # Custom pads: the per-layer `size` is only the anchor; enclose the real
+        # primitive copper so a track can't graze copper that reaches past the
+        # anchor (mirrors the text parser's _custom_pad_local_extent and the SWIG
+        # board builder's bbox). PadStackLayer.custom_shapes are BoardShapes in
+        # the pad-local frame (centred on the anchor); each exposes a Box2
+        # bounding_box (pos = min corner, size = w/h) that correctly covers rects,
+        # circles and arcs. Half-extents = furthest corner from the anchor. Done
+        # before _resolve_pad_rect so the rotation bakes in like any other pad.
+        if shape == "custom" and primary_layer is not None:
+            ext_x = ext_y = 0.0
+            try:
+                for cshape in (getattr(primary_layer, "custom_shapes", None) or []):
+                    bb = getattr(cshape, "bounding_box", None)
+                    bb = bb() if callable(bb) else bb
+                    if bb is None:
+                        continue
+                    px, py = _vec_to_xy_mm(bb.pos)
+                    bw, bh = _vec_to_xy_mm(bb.size)
+                    ext_x = max(ext_x, abs(px), abs(px + bw))
+                    ext_y = max(ext_y, abs(py), abs(py + bh))
+            except Exception as e:
+                print(f"_build_pad_from_kipy: custom-pad extent failed: {e}")
+            if ext_x > 0:
+                size_x = max(size_x, 2.0 * ext_x)
+            if ext_y > 0:
+                size_y = max(size_y, 2.0 * ext_y)
+
         total_rotation = (pad_rotation + fp_rotation) % 360
         # Padstack size is in pad-local coordinates; resolve it into board space
         # (swaps near 90° and carries a residual rect_rotation for diagonal pads),
@@ -2290,6 +2317,18 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
                 except Exception:
                     drill = 0.0
 
+        # Per-pad local clearance override (fiducial keep-clear rings etc.):
+        # kipy exposes it as Pad.copper_clearance_override (a Distance) on the
+        # proto; unset/0 means no override. Mirrors the text parser's local
+        # clearance read (issue: no-net fiducial keepout).
+        local_clearance = 0.0
+        try:
+            proto = getattr(pad, "proto", None)
+            if proto is not None and proto.HasField("copper_clearance_override"):
+                local_clearance = _nm_to_mm(proto.copper_clearance_override.value_nm)
+        except Exception:
+            local_clearance = 0.0
+
         return Pad(
             component_ref=reference,
             pad_number=pad_num,
@@ -2306,6 +2345,7 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
             drill=drill,
             roundrect_rratio=roundrect_rratio,
             rect_rotation=rect_rotation,
+            local_clearance=local_clearance,
         )
     except Exception as e:
         print(f"Warning: failed to read pad {getattr(pad, 'number', '?')}: {e}")
