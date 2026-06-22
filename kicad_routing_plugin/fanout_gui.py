@@ -864,12 +864,22 @@ class QFNOptionsPanel(wx.Panel):
         param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(param_sizer, 0, wx.EXPAND)
 
+        self.underpad_escape = wx.CheckBox(self, label="Under-pad escape (via-drop)")
+        self.underpad_escape.SetToolTip(
+            "Drop a through-via just past each pad and escape on an inner/back "
+            "layer instead of the surface 45-degree fan (#164). For crowded "
+            "fine-pitch edges where the surface fan has no room (e.g. a diff pair "
+            "boxed in by a neighbour pair and a foreign track). Via size/drill use "
+            "the Basic-tab via settings.")
+        main_sizer.Add(self.underpad_escape, 0, wx.ALL, 8)
+
         self.SetSizer(main_sizer)
 
     def get_config(self):
         """Get the configuration values (QFN-specific only, shared params come from Basic tab)."""
         return {
             'extension': self.extension.GetValue(),
+            'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'stub',
         }
 
 
@@ -1150,6 +1160,10 @@ class FanoutTab(wx.Panel):
 
         # Get extension from config (QFN-specific parameter)
         extension = config.get('extension', defaults.QFN_EXTENSION)
+        # Under-pad (via-drop) escape uses the Basic-tab via settings (#164)
+        escape_method = config.get('escape_method', 'stub')
+        via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
+        via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
 
         try:
             from qfn_fanout import generate_qfn_fanout
@@ -1166,6 +1180,9 @@ class FanoutTab(wx.Panel):
                 extension=extension,
                 clearance=clearance,
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
+                escape_method=escape_method,
+                via_size=via_size,
+                via_drill=via_drill,
             )
 
             self._apply_fanout_results(
