@@ -498,7 +498,7 @@ def try_phase3_ripup(
                     if tap_segments_added or tap_vias_added:
                         print(f"    Adding {len(tap_segments_added)} tap segments, {len(tap_vias_added)} tap vias to obstacles before re-routing...")
                         add_segments_list_as_obstacles(state.working_obstacles, tap_segments_added, config)
-                        add_vias_list_as_obstacles(state.working_obstacles, tap_vias_added, config)
+                        add_vias_list_as_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
                 elif net_id in ripped_net_ids:
                     print(f"    Skipping tap obstacle addition - net will be re-routed")
 
@@ -554,9 +554,29 @@ def try_phase3_ripup(
                              and (orig_tap_segs or orig_tap_vias))
                     if guard:
                         add_segments_list_as_obstacles(state.working_obstacles, orig_tap_segs, config)
-                        add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config)
+                        add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
+                    # Issue #171: the victims that DID re-route above avoided the
+                    # RETRY tap copper (added to obstacles before the re-route),
+                    # but we are now DISCARDING that retry in favour of net_id's
+                    # ORIGINAL tap. Those victims' fresh copper can short against
+                    # the original tap (it occupies different cells than the retry
+                    # tap did). Rip every still-routed victim so the full set is
+                    # re-routed clear of the original tap we are about to commit -
+                    # not just the stranded ones.
+                    reroute_items = list(ripped_items)
+                    for item in reroute_items:
+                        vic_id = item[0]
+                        if vic_id in routed_results:
+                            rip_up_net(
+                                vic_id, pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache,
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                layer_map
+                            )
                     _reroute_phase3_ripped_nets(
-                        [item for item, _lost in stranded],
+                        reroute_items,
                         pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
