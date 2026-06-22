@@ -257,7 +257,8 @@ python3 tests/test_multipoint_diff_route.py -v
 
 ### test_diff_connector_graze.py - Connector/Partner-Pad Graze Reject (issue #165)
 
-Unit test for the diff-pair final-geometry guard `_connector_grazes_foreign_pad`.
+Unit test for the diff-pair final-geometry guard `_connector_grazes_foreign_copper`
+(foreign pads **and** vias).
 The connector/setback segments are clearance-checked during routing against an
 obstacle map that excludes **both** halves of the pair, so a connector can graze
 the **partner** net's pad (USB-C, fine-pitch) unseen. The guard re-validates the

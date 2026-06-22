@@ -6,7 +6,7 @@ foreign/partner pad.
 The pair's connector segments are clearance-checked during routing against an
 obstacle map that excludes BOTH halves of the pair, so a connector can graze the
 PARTNER net's pad (e.g. a USB-C P connector cutting across the adjacent N pad)
-completely unseen. `_connector_grazes_foreign_pad` re-validates the final
+completely unseen. `_connector_grazes_foreign_copper` re-validates the final
 geometry against every foreign pad using the SAME geometry + tolerance as
 check_drc, so it rejects a real graze WITHOUT false-rejecting tight-but-legal
 packing that sits exactly at clearance (the over-rejection that sank the first
@@ -23,9 +23,9 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
 
-from kicad_parser import Pad, Segment, PCBData
+from kicad_parser import Pad, Segment, Via, PCBData
 from routing_config import GridRouteConfig
-from diff_pair_routing import _connector_grazes_foreign_pad
+from diff_pair_routing import _connector_grazes_foreign_copper
 
 P_NET, N_NET = 10, 20
 CLEARANCE = 0.2
@@ -70,35 +70,51 @@ def main():
     # 1. Real graze against the PARTNER net's pad must be rejected.
     pcb = _pcb({N_NET: [_pad(N_NET, '/USB_DN', 0.0, 0.0)]})
     y = LEGAL_CENTERLINE - 0.15  # 0.15mm into the required clearance band
-    r = _connector_grazes_foreign_pad([_seg(P_NET, y)], pcb, P_NET, N_NET, cfg)
+    r = _connector_grazes_foreign_copper([_seg(P_NET, y)], pcb, P_NET, N_NET, cfg)
     check("real partner-pad graze rejected", r is not None,
-          f"overlap={r[2]:.3f}mm" if r else "NOT detected")
+          f"overlap={r[3]:.3f}mm" if r else "NOT detected")
 
     # 2. A just-legal track sitting exactly at clearance must NOT be rejected.
-    r = _connector_grazes_foreign_pad([_seg(P_NET, LEGAL_CENTERLINE)], pcb, P_NET, N_NET, cfg)
+    r = _connector_grazes_foreign_copper([_seg(P_NET, LEGAL_CENTERLINE)], pcb, P_NET, N_NET, cfg)
     check("track exactly at clearance passes", r is None,
           "false reject" if r else "")
 
     # 3. The connector landing on its OWN-net pad must be ignored.
     pcb_own = _pcb({P_NET: [_pad(P_NET, '/USB_DP', 0.0, 0.0)]})
-    r = _connector_grazes_foreign_pad([_seg(P_NET, 0.0)], pcb_own, P_NET, N_NET, cfg)
+    r = _connector_grazes_foreign_copper([_seg(P_NET, 0.0)], pcb_own, P_NET, N_NET, cfg)
     check("own-net pad ignored (connector lands on it)", r is None,
           "wrongly rejected own pad" if r else "")
 
     # 4. Tolerance boundary matches check_drc: overlap <= tol passes, > tol rejects.
     below = LEGAL_CENTERLINE - (TOLERANCE - 0.001)  # overlap just under tolerance
     above = LEGAL_CENTERLINE - (TOLERANCE + 0.001)  # overlap just over tolerance
-    r_below = _connector_grazes_foreign_pad([_seg(P_NET, below)], pcb, P_NET, N_NET, cfg)
-    r_above = _connector_grazes_foreign_pad([_seg(P_NET, above)], pcb, P_NET, N_NET, cfg)
+    r_below = _connector_grazes_foreign_copper([_seg(P_NET, below)], pcb, P_NET, N_NET, cfg)
+    r_above = _connector_grazes_foreign_copper([_seg(P_NET, above)], pcb, P_NET, N_NET, cfg)
     check("overlap just under DRC tolerance passes", r_below is None)
     check("overlap just over DRC tolerance rejects", r_above is not None)
 
     # 5. N segment grazing the partner P pad (symmetric case).
     pcb_p = _pcb({P_NET: [_pad(P_NET, '/USB_DP', 0.0, 0.0)]})
-    r = _connector_grazes_foreign_pad([_seg(N_NET, LEGAL_CENTERLINE - 0.15)],
+    r = _connector_grazes_foreign_copper([_seg(N_NET, LEGAL_CENTERLINE - 0.15)],
                                       pcb_p, P_NET, N_NET, cfg)
     check("N segment grazing partner P pad rejected", r is not None,
-          f"overlap={r[2]:.3f}mm" if r else "NOT detected")
+          f"overlap={r[3]:.3f}mm" if r else "NOT detected")
+
+    # 6. P segment grazing the PARTNER net's via (e.g. its underpad escape via).
+    def _via(net_id, x, y):
+        return Via(x=x, y=y, size=0.45, drill=0.25, layers=['F.Cu', 'B.Cu'], net_id=net_id)
+    via_clear = 0.45 / 2 + WIDTH / 2 + CLEARANCE  # 0.525mm center-to-center
+    pcb_v = PCBData(footprints={}, nets={}, segments=[], vias=[_via(N_NET, 0.0, 0.0)],
+                    board_info=None, pads_by_net={})
+    r = _connector_grazes_foreign_copper([_seg(P_NET, via_clear - 0.12)], pcb_v, P_NET, N_NET, cfg)
+    check("P segment grazing partner via rejected", r is not None and r[0] == 'via',
+          f"kind={r[0]} overlap={r[3]:.3f}mm" if r else "NOT detected")
+
+    # 7. P segment near its OWN-net via must be ignored (it connects to it).
+    pcb_vo = PCBData(footprints={}, nets={}, segments=[], vias=[_via(P_NET, 0.0, 0.0)],
+                     board_info=None, pads_by_net={})
+    r = _connector_grazes_foreign_copper([_seg(P_NET, via_clear - 0.12)], pcb_vo, P_NET, N_NET, cfg)
+    check("own-net via ignored", r is None, "wrongly rejected own via" if r else "")
 
     passed = sum(1 for _, ok in results if ok)
     total = len(results)

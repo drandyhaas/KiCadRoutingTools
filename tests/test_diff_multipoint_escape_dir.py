@@ -80,6 +80,22 @@ def main():
         44.0, 50.20, 44.0, 49.80, 'F.Cu', other_center=(30.0, 50.0))
     check("free-end call still escapes OUTWARD (-x)", dx2 < -0.5, f"dir=({dx2:.2f},{dy2:.2f})")
 
+    # 2-PAD COMPONENT (e.g. termination resistor): the footprint's only two pads
+    # ARE the pair, so the centroid coincides with the terminal center - there's no
+    # body to point away from. The escape must orient toward the OTHER terminal.
+    rp = _pad('R1', '1', P_NET, 50.0, 50.20)
+    rn = _pad('R1', '2', N_NET, 50.0, 49.80)
+    r1 = Footprint('R1', 'lib:R', 50.0, 50.0, 0, 'F.Cu', [rp, rn], '')
+    rp_seg = _seg(P_NET, 50.0, 50.20, 49.0, 50.20)  # stub runs -x toward the route
+    rn_seg = _seg(N_NET, 50.0, 49.80, 49.0, 49.80)
+    pcb2 = PCBData(footprints={'R1': r1}, nets={}, segments=[rp_seg, rn_seg], vias=[],
+                   board_info=None, pads_by_net={P_NET: [rp], N_NET: [rn]})
+    dx3, dy3, _ = get_pair_end_direction(
+        pcb2, P_NET, N_NET, [rp_seg], [rn_seg],
+        50.0, 50.20, 50.0, 49.80, 'F.Cu', other_center=(40.0, 50.0))  # other end at -x
+    check("2-pad component escapes toward the other terminal (-x)",
+          dx3 < -0.5, f"dir=({dx3:.2f},{dy3:.2f})")
+
     passed = sum(1 for _, ok in results if ok)
     total = len(results)
     print("\n" + "=" * 60)

@@ -32,8 +32,8 @@ NET = 10
 HX, HY = 0.15, 0.725  # half-extents of a 0.3 x 1.45 mm USB-C-style pad
 
 
-def _pad(x, y, sx=2 * HX, sy=2 * HY, rot=0.0):
-    return Pad('J1', 'A6', x, y, 0, 0, sx, sy, 'roundrect', ['F.Cu'],
+def _pad(x, y, sx=2 * HX, sy=2 * HY, rot=0.0, shape='roundrect'):
+    return Pad('J1', 'A6', x, y, 0, 0, sx, sy, shape, ['F.Cu'],
                NET, '/USB_DP', 0, None, 0.0, None, 0.25, rot, None)
 
 
@@ -96,6 +96,15 @@ def main():
     check("diagonal pad launch stays inside rotated rect",
           _inside(pcb_rot.pads_by_net[NET][0], x, y), f"({x:.3f},{y:.3f})")
     check("diagonal pad launch actually moved", (x * x + y * y) > 1e-6)
+
+    # 6. Round (circle) pad, route at 45 deg: the launch must stay inside the
+    # CIRCLE, not the rect bounding box (which would put it in a corner off-copper).
+    R = 0.5
+    pcb_c = _pcb([_pad(0.0, 0.0, sx=2 * R, sy=2 * R, shape='circle')])
+    x, y = _pad_edge_launch(pcb_c, NET, 0.0, 0.0, 5.0, 5.0, cfg)  # route up-right (45 deg)
+    check("circle pad launch stays inside the circle (not the bbox corner)",
+          math.hypot(x, y) <= R + 1e-6, f"r={math.hypot(x, y):.3f} (R={R})")
+    check("circle pad launch actually moved", (x * x + y * y) > 1e-6)
 
     passed = sum(1 for _, ok in results if ok)
     total = len(results)

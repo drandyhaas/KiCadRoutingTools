@@ -113,15 +113,30 @@ def get_pair_end_direction(pcb_data: PCBData, p_net_id: int, n_net_id: int,
         # path passes the PAD position instead, so for a pad with an escape stub
         # (e.g. a fanned-out QFN pin) it returns the direction reversed - pointing
         # INTO the component body, which backs the centerline setback into the
-        # chip and the route dies on the pad field. Orient the escape to face away
-        # from the owning component's pad centroid (toward the routing area). For a
-        # true free-end terminal the stub already points outward, so this is a
-        # no-op there.
+        # chip and the route dies on the pad field.
+        #
+        # Correct it ONLY when the query point IS a pad of the owning component
+        # (_footprint_pad_centroid returns non-None), which is exactly the buggy
+        # case. A true free-end terminal is not at a pad -> centroid is None -> no
+        # orientation, so a genuine stub that legitimately doesn't point straight
+        # outward is left untouched (avoids false-flipping free-end stubs).
+        #
+        # When the query point is a pad: orient the escape away from the
+        # component's pad centroid; but if that centroid coincides with the
+        # terminal center (a 2-pad component - resistor/2-pin part - whose two pads
+        # ARE the pair), there is no "body" to point away from, so orient toward
+        # the other terminal instead.
         centroid = (_footprint_pad_centroid(pcb_data, p_net_id, p_x, p_y) or
                     _footprint_pad_centroid(pcb_data, n_net_id, n_x, n_y))
         if centroid:
             cx, cy = (p_x + n_x) / 2, (p_y + n_y) / 2
-            if dir_x * (cx - centroid[0]) + dir_y * (cy - centroid[1]) < 0:
+            if math.hypot(cx - centroid[0], cy - centroid[1]) > 0.05:
+                away = (cx - centroid[0], cy - centroid[1])          # away from body
+            elif other_center is not None:
+                away = (other_center[0] - cx, other_center[1] - cy)  # toward other end
+            else:
+                away = None
+            if away is not None and dir_x * away[0] + dir_y * away[1] < 0:
                 dir_x, dir_y = -dir_x, -dir_y
         return (dir_x, dir_y, False)
 
@@ -580,12 +595,27 @@ def _calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_
     return 0.0, 0.0
 
 
+def _routing_copper_layers(pcb_data, config) -> List[str]:
+    """Copper layer names for check_drc's pad/via layer-wildcard expansion: the
+    board's copper segment layers unioned with the configured routing layers."""
+    layers = {s.layer for s in pcb_data.segments if s.layer.endswith('.Cu')}
+    layers.update(config.layers)
+    return list(layers)
+
+
 def _rect_ray_exit(hx: float, hy: float, dx: float, dy: float) -> float:
     """Distance from an axis-aligned rectangle's center to its boundary along the
     unit direction (dx, dy). hx, hy are the half-extents."""
     tx = hx / abs(dx) if abs(dx) > 1e-9 else float('inf')
     ty = hy / abs(dy) if abs(dy) > 1e-9 else float('inf')
     return min(tx, ty)
+
+
+def _ellipse_ray_exit(a: float, b: float, dx: float, dy: float) -> float:
+    """Distance from an ellipse center (semi-axes a, b) to its boundary along the
+    unit direction (dx, dy). For a circle (a == b) this is just the radius."""
+    denom = (dx / a) ** 2 + (dy / b) ** 2 if a > 1e-9 and b > 1e-9 else 0.0
+    return 1.0 / math.sqrt(denom) if denom > 1e-12 else float('inf')
 
 
 def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.05):
@@ -622,7 +652,12 @@ def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.0
         cr, sr = math.cos(rad), math.sin(rad)
         ldx, ldy = dx * cr + dy * sr, -dx * sr + dy * cr
 
-    reach = _rect_ray_exit(pad.size_x / 2, pad.size_y / 2, ldx, ldy)
+    # Round pads use the ellipse boundary so the launch stays on copper (the rect
+    # bounding box would put it in a corner outside a circle/oval).
+    if pad.shape in ('circle', 'oval'):
+        reach = _ellipse_ray_exit(pad.size_x / 2, pad.size_y / 2, ldx, ldy)
+    else:
+        reach = _rect_ray_exit(pad.size_x / 2, pad.size_y / 2, ldx, ldy)
     if not math.isfinite(reach) or reach <= 0:
         return cx, cy
 
@@ -1963,35 +1998,37 @@ def _pn_tracks_cross_full(new_segments, pcb_data, p_net_id, n_net_id,
 _DRC_CLEARANCE_MARGIN = 0.05
 
 
-def _connector_grazes_foreign_pad(new_segments, pcb_data, p_net_id, n_net_id, config):
+def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id, config):
     """Issue #165: the pair's connector/setback segments are clearance-checked
     during routing against an obstacle map that excludes BOTH halves of the pair,
-    so a connector can graze the PARTNER net's pad (or other foreign copper)
-    completely unseen (e.g. a USB-C P connector cutting across the adjacent N pad).
+    so a connector can graze the PARTNER net's pad/via (or other foreign copper)
+    completely unseen (e.g. a USB-C P connector cutting across the adjacent N pad,
+    or grazing the partner's underpad escape via).
 
-    Re-validate the final P/N geometry against every foreign pad (any pad NOT on
-    this pair's own nets, which includes the partner net's pads) using the SAME
-    geometry and tolerance as check_drc, so a graze reported here is one check_drc
-    would also flag - not a tight-but-legal packing sitting exactly at clearance.
+    Re-validate the final P/N geometry against every foreign pad AND via (any not
+    on this pair's own nets, which includes the partner net's copper) using the
+    SAME geometry and tolerance as check_drc, so a graze reported here is one
+    check_drc would also flag - not tight-but-legal packing sitting at clearance.
 
-    Returns (pad, segment, overlap_mm) for the first real graze, or None.
+    Returns (kind, obj, segment, overlap_mm) where kind is 'pad' or 'via', or None.
     """
-    from check_drc import check_pad_segment_overlap
+    from check_drc import check_pad_segment_overlap, check_via_segment_overlap
 
     own = (p_net_id, n_net_id)
     pair_segs = [s for s in new_segments if s.net_id in own]
     if not pair_segs:
         return None
 
-    routing_layers = list({s.layer for s in pcb_data.segments if s.layer.endswith('.Cu')})
-    routing_layers = list(set(routing_layers) | set(config.layers))
+    routing_layers = _routing_copper_layers(pcb_data, config)
     clearance = config.clearance
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+    vias = getattr(pcb_data, 'vias', None) or []
 
     for seg in pair_segs:
         sxmin, sxmax = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
         symin, symax = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
         seg_margin = clearance + seg.width / 2
+        # vs foreign pads (includes the partner net's pads)
         for pad_net, pads in pads_by_net.items():
             if pad_net == seg.net_id:
                 continue  # the connector legitimately lands on its own-net pad
@@ -2004,7 +2041,19 @@ def _connector_grazes_foreign_pad(new_segments, pcb_data, p_net_id, n_net_id, co
                 hit, overlap, _ = check_pad_segment_overlap(
                     pad, seg, clearance, routing_layers, _DRC_CLEARANCE_MARGIN)
                 if hit:
-                    return (pad, seg, overlap)
+                    return ('pad', pad, seg, overlap)
+        # vs foreign vias (includes the partner net's escape/underpad vias)
+        for via in vias:
+            if via.net_id == seg.net_id:
+                continue  # the connector legitimately lands on its own-net via
+            vm = seg_margin + via.size / 2
+            if (via.x < sxmin - vm or via.x > sxmax + vm or
+                    via.y < symin - vm or via.y > symax + vm):
+                continue
+            hit, overlap = check_via_segment_overlap(
+                via, seg, clearance, _DRC_CLEARANCE_MARGIN)
+            if hit:
+                return ('via', via, seg, overlap)
     return None
 
 
@@ -2539,37 +2588,25 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     if polarity_fixed:
         p_end = (n_tgt_x, n_tgt_y)  # P route goes to original N position (will be P after swap)
         n_end = (p_tgt_x, p_tgt_y)  # N route goes to original P position (will be N after swap)
-        p_end_net, n_end_net = n_net_id, p_net_id  # net of the PAD physically at p_end/n_end
     else:
         p_end = (p_tgt_x, p_tgt_y)
         n_end = (n_tgt_x, n_tgt_y)
-        p_end_net, n_end_net = p_net_id, n_net_id
 
     # Prepare stub direction tuples for extension calculation
     src_stub_dir_tuple = (src_dir_x, src_dir_y)
     tgt_stub_dir_tuple = (tgt_dir_x, tgt_dir_y)
 
     # Route's first/last points - the setback positions the connectors run to.
+    # The terminal launch points (p_src_x/p_tgt_x etc.) are already shifted to the
+    # pad EDGE facing the route by _try_route_direction (issue #165), so the
+    # connectors leave the pad toward the route - nothing to re-shift here.
     p_src_route = p_float_path[0][:2] if p_float_path else p_start
     n_src_route = n_float_path[0][:2] if n_float_path else n_start
     p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
     n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
 
-    # Issue #165 (tier-2 root-cause 2): launch each connector from the pad EDGE
-    # facing the route, not the pad center, so it leaves the pad toward the route
-    # instead of cutting back across a long pad's field (USB-C, fine-pitch). No-op
-    # for stub endpoints (their launch point is not a pad center).
-    p_start = _pad_edge_launch(pcb_data, p_net_id, p_start[0], p_start[1],
-                               p_src_route[0], p_src_route[1], config)
-    n_start = _pad_edge_launch(pcb_data, n_net_id, n_start[0], n_start[1],
-                               n_src_route[0], n_src_route[1], config)
-    p_end = _pad_edge_launch(pcb_data, p_end_net, p_end[0], p_end[1],
-                             p_tgt_route[0], p_tgt_route[1], config)
-    n_end = _pad_edge_launch(pcb_data, n_end_net, n_end[0], n_end[1],
-                             n_tgt_route[0], n_tgt_route[1], config)
-
-    # Pre-calculate extensions for source and target connectors (from the shifted
-    # launch points) - these ensure P and N connector segments are parallel.
+    # Pre-calculate extensions for source and target connectors (from the
+    # pad-edge launch points) - these ensure P and N connector segments are parallel.
     src_p_ext, src_n_ext = _calculate_parallel_extension(
         p_start, n_start, p_src_route, n_src_route,
         src_stub_dir_tuple, p_sign
@@ -2786,15 +2823,19 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # Validate the final geometry against foreign pads with the SAME geometry and
     # tolerance as check_drc, so a reject here is a graze check_drc would also flag
     # (not tight-but-legal packing). Honest minimum: don't emit a known short.
-    graze = _connector_grazes_foreign_pad(result.get('new_segments', []),
-                                          pcb_data, p_net_id, n_net_id, config)
+    graze = _connector_grazes_foreign_copper(result.get('new_segments', []),
+                                             pcb_data, p_net_id, n_net_id, config)
     if graze:
-        pad, seg, overlap = graze
-        print(f"  Connector grazes foreign pad {pad.component_ref}.{pad.pad_number} "
-              f"(net {pad.net_name}) by {overlap:.3f}mm on {seg.layer} - "
+        kind, obj, seg, overlap = graze
+        if kind == 'pad':
+            what = f"pad {obj.component_ref}.{obj.pad_number} (net {obj.net_name})"
+        else:
+            net = pcb_data.nets.get(obj.net_id)
+            what = f"via at ({obj.x:.2f},{obj.y:.2f}) (net {net.name if net else obj.net_id})"
+        print(f"  Connector grazes foreign {what} by {overlap:.3f}mm on {seg.layer} - "
               f"rejecting pair route (issue #165)")
         print("  (a connector/setback segment violates clearance to the partner or "
-              "a foreign pad; needs a cleaner connector route or a different "
+              "foreign copper; needs a cleaner connector route or a different "
               "terminal join)")
         return {
             'failed': True,

@@ -29,7 +29,8 @@ except ImportError:
 from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from diff_pair_routing import (
-    route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross
+    route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross,
+    _DRC_CLEARANCE_MARGIN, _routing_copper_layers
 )
 from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_fallback_layers
 from stub_layer_switching import apply_bare_pad_target_via
@@ -120,6 +121,8 @@ def _min_cost_matching(cost: List[List[float]]) -> List[Tuple[int, int]]:
         pairs = [(r, best[r]) for r in range(nr)]
     else:
         # Greedy fallback (suboptimal, but only for unrealistically many pads).
+        print(f"  Warning: {nr}x{nc} terminal matching too large for the exact "
+              f"solver without scipy - using greedy (pairing may be suboptimal)")
         used_r, used_c, pairs = set(), set(), []
         for _, r, cc in sorted((c[r][cc], r, cc) for r in range(nr) for cc in range(nc)):
             if r in used_r or cc in used_c:
@@ -351,16 +354,18 @@ def _relocate_blocked_terminals(state, pair: DiffPairNet, terminals, obstacles, 
 
 
 def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
-    """True if every relocation fan via clears (check_drc clearance) the other fan
-    vias, the existing vias, and all foreign pads. The via legitimately sits on
-    its own relocated pad, so those pads are excluded from the pad-via test."""
-    from check_drc import check_via_via_overlap, check_pad_via_overlap
+    """True if every relocation fan via clears (at check_drc's clearance) the
+    other fan vias, the existing vias, all foreign pads, and all foreign tracks.
+    The via legitimately sits on its own relocated pad and connects to its own-net
+    stub, so own-net pads/segments are excluded."""
+    from check_drc import (check_via_via_overlap, check_pad_via_overlap,
+                           check_via_segment_overlap)
     clearance = config.clearance
-    margin = 0.05  # match check_drc's default --clearance-margin
+    margin = _DRC_CLEARANCE_MARGIN
     fan_vias = [v for v, _ in fans]
     fan_ids = {id(v) for v in fan_vias}
     reloc_ids = {id(p) for p in relocated_pads}
-    routing_layers = list({s.layer for s in pcb_data.segments if s.layer.endswith('.Cu')}) or list(config.layers)
+    routing_layers = _routing_copper_layers(pcb_data, config)
 
     for i, v in enumerate(fan_vias):
         for w in fan_vias[i + 1:]:
@@ -375,6 +380,11 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
                     continue
                 if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
                     return False
+        for seg in pcb_data.segments:
+            if seg.net_id == v.net_id:
+                continue  # own-net stub the via connects to
+            if check_via_segment_overlap(v, seg, clearance, margin)[0]:
+                return False
     return True
 
 
