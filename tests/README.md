@@ -315,6 +315,20 @@ so the pair falls through to single-ended instead of emitting via-via violations
 python3 tests/test_diff_relocation_fans.py
 ```
 
+### test_diff_multipoint_escape_dir.py - Multipoint Escape Direction (issue #165)
+
+Unit test for `get_pair_end_direction`. The multipoint diff-pair path passes the
+PAD position to `get_stub_direction` (which expects the stub free end), so a
+fanned-out pin's escape stub gave a REVERSED direction pointing into the chip
+body — backing the coupled centerline setback into the pad field so the pair
+couldn't route (the tigard `/USB_D` coupled-route failure). The fix orients the
+stub-derived escape away from the component's pad centroid. The test asserts the
+escape points outward whether called with the pad position or the stub free end.
+
+```bash
+python3 tests/test_diff_multipoint_escape_dir.py
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub

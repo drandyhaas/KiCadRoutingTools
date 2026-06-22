@@ -108,7 +108,22 @@ def get_pair_end_direction(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     dir_y = (p_dir[1] + n_dir[1]) / 2
     dir_len = math.sqrt(dir_x * dir_x + dir_y * dir_y)
     if dir_len > 1e-6:
-        return (dir_x / dir_len, dir_y / dir_len, False)
+        dir_x, dir_y = dir_x / dir_len, dir_y / dir_len
+        # get_stub_direction expects the stub FREE END; the multipoint diff-pair
+        # path passes the PAD position instead, so for a pad with an escape stub
+        # (e.g. a fanned-out QFN pin) it returns the direction reversed - pointing
+        # INTO the component body, which backs the centerline setback into the
+        # chip and the route dies on the pad field. Orient the escape to face away
+        # from the owning component's pad centroid (toward the routing area). For a
+        # true free-end terminal the stub already points outward, so this is a
+        # no-op there.
+        centroid = (_footprint_pad_centroid(pcb_data, p_net_id, p_x, p_y) or
+                    _footprint_pad_centroid(pcb_data, n_net_id, n_x, n_y))
+        if centroid:
+            cx, cy = (p_x + n_x) / 2, (p_y + n_y) / 2
+            if dir_x * (cx - centroid[0]) + dir_y * (cy - centroid[1]) < 0:
+                dir_x, dir_y = -dir_x, -dir_y
+        return (dir_x, dir_y, False)
 
     # Bare pads (or cancelling stub directions): synthesize from pad geometry.
     axis_x, axis_y = p_x - n_x, p_y - n_y
@@ -1516,6 +1531,25 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         if not tgt_dir_synth:
             return None, 0, [], None
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
+
+    # Issue #165 root-cause 2 (routing side): for a long pad (USB-C, 1.45mm) the
+    # terminal CENTER sits deep inside the pad, so the centerline setback point
+    # lands within the pad's own copper (added as an obstacle) and the route can't
+    # reach it. Launch the routing terminal from the pad EDGE nearest the escape
+    # direction, so the setback sits in open space just past the pad. No-op for
+    # stub/small terminals (their launch point isn't a pad center, or the edge ~
+    # the center).
+    _FAR = 10.0
+    p_src_x, p_src_y = _pad_edge_launch(pcb_data, p_net_id, p_src_x, p_src_y,
+                                        p_src_x + src_dir_x * _FAR, p_src_y + src_dir_y * _FAR, config)
+    n_src_x, n_src_y = _pad_edge_launch(pcb_data, n_net_id, n_src_x, n_src_y,
+                                        n_src_x + src_dir_x * _FAR, n_src_y + src_dir_y * _FAR, config)
+    p_tgt_x, p_tgt_y = _pad_edge_launch(pcb_data, p_net_id, p_tgt_x, p_tgt_y,
+                                        p_tgt_x + tgt_dir_x * _FAR, p_tgt_y + tgt_dir_y * _FAR, config)
+    n_tgt_x, n_tgt_y = _pad_edge_launch(pcb_data, n_net_id, n_tgt_x, n_tgt_y,
+                                        n_tgt_x + tgt_dir_x * _FAR, n_tgt_y + tgt_dir_y * _FAR, config)
+    center_src_x, center_src_y = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
+    center_tgt_x, center_tgt_y = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
 
     # Calculate setback distance (default to 4x spacing = 2x total P-N distance)
     if config.diff_pair_centerline_setback is not None:
