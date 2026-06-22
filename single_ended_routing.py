@@ -67,6 +67,38 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     return best
 
 
+def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=0.05):
+    """Neck a TERMINAL-connection segment that grazes a foreign pad, down to `floor`.
+
+    A route's terminal connects to an off-grid pad / fanout escape: the
+    exact-endpoint stub and the first/last on-grid leg are laid geometrically and
+    the endpoint region is obstacle-exempt (so the net can reach its own pad), so a
+    full-width terminal can sit sub-clearance to a NEIGHBOURING foreign pad (#157,
+    e.g. tigard Net-(R7-Pad2) grazing the VREG pad by 8um). Narrowing the offending
+    terminal segment restores clearance without moving the centreline, so
+    connectivity is preserved; a graze the floor width still can't clear is left for
+    the DRC report. Only segments touching a terminal point are considered (the A*
+    body keep-outs already enforce clearance mid-route). Returns the count necked."""
+    def touches(s):
+        for tx, ty in term_pts:
+            if (abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or \
+               (abs(s.end_x - tx) < 1e-6 and abs(s.end_y - ty) < 1e-6):
+                return True
+        return False
+    necked = 0
+    for s in segments:
+        if not touches(s):
+            continue
+        d = _seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer)
+        allowed_half = d - config.clearance - 1e-4  # 1e-4: stay just inside the rule
+        if allowed_half < s.width / 2.0 - 1e-9:
+            new_w = max(floor, 2.0 * allowed_half)
+            if new_w < s.width - 1e-9:
+                s.width = round(new_w, 4)
+                necked += 1
+    return necked
+
+
 def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
                              pcb_data, net_id, config, layer_names):
     """#4: route.py is on-grid, but a route's TERMINAL connects to an off-grid pad
@@ -818,6 +850,16 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             )
             new_segments.append(seg)
 
+    # Neck any terminal-connection segment that grazes a foreign pad (#157): the
+    # exact-endpoint stub / first-last leg is obstacle-exempt at the endpoint, so a
+    # full-width terminal can sit sub-clearance to a neighbouring foreign pad.
+    term_pts = [pts[0], pts[-1]]
+    if start_original:
+        term_pts.append((start_original[0], start_original[1]))
+    if end_original:
+        term_pts.append((end_original[0], end_original[1]))
+    _neck_terminal_grazes(new_segments, term_pts, pcb_data, net_id, config)
+
     return {
         'new_segments': new_segments,
         'new_vias': new_vias,
@@ -1080,6 +1122,16 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # Both endpoints are pads: neck the start side too
         new_segments = _apply_neckdown_widths(new_segments, config, net_id, obstacles,
                                               coord, layer_names, track_margin, neck_start=True)
+
+    # Neck any terminal-connection segment that grazes a foreign pad (#157): the
+    # endpoint stub is laid geometrically with the endpoint region obstacle-exempt,
+    # so a full-width terminal can sit sub-clearance to a neighbouring foreign pad.
+    term_pts = [coord.to_float(path[0][0], path[0][1]), coord.to_float(path[-1][0], path[-1][1])]
+    if start_original:
+        term_pts.append((start_original[0], start_original[1]))
+    if end_original:
+        term_pts.append((end_original[0], end_original[1]))
+    _neck_terminal_grazes(new_segments, term_pts, pcb_data, net_id, config)
 
     return {
         'new_segments': new_segments,
@@ -2550,6 +2602,17 @@ def _path_to_segments_vias(
                 net_id=net_id
             )
             segments.append(seg)
+
+    # Neck any terminal-connection segment that grazes a foreign pad (#157): the
+    # exact-endpoint stub / first-last leg is obstacle-exempt at the endpoint, so a
+    # full-width terminal can sit sub-clearance to a neighbouring foreign pad.
+    if pcb_data is not None:
+        term_pts = [pts[0], pts[-1]]
+        if start_original:
+            term_pts.append((start_original[0], start_original[1]))
+        if end_original:
+            term_pts.append((end_original[0], end_original[1]))
+        _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
 
     return segments, vias
 
