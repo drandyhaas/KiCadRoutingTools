@@ -627,8 +627,12 @@ def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.0
     Only fires when (cx, cy) actually sits on a pad of net_id (a bare-pad
     endpoint - its coords ARE the pad center); a stub-tip launch point is away
     from any pad center, so no pad is found and the launch is left untouched
-    (the connector must stay attached to the existing stub). Returns the shifted
-    (x, y), clamped to stay inside the pad copper and never past the route start.
+    (the connector must stay attached to the existing stub). Returns
+    (x, y, shift): the shifted launch point (clamped to stay inside the pad copper
+    and never past the route start) and how far along the route direction it
+    moved (0.0 when no pad / no move) -- the caller subtracts that from the
+    centerline setback so the setback point stays put instead of being pushed
+    past the pad into a downstream blockage (issue #166).
     """
     pad, best = None, tol
     for p in pcb_data.pads_by_net.get(net_id, []):
@@ -636,12 +640,12 @@ def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.0
         if d <= best:
             best, pad = d, p
     if pad is None:
-        return cx, cy
+        return cx, cy, 0.0
 
     dx, dy = route_x - cx, route_y - cy
     norm = math.hypot(dx, dy)
     if norm < 1e-6:
-        return cx, cy
+        return cx, cy, 0.0
     dx, dy = dx / norm, dy / norm
 
     # Rotate the direction into the pad's local frame for diagonal pads, matching
@@ -659,15 +663,15 @@ def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.0
     else:
         reach = _rect_ray_exit(pad.size_x / 2, pad.size_y / 2, ldx, ldy)
     if not math.isfinite(reach) or reach <= 0:
-        return cx, cy
+        return cx, cy, 0.0
 
     # Stay just inside the pad edge so the track endpoint lands on pad copper,
     # and never launch past the route's first point (very short connectors).
     margin = min(config.track_width / 2, reach * 0.25)
     shift = min(reach - margin, max(0.0, norm - config.track_width / 2))
     if shift <= 1e-6:
-        return cx, cy
-    return cx + dx * shift, cy + dy * shift
+        return cx, cy, 0.0
+    return cx + dx * shift, cy + dy * shift, shift
 
 
 def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs):
@@ -1567,6 +1571,14 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             return None, 0, [], None
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
 
+    # Calculate setback distance (default to 4x spacing = 2x total P-N distance).
+    # Computed BEFORE the pad-edge launch so the launch shift can be subtracted
+    # from it (issue #166).
+    if config.diff_pair_centerline_setback is not None:
+        setback = config.diff_pair_centerline_setback
+    else:
+        setback = spacing_mm * 4  # Default: 4x the P-N half-spacing = 2x total P-N distance
+
     # Issue #165 root-cause 2 (routing side): for a long pad (USB-C, 1.45mm) the
     # terminal CENTER sits deep inside the pad, so the centerline setback point
     # lands within the pad's own copper (added as an obstacle) and the route can't
@@ -1575,22 +1587,25 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # stub/small terminals (their launch point isn't a pad center, or the edge ~
     # the center).
     _FAR = 10.0
-    p_src_x, p_src_y = _pad_edge_launch(pcb_data, p_net_id, p_src_x, p_src_y,
+    p_src_x, p_src_y, p_src_shift = _pad_edge_launch(pcb_data, p_net_id, p_src_x, p_src_y,
                                         p_src_x + src_dir_x * _FAR, p_src_y + src_dir_y * _FAR, config)
-    n_src_x, n_src_y = _pad_edge_launch(pcb_data, n_net_id, n_src_x, n_src_y,
+    n_src_x, n_src_y, n_src_shift = _pad_edge_launch(pcb_data, n_net_id, n_src_x, n_src_y,
                                         n_src_x + src_dir_x * _FAR, n_src_y + src_dir_y * _FAR, config)
-    p_tgt_x, p_tgt_y = _pad_edge_launch(pcb_data, p_net_id, p_tgt_x, p_tgt_y,
+    p_tgt_x, p_tgt_y, p_tgt_shift = _pad_edge_launch(pcb_data, p_net_id, p_tgt_x, p_tgt_y,
                                         p_tgt_x + tgt_dir_x * _FAR, p_tgt_y + tgt_dir_y * _FAR, config)
-    n_tgt_x, n_tgt_y = _pad_edge_launch(pcb_data, n_net_id, n_tgt_x, n_tgt_y,
+    n_tgt_x, n_tgt_y, n_tgt_shift = _pad_edge_launch(pcb_data, n_net_id, n_tgt_x, n_tgt_y,
                                         n_tgt_x + tgt_dir_x * _FAR, n_tgt_y + tgt_dir_y * _FAR, config)
     center_src_x, center_src_y = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
     center_tgt_x, center_tgt_y = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
 
-    # Calculate setback distance (default to 4x spacing = 2x total P-N distance)
-    if config.diff_pair_centerline_setback is not None:
-        setback = config.diff_pair_centerline_setback
-    else:
-        setback = spacing_mm * 4  # Default: 4x the P-N half-spacing = 2x total P-N distance
+    # The launch moved toward the pad edge; pull the centerline setback in by the
+    # same (averaged) amount so the setback POINT stays where a centre launch
+    # would have put it, instead of being pushed a full pad-length further out
+    # into a downstream blockage (issue #166 esp_prog). Floored so the setback
+    # still clears the pad edge it launched from.
+    _setback_floor = config.track_width / 2 + config.clearance
+    setback_src = max(_setback_floor, setback - (p_src_shift + n_src_shift) / 2)
+    setback_tgt = max(_setback_floor, setback - (p_tgt_shift + n_tgt_shift) / 2)
 
     if direction_label and config.verbose:
         print(f"  Probing {direction_label}...")
@@ -1609,7 +1624,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Get all valid setback positions for source and target, sorted by
     # preference, scanning a ladder of radii per terminal (issue #90)
     src_candidates, _, src_rotated = _find_open_positions_laddered(
-        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
         src_pad_gap_half, "source",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
@@ -1617,19 +1632,19 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         # Synthesized direction blocked - try escaping from the opposite side
         src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
         src_candidates, _, src_rotated = _find_open_positions_laddered(
-            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
             src_pad_gap_half, "source",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not src_candidates:
         blocked = _collect_setback_blocked_cells(
-            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
             config, obstacles, connector_obstacles, coord
         )
         return None, 0, blocked, None
 
     tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
-        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
         tgt_pad_gap_half, "target",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
@@ -1637,13 +1652,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         # Synthesized direction blocked - try escaping from the opposite side
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
         tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
-            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
             tgt_pad_gap_half, "target",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not tgt_candidates:
         blocked = _collect_setback_blocked_cells(
-            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
             config, obstacles, connector_obstacles, coord
         )
         return None, 0, blocked, None

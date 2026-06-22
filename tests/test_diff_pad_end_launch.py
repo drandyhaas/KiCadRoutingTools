@@ -68,31 +68,31 @@ def main():
 
     # 1. Long axis: route far above the pad (+y) -> launch near the top edge.
     pcb = _pcb([_pad(0.0, 0.0)])
-    x, y = _pad_edge_launch(pcb, NET, 0.0, 0.0, 0.0, 5.0, cfg)
+    x, y, _ = _pad_edge_launch(pcb, NET, 0.0, 0.0, 0.0, 5.0, cfg)
     check("long-axis launch moves toward route edge", y > HY * 0.6,
           f"y={y:.3f} (edge={HY:.3f})")
     check("long-axis launch stays inside pad", _inside(pcb.pads_by_net[NET][0], x, y),
           f"({x:.3f},{y:.3f})")
 
     # 2. Narrow axis: route to +x -> small shift bounded by the narrow half-extent.
-    x, y = _pad_edge_launch(pcb, NET, 0.0, 0.0, 5.0, 0.0, cfg)
+    x, y, _ = _pad_edge_launch(pcb, NET, 0.0, 0.0, 5.0, 0.0, cfg)
     check("narrow-axis launch bounded by half-width", 0 < x < HX,
           f"x={x:.3f} (half-width={HX:.3f})")
 
     # 3. Short connector: route point only 0.2mm away -> must not overshoot it.
-    x, y = _pad_edge_launch(pcb, NET, 0.0, 0.0, 0.0, 0.2, cfg)
+    x, y, _ = _pad_edge_launch(pcb, NET, 0.0, 0.0, 0.0, 0.2, cfg)
     check("short connector not launched past route start", 0 <= y <= 0.2 + 1e-9,
           f"y={y:.3f} (route at 0.2)")
 
     # 4. Stub endpoint: no pad at the launch point -> unchanged.
     pcb_far = _pcb([_pad(10.0, 10.0)])
-    x, y = _pad_edge_launch(pcb_far, NET, 0.0, 0.0, 0.0, 5.0, cfg)
+    x, y, _ = _pad_edge_launch(pcb_far, NET, 0.0, 0.0, 0.0, 5.0, cfg)
     check("non-pad (stub) launch left untouched", x == 0.0 and y == 0.0,
           f"({x:.3f},{y:.3f})")
 
     # 5. Diagonal pad (rect_rotation): launch still lands inside the rotated rect.
     pcb_rot = _pcb([_pad(0.0, 0.0, rot=30.0)])
-    x, y = _pad_edge_launch(pcb_rot, NET, 0.0, 0.0, 3.0, 5.0, cfg)
+    x, y, _ = _pad_edge_launch(pcb_rot, NET, 0.0, 0.0, 3.0, 5.0, cfg)
     check("diagonal pad launch stays inside rotated rect",
           _inside(pcb_rot.pads_by_net[NET][0], x, y), f"({x:.3f},{y:.3f})")
     check("diagonal pad launch actually moved", (x * x + y * y) > 1e-6)
@@ -101,7 +101,7 @@ def main():
     # CIRCLE, not the rect bounding box (which would put it in a corner off-copper).
     R = 0.5
     pcb_c = _pcb([_pad(0.0, 0.0, sx=2 * R, sy=2 * R, shape='circle')])
-    x, y = _pad_edge_launch(pcb_c, NET, 0.0, 0.0, 5.0, 5.0, cfg)  # route up-right (45 deg)
+    x, y, _ = _pad_edge_launch(pcb_c, NET, 0.0, 0.0, 5.0, 5.0, cfg)  # route up-right (45 deg)
     check("circle pad launch stays inside the circle (not the bbox corner)",
           math.hypot(x, y) <= R + 1e-6, f"r={math.hypot(x, y):.3f} (R={R})")
     check("circle pad launch actually moved", (x * x + y * y) > 1e-6)
