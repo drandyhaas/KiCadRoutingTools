@@ -1340,6 +1340,52 @@ def _geometric_plane_verification(
     return results
 
 
+def _neck_plane_segments_around_vias(all_new_segments, pcb_data, clearance, min_width=0.1):
+    """Neck plane tap segments so they clear foreign vias by `clearance`.
+
+    The tap router (route_via_to_pad) exempts its source/target cells from the
+    obstacle map and appends an un-obstacle-checked stub to the pad centre, so a
+    full-width tap can graze a foreign via that sits inside the via keep-out near
+    its target pad (e.g. a GND pad placed ~0.4mm from a signal via). Narrowing a
+    trace only ever REMOVES a clearance conflict, never creates one, so we shrink
+    each tap segment to the widest value that still clears every nearby foreign
+    via, floored at `min_width` (placement-limited residue stays as-is).
+    """
+    import math
+    vias = [(v.x, v.y, v.size / 2.0, v.net_id, v.layers) for v in pcb_data.vias]
+    necked = 0
+    for seg in all_new_segments:
+        x0, y0 = seg['start']; x1, y1 = seg['end']
+        base = seg['width']; layer = seg['layer']; nid = seg['net_id']
+        half = base / 2.0
+        new_half = half
+        dx = x1 - x0; dy = y1 - y0; L2 = dx * dx + dy * dy
+        minx, maxx = min(x0, x1), max(x0, x1)
+        miny, maxy = min(y0, y1), max(y0, y1)
+        for vx, vy, vr, vnid, vlayers in vias:
+            if vnid == nid:
+                continue
+            # via conflicts on this layer if it's through (F.Cu&B.Cu) or lists it
+            if not (('F.Cu' in vlayers and 'B.Cu' in vlayers) or layer in vlayers):
+                continue
+            margin = half + vr + clearance
+            if vx < minx - margin or vx > maxx + margin or vy < miny - margin or vy > maxy + margin:
+                continue
+            t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((vx - x0) * dx + (vy - y0) * dy) / L2))
+            d = math.hypot(vx - (x0 + t * dx), vy - (y0 + t * dy))
+            allowed = d - vr - clearance - 1e-4  # 1e-4: stay just inside the rule
+            if allowed < new_half:
+                new_half = allowed
+        floor_half = min(base, min_width) / 2.0
+        new_half = max(new_half, floor_half)
+        if new_half < half - 1e-9:
+            seg['width'] = round(2.0 * new_half, 4)
+            necked += 1
+    if necked:
+        print(f"  Necked {necked} plane tap segment(s) to clear foreign vias")
+    return necked
+
+
 def _write_output_and_reroute(
     input_file: str,
     output_file: str,
@@ -1376,6 +1422,11 @@ def _write_output_and_reroute(
     combined_zone_sexpr = '\n'.join(all_sexprs) if all_sexprs else None
     if all_debug_lines:
         print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
+
+    # Neck tap segments that graze foreign vias near their target pads (the tap
+    # router exempts source/target cells, so the obstacle keep-out can't enforce
+    # clearance at the pad). Narrowing only removes conflicts.
+    _neck_plane_segments_around_vias(all_new_segments, pcb_data, clearance)
 
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,

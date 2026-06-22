@@ -467,10 +467,11 @@ def precompute_via_placement_obstacles(
         seg_expansion_sq = (seg_expansion_mm / config.grid_step) ** 2
         seg_expansion_int = int(math.ceil(math.sqrt(seg_expansion_sq)))
 
-        # Routing clearance for this segment's layer
+        # Routing clearance for this segment's layer (circular test: use float
+        # squared radius + ceil scan bound so we don't under-reserve by ~1 cell)
         route_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
-        route_expansion_sq = route_expansion_grid * route_expansion_grid
+        route_expansion_sq = (route_expansion_mm / config.grid_step) ** 2
+        route_expansion_grid = max(1, int(math.ceil(math.sqrt(route_expansion_sq))))
 
         # Walk along segment using Bresenham
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -533,7 +534,8 @@ def precompute_via_placement_obstacles(
     via_via_radius_sq = (via_via_expansion_mm / config.grid_step) ** 2
     via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
 
-    via_route_expansion = coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance)
+    via_route_expansion_sq = ((config.via_size / 2 + config.track_width / 2 + config.clearance) / config.grid_step) ** 2
+    via_route_expansion = max(1, int(math.ceil(math.sqrt(via_route_expansion_sq))))
 
     for via in pcb_data.vias:
         if via.net_id != net_id:
@@ -548,7 +550,7 @@ def precompute_via_placement_obstacles(
         for layer in all_copper_layers:
             for ex in range(-via_route_expansion, via_route_expansion + 1):
                 for ey in range(-via_route_expansion, via_route_expansion + 1):
-                    if ex*ex + ey*ey <= via_route_expansion * via_route_expansion:
+                    if ex*ex + ey*ey <= via_route_expansion_sq:
                         blocked_cells_by_layer[layer].append((gx + ex, gy + ey))
 
     # Convert to numpy arrays (keep duplicates for reference counting)
