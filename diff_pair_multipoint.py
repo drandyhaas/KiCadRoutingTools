@@ -311,6 +311,7 @@ def _relocate_blocked_terminals(state, pair: DiffPairNet, terminals, obstacles, 
     tgt_idx = config.layers.index(target_layer)
     new_terminals = list(terminals)
     fans = []
+    relocated_pads = []
     for i, (pp, nn) in enumerate(terminals):
         cx, cy = centers[i]
         pad_layer = _pad_layer(pp, config)
@@ -328,18 +329,77 @@ def _relocate_blocked_terminals(state, pair: DiffPairNet, terminals, obstacles, 
         via_p, stub_p = apply_bare_pad_target_via(pcb_data, pp.net_id, pp.global_x, pp.global_y, target_layer, ax, ay, config)
         via_n, stub_n = apply_bare_pad_target_via(pcb_data, nn.net_id, nn.global_x, nn.global_y, target_layer, ax, ay, config)
         fans += [(via_p, stub_p), (via_n, stub_n)]
+        relocated_pads += [pp, nn]
         new_terminals[i] = (_fake_pad(pp, stub_p.end_x, stub_p.end_y, target_layer),
                             _fake_pad(nn, stub_n.end_x, stub_n.end_y, target_layer))
         print(f"    Relocated terminal {pp.component_ref}:{pp.pad_number}/{nn.pad_number} "
               f"{pad_layer}({frac*100:.0f}%) -> {target_layer}({tgt_frac*100:.0f}%)")
+
+    # A relocation drops a through-via on each pad. On a dense connector (USB-C,
+    # fine-pitch headers) those per-pad vias can't fit - 0.5mm-pitch pads with a
+    # 0.5mm via collide - so relocating there just trades the original blockage
+    # for via-via / via-pad violations. Validate the fan vias with the same
+    # clearance check as check_drc; if they don't fit, abort the relocation (the
+    # pair then falls through to single-ended, the right treatment for a dense
+    # connector fan-out). Issue #165.
+    if fans and not _fans_fit(pcb_data, fans, relocated_pads, config):
+        print(f"    Relocation to {target_layer} would collide (dense pads) - "
+              f"skipping (pair falls through to single-ended)")
+        _cleanup_fans(pcb_data, fans)
+        return list(terminals), []
     return new_terminals, fans
 
 
-def _attach_fans(merged, fans):
-    """Record relocation fan copper (via + stub per pad) on the merged route so
-    sync_pcb_data_segments writes it to the output."""
-    merged['new_segments'] = list(merged.get('new_segments', [])) + [s for _, s in fans]
-    merged['new_vias'] = list(merged.get('new_vias', [])) + [v for v, _ in fans]
+def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
+    """True if every relocation fan via clears (check_drc clearance) the other fan
+    vias, the existing vias, and all foreign pads. The via legitimately sits on
+    its own relocated pad, so those pads are excluded from the pad-via test."""
+    from check_drc import check_via_via_overlap, check_pad_via_overlap
+    clearance = config.clearance
+    margin = 0.05  # match check_drc's default --clearance-margin
+    fan_vias = [v for v, _ in fans]
+    fan_ids = {id(v) for v in fan_vias}
+    reloc_ids = {id(p) for p in relocated_pads}
+    routing_layers = list({s.layer for s in pcb_data.segments if s.layer.endswith('.Cu')}) or list(config.layers)
+
+    for i, v in enumerate(fan_vias):
+        for w in fan_vias[i + 1:]:
+            if check_via_via_overlap(v, w, clearance, margin)[0]:
+                return False
+        for ev in pcb_data.vias:
+            if id(ev) not in fan_ids and check_via_via_overlap(v, ev, clearance, margin)[0]:
+                return False
+        for pads in pcb_data.pads_by_net.values():
+            for pad in pads:
+                if id(pad) in reloc_ids:
+                    continue
+                if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
+                    return False
+    return True
+
+
+def _attach_fans(merged, fans, legs=None):
+    """Record relocation fan copper (a layer-switch via + inner-layer stub per
+    relocated pad) so it is WRITTEN to the output.
+
+    The output file is generated from the per-leg `results` list, and vias in
+    particular reach the output ONLY through a result's ``new_vias`` -
+    sync_pcb_data_segments syncs segments but not vias. So fan copper recorded
+    only on the `merged` bookkeeping dict (which feeds obstacle sync, not the
+    writer) is dropped from the output: the relocated route then lands on the
+    inner layer with NO via back to its surface pad and is left floating - the
+    whole pair disconnected though DRC-clean (issue #165, tigard /USB_D on a
+    congested F.Cu that forced relocation to In1.Cu). Put the fan copper on a
+    real leg result so the writer emits its vias, and keep `merged` consistent
+    for obstacle sync."""
+    fan_segs = [s for _, s in fans]
+    fan_vias = [v for v, _ in fans]
+    sink = legs[0] if legs else merged
+    sink['new_segments'] = list(sink.get('new_segments', [])) + fan_segs
+    sink['new_vias'] = list(sink.get('new_vias', [])) + fan_vias
+    if merged is not sink:
+        merged['new_segments'] = list(merged.get('new_segments', [])) + fan_segs
+        merged['new_vias'] = list(merged.get('new_vias', [])) + fan_vias
 
 
 def _cleanup_fans(pcb_data, fans):
@@ -533,7 +593,12 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
             legs, m, se_legs = _route_terminal_set(state, pair, pair_name, reloc)
             if legs is not None:
                 if m is not None:
-                    _attach_fans(m, fans)
+                    _attach_fans(m, fans, legs)
+                else:
+                    # Every leg deferred to single-ended - the relocation buys
+                    # nothing (the single-ended pass connects the pads directly),
+                    # so drop its fan copper instead of leaving it floating.
+                    _cleanup_fans(pcb_data, fans)
                 return legs, m, se_legs
             _cleanup_fans(pcb_data, fans)
         return None, None, []
@@ -559,7 +624,17 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
             leg_results, merged, se = _try_relocated(coupled)
             if leg_results is not None:
                 return leg_results, merged, uncoupled + se
-    return None, None, []
+
+    # No coupled chain could be routed and relocation didn't help (e.g. a dense
+    # connector fan-out whose pads are too tightly pitched to drop relocation
+    # vias - tigard /USB_D on a congested F.Cu). Rather than leave the pair
+    # unrouted, defer the WHOLE pair to single-ended: the follow-up pass routes
+    # each net as a plain track to its pads (no coupling, no graze). Signalled
+    # like the all-electrically-short case (empty legs, no merged, all terminals
+    # peeled). Issue #165.
+    print(f"  Coupled routing failed and relocation unavailable - deferring the "
+          f"whole pair to single-ended")
+    return [], None, list(terminals)
 
 
 def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,

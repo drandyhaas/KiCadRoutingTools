@@ -299,6 +299,22 @@ diagonal (`rect_rotation`) pads.
 python3 tests/test_diff_pad_end_launch.py
 ```
 
+### test_diff_relocation_fans.py - Relocation Fallback (issue #165)
+
+Unit test for the multipoint terminal-relocation fallback. When a pair can't
+launch on its pads' congested layer, the router relocates terminals to an open
+inner layer by dropping a through-via per pad. Two guards: `_attach_fans` must
+put the fan VIAS on a real leg result (the output is written from per-leg
+`results`; segment-sync doesn't carry vias, so a via left only on the bookkeeping
+`merged` dict is dropped and the relocated route floats with no via to its pad —
+the tigard `/USB_D` "DRC-clean but disconnected" failure). `_fans_fit` rejects a
+relocation whose per-pad vias can't fit (USB-C 0.5mm pitch + 0.5mm via collide),
+so the pair falls through to single-ended instead of emitting via-via violations.
+
+```bash
+python3 tests/test_diff_relocation_fans.py
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub
