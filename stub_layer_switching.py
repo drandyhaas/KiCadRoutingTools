@@ -736,10 +736,18 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
 
     # Check 5: the stub copper moved onto dest_layer must clear other-net pads
     # living on that layer (issue #123: escape stub swapped onto a cap pad's
-    # layer grazed the pad).
+    # layer grazed the pad). Each polarity's stub is checked against the OTHER
+    # polarity's pads too: at a single-ended breakout (a per-net test point, e.g.
+    # EXT_PLL- TP20) the two halves diverge to separate pads, and the +stub must
+    # clear the -net's test-point pad even though they are the same pair (issue
+    # #168). Only the stub's OWN net and any swap-partner pair are exempt; the
+    # coupled body itself is segments, not pads, so legitimate parallel running
+    # is unaffected.
+    partner_excl = set(swap_partner_net_ids or set())
     for stub in (stub_p, stub_n):
         pad_clear, pad_reason = stub_clear_of_foreign_pads(
-            stub.segments, dest_layer, stub.net_id, pcb_data, config, via_exclude)
+            stub.segments, dest_layer, stub.net_id, pcb_data, config,
+            partner_excl | {stub.net_id})
         if not pad_clear:
             return False, pad_reason
 
