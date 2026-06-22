@@ -55,6 +55,13 @@ class Pad:
     # orthogonal pads (deg, in (-90,90]). 0 for axis-aligned pads (the common
     # case) where the rotation is already baked into size_x/size_y. The
     # obstacle/DRC geometry rotates the pad rectangle by this angle.
+    custom_obstacle: Optional[Tuple[float, float, float, float]] = None
+    # shape == "custom" pads with a (primitives ...) block: the real copper's GLOBAL
+    # axis-aligned bounding box (center_x, center_y, half_x, half_y). A KiCad SolderJumper
+    # pad declares a small (size ...) anchor plus larger gr_poly/gr_circle primitives, so the
+    # (size) rectangle under-models the copper; the obstacle map must cover the anchor UNION
+    # the primitives or a track can route across the unmodelled copper and short. None for
+    # standard pads, where the (size ...) rectangle is the copper.
 
 
 @dataclass
@@ -217,6 +224,41 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
     global_y = fp_y + (pad_local_x * sin_r + pad_local_y * cos_r)
 
     return global_x, global_y
+
+
+def _pad_custom_copper_extremes(pad_text):
+    """Extreme (x, y) points, in the pad's own frame, of a custom pad's (primitives ...)
+    copper, or [] if the pad has no primitives block. Covers gr_poly (vertices), gr_circle
+    (center +/- radius), gr_rect/gr_line (corners), and gr_arc (linearized to a polyline so the
+    bbox spans the arc's bulge, not just its 3 defining points); each grown by its (width ...)/2.
+    Conservative: the bounding box of these points contains the real
+    copper, so an obstacle covering that box never under-models a custom pad (e.g. a KiCad
+    SolderJumper, whose copper lives in the primitives, not the small (size ...) anchor)."""
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return []
+    block = pad_text[pm.start():find_matching_paren(pad_text, pm.start())]
+    pts = []
+    for gm in re.finditer(r'\(gr_(poly|circle|rect|line|arc)\b', block):
+        sub = block[gm.start():find_matching_paren(block, gm.start())]
+        wm = re.search(r'\(width\s+([\d.eE+-]+)\)', sub)
+        half_w = float(wm.group(1)) / 2 if wm else 0.0
+        coords = [(float(a), float(b)) for a, b in re.findall(
+            r'\((?:xy|start|mid|end|center)\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)', sub)]
+        if gm.group(1) == 'circle' and len(coords) >= 2:
+            (cx, cy), (ex, ey) = coords[0], coords[1]    # (center ..) then (end ..)
+            r = math.hypot(ex - cx, ey - cy) + half_w
+            pts += [(cx - r, cy - r), (cx + r, cy + r)]
+        elif gm.group(1) == 'arc' and len(coords) >= 3:
+            # An arc bulges past its (start)(mid)(end) points; linearize it (as the Edge.Cuts
+            # bounds path does, _arc_to_segments) so the bbox spans the bulge, not the chord.
+            for (p0, p1) in _arc_to_segments(coords[0], coords[1], coords[2]):
+                for (x, y) in (p0, p1):
+                    pts += [(x - half_w, y - half_w), (x + half_w, y + half_w)]
+        else:
+            for (x, y) in coords:
+                pts += [(x - half_w, y - half_w), (x + half_w, y + half_w)]
+    return pts
 
 
 # Tolerance (deg) within which a pad rotation is treated as axis-aligned and
@@ -1112,6 +1154,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # common orthogonal cases bake the rotation into the dimensions so
             # all downstream axis-aligned geometry stays exact; genuine diagonal
             # pads keep a residual rect_rotation the obstacle/DRC geometry applies.
+            raw_size_x, raw_size_y = size_x, size_y  # anchor dims before the orthogonal bake
             size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
             # Extract layers - use findall to get all quoted layer names
@@ -1160,6 +1203,26 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
 
+            # Custom-pad copper: model the real (primitives ...) copper, not just the (size ...)
+            # anchor, so a track cannot route across unmodelled custom-pad copper (e.g. a
+            # SolderJumper) and short. Transform the pad-frame extreme points through the same
+            # pad->footprint->board transform local_to_global applies (the pad (at) angle is
+            # footprint-relative; absolute orientation is pad+footprint), then take their GLOBAL
+            # axis-aligned bbox (conservative; never under-blocks).
+            custom_obstacle = None
+            if pad_shape == 'custom':
+                extremes = _pad_custom_copper_extremes(pad_text)
+                if extremes:
+                    ax, ay = raw_size_x / 2, raw_size_y / 2
+                    local_pts = extremes + [(-ax, -ay), (ax, -ay), (-ax, ay), (ax, ay)]
+                    gpts = [local_to_global(fp_x, fp_y, fp_rotation,
+                                            *local_to_global(local_x, local_y, pad_rotation, lx, ly))
+                            for (lx, ly) in local_pts]
+                    xs = [p[0] for p in gpts]
+                    ys = [p[1] for p in gpts]
+                    custom_obstacle = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2,
+                                       (max(xs) - min(xs)) / 2, (max(ys) - min(ys)) / 2)
+
             pad = Pad(
                 component_ref=reference,
                 pad_number=pad_num,
@@ -1178,7 +1241,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 pintype=pintype,
                 drill=drill_size,
                 roundrect_rratio=roundrect_rratio,
-                rect_rotation=rect_rotation
+                rect_rotation=rect_rotation,
+                custom_obstacle=custom_obstacle
             )
 
             footprint.pads.append(pad)
@@ -1849,6 +1913,22 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             except Exception:
                 roundrect_rratio = 0.0
 
+            # Custom-pad copper: GetSize() above is only the (size ...) anchor; a custom pad's
+            # real copper (its primitives) can be much larger (e.g. a SolderJumper), so model the
+            # pad's full board-space bounding box or a track can short across the unmodelled copper
+            # (mirrors the text-parser path's _pad_custom_copper_extremes). pcbnew's GetBoundingBox
+            # spans the primitives and is conservative; on any API mismatch fall back to None (the
+            # (size ...) behaviour) rather than crash.
+            custom_obstacle = None
+            if shape == 'custom':
+                try:
+                    bb = pad.GetBoundingBox()
+                    custom_obstacle = (to_mm((bb.GetLeft() + bb.GetRight()) / 2),
+                                       to_mm((bb.GetTop() + bb.GetBottom()) / 2),
+                                       to_mm(bb.GetWidth()) / 2, to_mm(bb.GetHeight()) / 2)
+                except Exception:
+                    custom_obstacle = None
+
             pad_obj = Pad(
                 component_ref=reference,
                 pad_number=pad_num,
@@ -1867,7 +1947,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 pintype=pintype,
                 drill=drill,
                 roundrect_rratio=roundrect_rratio,
-                rect_rotation=rect_rotation
+                rect_rotation=rect_rotation,
+                custom_obstacle=custom_obstacle
             )
 
             footprint.pads.append(pad_obj)

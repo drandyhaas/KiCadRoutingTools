@@ -106,9 +106,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # For track blocking by vias: via half-size + max routing track half-width + clearance
         via_track_mm = via_size / 2 + max_track_width / 2 + effective_clearance + extra_clearance
         via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
-        # For via-to-via: via size + routing via size + clearance
+        # For via-to-via: via size + routing via size + clearance. Round UP for safety
+        # (to_grid_dist_safe) like via-to-track above, NOT down: to_grid_dist truncates, so the
+        # via-via keepout could land up to one grid cell short and ship a sub-clearance drill-to-
+        # drill spacing (e.g. a 0.8mm via 0.224mm edge-to-edge from a foreign 0.8mm via at a
+        # 0.25mm clearance on a 0.1mm grid -- 1.05mm required, truncated to a 1.0mm keepout).
         via_via_mm = via_size / 2 + config.via_size / 2 + effective_clearance
-        via_via_expansion_grid = max(1, coord.to_grid_dist(via_via_mm))
+        via_via_expansion_grid = max(1, coord.to_grid_dist_safe(via_via_mm))
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid)
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
@@ -1360,25 +1364,36 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         skip_cell: Optional (gx, gy) -> bool predicate; cells for which it returns
             True are left unblocked (used for connector-region exemptions)
     """
-    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    # Custom pads (e.g. SolderJumpers) carry most of their copper in (primitives ...), not the
+    # (size ...) anchor; pad.custom_obstacle is the real copper's global bbox (center, half) so
+    # the obstacle covers it and a track cannot short across the unmodelled copper. Standard
+    # pads keep the (size ...) rectangle at the pad center with the shape's corner rounding.
+    if pad.custom_obstacle is not None:
+        ocx, ocy, half_width, half_height = pad.custom_obstacle
+        corner_radius = 0
+        pad_rot = 0.0
+    else:
+        ocx, ocy = pad.global_x, pad.global_y
+        half_width = pad.size_x / 2
+        half_height = pad.size_y / 2
+        pad_rot = pad.rect_rotation
+        # Compute corner radius based on pad shape:
+        # - circle/oval: use min dimension to model as stadium/capsule shape
+        # - roundrect: use the roundrect_rratio from pad
+        # - rect: no rounding
+        if pad.shape in ('circle', 'oval'):
+            corner_radius = min(half_width, half_height)
+        elif pad.shape == 'roundrect':
+            corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+        else:
+            corner_radius = 0
+    gx, gy = coord.to_grid(ocx, ocy)
     # Sub-cell offset of the real pad center from its quantized cell, so blocking
     # is measured from the real center, not the grid cell (issue #70).
-    off_x = pad.global_x - gx * coord.grid_step
-    off_y = pad.global_y - gy * coord.grid_step
-    half_width = pad.size_x / 2
-    half_height = pad.size_y / 2
+    off_x = ocx - gx * coord.grid_step
+    off_y = ocy - gy * coord.grid_step
     clearance = clearance_override if clearance_override is not None else config.clearance
     margin = config.track_width / 2 + clearance + extra_clearance
-    # Compute corner radius based on pad shape:
-    # - circle/oval: use min dimension to model as stadium/capsule shape
-    # - roundrect: use the roundrect_rratio from pad
-    # - rect: no rounding
-    if pad.shape in ('circle', 'oval'):
-        corner_radius = min(half_width, half_height)
-    elif pad.shape == 'roundrect':
-        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
-        corner_radius = 0
 
     # Expand wildcard layers like "*.Cu" to actual routing layers
     expanded_layers = expand_pad_layers(pad.layers, config.layers)
@@ -1396,7 +1411,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     layer_idxs = [layer_map[layer] for layer in expanded_layers if layer in layer_map]
     cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
                                     config.grid_step, corner_radius, corner_buffer,
-                                    off_x, off_y, rotation_deg=pad.rect_rotation)
+                                    off_x, off_y, rotation_deg=pad_rot)
     if skip_cell is not None and len(cells):
         keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in cells),
                            dtype=bool, count=len(cells))
@@ -1409,7 +1424,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         via_margin = config.via_size / 2 + clearance + extra_clearance
         via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                             config.grid_step, corner_radius, corner_buffer,
-                                            off_x, off_y, rotation_deg=pad.rect_rotation)
+                                            off_x, off_y, rotation_deg=pad_rot)
         if skip_cell is not None and len(via_cells):
             keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in via_cells),
                                dtype=bool, count=len(via_cells))

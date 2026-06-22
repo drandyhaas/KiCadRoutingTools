@@ -237,20 +237,31 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
     """
-    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-    # Sub-cell offset of the real pad center from its grid cell (issue #70).
-    off_x = pad.global_x - gx * coord.grid_step
-    off_y = pad.global_y - gy * coord.grid_step
-    half_width = pad.size_x / 2
-    half_height = pad.size_y / 2
-    margin = config.track_width / 2 + config.clearance + extra_clearance
-    # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
-    if pad.shape in ('circle', 'oval'):
-        corner_radius = min(half_width, half_height)
-    elif pad.shape == 'roundrect':
-        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
+    # Custom pads (e.g. SolderJumpers) carry most of their copper in (primitives ...), not the
+    # (size ...) anchor; pad.custom_obstacle is the real copper's global bbox (center, half) so
+    # the obstacle covers it and a track cannot short across the unmodelled copper. Standard
+    # pads keep the (size ...) rectangle at the pad center with the shape's corner rounding.
+    if pad.custom_obstacle is not None:
+        ocx, ocy, half_width, half_height = pad.custom_obstacle
         corner_radius = 0
+        pad_rot = 0.0
+    else:
+        ocx, ocy = pad.global_x, pad.global_y
+        half_width = pad.size_x / 2
+        half_height = pad.size_y / 2
+        pad_rot = pad.rect_rotation
+        # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
+        if pad.shape in ('circle', 'oval'):
+            corner_radius = min(half_width, half_height)
+        elif pad.shape == 'roundrect':
+            corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+        else:
+            corner_radius = 0
+    gx, gy = coord.to_grid(ocx, ocy)
+    # Sub-cell offset of the real pad center from its grid cell (issue #70).
+    off_x = ocx - gx * coord.grid_step
+    off_y = ocy - gy * coord.grid_step
+    margin = config.track_width / 2 + config.clearance + extra_clearance
 
     expanded_layers = expand_pad_layers(pad.layers, config.layers)
 
@@ -259,7 +270,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
                                     config.grid_step, corner_radius,
                                     off_x=off_x, off_y=off_y,
-                                    rotation_deg=pad.rect_rotation)
+                                    rotation_deg=pad_rot)
     for layer in expanded_layers:
         layer_idx = layer_map.get(layer)
         if layer_idx is not None:
@@ -275,7 +286,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
                                                     via_margin, config.grid_step, corner_radius,
                                                     off_x=off_x, off_y=off_y,
-                                                    rotation_deg=pad.rect_rotation))
+                                                    rotation_deg=pad_rot))
 
 
 def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: GridRouteConfig,
