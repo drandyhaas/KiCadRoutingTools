@@ -20,6 +20,12 @@ import math
 from itertools import permutations
 from typing import List, Optional, Tuple
 
+try:
+    from scipy.optimize import linear_sum_assignment
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from diff_pair_routing import (
@@ -83,10 +89,51 @@ def _oriented(terminal: Tuple[Pad, Pad], pair: DiffPairNet) -> Tuple[Pad, Pad]:
     return terminal
 
 
+def _min_cost_matching(cost: List[List[float]]) -> List[Tuple[int, int]]:
+    """Minimum-total-cost bipartite matching of a rectangular cost matrix
+    (rows x cols). Returns min(rows, cols) (row, col) index pairs, each row and
+    each column used at most once. Uses scipy's Hungarian solver when available
+    (e.g. CLI), else an exact brute force for the tiny pad counts seen here
+    (KiCad's bundled Python has no scipy), with a greedy fallback for the rare
+    large case."""
+    rows = len(cost)
+    cols = len(cost[0]) if rows else 0
+    if rows == 0 or cols == 0:
+        return []
+    if HAS_SCIPY:
+        import numpy as np
+        ri, ci = linear_sum_assignment(np.array(cost, dtype=float))
+        return list(zip(ri.tolist(), ci.tolist()))
+
+    # No scipy: brute-force the smaller side over the larger. Pad counts per net
+    # are tiny (connector redundancy is a handful of pins), so this is cheap.
+    transpose = rows > cols
+    c = [[cost[r][cc] for r in range(rows)] for cc in range(cols)] if transpose else cost
+    nr = len(c)            # nr <= nc after any transpose
+    nc = len(c[0])
+    if math.perm(nc, nr) <= 40320:  # 8! injective assignments
+        best_total, best = None, None
+        for perm in permutations(range(nc), nr):
+            total = sum(c[r][perm[r]] for r in range(nr))
+            if best_total is None or total < best_total:
+                best_total, best = total, perm
+        pairs = [(r, best[r]) for r in range(nr)]
+    else:
+        # Greedy fallback (suboptimal, but only for unrealistically many pads).
+        used_r, used_c, pairs = set(), set(), []
+        for _, r, cc in sorted((c[r][cc], r, cc) for r in range(nr) for cc in range(nc)):
+            if r in used_r or cc in used_c:
+                continue
+            used_r.add(r)
+            used_c.add(cc)
+            pairs.append((r, cc))
+    return [(cc, r) for (r, cc) in pairs] if transpose else pairs
+
+
 def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
                             ) -> List[Tuple[Pad, Pad]]:
-    """Group the pair's pads into (p_pad, n_pad) terminals by greedy matching,
-    preferring P/N pads on the SAME component before a globally-closer
+    """Group the pair's pads into (p_pad, n_pad) terminals by minimum-cost
+    matching, preferring P/N pads on the SAME component before a globally-closer
     cross-component pad. Each terminal is a P pad and its physically adjacent N
     pad (connector pins, IC input pair, termination resistor, ...).
 
@@ -98,29 +145,32 @@ def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
     Those bogus terminals then route a coupled leg straight across the partner
     polarity's connector pad, shorting the pair (castor_pollux /MCU/CONN_D).
     Pairing the connector's own pins keeps each leg clear of the partner pad
-    (and a too-wide own-pin terminal is later peeled to single-ended)."""
+    (and a too-wide own-pin terminal is later peeled to single-ended).
+
+    Greedy-by-distance is *locally* optimal but not globally: a closest-first
+    pick can strand the leftover pads into a far pairing. On a USB-C connector
+    whose redundant DP/DN pads interleave (J1 y-order B7,A6,A7,B6), greedy took
+    {A6,A7}(0.5mm) first and was then forced into {B6,B7}(1.5mm) - the wide
+    terminal drives a long diagonal connector that grazes the partner pad
+    (issue #165). Minimum-TOTAL-cost matching instead yields {A6,B7}+{B6,A7}
+    (0.5+0.5), each terminal tight so its connector launches straight out."""
     p_pads = pcb_data.pads_by_net.get(p_net_id, [])
     n_pads = pcb_data.pads_by_net.get(n_net_id, [])
+    if not p_pads or not n_pads:
+        return []
 
-    candidates = []
-    for pp in p_pads:
-        for nn in n_pads:
-            dist = math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
-            cross_comp = 0 if pp.component_ref == nn.component_ref else 1
-            candidates.append((cross_comp, dist, id(pp), id(nn), pp, nn))
-    # All same-component pairs first (closest within that class), then
-    # cross-component leftovers by distance.
-    candidates.sort(key=lambda c: (c[0], c[1]))
+    # Lexicographic cost: cross-component pairings carry a penalty larger than
+    # any achievable total distance, so the matcher minimizes the cross-component
+    # count first (keeping a part's own diff pins paired), then total distance.
+    dist_sum = sum(math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
+                   for pp in p_pads for nn in n_pads)
+    cross_penalty = dist_sum + 1.0
+    cost = [[math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
+             + (0.0 if pp.component_ref == nn.component_ref else cross_penalty)
+             for nn in n_pads]
+            for pp in p_pads]
 
-    terminals = []
-    used_p, used_n = set(), set()
-    for cross_comp, dist, pid, nid, pp, nn in candidates:
-        if pid in used_p or nid in used_n:
-            continue
-        used_p.add(pid)
-        used_n.add(nid)
-        terminals.append((pp, nn))
-    return terminals
+    return [(p_pads[i], n_pads[j]) for (i, j) in _min_cost_matching(cost)]
 
 
 def _terminal_center(terminal: Tuple[Pad, Pad]) -> Tuple[float, float]:

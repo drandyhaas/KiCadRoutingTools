@@ -270,6 +270,21 @@ clearance. Pure-geometry, no Rust router or board file needed.
 python3 tests/test_diff_connector_graze.py
 ```
 
+### test_diff_terminal_pairing.py - Diff-Pair Terminal Pairing (issue #165)
+
+Unit test for `get_diff_pair_terminals`. The old greedy-by-distance matcher is
+only locally optimal: a closest-first pick can strand leftover pads into a far
+pairing. On a USB-C connector whose redundant DP/DN pads interleave (J1 y-order
+B7,A6,A7,B6), greedy took `{A6,A7}`(0.5mm) first and was forced into
+`{B6,B7}`(1.5mm) — the wide terminal drives a long diagonal connector that grazes
+the partner pad. Minimum-total-cost matching yields `{A6,B7}+{B6,A7}` (0.5+0.5).
+The test asserts the optimal pairing on both the scipy and the no-scipy
+brute-force code paths (KiCad's bundled Python has no scipy).
+
+```bash
+python3 tests/test_diff_terminal_pairing.py
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub
