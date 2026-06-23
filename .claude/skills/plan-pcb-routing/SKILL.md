@@ -728,6 +728,25 @@ python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5_r
     --power-nets <PWR...> --power-nets-widths <W...> [--no-bga-zone] \
     2>&1 | tee /tmp/step5_plane_repair.txt
 
+**If it reports `Pads still unconnected` on fine-pitch (BGA/QFN ≤0.5 mm-pitch)
+pads, retry the repair in this order — cheapest/safest first:**
+
+1. **Smaller via first** — drop `--via-size`/`--via-drill` toward the **fab-floor
+   / fine-pitch escape via** (e.g. `0.30/0.15`), but **never below the fab via
+   floor**. A boxed fine-pitch pad usually fails because the repair *via* can't
+   fit beside the ball; a smaller via fits in/near it and frees the connection.
+2. **Then finer grid** — drop `--grid-step` (e.g. `0.05 → 0.025`), but **not below
+   the board's minimum feature / your fab grid**. This is for the case where the
+   pad connects by a *trace* to an adjacent already-connected same-net ball (the
+   repair does this automatically): the trace is already thin, but at a coarse
+   grid the A* can't thread the 0.65 mm-pitch BGA escape. **Measured on
+   ottercast_audio: GND U1.N4 fails to route at `--grid-step 0.05` but connects
+   to its neighbour ball at `0.025`** — it's a grid-resolution limit, not a width
+   one (the trace runs at the thin signal track in both the A* and obstacle map).
+
+Re-check `check_connected.py` after each retry; stop as soon as the pads connect
+(finer grid is slower, so only escalate to it if the smaller via didn't do it).
+
 ### Step 5c: Reconnect the nets plane-repair left unrouted (mandatory if Step 5 ripped any)
 route_disconnected_planes lists the blockers it ripped and left unrouted. Reconnect
 them with a final route.py pass using the **same parameters as the Step 2 signal
