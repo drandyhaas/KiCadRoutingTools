@@ -82,6 +82,10 @@ On ulx3s U1 (22×22, 0.8 mm) this took the fanned board from 4 PAD-VIA to
 fully DRC-clean, tidying 19 caps toward same-net balls (all ≤1.9 mm). In the
 GUI, the **"Optimize decoupling cap placement"** checkbox on the BGA fanout
 tab runs the same engine automatically right after fanout (off by default).
+The advanced knobs above (capture radius, near margin, search step, max
+displacement / cap / growth, max passes, cap-ref prefix, allow-rotation) are
+exposed in that tab's **"Cap Placement (advanced)"** box; `--clearance`,
+`--grid-step`, and the via size come from the Basic tab.
 
 ## Module layout
 

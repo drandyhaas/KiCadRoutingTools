@@ -833,17 +833,21 @@ You normally don't run this by hand: **`route.py`, `route_diff.py`,
 step** (issue #160), pinning the floors to the clearances/sizes they just routed
 with, so the written project is DRC-consistent by default. If the output is a new
 file with no project yet, they copy the input board's `.kicad_pro` (or seed a
-complete one when the input has none). Pass `--no-fix-drc-settings` to skip it.
+complete one when the input has none). Pass `--no-fix-drc-settings` to skip it, or
+`--keep-thermal` to leave `starved_thermal` at its original severity instead of
+demoting it to a warning (all four routing CLIs accept both flags).
 
 The **GUI plugin** does the equivalent on the live board via the pcbnew API
 (`BOARD_DESIGN_SETTINGS` + the Default net class + severities) after routing, and
 marks the board modified so your next save keeps it. A single **"Fix DRC settings
 after routing"** checkbox on the **Basic tab** controls this for every routing
 action in the dialog — single-ended routing, differential pairs, and plane
-create/repair all read that one shared toggle (it is on by default). Both
-front-ends share the same target-computing logic (`compute_targets` /
-`severity_plan` in `fix_kicad_drc_settings.py`) and differ only in how they apply
-it (`.kicad_pro` file vs. pcbnew API).
+create/repair all read that one shared toggle (it is on by default); a **"Keep
+thermal-relief DRC severity"** checkbox on the **Advanced tab** is the GUI
+counterpart of `--keep-thermal` (off by default). Both front-ends share the same
+target-computing logic (`compute_targets` / `severity_plan` in
+`fix_kicad_drc_settings.py`) and differ only in how they apply it (`.kicad_pro`
+file vs. pcbnew API).
 
 ### Examples
 

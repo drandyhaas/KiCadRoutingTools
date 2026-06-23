@@ -1048,6 +1048,8 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb [output.kicad_pc
 # DRC settings
 --no-fix-drc-settings       # Skip making the output project's DRC rules match the
                             # plane routing floors (done by default; issue #160)
+--keep-thermal              # Leave starved_thermal at its severity instead of
+                            # demoting it to a warning when fixing DRC settings
 ```
 
 Features:
