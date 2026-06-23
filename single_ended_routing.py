@@ -1018,7 +1018,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         print(f"    GridRouter targets: {forward_targets[:3]}{'...' if len(forward_targets) > 3 else ''}")
         if use_single_direction:
             print(f"    Bus routing: single-direction mode (start from clustered endpoints)")
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down, uniform_width = _route_main_connection(
         router, obstacles, config, forward_sources, forward_targets, track_margin,
         pcb_data, net_id, print_prefix="", direction_labels=direction_labels,
         single_direction=use_single_direction
@@ -1142,6 +1142,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # Both endpoints are pads: neck the start side too
         new_segments = _apply_neckdown_widths(new_segments, config, net_id, obstacles,
                                               coord, layer_names, track_margin, neck_start=True)
+    elif uniform_width is not None:
+        # Short power edge routed at a stepped-down width: every segment is that
+        # width, so the obstacle map (reads seg.width) and the output match (#180).
+        for _s in new_segments:
+            _s.width = uniform_width
 
     # Neck any terminal-connection segment that grazes a foreign pad (#157): the
     # endpoint stub is laid geometrically with the endpoint region obstacle-exempt,
@@ -1311,22 +1316,85 @@ def assign_waypoints_to_mst_edges(waypoints, pad_grid, mst_edges):
     return buckets
 
 
+# Issue #180: a SHORT power-net connection (span <= this, ~max_search_radius) that
+# can't fit the full power width is routed at the widest width that DOES fit --
+# full -> /2 -> /4 -> ... -> fab floor -- instead of failing. This lets a power
+# ball daisy-chain to an adjacent same-net ball with a thin escape, while long
+# trunks keep the full power width (current capacity).
+SHORT_POWER_EDGE_MM = 10.0
+
+
+def _track_margin_for_width(width, layer_width, grid_step):
+    """Extra grid-cell margin the A* needs for a track of `width` over the layer's
+    base width (mirrors the inline computation at the route_* entry points)."""
+    extra_half = (width - layer_width) / 2
+    return (int(math.ceil(extra_half / grid_step)) + 1) if extra_half > 0 else 0
+
+
+def _power_width_ladder(net_width, layer_width):
+    """Widths BELOW the full power width to try, descending: net/2, net/4, ... down
+    to the fab floor (layer_width). The full width is tried first by the caller."""
+    floor = layer_width
+    out = []
+    w = net_width / 2
+    while w > floor + 1e-9:
+        out.append(w)
+        w /= 2
+    if net_width > floor + 1e-9:
+        out.append(floor)
+    return out
+
+
+def _edge_span_mm(sources, targets, grid_step):
+    """Min source->target span (mm): a cheap 'is this a short escape vs a trunk' proxy."""
+    best = float('inf')
+    for s in sources:
+        for t in targets:
+            best = min(best, math.hypot(s[0] - t[0], s[1] - t[1]))
+    return best * grid_step
+
+
 def _route_main_connection(router, obstacles, config, sources, targets, track_margin,
                            pcb_data, net_id, print_prefix="",
                            direction_labels=("forward", "backward"), single_direction=False,
                            waypoints=None):
-    """Route sources->targets; wide routes that fail retry narrow (issue #72).
+    """Route sources->targets; wide routes that fail retry narrow (issue #72/#180).
 
     Same return shape as _route_connection_at_margin plus a trailing
-    necked_down flag: when a wide power route cannot fit, it is retried at
-    the layer's default width and the caller applies neck-down widths to
-    the resulting segments (_apply_neckdown_widths).
+    (necked_down, uniform_width):
+      - necked_down=True (long trunk): the wide route failed and it re-routed at the
+        layer width; the caller necks down the segments near the pad.
+      - uniform_width=W (short edge, necked_down=False): a short power edge routed
+        at width W (full -> /2 -> ... -> fab floor); the caller sets EVERY segment to
+        W so the trace -- and the obstacle map (which reads seg.width) and the written
+        output -- is genuinely that width, not the power width.
+      - both None/False: full power width, no rewidthing.
     """
     result = _route_connection_at_margin(
         router, obstacles, config, sources, targets, track_margin,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
     if result[0] is not None or track_margin == 0 or not config.power_tap_neckdown:
-        return result + (False,)
+        return result + (False, None)
+
+    net_w = config.get_net_track_width(net_id, config.layers[0])
+    layer_w = config.get_track_width(config.layers[0])
+
+    if _edge_span_mm(sources, targets, config.grid_step) <= SHORT_POWER_EDGE_MM:
+        # Short edge: step the width down, widest-that-fits wins; segments use it.
+        total_iters = result[1]
+        for w in _power_width_ladder(net_w, layer_w):
+            tm = _track_margin_for_width(w, layer_w, config.grid_step)
+            r = _route_connection_at_margin(
+                router, obstacles, config, sources, targets, tm,
+                pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
+            total_iters += r[1]
+            if r[0] is not None:
+                print(f"{print_prefix}{YELLOW}Wide power route blocked - routed short edge at "
+                      f"{w:.4f}mm (down from {net_w:.4f}){RESET}")
+                return (r[0], total_iters) + r[2:] + (False, w)
+        return (result[0], total_iters) + result[2:] + (False, None)
+
+    # Long trunk: keep the existing single wide->base retry + neck-down.
     print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
     retry = _route_connection_at_margin(
         router, obstacles, config, sources, targets, 0,
@@ -1335,8 +1403,8 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         # Keep the WIDE attempt's frontier for rip-up analysis: blockers found
         # by the narrow frontier only help a narrow route, but ripped nets
         # re-route at their own wide width and can fail entirely
-        return (result[0], result[1] + retry[1]) + result[2:] + (False,)
-    return (retry[0], result[1] + retry[1]) + retry[2:] + (True,)
+        return (result[0], result[1] + retry[1]) + result[2:] + (False, None)
+    return (retry[0], result[1] + retry[1]) + retry[2:] + (True, None)
 
 
 def _route_connection_at_margin(router, obstacles, config, sources, targets, track_margin,
@@ -1971,7 +2039,7 @@ def route_multipoint_main(
 
         # Use probe routing helper, steered through this edge's bucket of
         # corridor waypoints (tap edges follow their own buckets later).
-        path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
+        path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down, uniform_width = _route_main_connection(
             router, obstacles, config, sources, targets, track_margin,
             pcb_data, net_id, print_prefix="  ", direction_labels=("forward", "backward"),
             waypoints=waypoint_buckets.get(frozenset((idx_a, idx_b)), [])
@@ -2026,6 +2094,11 @@ def route_multipoint_main(
         # Both endpoints are pads: neck the start side too
         segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
                                           coord, layer_names, track_margin, neck_start=True)
+    elif uniform_width is not None:
+        # Short power edge routed at a stepped-down width (#180): every segment is
+        # that width, so obstacle blocking (reads seg.width) and output match.
+        for _s in segments:
+            _s.width = uniform_width
 
     print(f"  Phase 1 routed in {total_iterations} iterations, {len(segments)} segments")
 
@@ -2389,7 +2462,7 @@ def route_multipoint_taps(
         # Use probe routing helper to detect stuck directions early
         tap_start_time = time.time()
 
-        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _, necked_down = _route_main_connection(
+        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _, necked_down, uniform_width = _route_main_connection(
             router, obstacles, config, sources, targets, track_margin,
             pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
             waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
@@ -2438,6 +2511,11 @@ def route_multipoint_taps(
         if necked_down:
             segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
                                               coord, layer_names, track_margin)
+        elif uniform_width is not None:
+            # Short power edge routed at a stepped-down width (#180): uniform width
+            # so obstacle blocking (reads seg.width) and output match.
+            for _s in segments:
+                _s.width = uniform_width
         all_segments.extend(segments)
         all_vias.extend(vias)
         # Make this edge's vias reusable by later edges of the same net, so a
