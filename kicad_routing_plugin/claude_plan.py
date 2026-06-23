@@ -31,7 +31,8 @@ PLAN_RESULT_SCHEMA = (
     '{"action": "route", "nets": ["<glob>", ...], '
     '"params": {"track_width": <mm>, "clearance": <mm>, "via_size": <mm>, '
     '"via_drill": <mm>, "power_nets": ["<glob>", ...], '
-    '"power_nets_widths": [<mm>, ...]}} | '
+    '"power_nets_widths": [<mm>, ...], '
+    '"layer_costs": [<per-copper-layer cost multiplier, in board layer order>, ...]}} | '
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
     '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
@@ -39,7 +40,7 @@ PLAN_RESULT_SCHEMA = (
     '{"action": "repair_planes", '
     '"assignments": [{"nets": ["<exact net name>", ...], "layer": "<copper layer>"}], '
     '"params": {"via_size": <mm>, "via_drill": <mm>, "max_track_width": <mm>, '
-    '"analysis_grid_step": <mm>, "repair_pads": true|false, '
+    '"grid_step": <mm>, "analysis_grid_step": <mm>, "repair_pads": true|false, '
     '"rip_blocker_nets": true|false}} '
     ']} '
     'List steps in execution order: fanout first, then route_diff, then route, '
@@ -166,6 +167,12 @@ def apply_step_params(step, dialog):
                 dialog.power_widths_ctrl.SetValue(" ".join(f"{float(w):g}" for w in widths))
             else:
                 notes.append("power_nets/widths count mismatch, fields not filled")
+        costs = params.get("layer_costs")
+        if costs:
+            try:
+                dialog.layer_costs_ctrl.SetValue(" ".join(f"{float(c):g}" for c in costs))
+            except (TypeError, ValueError):
+                notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_diff":
         tab = dialog.differential_tab
         if "diff_pair_width" in params or "diff_pair_gap" in params:
@@ -193,9 +200,10 @@ def apply_step_params(step, dialog):
         if "rip_blocker_nets" in params:
             opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
     elif action == "repair_planes":
-        # via size/drill come from the shared Basic-tab controls (same as route);
-        # the repair-specific knobs live on the Repair options panel.
-        for name in ("via_size", "via_drill"):
+        # via size/drill and the routing grid step come from the shared Basic-tab
+        # controls (same as route); the repair-specific knobs live on the Repair
+        # options panel.
+        for name in ("via_size", "via_drill", "grid_step"):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
