@@ -122,15 +122,30 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
 
-    # Process segments
+    # Process segments. Keep-out from the segment's ACTUAL width, not just the
+    # net's configured width: a pre-existing wide/diff-pair trace (e.g. a 0.2mm
+    # trunk placed by route_diff) under-reserved when stamped at the default
+    # 0.127 track width, letting a later track graze its edge (#172). Mirror the
+    # via path below, which already keeps out from the via's actual size. Only
+    # segments wider than the configured width grow their keep-out, so normal
+    # tracks (seg.width == configured) are unaffected - no blanket margin.
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
-        via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
+        layer_w = config.get_net_track_width(net_id, seg.layer)
+        seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) else layer_w
+        own_half = max(layer_w, seg_w) / 2
+        if seg_w <= layer_w:
+            expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
+            via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
+        else:
+            expansion_mm = max(coord.grid_step,
+                               own_half + config.clearance + config.track_width / 2 + extra_clearance)
+            via_block_grid = max(1, coord.to_grid_dist_safe(
+                config.via_size / 2 + own_half + config.clearance + extra_clearance))
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm, via_block_grid,
                                     blocked_cells_set, blocked_vias_set)
 
