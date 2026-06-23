@@ -289,6 +289,19 @@ Use the printed flags as-is:
   via** (below) and/or a narrower `--track-width` toward the floor. Do not proceed
   to signal routing with `failed > 0` unexpected — those balls are dropped from the
   output and will fail later as "no rippable blockers".
+- **Also check `drc_grazes` (even when `failed == 0`).** The summary's
+  `drc_grazes` (graded at the fanout `--clearance`) reports sub-clearance grazes the
+  escape left in the output: `via_segment` / `pad_via` are the #130 classes (an
+  escape via too close to a foreign track or pad), `total` is all DRC violations.
+  A *successful* fanout (every ball escaped) can still leave many of these — they're
+  not caught by `failed`. **If `drc_grazes.via_segment` or `.pad_via` > 0 and there
+  is headroom above the fab floor, re-run the fanout with a smaller `--via-size` /
+  `--via-drill` (and/or a thinner `--track-width`), stepping toward — never below —
+  the floor.** These grazes are typically a uniform ~1-grid-cell shortfall, so even
+  one size step down (e.g. via 0.5→0.45) usually clears them all; shrinking the via
+  also relieves escape congestion. (For *via-over-pad* grazes where a decoupling
+  cap/resistor sits on a via, `place_fanout_clearance.py` (Step 1b) is the better
+  fix — it moves the part; smaller vias help the *via-over-track* class.)
 - **Fine-pitch escape VIA (4+ layer):** the 0.45 mm standard via can't dog-bone /
   via-in-pad sub-~0.5 mm-pitch BGA/QFN balls. For *those parts only*, pass the
   smaller **fine-pitch escape via** that `--design-rules` prints (`fine-pitch

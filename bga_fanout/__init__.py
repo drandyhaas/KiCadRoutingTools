@@ -2212,6 +2212,27 @@ def main():
               f"escaped at --clearance {args.clearance}mm / --track-width "
               f"{args.track_width}mm and were DROPPED from the output. Retry the "
               f"fanout with a smaller --clearance (toward the manufacturing floor).")
+    # DRC the written output at the routed clearance so downstream tooling can
+    # detect sub-clearance grazes the escape left behind even when every ball
+    # escaped (failed==0): via-over-track / via-over-pad (#130). The planner uses
+    # this to retry the fanout with a smaller via / thinner track toward the fab
+    # floor. Subprocess + best-effort: a DRC hiccup must never fail the fanout.
+    drc_grazes = {}
+    out_path = getattr(args, 'output', None)
+    if out_path:
+        try:
+            import subprocess as _sp, re as _re
+            _drc = os.path.join(os.path.dirname(os.path.dirname(__file__)), "check_drc.py")
+            _o = _sp.run([sys.executable, "-X", "utf8", _drc, out_path,
+                          "-c", str(args.clearance), "--max-print", "0"],
+                         capture_output=True, text=True).stdout
+            for _c in ("PAD-VIA", "VIA-SEGMENT", "PAD-SEGMENT", "SEGMENT-SEGMENT"):
+                _m = _re.search(_c + r" violations \((\d+)\)", _o)
+                drc_grazes[_c.lower().replace('-', '_')] = int(_m.group(1)) if _m else 0
+            _t = _re.search(r"FOUND (\d+) DRC", _o)
+            drc_grazes['total'] = int(_t.group(1)) if _t else 0
+        except Exception as _e:
+            drc_grazes = {'error': str(_e)}
     summary = {
         'component': args.component,
         'requested': requested,
@@ -2222,6 +2243,9 @@ def main():
         'clearance': args.clearance,
         'track_width': args.track_width,
         'layers': list(args.layers) if args.layers else None,
+        # grazes graded at --clearance; 'total' counts ALL DRC violations on the
+        # output, the via_*/pad_* keys are the fanout-relevant #130 classes.
+        'drc_grazes': drc_grazes,
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
 
