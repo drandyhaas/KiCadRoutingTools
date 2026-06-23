@@ -189,9 +189,11 @@ def find_route_blocker_from_frontier(
     net_block_count: Dict[int, int] = {}
 
     # Check segments
-    # expansion = existing_track_half + clearance + routing_track_half
-    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+    # expansion = existing_track_half + clearance + routing_track_half. Size the
+    # existing-track half from the segment's ACTUAL width (a wide/diff-pair trace
+    # is responsible for more blocked cells than the default width implies), so
+    # the rip-up heuristic attributes blockage to the right net. Mirrors #172.
+    routing_half = config.track_width / 2
 
     for seg in pcb_data.segments:
         if seg.net_id == exclude_net_id:
@@ -199,6 +201,10 @@ def find_route_blocker_from_frontier(
 
         # Get layer index (assume single layer routing, layer 0)
         layer_idx = 0
+
+        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+                    else config.track_width) / 2
+        expansion_grid = max(1, coord.to_grid_dist(seg_half + config.clearance + routing_half))
 
         # Trace along segment and check for blocked cells
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -216,12 +222,15 @@ def find_route_blocker_from_frontier(
         if count > 0:
             net_block_count[seg.net_id] = net_block_count.get(seg.net_id, 0) + count
 
-    # Check vias
-    via_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance))
-
+    # Check vias - size the keep-out from each via's ACTUAL size (a fanout
+    # via-in-pad is larger than config.via_size), same rationale as the segments.
     for via in pcb_data.vias:
         if via.net_id == exclude_net_id:
             continue
+
+        via_r = (via.size if getattr(via, 'size', 0) and via.size > 0
+                 else config.via_size) / 2
+        via_expansion_grid = max(1, coord.to_grid_dist(via_r + config.track_width / 2 + config.clearance))
 
         gx, gy = coord.to_grid(via.x, via.y)
         count = 0
