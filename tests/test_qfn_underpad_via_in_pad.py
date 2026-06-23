@@ -53,7 +53,9 @@ def _fanout(out_path, allow_via_in_pad):
 
 
 def _drc_clean(out_path):
-    return not run_drc(out_path, clearance=CLEARANCE, quiet=True)
+    # check_sizes=False: the fanout intentionally routes 0.1mm escapes (below the
+    # 2-layer fab floor); this test asserts clearance, not the issue #176 fab floor.
+    return not run_drc(out_path, clearance=CLEARANCE, quiet=True, check_sizes=False)
 
 
 def main():

@@ -52,7 +52,10 @@ def main():
     import tempfile
     fails = []
     with tempfile.TemporaryDirectory() as tmp:
-        if run_drc(BOARD, clearance=CLEARANCE, quiet=True):
+        # check_sizes=False: this fanout intentionally routes 0.1mm escapes, below
+        # the 2-layer fab floor -- the test asserts clearance/connectivity, not the
+        # fab-width floor that issue #176 added.
+        if run_drc(BOARD, clearance=CLEARANCE, quiet=True, check_sizes=False):
             fails.append("input board is not DRC-clean")
 
         # Default config only: the simple nearest-first stagger drops a leg.
@@ -76,7 +79,7 @@ def main():
         if len(d_full) >= len(d_single):
             fails.append(f"search did not improve escape fraction "
                          f"(single dropped {len(d_single)}, full dropped {len(d_full)})")
-        if run_drc(full_out, clearance=CLEARANCE, quiet=True):
+        if run_drc(full_out, clearance=CLEARANCE, quiet=True, check_sizes=False):
             fails.append("full-search output is not DRC-clean")
 
     if fails:

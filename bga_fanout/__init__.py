@@ -2224,8 +2224,11 @@ def main():
             import io as _io, contextlib as _cl
             from check_drc import run_drc as _run_drc
             with _cl.redirect_stdout(_io.StringIO()):  # keep JSON_SUMMARY output clean
+                # check_sizes=False: drc_grazes grades clearance grazes at
+                # --clearance (#130); the issue #176 fab-width floor is a separate
+                # concern and would change this 'total's meaning.
                 _viols = _run_drc(out_path, clearance=args.clearance,
-                                  quiet=True, max_print=0)
+                                  quiet=True, max_print=0, check_sizes=False)
             _by = {}
             for _v in _viols:
                 _by[_v['type']] = _by.get(_v['type'], 0) + 1

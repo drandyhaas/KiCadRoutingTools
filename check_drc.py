@@ -766,9 +766,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         copper_layers = getattr(pcb_data.board_info, 'copper_layers', None) or []
         copper_count = len(copper_layers) if copper_layers else 2
         fab = fab_floors(copper_count)
+        # Use the FINE via floor (the smallest via the fab can make) as the hard
+        # minimum -- 0.30mm dia / 0.15mm drill on 4+ layers. Flagging at the
+        # larger standard via floor would reject legitimate fine-pitch vias.
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
-        eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
-        eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
+        eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['fine_via_diameter']
+        eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['fine_via_drill']
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm")

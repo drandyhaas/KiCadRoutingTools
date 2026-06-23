@@ -20,6 +20,12 @@ Options:
   --debug-lines        Output debug lines on User.7 showing violation locations
   --max-print INT      Max violations listed per type before "... and N more"
                        (0 = print all; default 20)
+  --no-size-checks     Skip the track-width and via/hole-size fab-floor checks
+  --min-track-width FLOAT   Minimum manufacturable track width in mm
+                            (default: JLC fab floor for the board layer count)
+  --min-via-diameter FLOAT  Minimum via outer diameter in mm (default: fab floor)
+  --min-via-drill FLOAT     Minimum via drill diameter in mm (default: fab floor)
+  --size-margin FLOAT       Absolute tolerance in mm for the size checks (default: 0)
 ```
 
 The per-type listing is capped at `--max-print` (default 20); when a type has
@@ -55,6 +61,10 @@ The DRC checker validates:
 6. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
 7. **Board edge clearance** - Tracks and vias maintain clearance from the board outline
 8. **Same-net crossings** - Detects tracks crossing on the same layer within a net
+9. **Track width** - Segments are at least the fab-floor minimum track width (JLC: 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
+10. **Via / hole size** - Via outer diameter and drill are at least the fine-via fab floor (JLC: 0.45mm/0.20mm on 2-layer, 0.30mm/0.15mm on 4+ layer).
+
+Checks 9–10 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
 
 ### Clearance Margin
 
