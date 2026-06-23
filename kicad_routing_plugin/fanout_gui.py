@@ -1221,6 +1221,9 @@ class FanoutTab(wx.Panel):
                     'via_size': via_size, 'via_drill': via_drill,
                     'exit_margin': config.get('exit_margin'),
                     'grid_step': shared.get('grid_step', defaults.GRID_STEP),
+                    # Advanced cap-placement knobs (#130) so the inline checkbox
+                    # path honours them too, not just defaults.
+                    **{k: v for k, v in config.items() if k.startswith('cap_')},
                 },
                 optimize_caps=config.get('optimize_caps', False))
 
@@ -1481,3 +1484,32 @@ class FanoutTab(wx.Panel):
             import traceback
             traceback.print_exc()
             return f"Cap optimization skipped (error: {e})"
+
+    def run_cap_optimization(self, log=None):
+        """Standalone decoupling-cap optimization on the live board (#130).
+
+        Entry point for the Claude-plan executor's "optimize_caps" step (and
+        any caller that wants the repair without running a fanout). Reads the
+        clearance/grid/via from the Basic tab and the advanced cap knobs from
+        the BGA options panel, runs the shared engine, and applies the moves.
+        Synchronous, no modal dialog. Returns a one-line summary or None.
+        """
+        import pcbnew
+        board = pcbnew.GetBoard()
+        if board is None:
+            return None
+        shared = self.get_shared_params() if self.get_shared_params else {}
+        cfg = dict(self.bga_options.get_config())  # advanced cap_* knobs
+        cfg.update({
+            'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
+            'grid_step': shared.get('grid_step', defaults.GRID_STEP),
+            'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
+        })
+        summary = self._optimize_decoupling_caps(board, pcbnew, cfg)
+        board.BuildConnectivity()
+        pcbnew.Refresh()
+        if summary:
+            self.status_text.SetLabel(summary)
+            if log:
+                log(summary)
+        return summary

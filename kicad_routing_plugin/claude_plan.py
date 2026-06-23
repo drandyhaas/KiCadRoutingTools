@@ -14,7 +14,8 @@ import fnmatch
 
 import wx
 
-KNOWN_ACTIONS = ("fanout", "route_diff", "route", "route_planes", "repair_planes")
+KNOWN_ACTIONS = ("fanout", "optimize_caps", "route_diff", "route",
+                 "route_planes", "repair_planes")
 
 # Appended to the /plan-pcb-routing prompt so the plan lands as parseable JSON.
 PLAN_RESULT_SCHEMA = (
@@ -93,7 +94,25 @@ def parse_plan_result(value):
         steps.append(step)
     if not steps:
         return None, errors + ["no usable steps in plan"]
+    _insert_cap_optimization(steps)
     return steps, errors
+
+
+def _insert_cap_optimization(steps):
+    """Insert one decoupling-cap optimization step right after the last BGA
+    fanout (issue #130), unless the plan already has one. The cap engine is
+    board-global, so running it once after every BGA's vias are placed clears
+    all cap/fanout-via collisions; placing it after the LAST bga fanout (the
+    plan lists fanouts first) is exactly that timing. QFN fanouts don't need it.
+    """
+    if any(s["action"] == "optimize_caps" for s in steps):
+        return
+    last_bga = None
+    for i, s in enumerate(steps):
+        if s["action"] == "fanout" and (s.get("kind") or "bga").lower() == "bga":
+            last_bga = i
+    if last_bga is not None:
+        steps.insert(last_bga + 1, {"action": "optimize_caps"})
 
 
 def step_label(index, step):
@@ -102,6 +121,8 @@ def step_label(index, step):
     if action == "fanout":
         kind = step.get("kind", "bga").upper()
         return f"{index}. Fanout {step.get('component')} ({kind})"
+    if action == "optimize_caps":
+        return f"{index}. Optimize decoupling cap placement"
     if action == "route_diff":
         pairs = step.get("pairs", [])
         shown = ", ".join(pairs[:3]) + (", ..." if len(pairs) > 3 else "")
@@ -395,6 +416,10 @@ class PlanExecutor:
                            lambda: not d.differential_tab.route_btn.IsEnabled()),
             "fanout": (lambda: d.fanout_tab._on_fanout(None),
                        lambda: not d.fanout_tab.fanout_btn.IsEnabled()),
+            # Synchronous (no worker thread); the start-grace period in
+            # _poll_until_idle covers its instant completion.
+            "optimize_caps": (lambda: d.fanout_tab.run_cap_optimization(log=self.log),
+                              lambda: False),
             "route_planes": (lambda: d.planes_tab._on_action(None),
                              lambda: not d.planes_tab.action_btn.IsEnabled()),
             # Same planes tab + action button; apply_step_selection has already
