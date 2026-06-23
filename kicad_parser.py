@@ -73,6 +73,12 @@ class Pad:
     # pad's own (clearance ...) token. 0 means "no override, use the global
     # clearance". Larger-than-global values (e.g. fiducial keep-clear rings)
     # must widen the obstacle halo or copper routes within the pad's clearance.
+    polygons: Optional[List[List[Tuple[float, float]]]] = None  # Real copper
+    # outline(s) in GLOBAL board mm for custom comb/finger pads (issue #188).
+    # When set, the obstacle map and DRC rasterize these polygons instead of the
+    # size_x x size_y bounding box, so the finger channels (and the empty side of
+    # an off-anchor pad) stay routable. None for ordinary rect/circle/roundrect
+    # pads, which the bounding box models exactly.
 
 
 @dataclass
@@ -269,6 +275,46 @@ def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
     widths = [float(w) for w in re.findall(r'\(width\s+(-?[\d.]+)\)', prim)]
     hw = (max(widths) / 2.0) if widths else 0.0
     return max(abs(min(xs)), abs(max(xs))) + hw, max(abs(min(ys)), abs(max(ys))) + hw
+
+
+def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
+                                pad_abs_rotation_deg: float):
+    """Real copper outline(s) of a custom pad in GLOBAL board mm (issue #188).
+
+    A custom pad's exposed source/drain copper is a comb/finger ``gr_poly``
+    primitive whose notches our bounding-box model fills in, boxing in the pads
+    that sit in the channels. This returns the actual polygon(s) so the obstacle
+    map and DRC can rasterize the true copper instead.
+
+    Each primitive vertex is in the pad's local frame (relative to the pad anchor,
+    which is at the pad's global position). The pad's primitives are oriented by
+    the pad's ABSOLUTE board angle (the file's ``(at x y angle)`` already folds in
+    the footprint rotation), applied with KiCad's negate convention -- same as
+    local_to_global. Verified against pcbnew GetEffectivePolygon for bitaxe Q1/Q2.
+
+    Returns a list of vertex lists, or None when the pad has no primitives or has
+    any NON-gr_poly primitive (gr_circle/gr_line/gr_rect) -- those rarer shapes are
+    left to the conservative bounding-box model rather than approximated here.
+    """
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return None
+    prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
+    # Bail out (bbox fallback) if any non-polygon primitive is present.
+    if re.search(r'\(gr_(circle|line|rect|arc|curve)\b', prim):
+        return None
+    rad = math.radians(-pad_abs_rotation_deg)
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+    polys = []
+    for pm2 in re.finditer(r'\(gr_poly\b', prim):
+        block = prim[pm2.start():find_matching_paren(prim, pm2.start()) - 1]
+        pts = [(float(a), float(b))
+               for a, b in re.findall(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)]
+        if len(pts) < 3:
+            continue
+        polys.append([(global_x + (vx * cos_r - vy * sin_r),
+                       global_y + (vx * sin_r + vy * cos_r)) for vx, vy in pts])
+    return polys or None
 
 
 def _resolve_pad_rect(size_x: float, size_y: float,
@@ -1225,6 +1271,15 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
 
+            # Custom comb/finger pads: carry the real copper polygon(s) so the
+            # obstacle map / DRC model the notches instead of the bounding box
+            # (issue #188). pad_rotation here is the file's pad (at) angle, which
+            # is the pad's absolute board orientation (folds in fp rotation).
+            pad_polygons = None
+            if pad_shape == 'custom':
+                pad_polygons = _custom_pad_global_polygons(
+                    pad_text, global_x, global_y, pad_rotation)
+
             pad = Pad(
                 component_ref=reference,
                 pad_number=pad_num,
@@ -1244,7 +1299,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 drill=drill_size,
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
-                local_clearance=local_clearance
+                local_clearance=local_clearance,
+                polygons=pad_polygons
             )
 
             footprint.pads.append(pad)
@@ -1897,6 +1953,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # against the anchor GetSize(), which is in the pad's UN-rotated local
             # frame - for a rotated pad the anchor's long side leaks into the wrong
             # board axis and over-widens the pad (e.g. U9 QFN: narrow 0.28 -> 0.71).
+            pad_polygons = None
             if shape == 'custom':
                 try:
                     bb = pad.GetBoundingBox()
@@ -1906,6 +1963,25 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     size_x, size_y, rect_rotation = 2 * hx, 2 * hy, 0.0
                 except Exception:
                     size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
+                # Carry the real copper outline so the obstacle map / DRC model the
+                # finger channels, not the bounding box (issue #188). pcbnew's
+                # effective polygon is already in GLOBAL board coordinates.
+                # GetEffectivePolygon needs KiCad's geometry cache (a running
+                # wxApp, which the plugin has); if it is unavailable it returns
+                # empty and we fall back to the bounding box (today's behaviour --
+                # no regression). pcbnew gives the outline in GLOBAL board coords.
+                try:
+                    poly_set = pad.GetEffectivePolygon(pad.GetLayer())
+                    polys = []
+                    for oi in range(poly_set.OutlineCount()):
+                        ol = poly_set.Outline(oi)
+                        pts = [(to_mm(ol.CPoint(i).x), to_mm(ol.CPoint(i).y))
+                               for i in range(ol.PointCount())]
+                        if len(pts) >= 3:
+                            polys.append(pts)
+                    pad_polygons = polys or None
+                except Exception:
+                    pad_polygons = None
             else:
                 # Resolve the pad rectangle into board space (keyed on the absolute
                 # total rotation, not pad_rotation alone — see the text-parser path).
@@ -1965,7 +2041,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 drill=drill,
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
-                local_clearance=local_clearance
+                local_clearance=local_clearance,
+                polygons=pad_polygons
             )
 
             footprint.pads.append(pad_obj)

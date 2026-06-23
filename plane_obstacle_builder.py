@@ -442,6 +442,24 @@ def _add_segment_via_obstacle(obstacles: GridObstacleMap, seg: Segment,
     _batch_block_circles_via(obstacles, centers, circle_offsets)
 
 
+def _block_custom_pad_polys(obstacles, pad, coord, margin, via_mode, layer_idx=None):
+    """Block a custom comb/finger pad by its real copper polygon(s) expanded by
+    `margin`, leaving the finger channels open instead of filling the bounding box
+    (issue #188). Used by the plane obstacle builder's via- and track-blocking."""
+    import numpy as np
+    from obstacle_map import _rasterize_polygon
+    for poly in pad.polygons:
+        gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, margin)
+        if gxf is None:
+            continue
+        mask = inside | (edist <= margin)
+        for i in np.flatnonzero(mask):
+            if via_mode:
+                obstacles.add_blocked_via(int(gxf[i]), int(gyf[i]))
+            else:
+                obstacles.add_blocked_cell(int(gxf[i]), int(gyf[i]), layer_idx)
+
+
 def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
                            coord: GridCoord, config: GridRouteConfig,
                            clearance_override: float = None):
@@ -460,6 +478,9 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     if clearance_override is None:
         clearance = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
     margin = config.via_size / 2 + clearance + config.grid_step / 2
+    if getattr(pad, 'polygons', None):
+        _block_custom_pad_polys(obstacles, pad, coord, margin, via_mode=True)
+        return
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)
@@ -779,6 +800,11 @@ def build_routing_obstacle_map(
                     # required clearance (no-net fiducial DRC, upduino #146).
                     pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
                     margin = config.track_width / 2 + pad_clr
+                    if getattr(pad, 'polygons', None):
+                        _block_custom_pad_polys(obstacles, pad, coord, margin,
+                                                via_mode=False, layer_idx=layer_idx)
+                        pad_count += 1
+                        continue
                     # Corner radius based on pad shape
                     if pad.shape in ('circle', 'oval'):
                         corner_radius = min(half_width, half_height)

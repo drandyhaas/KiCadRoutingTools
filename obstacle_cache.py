@@ -283,6 +283,38 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     margin = config.track_width / 2 + config.clearance + extra_clearance
+
+    # Custom comb/finger pads: rasterize the real copper polygon(s), leaving the
+    # finger channels open, instead of the bounding box (issue #188). This is the
+    # per-net obstacle CACHE the routing loop actually uses, so the fix must live
+    # here as well as in _add_pad_obstacle.
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        from obstacle_map import _rasterize_polygon
+        expanded_layers = expand_pad_layers(pad.layers, config.layers)
+        layer_idxs = [layer_map.get(l) for l in expanded_layers]
+        layer_idxs = [li for li in layer_idxs if li is not None]
+        on_copper = any(l.endswith('.Cu') for l in expanded_layers)
+        via_margin = config.via_size / 2 + config.clearance + config.grid_step / 2
+        for poly in pad_polys:
+            gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, margin)
+            if gxf is not None:
+                m = inside | (edist <= margin)
+                if m.any():
+                    cells = np.column_stack([gxf[m], gyf[m]]).astype(np.int32)
+                    for li in layer_idxs:
+                        rows = np.empty((len(cells), 3), dtype=np.int32)
+                        rows[:, :2] = cells
+                        rows[:, 2] = li
+                        blocked_cells.append(rows)
+            if on_copper:
+                vgxf, vgyf, vin, ved = _rasterize_polygon(poly, coord, via_margin)
+                if vgxf is not None:
+                    vm = vin | (ved <= via_margin)
+                    if vm.any():
+                        blocked_vias.append(np.column_stack([vgxf[vm], vgyf[vm]]).astype(np.int32))
+        return
+
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)

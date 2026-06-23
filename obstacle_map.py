@@ -1477,6 +1477,47 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     if lc > clearance:
         clearance = lc
     margin = config.track_width / 2 + clearance + extra_clearance
+
+    # Custom comb/finger pads (issue #188): block the REAL copper polygon(s)
+    # expanded by margin, leaving the finger channels open, instead of the
+    # size_x x size_y bounding box (which fills the notches and the empty side of
+    # an off-anchor pad, walling in the pads that route through them).
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        expanded_layers = expand_pad_layers(pad.layers, config.layers)
+        layer_idxs = [layer_map[l] for l in expanded_layers if l in layer_map]
+        on_copper = any(l.endswith('.Cu') for l in expanded_layers)
+        via_margin = config.via_size / 2 + clearance + extra_clearance
+
+        def _emit(poly, m, via_pass):
+            gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, m)
+            if gxf is None:
+                return
+            mask = inside | (edist <= m)
+            if skip_cell is not None and mask.any():
+                idx = np.flatnonzero(mask)
+                keep = np.fromiter((not skip_cell(int(gxf[i]), int(gyf[i])) for i in idx),
+                                   dtype=bool, count=idx.size)
+                mask = np.zeros_like(mask)
+                mask[idx[keep]] = True
+            if not mask.any():
+                return
+            if via_pass:
+                cells = np.column_stack([gxf[mask], gyf[mask]])
+                _batch_vias(obstacles, cells, blocked_vias)
+            else:
+                _block_cells_on_layers(obstacles, gxf, gyf, mask, layer_idxs)
+                if blocked_cells is not None:
+                    for li in layer_idxs:
+                        if li < len(blocked_cells):
+                            blocked_cells[li].update(zip(gxf[mask].tolist(), gyf[mask].tolist()))
+
+        for poly in pad_polys:
+            _emit(poly, margin, via_pass=False)
+            if on_copper:
+                _emit(poly, via_margin, via_pass=True)
+        return
+
     # Compute corner radius based on pad shape:
     # - circle/oval: use min dimension to model as stadium/capsule shape
     # - roundrect: use the roundrect_rratio from pad

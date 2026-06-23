@@ -356,6 +356,53 @@ def _into_pad_frame(x: float, y: float, pad: Pad,
             pad.global_y - dx * sin_r + dy * cos_r)
 
 
+def _point_in_poly(x: float, y: float, poly) -> bool:
+    n = len(poly)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _point_to_polys_distance(x: float, y: float, polys) -> float:
+    """Min distance from a point to any of the polygons (0 if inside one)."""
+    best = float('inf')
+    for poly in polys:
+        if _point_in_poly(x, y, poly):
+            return 0.0
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            d = point_to_segment_distance(x, y, x1, y1, x2, y2)
+            if d < best:
+                best = d
+    return best
+
+
+def _segment_to_polys_distance(x1: float, y1: float, x2: float, y2: float, polys):
+    """Min distance from a segment to custom-pad polygon copper (0 if it enters),
+    sampled along the segment like segment_to_rect_distance. Returns (dist, pt)."""
+    length = math.hypot(x2 - x1, y2 - y1)
+    n = max(10, int(length / 0.05))
+    best = float('inf')
+    best_pt = (x1, y1)
+    for i in range(n + 1):
+        t = i / n
+        px = x1 + t * (x2 - x1)
+        py = y1 + t * (y2 - y1)
+        d = _point_to_polys_distance(px, py, polys)
+        if d < best:
+            best = d
+            best_pt = (px, py)
+    return best, best_pt
+
+
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
                                clearance_margin: float = 0.05) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
@@ -376,6 +423,19 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
 
     # Check if segment is on a layer the pad is on
     if seg.layer not in expanded_layers:
+        return False, 0.0, None
+
+    # Custom comb/finger pads: measure against the real copper polygon(s), not the
+    # bounding box, so a track legitimately threading a finger channel is not
+    # flagged (issue #188).
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        dist_to_pad, closest_pt = _segment_to_polys_distance(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y, pad_polys)
+        required_dist = seg.width / 2 + clearance
+        overlap = required_dist - dist_to_pad
+        if overlap > clearance * clearance_margin:
+            return True, overlap, closest_pt
         return False, 0.0, None
 
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
@@ -439,6 +499,16 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
 
     # Vias are through-hole, so they conflict with pads on any copper layer
     if not any(layer.endswith('.Cu') for layer in expanded_layers):
+        return False, 0.0
+
+    # Custom comb/finger pads: measure to the real copper polygon(s) (issue #188).
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        dist_to_pad = _point_to_polys_distance(via.x, via.y, pad_polys)
+        required_dist = via.size / 2 + clearance
+        overlap = required_dist - dist_to_pad
+        if overlap > clearance * clearance_margin:
+            return True, overlap
         return False, 0.0
 
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
