@@ -901,12 +901,32 @@ class QFNOptionsPanel(wx.Panel):
         param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(param_sizer, 0, wx.EXPAND)
 
+        self.underpad_escape = wx.CheckBox(self, label="Under-pad escape (via-drop)")
+        self.underpad_escape.SetToolTip(
+            "Drop a through-via just past each pad and escape on an inner/back "
+            "layer instead of the surface 45-degree fan (#164). For crowded "
+            "fine-pitch edges where the surface fan has no room (e.g. a diff pair "
+            "boxed in by a neighbour pair and a foreign track). Via size/drill use "
+            "the Basic-tab via settings.")
+        main_sizer.Add(self.underpad_escape, 0, wx.ALL, 8)
+
+        self.allow_via_in_pad = wx.CheckBox(self, label="Allow via-in-pad (stagger inward)")
+        self.allow_via_in_pad.SetToolTip(
+            "Under-pad escape only: let the escape via overlap its OWN pad "
+            "(via-in-pad), so a leg boxed in on the outward side (a neighbour "
+            "pad/track a pitch away) staggers inward toward the chip instead of "
+            "being dropped (#161). The via still must clear other-net pads, vias "
+            "and tracks.")
+        main_sizer.Add(self.allow_via_in_pad, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         self.SetSizer(main_sizer)
 
     def get_config(self):
         """Get the configuration values (QFN-specific only, shared params come from Basic tab)."""
         return {
             'extension': self.extension.GetValue(),
+            'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'stub',
+            'allow_via_in_pad': self.allow_via_in_pad.GetValue(),
         }
 
 
@@ -1192,6 +1212,12 @@ class FanoutTab(wx.Panel):
 
         # Get extension from config (QFN-specific parameter)
         extension = config.get('extension', defaults.QFN_EXTENSION)
+        # Under-pad (via-drop) escape uses the Basic-tab via settings (#164);
+        # via-in-pad allowance is the QFN panel's checkbox (#161).
+        escape_method = config.get('escape_method', 'stub')
+        allow_via_in_pad = config.get('allow_via_in_pad', False)
+        via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
+        via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
 
         try:
             from qfn_fanout import generate_qfn_fanout
@@ -1208,6 +1234,10 @@ class FanoutTab(wx.Panel):
                 extension=extension,
                 clearance=clearance,
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
+                escape_method=escape_method,
+                via_size=via_size,
+                via_drill=via_drill,
+                allow_via_in_pad=allow_via_in_pad,
             )
 
             self._apply_fanout_results(
