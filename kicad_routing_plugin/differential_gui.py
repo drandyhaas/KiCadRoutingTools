@@ -461,6 +461,19 @@ class DifferentialTab(wx.Panel):
         self.diff_pair_gap.SetToolTip("Gap between P and N traces")
         param_grid.Add(self.diff_pair_gap, 0, wx.EXPAND)
 
+        # Differential impedance (optional). When > 0 the per-layer trace width
+        # is computed from the board stackup using Pair Gap as spacing and
+        # overrides Pair Width -- the GUI counterpart of route_diff.py --impedance.
+        param_grid.Add(wx.StaticText(self, label="Diff Impedance (Ω):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.diff_impedance = wx.SpinCtrlDouble(self, min=0.0, max=200.0,
+                                                initial=0.0, inc=5.0)
+        self.diff_impedance.SetDigits(0)
+        self.diff_impedance.SetToolTip(
+            "Target differential impedance in ohms (e.g. 90, 100). When > 0, the "
+            "per-layer trace width is derived from the board stackup using Pair "
+            "Gap as spacing, overriding Pair Width. 0 = off (use Pair Width).")
+        param_grid.Add(self.diff_impedance, 0, wx.EXPAND)
+
         # Min turning radius
         param_grid.Add(wx.StaticText(self, label="Min Turn Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_min_turning_radius']
@@ -773,6 +786,7 @@ class DifferentialTab(wx.Panel):
                 net_names=net_names,
                 layers=config.get('layers', defaults.DEFAULT_LAYERS),
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
+                impedance=config.get('impedance'),  # when set, overrides per-layer width
                 clearance=config.get('clearance', 0.1),
                 via_size=config.get('via_size', 0.3),
                 via_drill=config.get('via_drill', 0.2),
@@ -947,6 +961,7 @@ class DifferentialTab(wx.Panel):
         return {
             'diff_pair_width': self.diff_pair_width.GetValue(),
             'diff_pair_gap': self.diff_pair_gap.GetValue(),
+            'impedance': self.diff_impedance.GetValue() or None,  # 0 = off
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
             'max_turn_angle': self.max_turn_angle.GetValue(),

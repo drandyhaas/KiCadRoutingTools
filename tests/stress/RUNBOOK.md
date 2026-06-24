@@ -232,6 +232,16 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
    Fine-pitch escapes are routed down to this floor, so checking at it stops them
    reading as violations (the dominant set-1/set-2 DRC source) while still
    flagging anything genuinely sub-manufacturable.
+   GRADE AT THE HOLE-TO-HOLE YOU ROUTED AT. The drill hole-to-hole minimum is
+   only met if the via placers were *given* it: pass `--hole-to-hole-clearance
+   <floor>` to route.py / route_planes.py / route_disconnected_planes.py, then
+   grade at that SAME value. Grading at a hole-to-hole the routing never enforced
+   invents phantom VIA-VIA-SAME-NET / VIA-DRILL-HOLE violations — the routed vias
+   were never asked to meet it (a board routed without the flag shows 0 at its
+   routed setting but dozens when graded at a forced 0.25). This is the
+   hole-to-hole case of the general rule (grade at the value you routed at, never
+   a stricter one): route AND grade at the floor so the two match and the result
+   is genuinely manufacturable.
    BASELINE: before routing, run check_drc.py on the unrouted input at the same
    floor and record the count — real boards have pre-existing pad-to-pad
    proximity that is not the router's fault. Report post-route DRC as total AND delta.

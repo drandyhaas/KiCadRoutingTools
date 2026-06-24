@@ -1053,6 +1053,10 @@ class PlanesTab(wx.Panel):
                 analysis_grid_step=config.get('analysis_grid_step', defaults.REPAIR_ANALYSIS_GRID_STEP),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
                 board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
+                # Honor the panel's max-search-radius slider on Repair too, not
+                # just Create -- a boxed plane pad reaches a farther via/trace
+                # when the user widens it (issue #180).
+                max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_iterations=config.get('max_iterations', defaults.MAX_ITERATIONS),
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),

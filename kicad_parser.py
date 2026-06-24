@@ -2129,6 +2129,23 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
     except Exception as e:
         print(f"build_pcb_data_from_board: guide/keepout read failed: {e}")
 
+    # --- Extract KiCad rule-area keep-outs (issue #95) ---
+    # board_info.keepouts (the (keepout ...) rule areas the router must avoid)
+    # isn't exposed cleanly via the IPC zone API, so read them from the board
+    # file content exactly as the text parser does (parse_kicad_pcb), keeping the
+    # IPC path at parity with the CLI. The kipy board only knows its basename, so
+    # resolve the on-disk path via the adapter. Best-effort: the saved file is the
+    # last-saved state, which is fine for rule areas (design-time features, not
+    # edited mid-route). Without this the router lays copper through rule areas.
+    try:
+        from kicad_ipc_adapter import get_board_full_path
+        board_filename = get_board_full_path()
+        if board_filename:
+            with open(board_filename, 'r', encoding='utf-8') as f:
+                board_info.keepouts = extract_keepouts(f.read())
+    except Exception:
+        pass
+
     return PCBData(
         board_info=board_info,
         nets=nets,
