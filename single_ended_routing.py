@@ -6,6 +6,7 @@ Routes individual nets using A* pathfinding on a grid obstacle map.
 
 import math
 import time
+import numpy as np
 from typing import Dict, List, Optional, Set, Tuple
 from terminal_colors import RED, YELLOW, GREEN, RESET
 
@@ -36,35 +37,82 @@ except ImportError:
     VisualRouter = None
 
 
+# Pads farther than this from a query point can't change a neck/merge decision:
+# every caller thresholds the distance against a clearance/track-width margin that
+# is well under a millimetre. Windowing to this radius keeps the result identical
+# where it matters (the exact min for anything closer) while letting the numpy
+# kernels skip the bulk of the board's pads. Generous (~10x the largest realistic
+# margin) so routing stays byte-for-byte identical.
+_FOREIGN_PAD_WINDOW = 5.0  # mm
+
+
+def _foreign_pad_arrays(pcb_data, layer):
+    """Cached per-layer numpy arrays (net_id, cx, cy, half_x, half_y) for every pad
+    on `layer`. Pads never change during a route, so this is built once per board
+    and reused across the millions of foreign-pad distance queries (the terminal
+    graze/merge checks). Returns five parallel arrays."""
+    cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
+    if cache is None:
+        cache = {}
+        pcb_data._foreign_pad_arr_cache = cache
+    arr = cache.get(layer)
+    if arr is None:
+        nids, cx, cy, hx, hy = [], [], [], [], []
+        for nid, pads in pcb_data.pads_by_net.items():
+            for pad in pads:
+                if layer in pad.layers or '*.Cu' in pad.layers:
+                    nids.append(nid)
+                    cx.append(pad.global_x); cy.append(pad.global_y)
+                    hx.append(pad.size_x / 2.0); hy.append(pad.size_y / 2.0)
+        arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
+               np.asarray(hx), np.asarray(hy))
+        cache[layer] = arr
+    return arr
+
+
 def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
-    """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT
-    net. The pad is treated as its full board-axis rect (rounded corners ignored
-    -> a slight under-estimate, i.e. conservative)."""
-    best = 1e9
-    for nid, pads in pcb_data.pads_by_net.items():
-        if nid == net_id:
-            continue
-        for pad in pads:
-            if layer not in pad.layers and '*.Cu' not in pad.layers:
-                continue
-            dx = max(abs(x - pad.global_x) - pad.size_x / 2.0, 0.0)
-            dy = max(abs(y - pad.global_y) - pad.size_y / 2.0, 0.0)
-            d = math.hypot(dx, dy)
-            if d < best:
-                best = d
-    return best
+    """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
+    The pad is treated as its full board-axis rect (rounded corners ignored -> a
+    slight under-estimate, i.e. conservative). Vectorized + windowed (see
+    _FOREIGN_PAD_WINDOW); exact for any distance within the window, which is all
+    the callers ever look at."""
+    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, layer)
+    if cx.size == 0:
+        return 1e9
+    R = _FOREIGN_PAD_WINDOW
+    # Expand the window by each pad's own half-size: a large pad's EDGE can be
+    # within R even when its centre is past R. Then min edge distance is exact for
+    # anything <= R (any excluded pad is > R away, beyond every caller's margin).
+    near = (np.abs(cx - x) <= R + hx) & (np.abs(cy - y) <= R + hy) & (nids != net_id)
+    if not near.any():
+        return 1e9
+    dx = np.maximum(np.abs(x - cx[near]) - hx[near], 0.0)
+    dy = np.maximum(np.abs(y - cy[near]) - hy[near], 0.0)
+    return float(np.min(np.hypot(dx, dy)))
 
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
-    """Min foreign-pad edge distance sampled along a (short, terminal) segment."""
+    """Min foreign-pad edge distance sampled along a (short, terminal) segment.
+    Vectorized: windows pads to the segment's bbox + margin, then evaluates ALL
+    sample points against them in one numpy matrix op."""
+    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, layer)
+    if cx.size == 0:
+        return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
-    best = 1e9
-    for i in range(n + 1):
-        t = i / n
-        d = _pt_foreign_pad_dist(pcb_data, net_id, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, layer)
-        if d < best:
-            best = d
-    return best
+    R = _FOREIGN_PAD_WINDOW
+    # Pad bbox (centre +/- half) must reach within R of the segment bbox; a pad
+    # excluded here is > R from every sample point on the segment.
+    near = ((cx + hx >= min(x1, x2) - R) & (cx - hx <= max(x1, x2) + R) &
+            (cy + hy >= min(y1, y2) - R) & (cy - hy <= max(y1, y2) + R) & (nids != net_id))
+    if not near.any():
+        return 1e9
+    fcx, fcy, fhx, fhy = cx[near], cy[near], hx[near], hy[near]
+    t = np.linspace(0.0, 1.0, n + 1)
+    sx = x1 + (x2 - x1) * t
+    sy = y1 + (y2 - y1) * t
+    dx = np.maximum(np.abs(sx[:, None] - fcx[None, :]) - fhx[None, :], 0.0)
+    dy = np.maximum(np.abs(sy[:, None] - fcy[None, :]) - fhy[None, :], 0.0)
+    return float(np.min(np.hypot(dx, dy)))
 
 
 def _fab_track_floor(pcb_data) -> float:
