@@ -52,7 +52,7 @@ def main():
     txt = run_route(out)
     checks = []
 
-    checks.append(("via-in-pad escape fired", "Via-in-pad escape" in txt))
+    checks.append(("via-in-pad escape fired", "Via-in-pad unblock" in txt))
 
     m = re.search(r"JSON_SUMMARY:\s*(\{.*\})", txt)
     checks.append(("JSON_SUMMARY line present", m is not None))
