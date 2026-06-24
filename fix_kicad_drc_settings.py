@@ -27,6 +27,9 @@ board actually uses:
   * **copper-to-edge** clearance (``min_copper_edge_clearance``)
   * **min track width / via diameter / via drill / annular ring** -- lowered to
     the smallest such object actually placed on the board
+  * Default net-class **differential-pair gap / width** (``--diff-pair-gap`` /
+    ``--diff-pair-width``) -- lowered to the routed values so the net class stops
+    advertising the stock-wide 0.25 mm gap a planner would read back and re-use
   * non-routing severities (courtyard, solder-mask, footprint/library) -> ignore
 
 **Only loosen, never tighten.** Every constraint is set to ``min(current, target)``
@@ -219,10 +222,19 @@ def severity_plan(keep_courtyards=False, keep_mask=False, keep_footprint=False,
 
 
 def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
-                             ignore_current_warnings=False):
+                             ignore_current_warnings=False,
+                             diff_pair_gap=None, diff_pair_width=None):
     """Apply the floors + severity plan to a parsed ``.kicad_pro`` dict, only
     ever loosening (lowering a constraint / lowering a severity rank), never
-    tightening. Returns a list of human-readable change strings."""
+    tightening. Returns a list of human-readable change strings.
+
+    ``diff_pair_gap`` / ``diff_pair_width`` (mm), when given, lower the Default
+    net class's differential-pair geometry to the values the board was actually
+    routed to (issue: a stock 0.25 mm net-class gap is far wider than the
+    fab-floor ~0.1 mm coupled pairs route_diff places, and a planner reading the
+    net class back would recommend the wide value). Neither is a DRC-enforced
+    minimum -- they are draw defaults -- so lowering them cannot create a new
+    violation, consistent with the only-loosen guarantee."""
     EPS = 1e-9
     ds = proj.setdefault("board", {}).setdefault("design_settings", {})
     rules = ds.setdefault("rules", {})
@@ -245,7 +257,10 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     nc_map = {"clearance": targets.get("min_clearance"),
               "track_width": targets.get("min_track_width"),
               "via_diameter": targets.get("min_via_diameter"),
-              "via_drill": targets.get("min_through_hole_diameter")}
+              "via_drill": targets.get("min_through_hole_diameter"),
+              "diff_pair_gap": diff_pair_gap,
+              "diff_pair_via_gap": diff_pair_gap,
+              "diff_pair_width": diff_pair_width}
     net_settings = proj.setdefault("net_settings", {})
     net_settings.setdefault("meta", {"version": 0})  # KiCad needs this to read classes
     classes = net_settings.setdefault("classes", [])
@@ -282,6 +297,7 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            hole_clearance=None, hole_to_hole=None, edge_clearance=None,
                            track_width=None, via_diameter=None, via_drill=None,
+                           diff_pair_gap=None, diff_pair_width=None,
                            keep_courtyards=False, keep_mask=False, keep_footprint=False,
                            keep_thermal=False, extra_ignore=(), verbose=True):
     """Make the DRC settings of a freshly written board consistent with the
@@ -315,7 +331,9 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     plan = severity_plan(keep_courtyards=keep_courtyards, keep_mask=keep_mask,
                          keep_footprint=keep_footprint, keep_thermal=keep_thermal,
                          extra_ignore=extra_ignore)
-    changes = apply_targets_to_project(proj, targets, plan)
+    changes = apply_targets_to_project(proj, targets, plan,
+                                       diff_pair_gap=diff_pair_gap,
+                                       diff_pair_width=diff_pair_width)
     if not changes:
         if verbose:
             print(f"  DRC settings already consistent ({out_pro})")
@@ -329,7 +347,8 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     return out_pro
 
 
-def apply_targets_to_board(board, targets: dict, sev_plan: dict):
+def apply_targets_to_board(board, targets: dict, sev_plan: dict,
+                           diff_pair_gap=None, diff_pair_width=None):
     """GUI path: apply the same floors + severity plan to a live pcbnew BOARD
     via BOARD_DESIGN_SETTINGS (issue #160). Best-effort and defensive -- the
     pcbnew API field/severity names vary across KiCad versions, so each step is
@@ -383,10 +402,23 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict):
             default_nc = bds.GetNetClasses().GetDefault()
         except Exception:
             default_nc = None
+    # Differential-pair geometry (gap/width) -- draw defaults, not DRC floors;
+    # lowered only, same as the CLI path. Best-effort across KiCad versions.
+    nc_map.update({"SetDiffPairGap": diff_pair_gap,
+                   "SetDiffPairViaGap": diff_pair_gap,
+                   "SetDiffPairWidth": diff_pair_width})
     if default_nc is not None:
         for setter, target in nc_map.items():
             if target is None or not hasattr(default_nc, setter):
                 continue
+            getter = "Get" + setter[3:]
+            if hasattr(default_nc, getter):
+                try:
+                    cur = getattr(default_nc, getter)()
+                    if cur is not None and cur <= round(float(target) * MM) + EPS:
+                        continue  # only loosen (lower); never raise
+                except Exception:
+                    pass
             try:
                 getattr(default_nc, setter)(round(float(target) * MM))
                 changes.append(f"net_class[Default].{setter} -> {target:.4g} mm")
@@ -446,6 +478,14 @@ def main():
                     help="Min via diameter in mm (default: smallest via on the board)")
     ap.add_argument("--via-drill", type=float, default=None,
                     help="Min hole/drill diameter in mm (default: smallest drill on the board)")
+    ap.add_argument("--diff-pair-gap", type=float, default=None,
+                    help="Default net-class differential-pair gap in mm (match route_diff "
+                         "--diff-pair-gap; lowered only). Use the fab floor (~0.1) for "
+                         "impedance-controlled pairs so the net class stops recommending the "
+                         "stock-wide 0.25 mm gap.")
+    ap.add_argument("--diff-pair-width", type=float, default=None,
+                    help="Default net-class differential-pair trace width in mm (the diff-pair "
+                         "track width; lowered only).")
     ap.add_argument("--keep-courtyards", action="store_true", help="Do not ignore courtyard categories")
     ap.add_argument("--keep-mask", action="store_true", help="Do not ignore solder-mask bridge")
     ap.add_argument("--keep-footprint", action="store_true",
@@ -483,7 +523,9 @@ def main():
                          keep_footprint=args.keep_footprint, keep_thermal=args.keep_thermal,
                          extra_ignore=args.ignore)
     changes = apply_targets_to_project(proj, targets, plan,
-                                       ignore_current_warnings=args.ignore_warnings)
+                                       ignore_current_warnings=args.ignore_warnings,
+                                       diff_pair_gap=args.diff_pair_gap,
+                                       diff_pair_width=args.diff_pair_width)
 
     if not changes:
         print(f"{pro}: already consistent, nothing to change.")

@@ -1241,6 +1241,7 @@ Examples:
                 clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
+                diff_pair_gap=args.diff_pair_gap, diff_pair_width=args.track_width,
                 keep_thermal=args.keep_thermal)
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")

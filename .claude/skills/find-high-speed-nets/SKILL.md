@@ -1,6 +1,6 @@
 ---
 name: find-high-speed-nets
-description: Analyzes a KiCad PCB to identify high-speed and impedance-controlled nets by looking up component datasheets via AI. Classifies nets by speed tier (ultra-high/high/medium/low), detects RF/antenna feeds and other controlled-impedance nets, estimates max frequencies and rise times per interface, and recommends GND return via distances AND impedance-controlled routing (target ohms + the route.py/route_diff.py --impedance commands).
+description: Analyzes a KiCad PCB to identify high-speed and impedance-controlled nets by looking up component datasheets via AI. Classifies nets by speed tier (ultra-high/high/medium/low), detects RF/antenna feeds and other controlled-impedance nets, estimates max frequencies and rise times per interface, and recommends GND return via distances AND impedance-controlled routing: target ohms, the route.py/route_diff.py --impedance commands, and near-fab-floor width/spacing (~0.1 mm gap & clearance, impedance-derived width clamped to the floor) that override and update the board's Default net class.
 ---
 
 # Find High-Speed Nets
@@ -425,12 +425,39 @@ python3 -X utf8 route.py board_diff.kicad_pcb board_imp.kicad_pcb \
 ```
 
 **Differential impedance pairs** keep being routed in the diff-pair step (Step 2),
-just add `--impedance`:
+just add `--impedance` — **and ride the fab floor for the gap and clearance:**
 
 ```bash
 python3 -X utf8 route_diff.py board.kicad_pcb board_diff.kicad_pcb \
-    --nets "*USB*" "*LVDS*" --impedance 90 --layers F.Cu In1.Cu In2.Cu B.Cu
+    --nets "*USB*" "*LVDS*" --impedance 90 \
+    --diff-pair-gap 0.1 --clearance 0.1 \
+    --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
+
+**Width and spacing: choose them near the fab floor (~0.1 mm), overriding the
+net class.** The stock Default net class is usually wide (e.g. `diff_pair_gap`
+0.25 mm, `diff_pair_width`/`track_width` 0.2 mm). A wide pair is a *fatter
+bundle* that needs more lateral room, so on a congested board the router drops
+pairs it would otherwise route — measured: on `glasgow_revC` all 13 FPGA pairs
+couple at `--diff-pair-gap 0.1`, but 2 fail at `0.25`. So for every
+impedance-controlled net:
+
+- **Spacing (`--diff-pair-gap`) and `--clearance`: the fab floor (~0.1 mm).** Do
+  NOT read the net-class `diff_pair_gap`; recommend the floor. Tighter coupling
+  is also better signal integrity for the pair.
+- **Width: keep `--impedance` (it computes the per-layer width from the stackup
+  for the target ohms), but the result is clamped to the fab floor (~0.1 mm) — it
+  will not go thinner than the board can make.** Width stays impedance-correct;
+  only the gap/clearance are forced tight.
+
+**These override the net class, and the routed board's net class is updated to
+match.** `route_diff.py` auto-invokes `fix_kicad_drc_settings.py` after routing,
+which lowers the Default net class `diff_pair_gap` / `diff_pair_width` /
+`clearance` to the values just routed (only-loosen — never raised). So after the
+diff-pair step the `.kicad_pro` net class reads ~0.1 mm, not the stock 0.25, and
+a later planner re-reading it won't resurrect the wide value. (To write it
+without routing — e.g. before the run — call it directly:
+`python3 fix_kicad_drc_settings.py board.kicad_pcb --diff-pair-gap 0.1 --diff-pair-width 0.1 --clearance 0.1`.)
 
 | Interface | Target | Routed by | Pipeline step |
 |-----------|--------|-----------|---------------|

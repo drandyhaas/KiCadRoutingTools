@@ -303,8 +303,16 @@ Use the printed flags as-is:
   hard minimum: on dense/congested boards route ordinary signals at the **fab
   physical floor** instead (thinner is both more complete and faster — see "Route
   signals at the FAB floor by default" in Diagnose and Retry). Keep the net-class
-  width only for current-carrying nets (`--power-nets`) and impedance-controlled
-  nets.
+  width only for **current-carrying nets** (`--power-nets`).
+  **Do NOT keep the net-class gap/width for impedance-controlled (diff-pair) nets** —
+  the stock net class is usually wide (`diff_pair_gap` 0.25 / width 0.2 mm), and a
+  fat pair is a wider bundle that gets dropped on congested boards (measured:
+  `glasgow_revC` routes all 13 FPGA pairs at `--diff-pair-gap 0.1` but loses 2 at
+  0.25). Per `/find-high-speed-nets`, route those at the **fab floor for gap and
+  clearance (~0.1 mm)** while keeping `--impedance` for the width (the router
+  computes it from the stackup and clamps it to the floor). `route_diff.py` then
+  auto-updates the Default net class to those tight values (only-loosen, via
+  `fix_kicad_drc_settings.py`), so the `.kicad_pro` stops advertising the wide gap.
 - **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
   inter-ball channel is too narrow to fit a track at the net-class clearance on
   more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls

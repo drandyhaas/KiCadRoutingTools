@@ -968,7 +968,9 @@ class DifferentialTab(wx.Panel):
                     via_diameter=cfg.get('via_size'),
                     via_drill=cfg.get('via_drill'))
                 if apply_targets_to_board(
-                        board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False))):
+                        board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
+                        diff_pair_gap=cfg.get('diff_pair_gap'),
+                        diff_pair_width=cfg.get('track_width')):
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the diff-pair routing values (save to persist)")
             except Exception as e:
