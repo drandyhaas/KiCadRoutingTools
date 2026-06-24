@@ -107,6 +107,73 @@ def _polygon_overlaps_window(points, min_x, min_y, max_x, max_y) -> bool:
                 max(ys) < min_y or min(ys) > max_y)
 
 
+# --- Spatial index for make_local_window (speedup 3) ---------------------------
+# make_local_window filters every board segment/via/pad to a small window around
+# one pad. Doing that as an O(all-board) scan per call is fine once, but the
+# plane-repair sweep and the via-in-pad escape call it for many pads; a coarse
+# bucket index makes each window query O(window) instead of O(board). The index
+# is cached on pcb_data and rebuilt only when the copper count changes, so it is
+# correct as routing adds/removes copper (the signature catches every mutation
+# that changes a count) while being reused across the many static-copper queries
+# of the repair sweep.
+_TAP_INDEX_CELL = 8.0  # mm bucket size
+
+
+def _cells_for_bbox(min_x, min_y, max_x, max_y):
+    cell = _TAP_INDEX_CELL
+    cx0, cy0 = int(math.floor(min_x / cell)), int(math.floor(min_y / cell))
+    cx1, cy1 = int(math.floor(max_x / cell)), int(math.floor(max_y / cell))
+    for cx in range(cx0, cx1 + 1):
+        for cy in range(cy0, cy1 + 1):
+            yield (cx, cy)
+
+
+def _build_tap_spatial_index(pcb_data: PCBData):
+    seg_b: Dict[Tuple[int, int], list] = {}
+    via_b: Dict[Tuple[int, int], list] = {}
+    pad_b: Dict[Tuple[int, int], list] = {}
+    for s in pcb_data.segments:
+        r = s.width / 2
+        for k in _cells_for_bbox(min(s.start_x, s.end_x) - r, min(s.start_y, s.end_y) - r,
+                                 max(s.start_x, s.end_x) + r, max(s.start_y, s.end_y) + r):
+            seg_b.setdefault(k, []).append(s)
+    for v in pcb_data.vias:
+        r = v.size
+        for k in _cells_for_bbox(v.x - r, v.y - r, v.x + r, v.y + r):
+            via_b.setdefault(k, []).append(v)
+    for nid, pads in pcb_data.pads_by_net.items():
+        for p in pads:
+            entry = (nid, p)  # ONE tuple per pad, shared across its cells, so
+            hw = max(p.size_x, p.size_y)  # _query_bucket's id()-dedup works
+            for k in _cells_for_bbox(p.global_x - hw, p.global_y - hw,
+                                     p.global_x + hw, p.global_y + hw):
+                pad_b.setdefault(k, []).append(entry)
+    return seg_b, via_b, pad_b
+
+
+def _tap_spatial_index(pcb_data: PCBData):
+    sig = (len(pcb_data.segments), len(pcb_data.vias),
+           sum(len(v) for v in pcb_data.pads_by_net.values()))
+    cached = getattr(pcb_data, '_tap_spatial_index_cache', None)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+    idx = _build_tap_spatial_index(pcb_data)
+    pcb_data._tap_spatial_index_cache = (sig, idx)
+    return idx
+
+
+def _query_bucket(bucket, min_x, min_y, max_x, max_y):
+    seen = set()
+    out = []
+    for k in _cells_for_bbox(min_x, min_y, max_x, max_y):
+        for item in bucket.get(k, ()):
+            i = id(item)
+            if i not in seen:
+                seen.add(i)
+                out.append(item)
+    return out
+
+
 def make_local_window(pcb_data: PCBData, cx: float, cy: float,
                       half_size: float) -> PCBData:
     """Build a shallow PCBData copy restricted to a square window around (cx, cy).
@@ -133,16 +200,20 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
         return (wmin_x - reach <= x <= wmax_x + reach and
                 wmin_y - reach <= y <= wmax_y + reach)
 
+    # Query the cached spatial index for candidates whose bbox overlaps the
+    # window, then apply the same precise filters (speedup 3). Falls back to the
+    # full board only via the index, which is built from the full board, so the
+    # result is identical to the old O(board) scan.
+    seg_b, via_b, pad_b = _tap_spatial_index(pcb_data)
     local = copy.copy(pcb_data)
-    local.vias = [v for v in pcb_data.vias if in_window(v.x, v.y, v.size)]
-    local.segments = [s for s in pcb_data.segments
+    local.vias = [v for v in _query_bucket(via_b, wmin_x, wmin_y, wmax_x, wmax_y)
+                  if in_window(v.x, v.y, v.size)]
+    local.segments = [s for s in _query_bucket(seg_b, wmin_x, wmin_y, wmax_x, wmax_y)
                       if _segment_overlaps_window(s, wmin_x, wmin_y, wmax_x, wmax_y)]
     pads_by_net: Dict[int, List[Pad]] = {}
-    for nid, pads in pcb_data.pads_by_net.items():
-        kept = [p for p in pads
-                if in_window(p.global_x, p.global_y, max(p.size_x, p.size_y))]
-        if kept:
-            pads_by_net[nid] = kept
+    for nid, p in _query_bucket(pad_b, wmin_x, wmin_y, wmax_x, wmax_y):
+        if in_window(p.global_x, p.global_y, max(p.size_x, p.size_y)):
+            pads_by_net.setdefault(nid, []).append(p)
     local.pads_by_net = pads_by_net
 
     board_info = copy.copy(pcb_data.board_info)
