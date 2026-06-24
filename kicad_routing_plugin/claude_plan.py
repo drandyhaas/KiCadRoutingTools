@@ -27,7 +27,9 @@ PLAN_RESULT_SCHEMA = (
     '"extension": <mm>}} | '
     '{"action": "route_diff", "pairs": ["<pair base name, the net name with its '
     'P/N suffix stripped, e.g. /lvds_rx0>", ...], '
-    '"params": {"diff_pair_width": <mm>, "diff_pair_gap": <mm>}} | '
+    '"params": {"diff_pair_width": <mm>, "diff_pair_gap": <mm>, '
+    '"impedance": <target differential ohms, optional - when set, per-layer '
+    'trace width is derived from the stackup and overrides diff_pair_width>}} | '
     '{"action": "route", "nets": ["<glob>", ...], '
     '"params": {"track_width": <mm>, "clearance": <mm>, "via_size": <mm>, '
     '"via_drill": <mm>, "power_nets": ["<glob>", ...], '
@@ -186,6 +188,13 @@ def apply_step_params(step, dialog):
                     getattr(tab, name).SetValue(float(params[name]))
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
+        # Impedance-controlled diff routing: per-layer width is derived from the
+        # stackup, so this overrides diff_pair_width (the diff tab control above).
+        if "impedance" in params:
+            try:
+                tab.diff_impedance.SetValue(float(params["impedance"]))
+            except (TypeError, ValueError):
+                notes.append(f"ignored non-numeric impedance={params['impedance']!r}")
     elif action == "route_planes":
         opts = dialog.planes_tab.create_options
         if "add_gnd_vias" in params:

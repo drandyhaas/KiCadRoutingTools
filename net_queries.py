@@ -368,27 +368,12 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
         if '/' in path:
             net_name = path.rsplit('/', 1)[-1]
 
-    # DDR true/complement, _t/_c, case-insensitive (CK_t/CK_c, CK_T/CK_C).
-    # With an explicit channel separator: DQS0_t_A / DQS0_c_A
-    tc_match = re.match(r'^(.+)_([tc])_(.+)$', net_name, re.IGNORECASE)
-    if tc_match:
-        base = tc_match.group(1) + '_X_' + tc_match.group(3)  # Keep suffix in base for pairing
-        is_positive = tc_match.group(2).lower() == 't'
-        return (base, is_positive, '_t')
-
-    # No separator before the channel char: DQS0_TA / DQS0_CA, CK_T0 / CK_C0.
-    # Requires a trailing char so plain CK_t / CK_c falls through to the next rule.
-    tc_match = re.match(r'^(.+)_([tc])([A-Za-z0-9])$', net_name, re.IGNORECASE)
-    if tc_match:
-        base = tc_match.group(1) + '_X' + tc_match.group(3)  # Keep channel in base for pairing
-        is_positive = tc_match.group(2).lower() == 't'
-        return (base, is_positive, '_t')
-
-    # Plain _t / _c suffix (DDR style, e.g., CK_t / CK_c), case-insensitive
-    if net_name[-2:].lower() == '_t':
-        return (net_name[:-2], True, '_t')
-    if net_name[-2:].lower() == '_c':
-        return (net_name[:-2], False, '_t')
+    # NOTE (issue #192): the DDR true/complement (_t_/_c_) rules are checked LAST,
+    # AFTER the explicit polarity-suffix rules below (+/-, _P/_N, P/N, USB,
+    # indexed). A `_t_`/`_c_` can appear mid-name as a section/channel letter
+    # (e.g. TARGET_C_SENSE+), and a real polarity suffix must win over it -- else
+    # the infix is misread as DDR complement and both halves key to different
+    # bases with the same polarity, so the pair is silently dropped.
 
     # USB data lines: DPLUS / DMINUS (case-insensitive). The D is kept in the
     # base so the two halves pair. Reject a letter before the D (e.g. an
@@ -439,6 +424,29 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
         return (net_name[:-1], True, '+')
     if net_name.endswith('-') and not net_name.endswith('--'):
         return (net_name[:-1], False, '+')
+
+    # DDR true/complement, _t/_c -- checked LAST so a mid-name _t_/_c_ section
+    # letter never shadows a real +/- or _P/_N pair (issue #192). Case-insensitive
+    # (CK_t/CK_c, CK_T/CK_C). With an explicit channel separator: DQS0_t_A / DQS0_c_A
+    tc_match = re.match(r'^(.+)_([tc])_(.+)$', net_name, re.IGNORECASE)
+    if tc_match:
+        base = tc_match.group(1) + '_X_' + tc_match.group(3)  # Keep suffix in base for pairing
+        is_positive = tc_match.group(2).lower() == 't'
+        return (base, is_positive, '_t')
+
+    # No separator before the channel char: DQS0_TA / DQS0_CA, CK_T0 / CK_C0.
+    # Requires a trailing char so plain CK_t / CK_c falls through to the next rule.
+    tc_match = re.match(r'^(.+)_([tc])([A-Za-z0-9])$', net_name, re.IGNORECASE)
+    if tc_match:
+        base = tc_match.group(1) + '_X' + tc_match.group(3)  # Keep channel in base for pairing
+        is_positive = tc_match.group(2).lower() == 't'
+        return (base, is_positive, '_t')
+
+    # Plain _t / _c suffix (DDR style, e.g., CK_t / CK_c), case-insensitive
+    if net_name[-2:].lower() == '_t':
+        return (net_name[:-2], True, '_t')
+    if net_name[-2:].lower() == '_c':
+        return (net_name[:-2], False, '_t')
 
     return None
 
