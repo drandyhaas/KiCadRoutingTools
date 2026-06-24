@@ -10,7 +10,7 @@ the `comparison` / `suggestions` fields of the results JSON.
 
 Usage:
   python3 compare_to_original.py --ours <our_final.kicad_pcb> \
-        --orig <boards/<board>.kicad_pcb> [--clearance <netclass Default cl>] [--json]
+        --orig <boards_setN/<board>.kicad_pcb> [--clearance <netclass Default cl>] [--json]
 """
 import sys
 import os

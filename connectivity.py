@@ -8,6 +8,8 @@ and tracking segment connectivity.
 import math
 from typing import List, Optional, Tuple, Dict, Set
 
+import numpy as np
+
 from kicad_parser import PCBData, Segment, Via, Pad, Zone
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import pos_key, segment_length, POSITION_DECIMALS, build_layer_map
@@ -1203,51 +1205,48 @@ def compute_mst_edges(points: List[Tuple[float, float]], use_manhattan: bool = F
             dist = math.sqrt((points[0][0] - points[1][0])**2 + (points[0][1] - points[1][1])**2)
         return [(0, 1, dist)]
 
-    # Prim's algorithm with min_dist array - O(n^2) instead of O(n^3)
+    # Prim's algorithm, vectorized with numpy. The per-step frontier update and
+    # min-selection are O(n) array ops instead of Python loops, so the whole MST
+    # is O(n^2) numpy work rather than O(n^2) interpreted work - a large win on
+    # big nets (connectors, wide buses). argmin/strict-less-than tie-breaking
+    # matches the scalar version (first-index wins).
     n = len(points)
-    in_tree = [False] * n
-    # min_dist[j] = minimum distance from any tree node to j
-    min_dist = [float('inf')] * n
-    # nearest[j] = the tree node closest to j
-    nearest = [0] * n
+    pts = np.asarray(points, dtype=np.float64)
+    xs = pts[:, 0]
+    ys = pts[:, 1]
+
+    in_tree = np.zeros(n, dtype=bool)
+    nearest = np.zeros(n, dtype=np.intp)
     edges = []
 
-    # Start with node 0
-    in_tree[0] = True
-    # Initialize distances from node 0
-    for j in range(1, n):
+    def _dist_from(idx):
+        dx = xs - xs[idx]
+        dy = ys - ys[idx]
         if use_manhattan:
-            min_dist[j] = abs(points[0][0] - points[j][0]) + abs(points[0][1] - points[j][1])
-        else:
-            min_dist[j] = math.sqrt((points[0][0] - points[j][0])**2 +
-                                    (points[0][1] - points[j][1])**2)
+            return np.abs(dx) + np.abs(dy)
+        return np.sqrt(dx * dx + dy * dy)
+
+    # Start with node 0.
+    in_tree[0] = True
+    min_dist = _dist_from(0)
+    min_dist[0] = np.inf  # node 0 is in the tree
 
     for _ in range(n - 1):
-        # Find non-tree node with minimum distance to tree
-        best_j = -1
-        best_dist = float('inf')
-        for j in range(n):
-            if not in_tree[j] and min_dist[j] < best_dist:
-                best_dist = min_dist[j]
-                best_j = j
-
-        if best_j == -1:
+        # Find the non-tree node closest to the tree (in-tree nodes masked out).
+        masked = np.where(in_tree, np.inf, min_dist)
+        best_j = int(np.argmin(masked))
+        best_dist = float(masked[best_j])
+        if not np.isfinite(best_dist):
             break
 
         in_tree[best_j] = True
-        edges.append((nearest[best_j], best_j, best_dist))
+        edges.append((int(nearest[best_j]), best_j, best_dist))
 
-        # Update min_dist for remaining non-tree nodes
-        for j in range(n):
-            if not in_tree[j]:
-                if use_manhattan:
-                    d = abs(points[best_j][0] - points[j][0]) + abs(points[best_j][1] - points[j][1])
-                else:
-                    d = math.sqrt((points[best_j][0] - points[j][0])**2 +
-                                  (points[best_j][1] - points[j][1])**2)
-                if d < min_dist[j]:
-                    min_dist[j] = d
-                    nearest[j] = best_j
+        # Pull every remaining node toward the freshly added node where closer.
+        d = _dist_from(best_j)
+        update = (~in_tree) & (d < min_dist)
+        min_dist[update] = d[update]
+        nearest[update] = best_j
 
     return edges
 

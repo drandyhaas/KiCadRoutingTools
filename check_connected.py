@@ -48,7 +48,7 @@ def matches_any_pattern(name: str, patterns: List[str]) -> bool:
     return False
 
 
-from geometry_utils import UnionFind, point_key
+from geometry_utils import UnionFind
 
 
 def points_match(x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:

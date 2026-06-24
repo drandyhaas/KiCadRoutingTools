@@ -700,6 +700,10 @@ class DifferentialTab(wx.Panel):
         # Merge configs
         config = {**routing_config, **diff_config}
 
+        # Remember the routed floors so _apply_results_to_board can make the live
+        # board's DRC constraints consistent with them (issue #160).
+        self._diff_drc_config = dict(config)
+
         # Build actual net names from selected pair net IDs
         net_names = []
         for base_name, p_net_id, n_net_id in selected_pair_info:

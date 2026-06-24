@@ -30,29 +30,31 @@ PLAN_RESULT_SCHEMA = (
     '{"action": "route", "nets": ["<glob>", ...], '
     '"params": {"track_width": <mm>, "clearance": <mm>, "via_size": <mm>, '
     '"via_drill": <mm>, "power_nets": ["<glob>", ...], '
-    '"power_nets_widths": [<mm>, ...]}} | '
+    '"power_nets_widths": [<mm>, ...], '
+    '"layer_costs": [<per-copper-layer cost multiplier, in board layer order>, ...]}} | '
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
     '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
-    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false, '
-    '"reroute_ripped_nets": true|false}} | '
+    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false}} | '
     '{"action": "repair_planes", '
     '"assignments": [{"nets": ["<exact net name>", ...], "layer": "<copper layer>"}], '
     '"params": {"via_size": <mm>, "via_drill": <mm>, "max_track_width": <mm>, '
-    '"analysis_grid_step": <mm>, "repair_pads": true|false, '
-    '"rip_blocker_nets": true|false, "reroute_ripped_nets": true|false}} '
+    '"grid_step": <mm>, "analysis_grid_step": <mm>, "repair_pads": true|false, '
+    '"rip_blocker_nets": true|false}} '
     ']} '
     'List steps in execution order: fanout first, then route_diff, then route, '
     'then route_planes, then repair_planes - signals route before planes because '
     'plane stitching vias can adapt around tracks, but a via placed early can '
-    'block a diff pair; repair_planes runs LAST to connect any disconnected plane '
-    'regions and tap plane pads the pour missed. Give it the SAME "assignments" '
-    'as the route_planes step (same nets and layers). Include exactly one '
-    'repair_planes step at the end whenever there is a route_planes step. Set '
-    'its rip_blocker_nets and reroute_ripped_nets true so a plane pad blocked by '
-    'a signal trace (e.g. a connector GND pin) is connected by ripping and '
-    're-routing the blocker; the re-route reuses the route step\'s '
-    'power_nets/power_nets_widths (shared Basic-tab fields, no need to repeat). '
+    'block a diff pair. repair_planes connects disconnected plane regions and taps '
+    'plane pads the pour missed. Give it the SAME "assignments" as the route_planes '
+    'step (same nets and layers). Include exactly one repair_planes step whenever '
+    'there is a route_planes step. Set its rip_blocker_nets true so a plane pad '
+    'blocked by a signal trace (e.g. a connector GND pin) is connected by ripping '
+    'the blocker out of the way; the ripped blocker is then left UNROUTED. So '
+    'whenever rip_blocker_nets is set, add ONE more route step AFTER repair_planes '
+    '(nets "*" minus the plane net names) to reconnect the ripped blockers - route '
+    'handles rip-up/restore safely against the live obstacle map and reuses the '
+    'route step\'s power_nets/power_nets_widths. '
     'The route step\'s "nets" globs support '
     '"!" exclusions and MUST exclude any net that a route_planes step will handle, '
     'e.g. ["*", "!GND", "!VCC"]. '
@@ -144,6 +146,12 @@ def apply_step_params(step, dialog):
                 dialog.power_widths_ctrl.SetValue(" ".join(f"{float(w):g}" for w in widths))
             else:
                 notes.append("power_nets/widths count mismatch, fields not filled")
+        costs = params.get("layer_costs")
+        if costs:
+            try:
+                dialog.layer_costs_ctrl.SetValue(" ".join(f"{float(c):g}" for c in costs))
+            except (TypeError, ValueError):
+                notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_diff":
         tab = dialog.differential_tab
         if "diff_pair_width" in params or "diff_pair_gap" in params:
@@ -170,12 +178,11 @@ def apply_step_params(step, dialog):
             opts.gnd_via_net.SetValue(str(params["gnd_via_net"]))
         if "rip_blocker_nets" in params:
             opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
-        if "reroute_ripped_nets" in params:
-            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
     elif action == "repair_planes":
-        # via size/drill come from the shared Basic-tab controls (same as route);
-        # the repair-specific knobs live on the Repair options panel.
-        for name in ("via_size", "via_drill"):
+        # via size/drill and the routing grid step come from the shared Basic-tab
+        # controls (same as route); the repair-specific knobs live on the Repair
+        # options panel.
+        for name in ("via_size", "via_drill", "grid_step"):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
@@ -193,8 +200,6 @@ def apply_step_params(step, dialog):
             opts.repair_pads.SetValue(bool(params["repair_pads"]))
         if "rip_blocker_nets" in params:
             opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
-        if "reroute_ripped_nets" in params:
-            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
     elif action == "fanout":
         kind = (step.get("kind") or "bga").lower()
         if kind == "bga":
@@ -305,9 +310,16 @@ def _plane_assignments_from_step(step, dialog, notes, action_name):
 
 def _match_net_names(pcb_data, globs):
     """Match net names against include globs, minus "!" exclusion globs
-    (CLI semantics: the plan's route step excludes plane nets as "!GND")."""
-    includes = [g for g in globs if not g.startswith("!")] or ["*"]
-    excludes = [g[1:] for g in globs if g.startswith("!")]
+    (CLI semantics: the plan's route step excludes plane nets as "!GND").
+
+    Uses the shared split_net_patterns helper so a literal active-low net name
+    like "!RESET" stays selectable rather than being read as an exclusion
+    (issue #177)."""
+    from net_queries import split_net_patterns
+    known_names = {net.name for net in pcb_data.nets.values() if net.name}
+    includes, excludes = split_net_patterns(globs, known_names)
+    if not includes:
+        includes = ["*"]
     names = []
     for net in pcb_data.nets.values():
         if not net.net_id or not net.name:

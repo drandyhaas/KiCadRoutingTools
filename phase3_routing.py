@@ -41,6 +41,38 @@ class Phase3Stats:
     total_time: float = 0.0
 
 
+def _nets_crossing_segments(segs, pcb_data, exclude_net_id, exclude_ids):
+    """Net IDs (other than exclude_net_id / exclude_ids) with a segment that truly
+    crosses any segment in `segs` on the same layer (a real different-net short).
+
+    Used when a tap rip-up is abandoned: a net re-routed by a NESTED rip-up cascade
+    can have been laid across the original tap we are about to keep -- that net is
+    NOT in this frame's ripped_items (it was a nested victim), so the #171 cleanup
+    misses it and a SEGMENT-CROSSING short ships (issue #186). Finding it here lets
+    the abandon re-route it clear of the original tap too.
+    """
+    from check_drc import segments_cross
+    if not segs:
+        return []
+    hits = set()
+    for ts in segs:
+        tminx, tmaxx = sorted((ts.start_x, ts.end_x))
+        tminy, tmaxy = sorted((ts.start_y, ts.end_y))
+        for other in pcb_data.segments:
+            if other.net_id in hits or other.net_id == exclude_net_id \
+                    or other.net_id in exclude_ids or other.layer != ts.layer:
+                continue
+            if (max(other.start_x, other.end_x) < tminx or
+                    min(other.start_x, other.end_x) > tmaxx or
+                    max(other.start_y, other.end_y) < tminy or
+                    min(other.start_y, other.end_y) > tmaxy):
+                continue
+            crosses, _ = segments_cross(ts, other)
+            if crosses:
+                hits.add(other.net_id)
+    return list(hits)
+
+
 def _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id):
     """Re-derive a multipoint result's routed/failed pads from the net's ACTUAL
     copper currently in pcb_data, via the same union-find used for MST seeding.
@@ -268,7 +300,7 @@ def run_phase3_tap_routing(
                 print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                 # IMPORTANT: Update completed_result['new_segments'] to match what's in pcb_data
-                # add_route_to_pcb_data cleans segments via collapse_appendices (now just
+                # add_route_to_pcb_data no longer per-commit-cleans segments (the
                 # a self-intersection fix, #148), updating
                 # tap_result['new_segments']. We need completed_result to have the cleaned
                 # segments for correct rip-up later. Combine cleaned main (lm_segments)
@@ -498,7 +530,7 @@ def try_phase3_ripup(
                     if tap_segments_added or tap_vias_added:
                         print(f"    Adding {len(tap_segments_added)} tap segments, {len(tap_vias_added)} tap vias to obstacles before re-routing...")
                         add_segments_list_as_obstacles(state.working_obstacles, tap_segments_added, config)
-                        add_vias_list_as_obstacles(state.working_obstacles, tap_vias_added, config)
+                        add_vias_list_as_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
                 elif net_id in ripped_net_ids:
                     print(f"    Skipping tap obstacle addition - net will be re-routed")
 
@@ -554,9 +586,50 @@ def try_phase3_ripup(
                              and (orig_tap_segs or orig_tap_vias))
                     if guard:
                         add_segments_list_as_obstacles(state.working_obstacles, orig_tap_segs, config)
-                        add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config)
+                        add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
+                    # Issue #171: the victims that DID re-route above avoided the
+                    # RETRY tap copper (added to obstacles before the re-route),
+                    # but we are now DISCARDING that retry in favour of net_id's
+                    # ORIGINAL tap. Those victims' fresh copper can short against
+                    # the original tap (it occupies different cells than the retry
+                    # tap did). Rip every still-routed victim so the full set is
+                    # re-routed clear of the original tap we are about to commit -
+                    # not just the stranded ones.
+                    reroute_items = list(ripped_items)
+                    for item in reroute_items:
+                        vic_id = item[0]
+                        if vic_id in routed_results:
+                            rip_up_net(
+                                vic_id, pcb_data, routed_net_ids, routed_net_paths,
+                                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                results, config, track_proximity_cache,
+                                state.working_obstacles, state.net_obstacles_cache,
+                                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                                layer_map
+                            )
+                    # Issue #186: also re-route any OTHER routed net whose copper
+                    # crosses the original tap we are keeping. A net re-routed by a
+                    # nested rip-up cascade can have been laid across this tap (it was
+                    # in-flight, invisible copper then) and is not in ripped_items, so
+                    # the loop above misses it and a different-net SHORT would ship.
+                    existing_ids = {it[0] for it in reroute_items}
+                    for cid in _nets_crossing_segments(orig_tap_segs, pcb_data, net_id, existing_ids):
+                        if cid not in routed_results:
+                            continue
+                        c_saved, c_ripped, c_was_in = rip_up_net(
+                            cid, pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id, remaining_net_ids,
+                            results, config, track_proximity_cache,
+                            state.working_obstacles, state.net_obstacles_cache,
+                            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                            layer_map
+                        )
+                        if c_saved is not None:
+                            print(f"    {net_name}: re-routing {pcb_data.nets[cid].name if cid in pcb_data.nets else f'net_{cid}'} "
+                                  f"clear of the kept tap (crossed it; issue #186)")
+                            reroute_items.append((cid, c_saved, c_ripped, c_was_in))
                     _reroute_phase3_ripped_nets(
-                        [item for item, _lost in stranded],
+                        reroute_items,
                         pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
@@ -754,7 +827,7 @@ def _reroute_phase3_ripped_nets(
                         print(f"    Re-routed {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                         # IMPORTANT: Update tap_result['new_segments'] to match what's in pcb_data
-                        # add_route_to_pcb_data cleans segments via collapse_appendices (now
+                        # add_route_to_pcb_data no longer per-commit-cleans segments (the
                         # just a self-intersection fix, #148), updating
                         # tap_result_data['new_segments']. We need tap_result to have the cleaned
                         # segments for correct rip-up later. Combine cleaned main (from result)

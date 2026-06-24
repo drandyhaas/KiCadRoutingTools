@@ -41,6 +41,8 @@ def get_dialog_settings(dialog):
         'enable_layer_switch': dialog.enable_layer_switch.GetValue(),
         'move_text_check': dialog.move_text_check.GetValue(),
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
+        'fix_drc_settings': dialog.fix_drc_check.GetValue(),
+        'keep_thermal': dialog.keep_thermal_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -164,6 +166,8 @@ def get_dialog_settings(dialog):
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
         'fanout_bga_underpad': dialog.fanout_tab.bga_options.underpad_escape.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
+        'fanout_qfn_underpad': dialog.fanout_tab.qfn_options.underpad_escape.GetValue(),
+        'fanout_qfn_allow_via_in_pad': dialog.fanout_tab.qfn_options.allow_via_in_pad.GetValue(),
 
         # Planes tab settings
         'planes_net_panel_checked': list(dialog.planes_tab.net_panel.get_selected_nets()),
@@ -176,7 +180,6 @@ def get_dialog_settings(dialog):
         'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
         'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
-        'planes_reroute_ripped_check': dialog.planes_tab.create_options.reroute_ripped_check.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
@@ -185,7 +188,6 @@ def get_dialog_settings(dialog):
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
         'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
         'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
-        'planes_repair_reroute_ripped_check': dialog.planes_tab.repair_options.reroute_ripped_check.GetValue(),
 
         # Claude tab settings (issue #40)
         'claude_model': dialog.claude_tab.get_model_value(),
@@ -260,6 +262,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.move_text_check.SetValue(settings['move_text_check'])
     if 'add_teardrops_check' in settings:
         dialog.add_teardrops_check.SetValue(settings['add_teardrops_check'])
+    if 'fix_drc_settings' in settings:
+        dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
+    if 'keep_thermal' in settings:
+        dialog.keep_thermal_check.SetValue(settings['keep_thermal'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:
@@ -510,6 +516,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.underpad_escape.SetValue(settings['fanout_bga_underpad'])
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
+    if 'fanout_qfn_underpad' in settings:
+        dialog.fanout_tab.qfn_options.underpad_escape.SetValue(settings['fanout_qfn_underpad'])
+    if 'fanout_qfn_allow_via_in_pad' in settings:
+        dialog.fanout_tab.qfn_options.allow_via_in_pad.SetValue(settings['fanout_qfn_allow_via_in_pad'])
 
     # Restore planes tab settings
     if 'planes_mode' in settings:
@@ -536,8 +546,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
     if 'planes_rip_blocker_check' in settings:
         dialog.planes_tab.create_options.rip_blocker_check.SetValue(settings['planes_rip_blocker_check'])
-    if 'planes_reroute_ripped_check' in settings:
-        dialog.planes_tab.create_options.reroute_ripped_check.SetValue(settings['planes_reroute_ripped_check'])
     if 'planes_add_gnd_vias' in settings:
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:
@@ -553,8 +561,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.repair_options.repair_pads.SetValue(settings['planes_repair_pads'])
     if 'planes_repair_rip_blocker_check' in settings:
         dialog.planes_tab.repair_options.rip_blocker_check.SetValue(settings['planes_repair_rip_blocker_check'])
-    if 'planes_repair_reroute_ripped_check' in settings:
-        dialog.planes_tab.repair_options.reroute_ripped_check.SetValue(settings['planes_repair_reroute_ripped_check'])
 
     # Restore Claude tab model/effort (issue #40). The setters validate
     # against the current dropdown choices, so a saved model or effort

@@ -10,8 +10,8 @@ import os
 STRESS = Path(os.environ.get("STRESS_DIR", str(Path.home() / "Documents/kicad_stress_test")))
 import pcbnew
 
-SRC = STRESS / "sources/github"
-DST = STRESS / "boards"
+SRC = STRESS / "sources/github_set1"
+DST = STRESS / "boards_set1"
 DST.mkdir(parents=True, exist_ok=True)
 
 # curated: source filename fragment -> short board name

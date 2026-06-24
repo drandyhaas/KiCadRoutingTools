@@ -883,6 +883,16 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetToolTip("Add teardrop settings to all pads in output file")
         options_inner.Add(self.add_teardrops_check, 0, wx.ALL, 3)
 
+        self.fix_drc_check = wx.CheckBox(options_scroll, label="Fix DRC settings after routing")
+        self.fix_drc_check.SetValue(True)
+        self.fix_drc_check.SetToolTip(
+            "After routing, loosen the live board's DRC Board Setup floors + Default "
+            "net class + non-routing severities to the values just routed to (issue "
+            "#160), so a manual DRC flags only genuine problems instead of stock-"
+            "default noise. The board's next save persists it. Mirrors the CLI's "
+            "auto-fix (route.py, off via --no-fix-drc-settings)")
+        options_inner.Add(self.fix_drc_check, 0, wx.ALL, 3)
+
         # Guide corridor: follow a user-drawn polyline (issue #7)
         self.guide_corridor_check = wx.CheckBox(options_scroll, label="Follow User-layer guide path")
         self.guide_corridor_check.SetValue(defaults.GUIDE_CORRIDOR_ENABLED)
@@ -1104,6 +1114,15 @@ class RoutingDialog(wx.Dialog):
         self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
         options_inner.Add(self.mps_segment_intersection, 0, wx.ALL, 3)
+
+        self.keep_thermal_check = wx.CheckBox(options_scroll, label="Keep thermal-relief DRC severity")
+        self.keep_thermal_check.SetValue(False)
+        self.keep_thermal_check.SetToolTip(
+            "When 'Fix DRC settings after routing' runs (Basic tab), by default it "
+            "demotes the starved_thermal DRC category to a warning. Check this to "
+            "leave thermal-relief severity untouched (matches the CLI's "
+            "--keep-thermal). Off by default.")
+        options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
 
         options_inner.AddSpacer(10)
 
@@ -1374,6 +1393,10 @@ class RoutingDialog(wx.Dialog):
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
                 'power_nets': power_nets,
                 'power_nets_widths': power_widths,
+                # Shared across all tabs: the single "Fix DRC settings after
+                # routing" toggle lives on the Basic tab (issue #160).
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
+                'keep_thermal': self.keep_thermal_check.GetValue(),
             }
 
         def get_claude_params():
@@ -1422,6 +1445,9 @@ class RoutingDialog(wx.Dialog):
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
+                # Shared across all tabs: the single "Fix DRC settings after
+                # routing" toggle lives on the Basic tab (issue #160).
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
             }
 
         def get_routing_config():
@@ -1447,6 +1473,9 @@ class RoutingDialog(wx.Dialog):
                 'debug_lines': self.debug_lines_check.GetValue(),
                 'verbose': self.verbose_check.GetValue(),
                 'enable_layer_switch': self.enable_layer_switch.GetValue(),
+                # Shared Basic-tab toggle, inherited by the Differential tab (#160).
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
+                'keep_thermal': self.keep_thermal_check.GetValue(),
             }
 
         def sync_pcb_data():
@@ -2140,6 +2169,8 @@ class RoutingDialog(wx.Dialog):
             'direction': ['forward', 'backward'][self.direction_choice.GetSelection() - 1] if self.direction_choice.GetSelection() > 0 else None,
             # Options
             'add_teardrops': self.add_teardrops_check.GetValue(),
+            'fix_drc_settings': self.fix_drc_check.GetValue(),
+            'keep_thermal': self.keep_thermal_check.GetValue(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,

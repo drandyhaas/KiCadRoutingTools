@@ -61,7 +61,7 @@ from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_m
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
-    add_net_obstacles_with_vis, VisualizationData
+    VisualizationData
 )
 from obstacle_costs import (
     add_stub_proximity_costs, merge_track_proximity_costs,

@@ -79,7 +79,7 @@ name. Recognized suffix conventions:
 | `_P` / `_N` | `LVDS0_P`, `LVDS0_N` |
 | `_PX` / `_NX` (indexed, index kept in base) | `FE_CLK_P0`, `FE_CLK_N0` |
 | `P` / `N` (no underscore) | `CLKP`, `CLKN` |
-| `+` / `-` | `USB+`, `USB-` |
+| `+` / `-` (not a `Net-(<ref>-±)` passive terminal) | `USB+`, `USB-` |
 | `_t` / `_c` (DDR true/complement, case-insensitive) | `DQS0_t`, `DQS0_c`, `CK_T`, `CK_C` |
 | `_t_X` / `_c_X` (with channel suffix) | `DQS0_t_A`, `DQS0_c_A` |
 | `_tX` / `_cX` (no-separator channel) | `DQS0_TA`, `DQS0_CA` |
@@ -91,7 +91,17 @@ so `FE_CLK_P0` pairs only with `FE_CLK_N0` (never `FE_CLK_N1`). For the USB
 half, so `/USB_DP` pairs with either `/USB_DM` or `/USB_DN`.
 
 KiCad's `Net-(<ref>-<pin>)` auto-names are unwrapped first, so a buried suffix
-like `Net-(U12-USB_D+)` / `Net-(U12-USB_D-)` still pairs.
+like `Net-(U12-USB_D+)` / `Net-(U12-USB_D-)` still pairs. When the unwrapped
+pin path is hierarchical (`Net-(U12-GPIO19/.../USB_D-)`, KiCad escapes `/` as
+`{slash}`), only the **leaf** segment is used, so the two halves pair even when
+their chip-internal prefixes differ (`GPIO19` vs `GPIO20`). User-named
+hierarchical nets (not `Net-(...)` auto-names) keep their full path, so
+`/bank1/CLK_N` never pairs with `/bank2/CLK_P`.
+
+A bare `+`/`-` suffix on a `Net-(<ref>-+)` / `Net-(<ref>--)` auto-name is **not**
+treated as a differential pair: that is a 2-terminal passive's polarity pad
+(buzzer, LED, etc.), not a coupled signal. A genuine pair is `FOO+`/`FOO-`,
+never `FOO-+`/`FOO--`.
 
 Nets only pair **within the same suffix style**: `CLK+` will never pair with
 an unrelated `CLK_N`. Only complete pairs (both sides found) are returned;

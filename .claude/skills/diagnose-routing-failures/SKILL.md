@@ -18,7 +18,10 @@ grep "JSON_SUMMARY" /tmp/route_output.txt | sed 's/.*JSON_SUMMARY: //' | python3
 Key fields:
 - `failed_single`: failed single-ended net names
 - `failed_multipoint`: nets with unconnected pads, including pad coordinates
-- `multipoint_pads_connected` vs `multipoint_pads_total`: connection success rate
+- `multipoint_pads_connected` vs `multipoint_pads_total`: connection success rate.
+  Derived from the final-board union-find (the same check `check_connected.py`
+  uses), so it credits pads reached via planes/zones, fanout stubs, and
+  rip-up/retry reroutes and agrees with `check_connected.py` (issue #184).
 
 ### Failed net histories
 

@@ -51,11 +51,49 @@ On the kit-dev-coldfire demo board this repaired the hand placement from
 3 failed nets to 0 with 4.8× less router effort, moving only
 resistors/caps/jumpers.
 
+## place_fanout_clearance.py — decoupling-cap clearance repair (issue #130)
+
+Run **after** `bga_fanout.py`. Nudges decoupling caps near a BGA so their
+pads clear every foreign-net fanout via (and any foreign track on the cap's
+own copper side), and pulls each pad toward the nearest **same-net** ball — so
+a power/GND via dropped at that ball later also lands on the cap pad (one
+shared via connects ball + cap + plane). Caps move as little as possible
+(90° rotations allowed), never overlap each other or a locked part, and a cap
+that can't clear within the (auto-grown) displacement budget is reported
+unresolved for a manual nudge.
+
+It reads each via's actual size from the board, so the only setting that
+matters is `--clearance`, which must match the fanout / DRC floor:
+
+```bash
+# after: bga_fanout.py board.kicad_pcb -o fanned.kicad_pcb --clearance 0.1 ...
+python place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--clearance` | 0.25 mm | DRC clearance; **set to the fanout/DRC floor** |
+| `--cap-prefix` | `C,R` | Comma-separated reference prefix(es) for movable passives near a BGA (caps **and** resistors by default). Only 2-copper-pad parts move, so RN-style arrays are auto-excluded; paste-only apertures are ignored when counting pads. |
+| `--capture-radius` | 2 mm | Max distance over which a same-net ball attracts a pad |
+| `--max-displacement` / `--max-displacement-cap` | 2 / 3 mm | Initial and grown move budget per cap |
+| `--default-via-size` | 0.3 mm | Fallback only, for vias with no readable size |
+| `--lock` | – | Extra reference patterns to pin in place |
+
+On ulx3s U1 (22×22, 0.8 mm) this took the fanned board from 4 PAD-VIA to
+fully DRC-clean, tidying 19 caps toward same-net balls (all ≤1.9 mm). In the
+GUI, the **"Optimize decoupling cap placement"** checkbox on the BGA fanout
+tab runs the same engine automatically right after fanout (off by default).
+The advanced knobs above (capture radius, near margin, search step, max
+displacement / cap / growth, max passes, cap-ref prefix, allow-rotation) are
+exposed in that tab's **"Cap Placement (advanced)"** box; `--clearance`,
+`--grid-step`, and the via size come from the Basic tab.
+
 ## Module layout
 
 | File | Purpose |
 |------|---------|
 | `quench.py` | The optimizer: cost terms, move generation, greedy quench |
+| `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `parser.py` | Courtyard boundary and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation) |
 | `utility.py` | Shared utilities (bbox from pads, grid snapping) |

@@ -43,8 +43,12 @@ def scenarios():
     r = check_net_connectivity(5, [], [far_via], [pad_f, on_plane], [zone])
     results.append(("via outside pad stays disconnected", not r['connected']))
 
-    # 3. Rotated pad: via inside the rotated rectangle is credited.
-    rpad = _pad('C90', 30.0, 30.0, 0.6, 1.95, ['F.Cu'], rot=90.0)  # now wide in x
+    # 3. Rotated pad: via inside the rotated rectangle is credited. A drawn
+    # 0.6x1.95 pad rotated 90deg is presented by the parser in BOARD space:
+    # size_x/size_y swapped (-> wide in x) with rect_rotation 0 for the
+    # orthogonal angle. _point_in_pad reads that resolved geometry, not the
+    # total rotation, so the fixture must supply the swapped sizes.
+    rpad = _pad('C90', 30.0, 30.0, 1.95, 0.6, ['F.Cu'])  # board-resolved: wide in x
     rvia = Via(x=30.8, y=30.0, size=0.5, drill=0.3, layers=['F.Cu', 'In1.Cu'], net_id=5)
     zone3 = Zone(net_id=5, net_name='GND', layer='In1.Cu',
                  polygon=[(25, 25), (35, 25), (35, 35), (25, 35)])

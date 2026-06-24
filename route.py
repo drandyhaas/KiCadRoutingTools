@@ -41,14 +41,14 @@ from connectivity import (
 )
 from net_queries import (
     get_all_unrouted_net_ids, get_chip_pad_positions,
-    compute_mps_net_ordering, find_pad_nearest_to_position, find_pad_at_position,
+    compute_mps_net_ordering, find_pad_nearest_to_position,
     expand_net_patterns, find_single_ended_nets, identify_power_nets
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance,
-    build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
+    build_base_obstacle_map_with_vis, get_net_bounds,
     VisualizationData, draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
 from obstacle_costs import (
@@ -58,7 +58,7 @@ from obstacle_costs import (
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, update_net_obstacles_after_routing
 )
-from single_ended_routing import (route_net, route_net_with_obstacles, route_net_with_visualization,
+from single_ended_routing import (route_net_with_obstacles, route_net_with_visualization,
                                    route_multipoint_taps, build_corridor_waypoints)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -80,7 +80,7 @@ from phase3_routing import run_phase3_tap_routing
 from net_ordering import order_nets_mps, order_nets_inside_out
 from routing_common import (
     setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
-    build_obstacle_infrastructure, run_length_matching, sync_pcb_data_segments,
+    run_length_matching, sync_pcb_data_segments,
     get_common_config_kwargs
 )
 import routing_defaults as defaults
@@ -781,15 +781,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Build summary data
     import json
-    routed_single = []
-    failed_single = []
-    failed_single_ids = []  # Track IDs for history output
-    for net_name, net_id in single_ended_nets:
-        if net_id in routed_results:
-            routed_single.append(net_name)
-        else:
-            failed_single.append(net_name)
-            failed_single_ids.append(net_id)
+    # routed_single / failed_single are derived below, AFTER the authoritative
+    # connectivity sweep -- a net with a result in routed_results may still have
+    # left pads disconnected (a failed MST edge), and must not be reported routed
+    # (issue #189). failed_single stays "no result at all"; the partially-routed
+    # disconnected nets are surfaced via failed_multipoint (and mp_deficit).
 
     # Keep only each net's authoritative result in the write-list. routed_results
     # holds one result per net; rip-reroute paths (restore_net, layer-swap) can
@@ -824,7 +820,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Final dead-end sweep (issue #84): trim copper that dead-ends -- tap tails
     # superseded by rip-and-reroute, spurs left when a blocker was ripped, and
     # fanout/escape stubs a net routed away from or never completed -- which
-    # the per-commit clean (collapse_appendices, now just a self-intersection
+    # the per-commit self-intersection clean was removed (#159); only the
     # fix since #148) does not reach. Runs after the phantom
     # drop so it only sees real board copper. Scoped to the nets this run routed
     # so untouched planes / excluded nets are never altered. Routed dead ends are
@@ -905,6 +901,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Authoritatively connected now: drop a stale (stricter-model or
             # pre-rip) failure flag so the net is not reported as a phantom fail.
             _res['failed_pads_info'] = []
+        # Issue #184: re-derive the multi-point pad counts from this same
+        # authoritative union-find (which credits pads reached via planes/zones,
+        # fanout stubs, and rip-up/retry reroutes), not the per-net MST edge tally
+        # gathered during routing -- otherwise the headline under-reports
+        # connectivity (e.g. upsy_desky 73/101) on boards check_connected.py
+        # confirms fully connected, and the tap-retry loop chases already-connected
+        # pads. Match check_connected.py semantics: count over all of the net's pads.
+        if _res.get('is_multipoint'):
+            _res['tap_pads_total'] = len(_pads)
+            _res['tap_pads_connected'] = len(_pads) - len(_dp)
 
     # Collect multi-point tap routing stats and failed pad details
     tap_pads_connected = 0
@@ -941,6 +947,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if nid in routed_results and nid not in failed_multipoint_ids}
     successful = len(fully_routed_ids)
     failed = len(scope_ids) - successful
+
+    # Now classify each net for the summary. A net only counts as routed_single
+    # if it is fully connected (issue #189): one that routed a result but left
+    # pads disconnected (a failed MST edge) is in failed_multipoint_ids and is
+    # NOT routed. failed_single stays "no result at all" so the place/route loop
+    # does not double-count it (its deficit is already in mp_deficit).
+    routed_single = []
+    failed_single = []
+    failed_single_ids = []  # Track IDs for history output
+    for net_name, net_id in single_ended_nets:
+        if net_id in fully_routed_ids:
+            routed_single.append(net_name)
+        elif net_id not in routed_results:
+            failed_single.append(net_name)
+            failed_single_ids.append(net_id)
 
     # Print human-readable summary
     print("\n" + "=" * 60)
@@ -1033,7 +1054,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         }
     else:
         # Write output file using extracted output_writer module
-        write_routed_output(
+        wrote = write_routed_output(
             input_file=input_file,
             output_file=output_file,
             results=results,
@@ -1050,6 +1071,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_teardrops=add_teardrops,
             segments_to_remove=dead_end_input_segments
         )
+        # When nothing could be routed (every net failed) there is no copper to
+        # write, so write_routed_output produces no file. Pass the board through
+        # unchanged so the pipeline never loses its board and a later step (a
+        # finer-grid retry, planes, repair) can still run on it (issues #90, #167)
+        # -- otherwise the whole chain FileNotFoundErrors on the missing output.
+        if not wrote and output_file:
+            _write_passthrough_output(input_file, output_file)
 
     # Update schematics with swap info if directory specified
     if schematic_dir and single_ended_target_swap_info:
@@ -1274,6 +1302,14 @@ For differential pair routing, use route_diff.py:
                         help=f"Minimum clearance between drill holes in mm (default: {defaults.HOLE_TO_HOLE_CLEARANCE})")
     parser.add_argument("--board-edge-clearance", type=float, default=defaults.BOARD_EDGE_CLEARANCE,
                         help=f"Clearance from board edge in mm (default: {defaults.BOARD_EDGE_CLEARANCE} = use track clearance)")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not adjust the output's .kicad_pro DRC constraints to match the "
+                             "routed clearances/sizes afterwards (issue #160). By default the "
+                             "written project's Board Setup floors are loosened to the routed "
+                             "values so KiCad's DRC only flags genuine problems.")
+    parser.add_argument("--keep-thermal", action="store_true",
+                        help="When fixing DRC settings, leave thermal-relief severity "
+                             "(starved_thermal) untouched instead of demoting it to a warning")
 
     # Vertical alignment attraction options
     parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
@@ -1481,3 +1517,20 @@ For differential pair routing, use route_diff.py:
                 layer_costs=args.layer_costs,
                 add_teardrops=args.add_teardrops,
                 collect_stats=args.stats)
+
+    # Make the written project's KiCad DRC constraints consistent with the
+    # clearances/sizes we just routed to, so a manual DRC only flags genuine
+    # problems instead of stock-default noise (issue #160). Only edits the
+    # .kicad_pro, never the .kicad_pcb, so the board's KiCad version is preserved.
+    if not args.no_fix_drc_settings and not args.skip_routing \
+            and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                args.output_file, input_pcb=args.input_file,
+                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                via_diameter=args.via_size, via_drill=args.via_drill,
+                keep_thermal=args.keep_thermal)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")

@@ -79,6 +79,25 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
 | `--escape-method` | `channel` (default) or `underpad` (dense arrays) | channel |
 
+### Sizing the escape via to the pitch (issue #158)
+
+The channel engine runs one escape track down the **half-pitch** between adjacent
+via columns, so the via, track, and clearance must fit it or **every** escape
+grazes the neighbouring column's via by a few µm (a sub-clearance DRC violation
+the fanout would otherwise report as a clean `failed: 0`). The budget, per array:
+
+```
+via_size  ≤  pitch − track_width − 2·clearance        (one escape track per channel)
+via_size  ≥  via_drill + 2·min_annular_ring           (fab floor)
+```
+
+Example: at 0.8 mm pitch with `--track-width 0.127 --clearance 0.1`, the escape
+via must be ≤ 0.473 mm — **Ø0.5 grazes (every escape ~13 µm short), Ø0.45 is
+clean** (pair with `--via-drill 0.25` to keep a 0.1 mm annular ring). When handed
+infeasible params, `bga_fanout` prints a `WARNING: escape via ... busts the
+half-pitch budget` with the recommended maximum. The `plan-pcb-routing` skill
+computes this automatically.
+
 ## Escape methods
 
 `--escape-method` selects the fanout engine:
@@ -101,7 +120,16 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
   - Use it when `channel` reports dropped balls (`failed > 0`) on a dense array.
   - **Power/plane nets are skipped** - they tap their plane through a via, not a
     lateral escape. (Plane the power nets first, or exclude them with `--nets`.)
-  - Diff pairs are routed as **single-ended** (the pair geometry isn't preserved).
+  - **Differential pairs are escaped coupled** when `--diff-pairs` is given
+    (issue #182): each pair's P and N exit on the **same layer**, converged to
+    the diff spacing and extended past the boundary, so `route_diff` picks them
+    up. Edge pairs escape **via-free on the top layer** (broadside pairs straight
+    off the boundary; stacked pairs *END-ON*, the trail ball bulging through the
+    pad gap), which keeps the rim via-free so the **deeper stacked pairs escape
+    END-ON on an inner layer** (via-in-pad, same layer for P/N) running underneath
+    them. A pair that can't fit a coupled corridor falls back to single-ended
+    (still connected, just not coupled). On `glasgow_revC` (BGA U30, 0.8 mm
+    pitch) all 13 FPGA Z-pairs escape coupled and route_diff couples them.
   - Use a **small via and track** for the pitch - the escape needs one clean
     track between adjacent via-in-pads, roughly `via ≤ pitch − 2·track − 2·clearance`.
     For 0.8 mm pitch, `--via-size 0.35 --track-width 0.12 --clearance 0.1` works well.
@@ -109,11 +137,29 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
     runs on the BGA's own layer.
 
 ```bash
-# Dense BGA that the channel router can't fully escape
+# Dense BGA that the channel router can't fully escape (diff pairs escaped coupled)
 python bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
-    --layers F.Cu In1.Cu In2.Cu B.Cu \
+    --layers F.Cu In1.Cu In2.Cu B.Cu --diff-pairs "*" \
     --escape-method underpad --via-size 0.35 --track-width 0.12 --clearance 0.1
 ```
+
+## After fanout: optimize decoupling-cap placement (issue #130)
+
+A fanout drops vias near the ball field. Where a foreign-net via lands under a
+decoupling cap placed at a ball, the via copper overlaps the cap pad — a real
+`PAD-VIA` DRC violation at the clearance floor. The fix is *placement*, so run
+[`place_fanout_clearance.py`](../placement/README.md) on the **fanned** board
+to nudge those caps clear and pull each pad toward its nearest same-net ball
+(so a power/GND via dropped there later shares the via):
+
+```bash
+python place_fanout_clearance.py out.kicad_pcb capclean.kicad_pcb --clearance 0.1
+```
+
+Use the same `--clearance` as the fanout. It only moves 2-pad caps near a BGA,
+never overlaps caps, and is a no-op when nothing collides — so run it after
+each fanout, before signal routing. (GUI: the "Optimize decoupling cap
+placement" checkbox on the BGA fanout tab does this automatically.)
 
 ## Module Structure
 

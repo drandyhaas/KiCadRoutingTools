@@ -12,196 +12,6 @@ from routing_config import GridRouteConfig, GridCoord
 from grid_router import GridObstacleMap
 
 
-def add_gnd_vias_near_signal_vias(
-    results: List[Dict],
-    pcb_data: PCBData,
-    gnd_net_name: str,
-    gnd_via_distance: float,
-    config: GridRouteConfig,
-    obstacles: GridObstacleMap,
-    coord: GridCoord
-) -> List[Via]:
-    """
-    Add GND vias near signal vias that don't already have a nearby GND via or pad.
-
-    Places GND vias as close as possible to each signal via, checking from minimum
-    viable distance outward up to gnd_via_distance.
-
-    Args:
-        results: List of routing results with 'new_vias' entries
-        pcb_data: PCB data with existing vias and pads
-        gnd_net_name: Net name for GND (e.g., "GND")
-        gnd_via_distance: Maximum distance to place GND via from signal via (mm)
-        config: Routing config with via size, drill, clearance, layers
-        obstacles: Current obstacle map with all routed tracks/vias
-        coord: Grid coordinate converter
-
-    Returns:
-        List of new GND Via objects to add
-    """
-    # Find GND net ID
-    gnd_net_id = None
-    for net_id, net in pcb_data.nets.items():
-        if net.name == gnd_net_name:
-            gnd_net_id = net_id
-            break
-
-    if gnd_net_id is None:
-        print(f"Warning: GND net '{gnd_net_name}' not found, skipping GND via placement")
-        return []
-
-    # Collect all signal vias from routing results (non-GND vias)
-    signal_vias = []
-    for result in results:
-        for via in result.get('new_vias', []):
-            if via.net_id != gnd_net_id:
-                signal_vias.append(via)
-
-    if not signal_vias:
-        return []
-
-    # Collect existing GND vias from PCB data and routing results
-    existing_gnd_positions = [(v.x, v.y) for v in pcb_data.vias if v.net_id == gnd_net_id]
-    for result in results:
-        for via in result.get('new_vias', []):
-            if via.net_id == gnd_net_id:
-                existing_gnd_positions.append((via.x, via.y))
-
-    # Also include through-hole GND pads (they act as GND vias)
-    for pad in pcb_data.pads_by_net.get(gnd_net_id, []):
-        if pad.drill and pad.drill > 0:  # Through-hole pad
-            existing_gnd_positions.append((pad.global_x, pad.global_y))
-
-    # Minimum distance from signal via center to GND via center
-    # (signal via radius + clearance + GND via radius)
-    min_distance = config.via_size / 2 + config.clearance + config.via_size / 2
-
-    new_gnd_vias = []
-    placed_gnd_positions = []  # Track mm positions of GND vias we're adding
-
-    # Via-to-via minimum clearance (center-to-center)
-    via_via_min_dist = config.via_size + config.clearance
-
-    # Grid cells to check for via clearance
-    # The obstacle map already expands tracks by track_width/2 + clearance.
-    # We only need to check cells within via_drill/2 (the actual hole).
-    via_check_radius_grid = max(1, coord.to_grid_dist(config.via_drill / 2))
-
-    def is_via_position_clear(x_mm: float, y_mm: float, skip_via_x: float, skip_via_y: float) -> bool:
-        """Check if a via can be placed at the given position.
-
-        Args:
-            x_mm, y_mm: Proposed GND via position
-            skip_via_x, skip_via_y: Signal via position to skip when checking via clearance
-        """
-        gx, gy = coord.to_grid(x_mm, y_mm)
-
-        # Check track clearance on all layers (via must not overlap tracks)
-        for layer_idx in range(len(config.layers)):
-            for dx in range(-via_check_radius_grid, via_check_radius_grid + 1):
-                for dy in range(-via_check_radius_grid, via_check_radius_grid + 1):
-                    if dx * dx + dy * dy <= via_check_radius_grid * via_check_radius_grid:
-                        if obstacles.is_blocked(gx + dx, gy + dy, layer_idx):
-                            return False
-
-        # Manual via-to-via clearance check (skip the signal via we're placing near)
-        for via in pcb_data.vias:
-            if abs(via.x - skip_via_x) < 0.01 and abs(via.y - skip_via_y) < 0.01:
-                continue  # Skip the signal via we're placing a GND via for
-            dist = math.sqrt((x_mm - via.x)**2 + (y_mm - via.y)**2)
-            if dist < via_via_min_dist:
-                return False
-
-        # Also check vias from routing results (the signal vias we're working with)
-        for result in results:
-            for via in result.get('new_vias', []):
-                if abs(via.x - skip_via_x) < 0.01 and abs(via.y - skip_via_y) < 0.01:
-                    continue  # Skip the target signal via
-                dist = math.sqrt((x_mm - via.x)**2 + (y_mm - via.y)**2)
-                if dist < via_via_min_dist:
-                    return False
-
-        # Check clearance from through-hole pads
-        for net_id, pads in pcb_data.pads_by_net.items():
-            for pad in pads:
-                if pad.drill and pad.drill > 0:
-                    dist = math.sqrt((x_mm - pad.global_x)**2 + (y_mm - pad.global_y)**2)
-                    min_pad_dist = pad.drill / 2 + config.clearance + config.via_drill / 2
-                    if dist < min_pad_dist:
-                        return False
-
-        # Check against GND vias we're placing in this batch
-        for px, py in placed_gnd_positions:
-            dist = math.sqrt((x_mm - px)**2 + (y_mm - py)**2)
-            if dist < via_via_min_dist:
-                return False
-
-        return True
-
-    # Try many angles for better coverage (every 15 degrees = 24 directions)
-    angles_deg = list(range(0, 360, 15))
-
-    for sig_via in signal_vias:
-        sx, sy = sig_via.x, sig_via.y
-
-        # Check if there's already a GND via/pad within gnd_via_distance
-        has_nearby_gnd = False
-        for gx, gy in existing_gnd_positions + placed_gnd_positions:
-            dist = math.sqrt((sx - gx)**2 + (sy - gy)**2)
-            if dist <= gnd_via_distance:
-                has_nearby_gnd = True
-                break
-
-        if has_nearby_gnd:
-            continue
-
-        # Try to place a GND via as close as possible to signal via
-        # Search all angles at each distance, find the closest valid position
-        best_pos = None
-        distance_step = config.grid_step / 2  # Finer step for better placement
-
-        distance = min_distance
-        while distance <= gnd_via_distance:
-            # Try all angles at this distance
-            for angle_deg in angles_deg:
-                angle_rad = math.radians(angle_deg)
-                gnd_x = sx + distance * math.cos(angle_rad)
-                gnd_y = sy + distance * math.sin(angle_rad)
-
-                if is_via_position_clear(gnd_x, gnd_y, sx, sy):
-                    # Found a valid position at closest possible distance
-                    best_pos = (gnd_x, gnd_y)
-                    break
-
-            if best_pos is not None:
-                break  # Found a position, stop searching
-
-            distance += distance_step
-
-        if best_pos:
-            gnd_via = Via(
-                x=best_pos[0],
-                y=best_pos[1],
-                size=config.via_size,
-                drill=config.via_drill,
-                # Through-hole span like every other routed via. A KiCad via is
-                # defined by its two outer copper layers; listing every plane
-                # layer (e.g. F/In1/In2/B for an inner-layer plane) is invalid
-                # and makes KiCad refuse to load the whole board.
-                layers=["F.Cu", "B.Cu"],
-                net_id=gnd_net_id,
-                free=True  # Prevent KiCad auto-assignment
-            )
-            new_gnd_vias.append(gnd_via)
-            placed_gnd_positions.append(best_pos)
-            existing_gnd_positions.append(best_pos)
-
-    if new_gnd_vias:
-        print(f"Added {len(new_gnd_vias)} GND vias near signal vias")
-
-    return new_gnd_vias
-
-
 def add_gnd_vias_to_existing_board(
     pcb_data: PCBData,
     gnd_net_name: str,
@@ -254,9 +64,12 @@ def add_gnd_vias_to_existing_board(
         if pad.drill and pad.drill > 0:  # Through-hole pad
             existing_gnd_positions.append((pad.global_x, pad.global_y))
 
-    # Minimum distance from signal via center to GND via center
-    # (signal via radius + clearance + GND via radius)
-    min_distance = config.via_size / 2 + config.clearance + config.via_size / 2
+    # Minimum distance from signal via center to GND via center: larger of the
+    # copper ring clearance (via_size + clearance) and the drill hole-to-hole
+    # minimum (via_drill + hole_to_hole_clearance), so the paired GND via clears
+    # the signal via on both measures (issue #125).
+    min_distance = max(config.via_size + config.clearance,
+                       config.via_drill + config.hole_to_hole_clearance)
 
     # Debug: Print clearance parameters
     print(f"GND via placement parameters:")
@@ -267,14 +80,20 @@ def add_gnd_vias_to_existing_board(
     new_gnd_vias = []
     placed_gnd_positions = []
 
-    # Via-to-via minimum clearance (center-to-center) for batch placement
-    via_via_min_dist = config.via_size + config.clearance
+    # Via-to-via minimum clearance (center-to-center) for batch placement: larger
+    # of copper ring (via_size + clearance) and drill hole-to-hole (via_drill +
+    # hole_to_hole_clearance), so a thin-ring via can't land inside the drill
+    # hole-to-hole minimum (issue #125).
+    via_via_min_dist = max(config.via_size + config.clearance,
+                           config.via_drill + config.hole_to_hole_clearance)
 
     # Grid cells to check for via clearance
     # The obstacle map already expands tracks by track_width/2 + clearance.
     # We only need to check cells within via_drill/2 (the actual hole), not the full
     # via pad, since the obstacle map expansion already accounts for clearance.
-    via_check_radius_grid = max(1, coord.to_grid_dist(config.via_drill / 2))
+    # Ceil (not floor) the hole radius so this circular clear-check doesn't miss the
+    # outermost ring and let the GND-via hole land ~1 cell into a keep-out (#154 class).
+    via_check_radius_grid = max(1, coord.to_grid_dist_safe(config.via_drill / 2))
 
     def is_via_position_clear(x_mm: float, y_mm: float, sig_via_x: float, sig_via_y: float) -> tuple:
         """Check if a via can be placed at the given position.
@@ -308,12 +127,14 @@ def add_gnd_vias_to_existing_board(
             if dist < via_via_min_dist:
                 return (False, f"too_close_to_via({dist:.2f}mm)")
 
-        # Check clearance from through-hole pads
+        # Check drill hole-to-hole clearance from through-hole pad drills (a
+        # physical drill-to-drill minimum -> hole_to_hole_clearance, NOT the copper
+        # clearance, which under-enforces it; issue #125 PAD-DRILL-VIA-DRILL).
         for net_id, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if pad.drill and pad.drill > 0:
                     dist = math.sqrt((x_mm - pad.global_x)**2 + (y_mm - pad.global_y)**2)
-                    min_pad_dist = pad.drill / 2 + config.clearance + config.via_drill / 2
+                    min_pad_dist = pad.drill / 2 + config.hole_to_hole_clearance + config.via_drill / 2
                     if dist < min_pad_dist:
                         return (False, f"too_close_to_th_pad({dist:.2f}mm)")
 

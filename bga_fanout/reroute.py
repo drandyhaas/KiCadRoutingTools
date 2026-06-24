@@ -305,30 +305,6 @@ def route_clear_of_foreign_pads(route: 'FanoutRoute',
     return True
 
 
-def route_clear_of_pads(route: 'FanoutRoute',
-                        obstacles,
-                        cfg,
-                        layer_map: Dict[str, int],
-                        foreign_pads=None) -> bool:
-    """Return True if the whole route is clear of foreign pads/copper/vias.
-
-    Checks every segment of the route on the route's own layer using the shared
-    obstacle map. A through-hole obstacle blocks all layers (already encoded in
-    the map). When `foreign_pads` is given, also applies a precise geometric
-    guard against foreign-component pads (catches foreign pads excluded from the
-    shared map because they share a net with a fanned BGA ball). No-op (True) if
-    obstacles/cfg/layer_map are None.
-    """
-    if obstacles is None or cfg is None or layer_map is None:
-        return True
-    if not segments_clear_of_pads(route_segments(route), route.layer,
-                                  obstacles, cfg, layer_map):
-        return False
-    if foreign_pads is not None and not route_clear_of_foreign_pads(route, foreign_pads, layer_map):
-        return False
-    return True
-
-
 def try_reroute_single_ended(route: 'FanoutRoute',
                               alternate_channel: Channel,
                               grid: BGAGrid,
@@ -1106,7 +1082,7 @@ def repair_pad_crossings(routes: List[FanoutRoute], tracks: List[Dict],
                          foreign_pads=None) -> Tuple[int, List[str]]:
     """Reroute fanout routes whose copper crosses a foreign pad/track/via.
 
-    Reuses the obstacle map: a route is "bad" if route_clear_of_pads is False.
+    Reuses the obstacle map: a route is "bad" if it crosses a foreign pad/track/via.
     Resolution order, reusing the existing jog/reroute machinery:
       1. Move the route (and its diff-pair partner, kept on the same layer) to a
          layer where it is both pad-clear and track-collision-free.

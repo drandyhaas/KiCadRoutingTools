@@ -255,6 +255,113 @@ python3 tests/test_multipoint_diff_route.py
 python3 tests/test_multipoint_diff_route.py -v
 ```
 
+### test_diff_connector_graze.py - Connector/Partner-Pad Graze Reject (issue #165)
+
+Unit test for the diff-pair final-geometry guard `_connector_grazes_foreign_copper`
+(foreign pads **and** vias).
+The connector/setback segments are clearance-checked during routing against an
+obstacle map that excludes **both** halves of the pair, so a connector can graze
+the **partner** net's pad (USB-C, fine-pitch) unseen. The guard re-validates the
+final geometry against foreign pads using the **same** geometry and tolerance as
+`check_drc`, so it rejects a real graze (the tigard 0.164 mm `/USB_DP`↔`J1.A7`
+short) without false-rejecting tight-but-legal packing that sits exactly at
+clearance. Pure-geometry, no Rust router or board file needed.
+
+```bash
+python3 tests/test_diff_connector_graze.py
+```
+
+### test_diff_terminal_pairing.py - Diff-Pair Terminal Pairing (issue #165)
+
+Unit test for `get_diff_pair_terminals`. The old greedy-by-distance matcher is
+only locally optimal: a closest-first pick can strand leftover pads into a far
+pairing. On a USB-C connector whose redundant DP/DN pads interleave (J1 y-order
+B7,A6,A7,B6), greedy took `{A6,A7}`(0.5mm) first and was forced into
+`{B6,B7}`(1.5mm) — the wide terminal drives a long diagonal connector that grazes
+the partner pad. Minimum-total-cost matching yields `{A6,B7}+{B6,A7}` (0.5+0.5).
+The test asserts the optimal pairing on both the scipy and the no-scipy
+brute-force code paths (KiCad's bundled Python has no scipy).
+
+```bash
+python3 tests/test_diff_terminal_pairing.py
+```
+
+### test_diff_pad_end_launch.py - Connector Pad-Edge Launch (issue #165)
+
+Unit test for `_pad_edge_launch`. Diff-pair connectors used to launch from the
+pad **center**; on a long (1.45mm USB-C) pad that makes the connector cut back
+across the pad field and graze a neighbour. `_pad_edge_launch` shifts the launch
+to the pad **edge facing the route**. The test asserts it shifts toward the route
+edge, stays inside the pad copper (so the track still attaches), never overshoots
+a near route start, leaves non-pad (stub) launch points untouched, and handles
+diagonal (`rect_rotation`) pads.
+
+```bash
+python3 tests/test_diff_pad_end_launch.py
+```
+
+### test_diff_relocation_fans.py - Relocation Fallback (issue #165)
+
+Unit test for the multipoint terminal-relocation fallback. When a pair can't
+launch on its pads' congested layer, the router relocates terminals to an open
+inner layer by dropping a through-via per pad. Two guards: `_attach_fans` must
+put the fan VIAS on a real leg result (the output is written from per-leg
+`results`; segment-sync doesn't carry vias, so a via left only on the bookkeeping
+`merged` dict is dropped and the relocated route floats with no via to its pad —
+the tigard `/USB_D` "DRC-clean but disconnected" failure). `_fans_fit` rejects a
+relocation whose per-pad vias can't fit (USB-C 0.5mm pitch + 0.5mm via collide),
+so the pair falls through to single-ended instead of emitting via-via violations.
+
+```bash
+python3 tests/test_diff_relocation_fans.py
+```
+
+### test_diff_multipoint_escape_dir.py - Multipoint Escape Direction (issue #165)
+
+Unit test for `get_pair_end_direction`. The multipoint diff-pair path passes the
+PAD position to `get_stub_direction` (which expects the stub free end), so a
+fanned-out pin's escape stub gave a REVERSED direction pointing into the chip
+body — backing the coupled centerline setback into the pad field so the pair
+couldn't route (the tigard `/USB_D` coupled-route failure). The fix orients the
+stub-derived escape away from the component's pad centroid. The test asserts the
+escape points outward whether called with the pad position or the stub free end.
+
+```bash
+python3 tests/test_diff_multipoint_escape_dir.py
+```
+
+### test_tigard_usb_diff.py - Real-World USB Diff Pair (issue #165)
+
+End-to-end test on the **Tigard** board (`kicad_files/tigard.kicad_pcb`, a
+QFN-64 FT2232H + USB-C connector) — the board that drove the #165 work. The USB
+2.0 pair `/USB_DP`+`/USB_DN` is a fine-pitch connector fan-out (J1 has redundant
+0.5mm-pitch DP/DN pads; U3.7/U3.8 sit on the congested QFN edge). Asserts that
+`route_diff` **coupled-routes** the pair (not defers/floats/grazes it) DRC-clean,
+then a single-ended `route.py` follow-up connects the redundant J1 row, leaving
+**all USB pads fully connected with no DRC errors**. Runs the full pipeline under
+three fan-out setups: **bare** (no fanout), **underpad-scoped** (`qfn_fanout` USB
+pair only, `--escape-method underpad`), and **stub-non-scoped** (`qfn_fanout` all
+U3 nets, default surface-stub escape).
+
+```bash
+python3 tests/test_tigard_usb_diff.py
+python3 tests/test_tigard_usb_diff.py -v
+```
+
+### test_net_format_roundtrip.py - KiCad 9/10 net-format preservation
+
+Unit test that the writers keep the output's net-token format consistent with the
+**input** board: a KiCad-9 numeric board gets `(net <id>)` refs and a KiCad-10
+board gets name-only `(net "name")` refs — even when the caller passes a
+`net_id_to_name` map (the fanout tools always do). Guards against the regression
+where fanout injected KiCad-10 name nets into a KiCad-9 board, producing a hybrid
+file KiCad 9 reads as net-less. Covers `board_uses_name_nets` detection (v9 /
+v10 / hybrid) and `add_tracks_and_vias_to_pcb` / `add_tracks_to_pcb` output.
+
+```bash
+python3 tests/test_net_format_roundtrip.py
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub

@@ -465,16 +465,20 @@ def prepare_obstacles_inplace(
     # Pad drill hole clearance
     # Skip the pad center - the router can use existing through-holes for layer transitions
     if config.hole_to_hole_clearance > 0:
-        hole_clearance_grid = coord.to_grid_dist(config.hole_to_hole_clearance + config.via_drill / 2)
         for pad in pcb_data.pads_by_net.get(net_id, []):
             if pad.drill and pad.drill > 0:
-                # Include pad drill radius in clearance calculation
+                # Include pad drill radius in clearance calculation. Float radius +
+                # ceil bound (not the flooring to_grid_dist) so this circular hole-to-
+                # hole keep-out reserves the full clearance instead of ~1 cell short
+                # (same grid-quantization fix as the via-via keep-out above / #154).
                 required_dist = pad.drill / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-                expand = coord.to_grid_dist(required_dist)
+                radius = required_dist * coord.inv_step
+                expand = int(math.ceil(radius))
+                radius_sq = radius * radius
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                 for ex in range(-expand, expand + 1):
                     for ey in range(-expand, expand + 1):
-                        if ex*ex + ey*ey <= expand * expand:
+                        if ex*ex + ey*ey <= radius_sq:
                             # Skip the pad center - allow layer transitions at through-holes
                             if ex == 0 and ey == 0:
                                 continue

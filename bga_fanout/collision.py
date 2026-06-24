@@ -5,6 +5,8 @@ Collision detection utilities for BGA fanout routing.
 import math
 from typing import Tuple, List, Dict, Set
 
+import numpy as np
+
 from bga_fanout.constants import POSITION_TOLERANCE
 
 
@@ -70,28 +72,84 @@ def check_segment_collision(seg1_start: Tuple[float, float], seg1_end: Tuple[flo
     return False
 
 
+def _track_bbox_arrays(tracks: List[Dict]):
+    """Axis-aligned bounding box (xmin/xmax/ymin/ymax) of every track, as arrays."""
+    n = len(tracks)
+    sx = np.empty(n); sy = np.empty(n); ex = np.empty(n); ey = np.empty(n)
+    for i, t in enumerate(tracks):
+        sx[i], sy[i] = t['start']
+        ex[i], ey[i] = t['end']
+    return (np.minimum(sx, ex), np.maximum(sx, ex),
+            np.minimum(sy, ey), np.maximum(sy, ey))
+
+
+def _encode_pair_ids(tracks: List[Dict]) -> "np.ndarray":
+    """Map each track's pair_id to an int code (>=0 for a truthy pair_id, -1 for none)."""
+    codes = np.empty(len(tracks), dtype=np.int64)
+    mapping: Dict = {}
+    for i, t in enumerate(tracks):
+        v = t.get('pair_id')
+        if not v:
+            codes[i] = -1
+        else:
+            c = mapping.get(v)
+            if c is None:
+                c = len(mapping)
+                mapping[v] = c
+            codes[i] = c
+    return codes
+
+
 def find_colliding_pairs(tracks: List[Dict], min_spacing: float) -> Set[str]:
     """Find all differential pairs or single-ended nets involved in collisions.
 
     Returns set of identifiers (pair_id for diff pairs, or 'net_<net_id>' for single-ended).
+
+    The cheap, exact filters (same layer, different net, different pair) and a
+    clearance-inflated bounding-box overlap test are evaluated with numpy across
+    all O(n^2) pairs at once, replacing the Python double loop. The bbox test is
+    a *necessary* condition for `check_segment_collision` to fire (two segments
+    within `min_spacing` must have bboxes overlapping within that margin), so the
+    exact per-segment check still decides every surviving candidate - the result
+    set is identical to the scalar version.
     """
     colliding_pairs = set()
-    for i, t1 in enumerate(tracks):
-        # Skip existing tracks (we can't move them)
-        if t1.get('is_existing'):
+    n = len(tracks)
+    if n < 2:
+        return colliding_pairs
+
+    xmin, xmax, ymin, ymax = _track_bbox_arrays(tracks)
+    nets = np.array([t['net_id'] for t in tracks])
+    existing = np.array([bool(t.get('is_existing')) for t in tracks])
+    pair_codes = _encode_pair_ids(tracks)
+
+    # Collisions only happen within a layer; bucket first so the O(m^2) pair
+    # enumeration is per-layer rather than over the whole board.
+    layer_buckets: Dict = {}
+    for i, t in enumerate(tracks):
+        layer_buckets.setdefault(t['layer'], []).append(i)
+
+    for idx_list in layer_buckets.values():
+        m = len(idx_list)
+        if m < 2:
             continue
+        idxs = np.array(idx_list)  # ascending -> idxs[ii] < idxs[jj] for ii<jj
+        ii, jj = np.triu_indices(m, k=1)
+        a = idxs[ii]
+        b = idxs[jj]
 
-        for j, t2 in enumerate(tracks[i+1:], i+1):
-            # Skip if different layers
-            if t1['layer'] != t2['layer']:
-                continue
-            # Skip if same net
-            if t1['net_id'] == t2['net_id']:
-                continue
-            # Skip if same pair (P and N of same diff pair)
-            if t1.get('pair_id') and t1.get('pair_id') == t2.get('pair_id'):
-                continue
+        mask = ~existing[a]
+        mask &= nets[a] != nets[b]
+        same_pair = (pair_codes[a] >= 0) & (pair_codes[a] == pair_codes[b])
+        mask &= ~same_pair
+        # Clearance-inflated bbox overlap (necessary condition for a collision).
+        mask &= (xmax[a] >= xmin[b] - min_spacing) & (xmax[b] >= xmin[a] - min_spacing)
+        mask &= (ymax[a] >= ymin[b] - min_spacing) & (ymax[b] >= ymin[a] - min_spacing)
 
+        sel = np.nonzero(mask)[0]
+        for i, j in zip(a[sel].tolist(), b[sel].tolist()):
+            t1 = tracks[i]
+            t2 = tracks[j]
             if check_segment_collision(t1['start'], t1['end'],
                                         t2['start'], t2['end'],
                                         min_spacing):
@@ -128,13 +186,25 @@ def tracks_match_identifier(track: Dict, identifier: str) -> bool:
 def find_collision_partners(identifier: str, tracks: List[Dict], min_spacing: float) -> Set[str]:
     """Find all pairs/nets that the given identifier collides with on the same layer."""
     partners = set()
-    id_tracks = [t for t in tracks if tracks_match_identifier(t, identifier)]
-    other_tracks = [t for t in tracks if not tracks_match_identifier(t, identifier) and not t.get('is_existing')]
+    id_idx = [i for i, t in enumerate(tracks) if tracks_match_identifier(t, identifier)]
+    other_idx = [i for i, t in enumerate(tracks)
+                 if not tracks_match_identifier(t, identifier) and not t.get('is_existing')]
+    if not id_idx or not other_idx:
+        return partners
 
-    for pt in id_tracks:
-        for ot in other_tracks:
-            if pt['layer'] != ot['layer']:
-                continue
+    xmin, xmax, ymin, ymax = _track_bbox_arrays(tracks)
+    o = np.array(other_idx)
+    o_layer = np.array([tracks[k]['layer'] for k in other_idx], dtype=object)
+
+    for i in id_idx:
+        pt = tracks[i]
+        # Same layer + clearance-inflated bbox overlap is a necessary condition;
+        # the exact check below decides each surviving candidate.
+        mask = (o_layer == pt['layer'])
+        mask &= (xmax[i] >= xmin[o] - min_spacing) & (xmax[o] >= xmin[i] - min_spacing)
+        mask &= (ymax[i] >= ymin[o] - min_spacing) & (ymax[o] >= ymin[i] - min_spacing)
+        for k in o[np.nonzero(mask)[0]].tolist():
+            ot = tracks[k]
             if check_segment_collision(pt['start'], pt['end'],
                                         ot['start'], ot['end'],
                                         min_spacing):

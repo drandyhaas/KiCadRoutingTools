@@ -45,7 +45,7 @@ from connectivity import (
 )
 from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
-    compute_mps_net_ordering, find_pad_nearest_to_position, find_pad_at_position,
+    compute_mps_net_ordering, find_pad_nearest_to_position,
     expand_net_patterns
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
@@ -53,7 +53,7 @@ from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance,
-    build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
+    build_base_obstacle_map_with_vis, get_net_bounds,
     VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
     draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
@@ -825,16 +825,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             skip_routing=skip_routing,
             add_teardrops=add_teardrops
         )
-        # When every pair was deferred to single-ended (electrically short),
-        # there is no coupled copper to write - but the deferred nets still need
-        # the downstream single-ended pass, so pass the board through unchanged so
-        # the pipeline can continue (otherwise no output file is produced at all).
-        if not wrote and output_file and state.diff_pair_single_ended_nets:
+        # When no coupled copper was written -- every pair was deferred to
+        # single-ended (electrically short), OR a pair could not be routed at all
+        # (terminal/launch escape exhausted, issue #167) -- still pass the board
+        # through unchanged so the pipeline never loses its output file. The
+        # unrouted nets are picked up by the downstream single-ended route.py pass
+        # (the chains route '*' from the diff step's output); without this the
+        # whole chain FileNotFoundErrors on the missing board (issues #90, #167).
+        if not wrote and output_file:
             import shutil
             shutil.copy(input_file, output_file)
-            print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
-                  f"added); wrote board through to {output_file} for the "
-                  f"single-ended pass")
+            if state.diff_pair_single_ended_nets:
+                print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
+                      f"added); wrote board through to {output_file} for the "
+                      f"single-ended pass")
+            else:
+                print(f"\nNo diff pair could be coupled-routed; wrote board through "
+                      f"unchanged to {output_file} so the pipeline can continue "
+                      f"(route the pair single-ended next)")
 
     # Update schematics with swap info if directory specified
     if schematic_dir and (target_swap_info or pad_swaps):
@@ -1088,6 +1096,13 @@ Examples:
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads in output file")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not rewrite the output project's DRC design rules to match "
+                             "the routing floors (by default they are made consistent so "
+                             "KiCad's manual DRC shows only genuine violations; issue #160)")
+    parser.add_argument("--keep-thermal", action="store_true",
+                        help="When fixing DRC settings, leave thermal-relief severity "
+                             "(starved_thermal) untouched instead of demoting it to a warning")
 
     args = parser.parse_args()
 
@@ -1213,3 +1228,20 @@ Examples:
                 mps_segment_intersection=args.mps_segment_intersection,
                 schematic_dir=args.schematic_dir,
                 add_teardrops=args.add_teardrops)
+
+    # Make the output project's DRC design rules consistent with the floors we
+    # just routed to (issue #160), mirroring route.py, so a manual DRC in KiCad
+    # flags only genuine problems instead of stock-default noise.
+    if not args.no_fix_drc_settings and not args.skip_routing \
+            and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                args.output_file, input_pcb=args.input_file,
+                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                via_diameter=args.via_size, via_drill=args.via_drill,
+                diff_pair_gap=args.diff_pair_gap, diff_pair_width=args.track_width,
+                keep_thermal=args.keep_thermal)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")

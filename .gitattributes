@@ -1,0 +1,2 @@
+# Normalize line endings: Python sources are LF
+*.py text eol=lf

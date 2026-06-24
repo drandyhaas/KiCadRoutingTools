@@ -1521,8 +1521,11 @@ def generate_bga_fanout(footprint: Footprint,
             (issue #122): every signal ball drops a via in its pad and routes
             straight UNDER the pad field on an inner layer, jogging into a
             between-ball channel only to dodge a via. It escapes fully-populated
-            arrays the channel router can't (ulx3s 22x22), but routes diff pairs
-            as single-ended. Power/plane nets are skipped (they tap their plane).
+            arrays the channel router can't (ulx3s 22x22). When diff_pair_patterns
+            are given it escapes those pairs COUPLED (issue #182) - via-free on
+            the top layer for edge pairs, on an inner layer with via-in-pad for
+            deeper ones - so route_diff picks them up. Power/plane nets are
+            skipped (they tap their plane).
 
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
@@ -1573,17 +1576,42 @@ def generate_bga_fanout(footprint: Footprint,
     print(f"  Center: ({grid.center_x:.2f}, {grid.center_y:.2f})")
     print(f"  Boundary: X[{grid.min_x:.2f}, {grid.max_x:.2f}], Y[{grid.min_y:.2f}, {grid.max_y:.2f}]")
 
+    # Escape-budget guard (issue #158). The channel engine runs one escape track down
+    # the half-pitch between adjacent via columns, so via/2 + track/2 + clearance must
+    # fit the half-pitch or EVERY escape grazes the neighbouring column's via by the
+    # deficit -- and the run still reports failed:0, since the success metric ignores
+    # sub-clearance grazes. We have all four numbers here, so warn (don't silently
+    # ship the graze). Doesn't apply to underpad, which routes under the pad field.
+    if escape_method != 'underpad':
+        half_pitch = min(grid.pitch_x, grid.pitch_y) / 2.0
+        need = via_size / 2.0 + track_width / 2.0 + clearance
+        if need > half_pitch + 1e-6:
+            via_max = 2.0 * (half_pitch - track_width / 2.0 - clearance)
+            print(f"  WARNING: escape via {via_size:.3f}mm busts the half-pitch budget "
+                  f"(need {need:.4f} > half-pitch {half_pitch:.4f}mm) -> every escape "
+                  f"track grazes an adjacent via by ~{(need - half_pitch) * 1000:.0f}um "
+                  f"at clearance {clearance:.3f}. Use --via-size <= {via_max:.3f} "
+                  f"(>= drill {via_drill:.3f} + annular ring), a narrower track, or more "
+                  f"escape layers. See issue #158.")
+
     # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
     if escape_method == 'underpad':
         from bga_fanout.underpad import generate_underpad_escape
         net_filter_fn = None
         if net_filter:
             net_filter_fn = lambda name: matches_net_filter(name, net_filter)
+        # Differential pairs (issue #182): escape each pair coupled so route_diff
+        # can pick the two halves up (without this they go single-ended).
+        up_diff_pairs = (find_differential_pairs(footprint, diff_pair_patterns)
+                         if diff_pair_patterns else {})
+        if up_diff_pairs:
+            print(f"  Found {len(up_diff_pairs)} differential pair(s) to escape coupled")
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
             footprint, pcb_data, grid, layers,
             track_width=track_width, clearance=clearance,
             via_size=via_size, via_drill=via_drill, exit_margin=exit_margin,
             net_filter_fn=net_filter_fn,
+            diff_pairs=up_diff_pairs, diff_pair_gap=diff_pair_gap,
         )
         return tracks, vias_to_add, [], failed_nets
 
@@ -2194,6 +2222,35 @@ def main():
               f"escaped at --clearance {args.clearance}mm / --track-width "
               f"{args.track_width}mm and were DROPPED from the output. Retry the "
               f"fanout with a smaller --clearance (toward the manufacturing floor).")
+    # DRC the written output at the routed clearance so downstream tooling can
+    # detect sub-clearance grazes the escape left behind even when every ball
+    # escaped (failed==0): via-over-track / via-over-pad (#130). The planner uses
+    # this to retry the fanout with a smaller via / thinner track toward the fab
+    # floor. Subprocess + best-effort: a DRC hiccup must never fail the fanout.
+    drc_grazes = {}
+    out_path = getattr(args, 'output', None)
+    if out_path:
+        try:
+            import io as _io, contextlib as _cl
+            from check_drc import run_drc as _run_drc
+            with _cl.redirect_stdout(_io.StringIO()):  # keep JSON_SUMMARY output clean
+                # check_sizes=False: drc_grazes grades clearance grazes at
+                # --clearance (#130); the issue #176 fab-width floor is a separate
+                # concern and would change this 'total's meaning.
+                _viols = _run_drc(out_path, clearance=args.clearance,
+                                  quiet=True, max_print=0, check_sizes=False)
+            _by = {}
+            for _v in _viols:
+                _by[_v['type']] = _by.get(_v['type'], 0) + 1
+            drc_grazes = {
+                'pad_via': _by.get('pad-via', 0),
+                'via_segment': _by.get('via-segment', 0),
+                'pad_segment': _by.get('pad-segment', 0),
+                'segment_segment': _by.get('segment-segment', 0),
+                'total': len(_viols),
+            }
+        except Exception as _e:
+            drc_grazes = {'error': str(_e)}
     summary = {
         'component': args.component,
         'requested': requested,
@@ -2204,6 +2261,9 @@ def main():
         'clearance': args.clearance,
         'track_width': args.track_width,
         'layers': list(args.layers) if args.layers else None,
+        # grazes graded at --clearance; 'total' counts ALL DRC violations on the
+        # output, the via_*/pad_* keys are the fanout-relevant #130 classes.
+        'drc_grazes': drc_grazes,
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
 

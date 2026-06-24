@@ -32,7 +32,7 @@ REPOS = [
     ("antmicro/lpddr4-testbed", "6-layer BGA LPDDR4 - set-1 replacement for dropped spirit_cm5"),
 ]
 
-OUT = STRESS / "sources/github"
+OUT = STRESS / "sources/github_set1"
 OUT.mkdir(parents=True, exist_ok=True)
 MAX_PER_REPO = 4  # avoid keyboard repos with dozens of variants
 

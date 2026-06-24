@@ -10,7 +10,7 @@ This module handles writing the routed PCB output file, including:
 """
 
 from typing import List, Dict, Optional
-from kicad_parser import is_kicad_10, KICAD_10_MIN_VERSION
+from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
@@ -83,9 +83,17 @@ def write_routed_output(
         else:
             print("  All pads already have teardrop settings")
 
-    # Determine if this is a KiCad 10 file and get net name mapping
+    # Determine if nets are referenced by NAME (KiCad 10 style) and get the
+    # net name mapping. Detect from the actual content, not just the version
+    # header: a board can carry a pre-2025 (version ...) yet already use
+    # name-only track/pad nets `(net "name")` (this is what our own writer emits
+    # when round-tripping such a board). The swap/relabel helpers must match the
+    # net token format the file ACTUALLY uses, or the by-id path silently matches
+    # nothing (issue #163: polarity-swap stub relabel found 0 segments, leaving
+    # the swapped pair's stubs on the pre-swap net -> reported disconnected even
+    # though the copper is fully connected).
     net_id_to_name = getattr(pcb_data, 'net_id_to_name', {}) if pcb_data else {}
-    kicad_v10 = is_kicad_10(content)
+    kicad_v10 = board_uses_name_nets(content)
 
     # Strip original-file segments the dead-end sweep flagged (issue #84). Done
     # before swaps so matching uses the net the input file carries.

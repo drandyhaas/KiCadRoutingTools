@@ -585,6 +585,8 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--dry-run` | off | Analyze without writing output |
 | `--verbose`, `-v` | off | Print detailed debug messages |
 | `--debug-lines` | off | Add debug lines on User.4 layer showing route paths |
+| `--no-fix-drc-settings` | off | Skip rewriting the output project's DRC design rules to match the plane routing floors. By default they are made consistent (clearance, hole/edge, track/via floors + Default net class, non-routing severities demoted) so KiCad's manual DRC shows only genuine violations (issue #160; see [DRC Settings Fixer](utilities.md#drc-settings-fixer-fix_kicad_drc_settingspy)) |
+| `--keep-thermal` | off | When fixing DRC settings, leave thermal-relief severity (`starved_thermal`) untouched instead of demoting it to a warning |
 
 ### Pad-Level Repair (`--repair-pads`, default on)
 

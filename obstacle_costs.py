@@ -268,55 +268,6 @@ def _add_segment_cross_layer_track(obstacles: GridObstacleMap, seg, coord: GridC
             obstacles.add_cross_layer_track(gx, gy, layer_idx)
 
 
-def add_routed_path_cross_layer_tracks(obstacles: GridObstacleMap,
-                                        new_segments: List,
-                                        config: GridRouteConfig,
-                                        layer_map: Dict[str, int]):
-    """Add newly routed path segments to the cross-layer track data.
-
-    Call this after successfully routing a path to make it an attractor
-    for future paths on different layers.
-
-    Args:
-        obstacles: The obstacle map to update
-        new_segments: List of Segment objects from the routed path
-        config: Routing configuration
-        layer_map: Mapping of layer names to layer indices
-    """
-    if config.vertical_attraction_radius <= 0:
-        return  # Feature disabled
-
-    coord = GridCoord(config.grid_step)
-    sample_interval = max(1, int(0.5 / config.grid_step))
-
-    for seg in new_segments:
-        layer_idx = layer_map.get(seg.layer)
-        if layer_idx is None:
-            continue
-        _add_segment_cross_layer_track(obstacles, seg, coord, layer_idx, sample_interval)
-
-
-def add_track_proximity_costs(obstacles: GridObstacleMap, pcb_data: PCBData,
-                               routed_net_ids: List[int], config: GridRouteConfig,
-                               layer_map: Dict[str, int]):
-    """Add track proximity costs around previously routed tracks (same layer only).
-
-    DEPRECATED: Use compute_track_proximity_for_net() + merge_track_proximity_costs()
-    for better performance with incremental updates.
-
-    Penalizes routing near existing tracks with linear falloff from max cost at track
-    to zero at track_proximity_distance.
-    """
-    if config.track_proximity_distance <= 0 or config.track_proximity_cost <= 0:
-        return  # Feature disabled
-
-    # Compute and merge costs for all routed nets
-    per_net_costs = {}
-    for net_id in routed_net_ids:
-        per_net_costs[net_id] = compute_track_proximity_for_net(pcb_data, net_id, config, layer_map)
-    merge_track_proximity_costs(obstacles, per_net_costs)
-
-
 def compute_ripped_route_costs(saved_result: dict, config: GridRouteConfig,
                                 layer_map: Dict[str, int]) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
     """Compute avoidance costs for a ripped route's former segment/via locations.

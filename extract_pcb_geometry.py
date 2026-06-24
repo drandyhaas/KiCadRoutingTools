@@ -231,47 +231,6 @@ def find_stubs_near_point(data: Dict[str, Any], x: float, y: float, radius: floa
     return sorted(results, key=lambda s: s["distance"])
 
 
-def find_stubs_near_line(
-    data: Dict[str, Any],
-    x1: float, y1: float,
-    x2: float, y2: float,
-    max_distance: float
-) -> List[Dict]:
-    """Find stub endpoints within max_distance of a line segment."""
-    import math
-
-    dx = x2 - x1
-    dy = y2 - y1
-    length = math.sqrt(dx*dx + dy*dy)
-    if length < 0.001:
-        return find_stubs_near_point(data, x1, y1, max_distance)
-
-    dx /= length
-    dy /= length
-
-    results = []
-    for stub in data["stubs"]:
-        # Vector from start to stub
-        vx = stub["x"] - x1
-        vy = stub["y"] - y1
-
-        # Distance along line
-        along = vx * dx + vy * dy
-
-        # Only consider points along the segment (with some margin)
-        if -1 < along < length + 1:
-            # Perpendicular distance
-            perp_dist = abs(vx * dy - vy * dx)
-            if perp_dist <= max_distance:
-                results.append({
-                    **stub,
-                    "distance": perp_dist,
-                    "along": along
-                })
-
-    return sorted(results, key=lambda s: s["distance"])
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Extract KiCad PCB geometry to JSON",
@@ -322,21 +281,6 @@ Examples:
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=indent)
         print(f"Wrote {output_file}")
-
-
-# Convenience functions for interactive use
-def load_geometry(json_file: str) -> Dict[str, Any]:
-    """Load geometry from a JSON file."""
-    with open(json_file) as f:
-        return json.load(f)
-
-
-def quick_extract(pcb_file: str, net_patterns: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Quick extraction without writing to file - useful for interactive use."""
-    pcb = parse_kicad_pcb(pcb_file)
-    data = extract_geometry(pcb, net_patterns)
-    data["source_file"] = pcb_file
-    return data
 
 
 if __name__ == "__main__":

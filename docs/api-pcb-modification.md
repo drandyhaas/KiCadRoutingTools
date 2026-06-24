@@ -91,22 +91,20 @@ The cleanup stages are callable directly when you need them outside
 `add_route_to_pcb_data`:
 
 ```python
-fix_self_intersections(segments, existing_segments=None,
-                       max_short_length=1.0, vias=None) -> List[Segment]
-collapse_appendices(segments, existing_segments=None,
-                    max_appendix_length=1.0, vias=None, pads=None,
-                    debug_lines=False) -> List[Segment]
 get_copper_layers_from_segments(segments, existing_segments=None) -> List[str]
 ```
 
-Both return new lists (inputs are not mutated) and expect **one net at a
-time** — pass that net's existing segments/vias/pads, not the whole board's.
+Returns a new list (input is not mutated).
 
-`collapse_appendices` now only runs `fix_self_intersections`; its old
-short-appendix trim (sliding a short dead-end spur onto its junction) was
-removed as redundant with the whole-net post-route dead-end trim
-`sweep_dead_ends` (issue #148). The name and signature are unchanged, so its
-call sites still work; `pads`/`debug_lines` are now accepted but unused.
+> **Removed:** `collapse_appendices` and `fix_self_intersections` were deleted
+> (issue #159). `fix_self_intersections` resolved a same-net self-crossing by
+> *extending* a segment to a far off-grid endpoint, which created long
+> non-orthonormal diagonals that crossed foreign copper. `collapse_appendices`
+> was already a vestigial wrapper (its short-appendix trim was removed in #148,
+> redundant with `sweep_dead_ends`). `add_route_to_pcb_data` now commits routed
+> segments directly; connectivity cleanup is handled by `prune_redundant_cycles`
+> and the whole-net dead-end trim `sweep_dead_ends` (#84). The residual same-net
+> self-crossings are tracked in #162.
 
 ## `geometry_utils.py`
 
@@ -196,8 +194,9 @@ print(uf.connected('A', 'C'), uf.connected('A', 'X'))   # True False
 - **`add_route_to_pcb_data` is mandatory in routing loops** — skipping it
   means later nets route through copper they can't see, and the writer gets
   uncleaned geometry.
-- **Per-net cleanup**: never feed segments from multiple nets into one
-  `collapse_appendices`/`fix_self_intersections` call.
+- **Per-net cleanup**: the dead-end / cycle cleanup helpers (`prune_redundant_cycles`,
+  `sweep_dead_ends`) operate on **one net at a time** — never feed segments from
+  multiple nets into one call.
 - **`remove_route_from_pcb_data` must see the same coordinates it added** —
   if you transform geometry in between, use `remove_net_from_pcb_data`
   instead.

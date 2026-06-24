@@ -13,7 +13,7 @@ checks:
   - every signal ball gets exactly one via-in-pad,
   - a bottom-side (B.Cu) BGA escapes too (layer roles swap correctly).
 
-Needs the ulx3s stress board; skips cleanly if absent.
+Uses kicad_files/ulx3s.kicad_pcb; skips cleanly if absent.
 """
 import os
 import sys
@@ -24,8 +24,7 @@ sys.path.insert(0, ROOT)
 from kicad_parser import parse_kicad_pcb
 from bga_fanout import generate_bga_fanout
 
-BOARD = os.path.expanduser(
-    "~/Documents/kicad_stress_test/boards_unrouted_set2/ulx3s.kicad_pcb")
+BOARD = os.path.join(ROOT, "kicad_files", "ulx3s.kicad_pcb")
 LAYERS = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
 PARAMS = dict(track_width=0.12, clearance=0.1, via_size=0.35, via_drill=0.2,
               escape_method='underpad')
@@ -36,7 +35,7 @@ def main():
     print("Issue #122 under-pad escape regression test")
     print("=" * 60)
     if not os.path.exists(BOARD):
-        print(f"  [SKIP] stress board not present: {BOARD}")
+        print(f"  [SKIP] board not present: {BOARD}")
         return 0
 
     checks = []

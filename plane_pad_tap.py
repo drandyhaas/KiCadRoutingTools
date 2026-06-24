@@ -37,7 +37,11 @@ _DIST_TOL = 1e-3                  # mm - tolerance so exactly-0.65mm pitch quali
 FINE_TAP_GRID_STEP = 0.05         # mm
 FINE_TAP_CLEARANCE = 0.15         # mm
 FINE_TAP_TRACK_WIDTH = 0.15       # mm (capped by pad min dimension)
-FINE_TAP_SEARCH_RADIUS = 3.0      # mm - via search radius for the fine retry
+# NEW-via search radius for the fine retry. Kept smaller than max_search_radius
+# on purpose: placing a brand-new via far from the pad at fine width butterflies
+# neighbouring plane pads. Reaching a far EXISTING via is done via the
+# distant-trace path (= max_search_radius) instead.
+FINE_TAP_SEARCH_RADIUS = 3.0      # mm
 
 # Window half-size margin beyond the via search radius
 _WINDOW_MARGIN = 3.0              # mm
@@ -103,6 +107,73 @@ def _polygon_overlaps_window(points, min_x, min_y, max_x, max_y) -> bool:
                 max(ys) < min_y or min(ys) > max_y)
 
 
+# --- Spatial index for make_local_window (speedup 3) ---------------------------
+# make_local_window filters every board segment/via/pad to a small window around
+# one pad. Doing that as an O(all-board) scan per call is fine once, but the
+# plane-repair sweep and the via-in-pad escape call it for many pads; a coarse
+# bucket index makes each window query O(window) instead of O(board). The index
+# is cached on pcb_data and rebuilt only when the copper count changes, so it is
+# correct as routing adds/removes copper (the signature catches every mutation
+# that changes a count) while being reused across the many static-copper queries
+# of the repair sweep.
+_TAP_INDEX_CELL = 8.0  # mm bucket size
+
+
+def _cells_for_bbox(min_x, min_y, max_x, max_y):
+    cell = _TAP_INDEX_CELL
+    cx0, cy0 = int(math.floor(min_x / cell)), int(math.floor(min_y / cell))
+    cx1, cy1 = int(math.floor(max_x / cell)), int(math.floor(max_y / cell))
+    for cx in range(cx0, cx1 + 1):
+        for cy in range(cy0, cy1 + 1):
+            yield (cx, cy)
+
+
+def _build_tap_spatial_index(pcb_data: PCBData):
+    seg_b: Dict[Tuple[int, int], list] = {}
+    via_b: Dict[Tuple[int, int], list] = {}
+    pad_b: Dict[Tuple[int, int], list] = {}
+    for s in pcb_data.segments:
+        r = s.width / 2
+        for k in _cells_for_bbox(min(s.start_x, s.end_x) - r, min(s.start_y, s.end_y) - r,
+                                 max(s.start_x, s.end_x) + r, max(s.start_y, s.end_y) + r):
+            seg_b.setdefault(k, []).append(s)
+    for v in pcb_data.vias:
+        r = v.size
+        for k in _cells_for_bbox(v.x - r, v.y - r, v.x + r, v.y + r):
+            via_b.setdefault(k, []).append(v)
+    for nid, pads in pcb_data.pads_by_net.items():
+        for p in pads:
+            entry = (nid, p)  # ONE tuple per pad, shared across its cells, so
+            hw = max(p.size_x, p.size_y)  # _query_bucket's id()-dedup works
+            for k in _cells_for_bbox(p.global_x - hw, p.global_y - hw,
+                                     p.global_x + hw, p.global_y + hw):
+                pad_b.setdefault(k, []).append(entry)
+    return seg_b, via_b, pad_b
+
+
+def _tap_spatial_index(pcb_data: PCBData):
+    sig = (len(pcb_data.segments), len(pcb_data.vias),
+           sum(len(v) for v in pcb_data.pads_by_net.values()))
+    cached = getattr(pcb_data, '_tap_spatial_index_cache', None)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+    idx = _build_tap_spatial_index(pcb_data)
+    pcb_data._tap_spatial_index_cache = (sig, idx)
+    return idx
+
+
+def _query_bucket(bucket, min_x, min_y, max_x, max_y):
+    seen = set()
+    out = []
+    for k in _cells_for_bbox(min_x, min_y, max_x, max_y):
+        for item in bucket.get(k, ()):
+            i = id(item)
+            if i not in seen:
+                seen.add(i)
+                out.append(item)
+    return out
+
+
 def make_local_window(pcb_data: PCBData, cx: float, cy: float,
                       half_size: float) -> PCBData:
     """Build a shallow PCBData copy restricted to a square window around (cx, cy).
@@ -129,16 +200,20 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
         return (wmin_x - reach <= x <= wmax_x + reach and
                 wmin_y - reach <= y <= wmax_y + reach)
 
+    # Query the cached spatial index for candidates whose bbox overlaps the
+    # window, then apply the same precise filters (speedup 3). Falls back to the
+    # full board only via the index, which is built from the full board, so the
+    # result is identical to the old O(board) scan.
+    seg_b, via_b, pad_b = _tap_spatial_index(pcb_data)
     local = copy.copy(pcb_data)
-    local.vias = [v for v in pcb_data.vias if in_window(v.x, v.y, v.size)]
-    local.segments = [s for s in pcb_data.segments
+    local.vias = [v for v in _query_bucket(via_b, wmin_x, wmin_y, wmax_x, wmax_y)
+                  if in_window(v.x, v.y, v.size)]
+    local.segments = [s for s in _query_bucket(seg_b, wmin_x, wmin_y, wmax_x, wmax_y)
                       if _segment_overlaps_window(s, wmin_x, wmin_y, wmax_x, wmax_y)]
     pads_by_net: Dict[int, List[Pad]] = {}
-    for nid, pads in pcb_data.pads_by_net.items():
-        kept = [p for p in pads
-                if in_window(p.global_x, p.global_y, max(p.size_x, p.size_y))]
-        if kept:
-            pads_by_net[nid] = kept
+    for nid, p in _query_bucket(pad_b, wmin_x, wmin_y, wmax_x, wmax_y):
+        if in_window(p.global_x, p.global_y, max(p.size_x, p.size_y)):
+            pads_by_net.setdefault(nid, []).append(p)
     local.pads_by_net = pads_by_net
 
     board_info = copy.copy(pcb_data.board_info)
@@ -223,6 +298,66 @@ def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
     return TapResult(success=False, blocked_cells=best_frontier)
 
 
+def _pad_has_same_net_copper(opad, net_id, local, tol: float = 0.2) -> bool:
+    """True if a same-net via or segment endpoint sits on `opad` -- i.e. the pad has
+    already been escaped/routed, a cheap proxy for "connected to the plane" (the
+    authoritative graph check is in find_unconnected_plane_pads; this stays local)."""
+    ox, oy = opad.global_x, opad.global_y
+    for v in local.vias:
+        if v.net_id == net_id and abs(v.x - ox) < tol and abs(v.y - oy) < tol:
+            return True
+    for s in local.segments:
+        if s.net_id == net_id and (
+                (abs(s.start_x - ox) < tol and abs(s.start_y - oy) < tol) or
+                (abs(s.end_x - ox) < tol and abs(s.end_y - oy) < tol)):
+            return True
+    return False
+
+
+def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, config,
+                                  route_via_to_pad_fn, radius: float):
+    """Issue #180: before dropping a NEW via, connect the pad by a trace to the
+    nearest EXISTING same-net copper within `radius`:
+      - a same-net via (spans to the plane layer) or through-hole pad -- always
+        plane-connected; or
+      - a same-net SMD pad that has already been escaped (same-net via/segment on
+        it), e.g. an adjacent BGA ball -- ottercast U1.N4 GND connects to its
+        neighbour ball U1.L4 this way.
+    Such copper already reaches the plane, so a new via would be redundant -- and a
+    redundant via can box in a neighbouring foreign pad (castor_pollux U11 -12V).
+
+    Unlike step-1 close-via reuse (radius via_size*2.5 ~1.25mm), this reaches the
+    full distant-trace radius so a slightly-farther existing target is preferred
+    over a brand-new via. Returns a successful TapResult (via=None) or None."""
+    if not pad_layer or radius <= 0:
+        return None
+    px, py = pad.global_x, pad.global_y
+    cands: List[Tuple[float, Tuple[float, float]]] = []
+    for v in local.vias:
+        if v.net_id == net_id:
+            d = math.hypot(v.x - px, v.y - py)
+            if 1e-6 < d <= radius:
+                cands.append((d, (v.x, v.y)))
+    for opad in local.pads_by_net.get(net_id, []):
+        if opad.component_ref == pad.component_ref and opad.pad_number == pad.pad_number:
+            continue
+        # Through-hole same-net pads are always plane-connected. An SMD same-net pad
+        # is a valid target only if it is already escaped (has same-net copper on
+        # it) -- a bare ball would itself be unconnected and tracing to it would
+        # just bond two floating pads.
+        if opad.drill > 0 or _pad_has_same_net_copper(opad, net_id, local):
+            d = math.hypot(opad.global_x - px, opad.global_y - py)
+            if 1e-6 < d <= radius:
+                cands.append((d, (opad.global_x, opad.global_y)))
+    cands.sort(key=lambda c: c[0])
+    for _d, pos in cands:
+        segs = route_via_to_pad_fn(pos, pad, pad_layer, net_id, routing_obs,
+                                   config, verbose=False)
+        if segs:  # non-empty trace: the pad now reaches the existing plane copper
+            return TapResult(success=True, via=None, segments=segs, reused_via_pos=pos)
+    return None
+
+
 def try_tap_pad(
     pad: Pad,
     pad_layer: Optional[str],
@@ -239,8 +374,15 @@ def try_tap_pad(
     verbose: bool = False,
     routing_clearance_cushion: bool = False,
     distant_trace_radius: float = 0.0,
+    disable_reuse: bool = False,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
+
+    ``disable_reuse`` skips the "route a trace to existing same-net copper
+    instead of dropping a via" shortcuts (steps 1 and 1b) and goes straight to
+    placing a NEW via. The caller uses it to force a real via when a prior
+    reuse-tap reported success but the pad turned out not to actually reach the
+    plane (a stale/ripped or not-itself-plane-connected reuse target).
 
     Builds via-placement and routing obstacle maps on a local window around
     the pad (cheap even at fine grid steps), then tries:
@@ -257,7 +399,18 @@ def try_tap_pad(
     # Imported lazily: route_planes imports this module at top level.
     from route_planes import find_via_position, route_via_to_pad
 
-    half_size = max_search_radius + _WINDOW_MARGIN
+    if max_search_radius > 0:
+        half_size = max_search_radius + _WINDOW_MARGIN
+    else:
+        # Via-IN-pad only (no spiral): the window need only cover the pad plus a
+        # via's clearance halo -- any foreign copper farther than that can't block
+        # a via placed inside the pad. Sizing it to the pad instead of the fixed
+        # 3mm spiral margin shrinks the Rust obstacle-map build ~8x at grid 0.05
+        # (#189 via-in-pad unblock). Conservative: full via diameter + clearance +
+        # a couple grid cells of slack, and make_local_window still pulls in items
+        # within its _ITEM_MARGIN beyond the window, so no near obstacle is missed.
+        half_size = (max(pad.size_x, pad.size_y) / 2 + via_size
+                     + config.clearance + 2 * config.grid_step)
     local = make_local_window(pcb_data, pad.global_x, pad.global_y, half_size)
 
     if extra_vias:
@@ -284,7 +437,18 @@ def try_tap_pad(
         local, config, net_id, verbose=False,
         same_net_pad_clearance=same_net_pad_clearance)
     routing_obs = None
-    if pad_layer:
+    # The routing-obstacle map is consulted ONLY to route a via->pad TRACE -- i.e.
+    # when reusing nearby same-net copper (steps 1/1b, gated on not disable_reuse),
+    # for the distant-trace fallback (distant_trace_radius>0), or when
+    # find_via_position lands a via OUTSIDE the pad (possible only with
+    # max_search_radius>0, since the in-pad ring search ignores it). A pure
+    # via-IN-pad placement (max_search_radius=0, disable_reuse, no distant trace)
+    # connects by copper overlap and never routes a trace, so its routing map is
+    # built-but-unused -- skip the ~0.5s Rust build entirely (#189 perf; the
+    # via-in-pad unblock hits this path). find_via_position tolerates a None
+    # routing map (it only does the routability check when one is provided).
+    _needs_trace_map = (not disable_reuse) or distant_trace_radius > 0 or max_search_radius > 0
+    if pad_layer and _needs_trace_map:
         # Optional half-grid clearance cushion: build_routing_obstacle_map
         # blocks cells by center distance, so routed traces can end up a
         # fraction of a grid step (~0.015mm at 0.05 grid) closer to other
@@ -309,12 +473,24 @@ def try_tap_pad(
         d2 = (v.x - pad.global_x) ** 2 + (v.y - pad.global_y) ** 2
         if d2 <= close_radius * close_radius and (best is None or d2 < best[0]):
             best = (d2, (v.x, v.y))
-    if best is not None and pad_layer:
+    if best is not None and pad_layer and not disable_reuse:
         segs = route_via_to_pad(best[1], pad, pad_layer, net_id,
                                 routing_obs, config, verbose=False)
         if segs:  # non-empty trace: actually connects the pad to the via
             return TapResult(success=True, via=None, segments=segs,
                              reused_via_pos=best[1])
+
+    # 1b. Before placing a NEW via, prefer a trace to an existing same-net via /
+    # through-hole pad within the distant-trace radius -- that copper already
+    # reaches the plane, so a new via would be redundant and can box a neighbouring
+    # foreign pad (issue #180, castor_pollux U11). Gated on distant_trace_radius>0
+    # (the rip-blocker plane repair), same as the distant-trace fallback below.
+    if pad_layer and distant_trace_radius > 0 and not disable_reuse:
+        r = _try_trace_to_plane_connected(
+            pad, pad_layer, net_id, local, routing_obs, config,
+            route_via_to_pad, distant_trace_radius)
+        if r is not None:
+            return r
 
     # 2. Place a new via near the pad
     failed_positions: Set[Tuple[int, int]] = set()
@@ -380,6 +556,7 @@ def tap_pad_with_escalation(
     try_default: bool = True,
     fine_for_all: bool = False,
     distant_trace_radius: float = 0.0,
+    disable_reuse: bool = False,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -399,7 +576,7 @@ def tap_pad_with_escalation(
             pad, pad_layer, net_id, pcb_data, config, max_search_radius,
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
-            distant_trace_radius=distant_trace_radius)
+            distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
         if result.success:
             result.params_label = 'default'
             return result
@@ -407,13 +584,20 @@ def tap_pad_with_escalation(
 
     if fine_for_all or pad_is_fine_pitch(pad, pcb_data):
         fine_config = make_fine_tap_config(config, pad)
+        # The fine pass searches for a NEW via site at a thin trace / fine grid.
+        # Keep its NEW-via search capped (FINE_TAP_SEARCH_RADIUS) rather than the
+        # full max_search_radius: placing a brand-new via far from the pad at fine
+        # width is disruptive (it butterflies neighbouring plane pads -- measured
+        # on castor_pollux). Reaching a far EXISTING via is handled separately and
+        # safely by distant_trace_radius (= max_search_radius), so a boxed pad is
+        # still connected by trace; see try_tap_pad step 1b.
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, fine_config,
             min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
             routing_clearance_cushion=True,
-            distant_trace_radius=distant_trace_radius)
+            distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
         if result.success:
             result.params_label = 'fine'
             return result

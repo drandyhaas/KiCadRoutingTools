@@ -95,6 +95,29 @@ class _Occ:
     def blocked(self, li, ix, iy):
         return self.grid[li][ix * self.ny + iy]
 
+    def seg_clear(self, li, p, q, exempt=None):
+        """True if the track centerline p->q is clear on layer li.
+
+        Tests the centerline cells (the grid is already inflated by obstacle
+        half-size + track/2 + clearance, so a clear centerline cell guarantees
+        the track edge clears the obstacle edge - same contract astar relies on).
+        Cells in `exempt` (a set of (ix, iy), e.g. the ball's own home keepout)
+        are ignored. Samples finely so no blocked cell between endpoints is
+        missed.
+        """
+        (x0, y0), (x1, y1) = p, q
+        n = int(max(abs(x1 - x0), abs(y1 - y0)) / (self.res * 0.5)) + 1
+        for i in range(n + 1):
+            t = i / n
+            ix, iy = self.cell(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+            if not self.inside(ix, iy):
+                continue
+            if exempt is not None and (ix, iy) in exempt:
+                continue
+            if self.blocked(li, ix, iy):
+                return False
+        return True
+
 
 def _segments_from_cells(occ, cells):
     """Compress a same-layer cell path into (start_xy, end_xy) polyline points."""
@@ -125,6 +148,8 @@ def generate_underpad_escape(footprint: Footprint,
                              exit_margin: float,
                              plane_min_pads: int = 6,
                              net_filter_fn=None,
+                             diff_pairs=None,
+                             diff_pair_gap: float = 0.1,
                              res: float = None,
                              via_cost: float = 14.0,
                              outer_rings: float = 2.0,
@@ -136,6 +161,16 @@ def generate_underpad_escape(footprint: Footprint,
     Returns (tracks, vias_to_add, failed_net_names). Power/plane balls (>=
     plane_min_pads in the footprint) are skipped - they tap their plane and act
     only as via obstacles.
+
+    Differential pairs (issue #182): when `diff_pairs` is given (a dict
+    base_name -> DiffPairPads, e.g. from find_differential_pairs), each pair
+    whose two balls are routable and ~one pitch apart is escaped *coupled* -
+    both balls drop a via on one inner layer, converge to the diff spacing
+    (track_width + diff_pair_gap) and run parallel out past the boundary. That
+    leaves a clean same-layer, parallel pair of free ends route_diff can pick
+    up; without it the two halves escape single-ended and route_diff cannot
+    re-pair them. A pair that won't fit a coupled corridor falls back to the
+    single-ended escape (still connected, just not coupled).
     """
     ref = footprint.reference
     fp_pads = [p for p in footprint.pads if p.net_id]
@@ -376,12 +411,191 @@ def generate_underpad_escape(footprint: Footprint,
                                 'layers': [layers[0], layers[-1]], 'net_id': net_id})
             nvia += 1
 
-    # Phase 1: route the near-edge balls on the BGA layer (no via). Whatever
-    # can't take a clean top-layer escape falls through to the inner phase.
-    inner_pads = list(signal_pads)
+    # Differential pairs (issue #182): collect the pairs we can try to escape
+    # coupled. A pair qualifies only if BOTH balls are in our routable signal
+    # set (not plane / NC / already-fanned) and they sit ~one pitch apart and
+    # axis-aligned (the array is axis-aligned in this frame). Anything else
+    # routes single-ended like before.
+    spacing = track_width + diff_pair_gap
+    half_sp = spacing / 2.0
+    signal_by_net = {p.net_id: p for p in signal_pads}
+    coupled_targets = []          # (base_name, p_pad, n_pad)
+    paired_net_ids = set()
+    if diff_pairs:
+        for base, dp in diff_pairs.items():
+            if not dp.is_complete:
+                continue
+            pp = signal_by_net.get(dp.p_pad.net_id)
+            nn = signal_by_net.get(dp.n_pad.net_id)
+            if pp is None or nn is None:
+                continue
+            dx = abs(pp.global_x - nn.global_x)
+            dy = abs(pp.global_y - nn.global_y)
+            if math.hypot(dx, dy) > 1.5 * pitch or min(dx, dy) > 0.25 * pitch:
+                continue          # not an adjacent, axis-aligned pair
+            coupled_targets.append((base, pp, nn))
+            paired_net_ids.add(pp.net_id)
+            paired_net_ids.add(nn.net_id)
+
+    single_pads = [p for p in signal_pads if p.net_id not in paired_net_ids]
+
+    def boundary_dist(mx, my, e):
+        """Distance from (mx,my) to the array boundary in cardinal dir e, plus
+        the exit margin (so the coupled run ends past the boundary)."""
+        ex, ey = e
+        if ex > 0:
+            return (grid.max_x - mx) + exit_margin
+        if ex < 0:
+            return (mx - grid.min_x) + exit_margin
+        if ey > 0:
+            return (grid.max_y - my) + exit_margin
+        return (my - grid.min_y) + exit_margin
+
+    def try_coupled(pp, nn, candidates):
+        """Escape one differential pair coupled, converging (<=45 deg) to +-half_sp
+        about the pair centerline and running parallel in the escape direction
+        (perpendicular to the P-N axis, toward the nearer boundary) out past the
+        boundary.
+
+        `candidates` is a list of (layer_index, use_via): a top-layer escape
+        (use_via=False) keeps both pads via-free - the key to letting deeper
+        pairs run UNDER an outer pair on inner layers without grazing a through-
+        via (which blocks every layer). An inner escape (use_via=True) drops a
+        via-in-pad in each ball. The first clear (direction, candidate) wins.
+        Returns True and commits, else False (caller defers the pair)."""
+        nonlocal nvia
+        mx, my = (pp.global_x + nn.global_x) / 2.0, (pp.global_y + nn.global_y) / 2.0
+        ax, ay = pp.global_x - nn.global_x, pp.global_y - nn.global_y   # axis P<-N
+        al = math.hypot(ax, ay)
+        if al < 1e-6:
+            return False
+        ax, ay = ax / al, ay / al
+        half_axis = al / 2.0
+        if half_axis <= half_sp:        # closer than the diff spacing - no room to converge
+            return False
+        Lc = half_axis - half_sp        # 45-degree converge length
+        # Two escape directions perpendicular to the axis; nearer boundary first.
+        cand_e = sorted([(-ay, ax), (ay, -ax)], key=lambda e: boundary_dist(mx, my, e))
+        homes = home_of(pp) | home_of(nn)
+        for e in cand_e:
+            ex, ey = e
+            De = boundary_dist(mx, my, e)
+            if De <= Lc + 0.01:
+                continue
+            for L, use_via in candidates:
+                segs = []
+                ok = True
+                for pad, side in ((pp, 1.0), (nn, -1.0)):
+                    p0 = (pad.global_x, pad.global_y)
+                    pc = (mx + Lc * ex + side * half_sp * ax,
+                          my + Lc * ey + side * half_sp * ay)
+                    pe = (mx + De * ex + side * half_sp * ax,
+                          my + De * ey + side * half_sp * ay)
+                    if not (occ.seg_clear(L, p0, pc, exempt=homes)
+                            and occ.seg_clear(L, pc, pe, exempt=homes)):
+                        ok = False
+                        break
+                    segs.append((pad, p0, pc, pe))
+                if not ok:
+                    continue
+                for pad, p0, pc, pe in segs:
+                    occ.block_segment(L, p0, pc, trk_keep)
+                    occ.block_segment(L, pc, pe, trk_keep)
+                    for a, b in ((p0, pc), (pc, pe)):
+                        if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6:
+                            continue
+                        tracks.append({'start': a, 'end': b, 'width': track_width,
+                                       'layer': layers[L], 'net_id': pad.net_id})
+                    if use_via:
+                        occ.block_all(pad.global_x, pad.global_y, via_keep)
+                        vias_to_add.append({'x': pad.global_x, 'y': pad.global_y,
+                                            'size': via_size, 'drill': via_drill,
+                                            'layers': [layers[0], layers[-1]],
+                                            'net_id': pad.net_id})
+                        nvia += 1
+                return True
+        return False
+
+    escaped = set()      # id(pad) of balls already committed (top-layer escapes)
+
+    def try_coupled_endon(pp, nn, candidates):
+        """Escape a 'stacked' pair (the two balls in line toward the nearest edge)
+        coupled, converging to the diff spacing and running parallel past the
+        boundary.
+
+        The lead ball (nearer the edge) runs straight out at -half_sp; the trail
+        ball bulges out through the ~1-pitch gap beside the lead (clearing the
+        lead pad/via), then converges to +half_sp. On the top layer
+        (use_via=False) this is via-free, so deeper balls run UNDER the pair; on
+        an inner layer (use_via=True) each ball drops a via-in-pad and the pair
+        runs under the via-free edge rows to reach the boundary. The clean
+        converged exit is what route_diff needs to couple them (two independently
+        routed stubs do not pick up). `candidates` = [(layer, use_via)]; the first
+        that fits wins. All-or-nothing."""
+        nonlocal nvia
+        mx, my = (pp.global_x + nn.global_x) / 2.0, (pp.global_y + nn.global_y) / 2.0
+        ax, ay = pp.global_x - nn.global_x, pp.global_y - nn.global_y
+        al = math.hypot(ax, ay)
+        if al < 1e-6:
+            return False
+        ax, ay = ax / al, ay / al
+        half_axis = al / 2.0
+        run = max(0.3, 2.0 * half_sp)            # length of the clean parallel tail
+        for sgn in (1.0, -1.0):                  # escape direction along the axis
+            ex, ey = sgn * ax, sgn * ay
+            De = boundary_dist(mx, my, (ex, ey))
+            if De <= half_axis + run + 0.05:
+                continue                          # edge must be ahead of the lead ball
+            px, py = -ey, ex                      # perp unit (cross axis)
+            # lead = the ball in the +e (toward-edge) direction. Each ball's
+            # segments are clearance-checked against the OTHER ball's pad/via
+            # (only the ball's own home is exempt), so the trail must really clear
+            # the lead's via.
+            if ex * (pp.global_x - mx) + ey * (pp.global_y - my) > 0:
+                lead, trail, lh, th = pp, nn, home_of(pp), home_of(nn)
+            else:
+                lead, trail, lh, th = nn, pp, home_of(nn), home_of(pp)
+
+            def pt(along, off):
+                return (mx + along * ex + off * px, my + along * ey + off * py)
+
+            for L, use_via in candidates:
+                for tside in (1.0, -1.0):         # which gap the trail bulges through
+                    lside = -tside
+                    lead_segs = [((lead.global_x, lead.global_y), pt(De - run, lside * half_sp)),
+                                 (pt(De - run, lside * half_sp), pt(De, lside * half_sp))]
+                    W = pt(half_axis, tside * half_axis)     # gap beside the lead pad
+                    trail_segs = [((trail.global_x, trail.global_y), W),
+                                  (W, pt(De - run, tside * half_sp)),
+                                  (pt(De - run, tside * half_sp), pt(De, tside * half_sp))]
+                    if not (all(occ.seg_clear(L, a, b, exempt=lh) for a, b in lead_segs)
+                            and all(occ.seg_clear(L, a, b, exempt=th) for a, b in trail_segs)):
+                        continue
+                    for segs, pad in ((lead_segs, lead), (trail_segs, trail)):
+                        for a, b in segs:
+                            if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6:
+                                continue
+                            occ.block_segment(L, a, b, trk_keep)
+                            tracks.append({'start': a, 'end': b, 'width': track_width,
+                                           'layer': layers[L], 'net_id': pad.net_id})
+                        if use_via:
+                            occ.block_all(pad.global_x, pad.global_y, via_keep)
+                            vias_to_add.append({'x': pad.global_x, 'y': pad.global_y,
+                                                'size': via_size, 'drill': via_drill,
+                                                'layers': [layers[0], layers[-1]],
+                                                'net_id': pad.net_id})
+                            nvia += 1
+                    escaped.update((id(pp), id(nn)))
+                    return True
+        return False
+
+    # Phase A: route the near-edge SINGLE balls on the BGA layer (no via).
+    # Whatever can't take a clean top-layer escape falls through to the inner
+    # phase. (Paired balls are handled coupled below.)
+    inner_pads = list(single_pads)
     if nl > 1:
         inner_pads = []
-        for p in signal_pads:
+        for p in single_pads:
             if depth(p) > outer_depth:
                 inner_pads.append(p)
                 continue
@@ -393,16 +607,55 @@ def generate_underpad_escape(footprint: Footprint,
             else:
                 inner_pads.append(p)
 
-    # Phase 2: reserve EVERY inner ball's via-in-pad keepout BEFORE routing any
-    # inner track. Otherwise a track running under pad P (placed before P's via)
-    # and P's later via collide (via-segment shorts). With the vias reserved,
-    # inner tracks dodge them and run under the via-less F.Cu pads and through
-    # the gaps - which keeps the geometry clean.
+    n_coupled = 0
+    coupled_fail = []
+
+    # Phase C1: escape diff pairs on the TOP (pad) layer with NO vias - edge
+    # pairs first so they claim the rim. A broadside pair (axis parallel to the
+    # edge) runs straight off the boundary; a stacked pair (axis pointing at the
+    # edge) escapes END-ON, the trail ball bulging through the pad gap. Keeping
+    # these pairs via-free is what lets the deeper pairs/balls run UNDER them on
+    # inner layers without grazing a through-via - the "outer edges on top, inner
+    # pads under them" strategy.
+    coupled_targets.sort(key=lambda t: depth(t[1]) + depth(t[2]))
+    remaining_pairs = []
+    for base, pp, nn in coupled_targets:
+        if (try_coupled(pp, nn, [(top_idx, False)])
+                or try_coupled_endon(pp, nn, [(top_idx, False)])):
+            n_coupled += 1
+            escaped.update((id(pp), id(nn)))
+        else:
+            remaining_pairs.append((base, pp, nn))  # try an inner coupled escape
+
+    # Phase B: reserve EVERY via-in-pad keepout BEFORE routing any inner track -
+    # the inner single balls AND both balls of every pair that still needs an
+    # inner (via) escape. Otherwise a track running under pad P (placed before
+    # P's via) and P's later via collide (via-segment short). Pairs that already
+    # escaped via-less on top are NOT reserved, so deeper inner runs stay open
+    # beneath them.
     for p in inner_pads:
         occ.block_all(p.global_x, p.global_y, via_keep)
+    for _base, pp, nn in remaining_pairs:
+        occ.block_all(pp.global_x, pp.global_y, via_keep)
+        occ.block_all(nn.global_x, nn.global_y, via_keep)
 
-    # Phase 3: route the inner balls (deepest-first - the interior claims the
-    # scarce central space before the shallower balls).
+    # Phase C2: escape the remaining pairs coupled on an inner layer (via-in-pad),
+    # deepest-first so the interior claims the scarce central space. A pair that
+    # still won't fit a coupled corridor falls back to single-ended (its vias are
+    # already reserved, so it just joins the inner single balls).
+    remaining_pairs.sort(key=lambda t: depth(t[1]) + depth(t[2]), reverse=True)
+    inner_cands = [(L, True) for L in range(nl) if L != top_idx]
+    for base, pp, nn in remaining_pairs:
+        if (try_coupled(pp, nn, inner_cands)
+                or try_coupled_endon(pp, nn, inner_cands)):
+            n_coupled += 1
+        else:
+            inner_pads.extend((pp, nn))
+            coupled_fail.append(base)
+
+    # Phase D: route the inner balls single-ended (deepest-first - the interior
+    # claims the scarce central space before the shallower balls).
+    inner_pads.sort(key=depth, reverse=True)
     for p in inner_pads:
         sx, sy = occ.cell(p.global_x, p.global_y)
         path = astar(sx, sy, home_of(p), inner_layers, allow_via=True)
@@ -415,7 +668,13 @@ def generate_underpad_escape(footprint: Footprint,
 
     if verbose:
         already = f", {len(fanned_net_ids)} already-fanned skipped" if fanned_net_ids else ""
+        pairs_msg = ""
+        if coupled_targets or coupled_fail:
+            total_pairs = n_coupled + len(coupled_fail)
+            pairs_msg = f", {n_coupled}/{total_pairs} diff pairs coupled"
+            if coupled_fail:
+                pairs_msg += f" ({len(coupled_fail)} fell back single-ended)"
         print(f"  Under-pad escape: {len(signal_pads)-len(failed)}/{len(signal_pads)} "
               f"signals escaped, {nvia} vias, {len(plane_pads)} plane balls skipped"
-              f"{already}, {len(failed)} failed")
+              f"{already}{pairs_msg}, {len(failed)} failed")
     return tracks, vias_to_add, failed

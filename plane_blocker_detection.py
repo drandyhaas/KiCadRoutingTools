@@ -189,9 +189,11 @@ def find_route_blocker_from_frontier(
     net_block_count: Dict[int, int] = {}
 
     # Check segments
-    # expansion = existing_track_half + clearance + routing_track_half
-    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
+    # expansion = existing_track_half + clearance + routing_track_half. Size the
+    # existing-track half from the segment's ACTUAL width (a wide/diff-pair trace
+    # is responsible for more blocked cells than the default width implies), so
+    # the rip-up heuristic attributes blockage to the right net. Mirrors #172.
+    routing_half = config.track_width / 2
 
     for seg in pcb_data.segments:
         if seg.net_id == exclude_net_id:
@@ -199,6 +201,10 @@ def find_route_blocker_from_frontier(
 
         # Get layer index (assume single layer routing, layer 0)
         layer_idx = 0
+
+        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+                    else config.track_width) / 2
+        expansion_grid = max(1, coord.to_grid_dist(seg_half + config.clearance + routing_half))
 
         # Trace along segment and check for blocked cells
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -216,12 +222,15 @@ def find_route_blocker_from_frontier(
         if count > 0:
             net_block_count[seg.net_id] = net_block_count.get(seg.net_id, 0) + count
 
-    # Check vias
-    via_expansion_grid = max(1, coord.to_grid_dist(config.via_size / 2 + config.track_width / 2 + config.clearance))
-
+    # Check vias - size the keep-out from each via's ACTUAL size (a fanout
+    # via-in-pad is larger than config.via_size), same rationale as the segments.
     for via in pcb_data.vias:
         if via.net_id == exclude_net_id:
             continue
+
+        via_r = (via.size if getattr(via, 'size', 0) and via.size > 0
+                 else config.via_size) / 2
+        via_expansion_grid = max(1, coord.to_grid_dist(via_r + config.track_width / 2 + config.clearance))
 
         gx, gy = coord.to_grid(via.x, via.y)
         count = 0
@@ -255,61 +264,6 @@ def find_route_blocker_from_frontier(
         return None
 
     return top_blocker
-
-
-def find_best_via_position_with_blocker(
-    pad: Pad,
-    obstacles: GridObstacleMap,
-    coord: GridCoord,
-    max_search_radius: float,
-    pcb_data: PCBData,
-    config: GridRouteConfig,
-    exclude_net_id: int
-) -> Tuple[Optional[Tuple[float, float]], Optional[int]]:
-    """
-    Find the best (closest) via position near a pad, and identify blocker if blocked.
-
-    Returns:
-        (via_pos, blocker_net_id) where:
-        - via_pos is (x, y) if found, None if all positions blocked
-        - blocker_net_id is the net blocking the closest position (if blocked), None otherwise
-    """
-    pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
-
-    # Try pad center first
-    if not obstacles.is_via_blocked(pad_gx, pad_gy):
-        return ((pad.global_x, pad.global_y), None)
-
-    # Find blocker at pad center
-    center_blocker = find_via_position_blocker(pad.global_x, pad.global_y, pcb_data, config, exclude_net_id)
-
-    # Search outward for valid position
-    max_radius_grid = coord.to_grid_dist(max_search_radius)
-    best_dist_sq = float('inf')
-    best_pos = None
-
-    for radius in range(1, max_radius_grid + 1):
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                if abs(dx) != radius and abs(dy) != radius:
-                    continue
-
-                gx, gy = pad_gx + dx, pad_gy + dy
-                if not obstacles.is_via_blocked(gx, gy):
-                    dist_sq = dx * dx + dy * dy
-                    if dist_sq < best_dist_sq:
-                        best_dist_sq = dist_sq
-                        best_pos = coord.to_float(gx, gy)
-
-        # If we found a position at this radius, no need to search further
-        if best_pos is not None:
-            break
-
-    if best_pos is not None:
-        return (best_pos, None)
-
-    # All positions blocked - return blocker for closest position (pad center)
-    return (None, center_blocker)
 
 
 @dataclass

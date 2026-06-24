@@ -26,7 +26,7 @@ from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect, pad_rect_halfspan
 from route import batch_route
-from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
+from obstacle_cache import ViaPlacementObstacleData
 from connectivity import compute_mst_segments
 
 # Import from new refactored modules
@@ -119,36 +119,6 @@ class ViaSpatialIndex:
                         best_dist_sq = dist_sq
                         best_via = (vx, vy)
         return best_via
-
-
-def find_existing_via_nearby(
-    pad: Pad,
-    existing_vias: List[Tuple[float, float]],
-    max_search_radius: float
-) -> Optional[Tuple[float, float]]:
-    """
-    Find an existing via on the target net within search radius of the pad.
-
-    Args:
-        pad: The pad to connect
-        existing_vias: List of (x, y) positions of existing vias on target net
-        max_search_radius: Maximum distance to search
-
-    Returns:
-        (x, y) position of nearest existing via, or None if none found
-    """
-    best_via = None
-    best_dist_sq = max_search_radius * max_search_radius
-
-    for vx, vy in existing_vias:
-        dx = vx - pad.global_x
-        dy = vy - pad.global_y
-        dist_sq = dx * dx + dy * dy
-        if dist_sq <= best_dist_sq:
-            best_dist_sq = dist_sq
-            best_via = (vx, vy)
-
-    return best_via
 
 
 def find_via_position(
@@ -249,51 +219,54 @@ def find_via_position(
     # Collect all valid via positions, sorted by distance
     valid_positions = []
 
-    # Search in expanding rings
-    for radius in range(1, max_radius_grid + 1):
-        # Check all points at this Manhattan radius
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                # Skip if not on the ring edge
-                if abs(dx) != radius and abs(dy) != radius:
-                    continue
-
-                gx, gy = pad_gx + dx, pad_gy + dy
-
-                # Check if via can be placed here
-                if obstacles.is_via_blocked(gx, gy):
-                    continue
-
-                # Skip if too close to a previously failed route position
-                if failed_route_positions and skip_radius_sq > 0:
-                    too_close = False
-                    for failed_gx, failed_gy in failed_route_positions:
-                        fdx = gx - failed_gx
-                        fdy = gy - failed_gy
-                        if fdx * fdx + fdy * fdy <= skip_radius_sq:
-                            too_close = True
-                            break
-                    if too_close:
+    # Open via cells within the search radius. The Rust obstacle map returns
+    # every non-via-blocked cell nearest-first in one batched FFI call
+    # (grid_router 0.16.0), replacing an O(radius^2) per-cell is_via_blocked()
+    # spiral - the wide-radius plane-tap search was thousands of FFI calls. Fall
+    # back to the spiral if the binary predates the batch query.
+    if hasattr(obstacles, 'open_via_cells_within'):
+        open_cells = obstacles.open_via_cells_within(pad_gx, pad_gy, max_radius_grid)
+    else:
+        open_cells = []
+        for radius in range(1, max_radius_grid + 1):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    if abs(dx) != radius and abs(dy) != radius:
                         continue
+                    gx, gy = pad_gx + dx, pad_gy + dy
+                    if not obstacles.is_via_blocked(gx, gy):
+                        open_cells.append((gx, gy))
 
-                # Skip if inside a pending pad's exclusion zone
-                if pending_pad_zones:
-                    in_zone = False
-                    for zone_idx, (min_gx, min_gy, max_gx, max_gy) in enumerate(pending_pad_zones):
-                        if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
-                            in_zone = True
-                            if verbose:
-                                print(f"\n    DEBUG: Skipping ({gx},{gy}) - inside zone {zone_idx}: ({min_gx},{min_gy})-({max_gx},{max_gy})")
-                            break
-                    if in_zone:
-                        continue
+    for gx, gy in open_cells:
+        dx, dy = gx - pad_gx, gy - pad_gy
 
-                # Valid via position - add to list with distance
-                dist_sq = dx * dx + dy * dy
-                via_pos = coord.to_float(gx, gy)
-                valid_positions.append((dist_sq, via_pos, gx, gy))
+        # Skip if too close to a previously failed route position
+        if failed_route_positions and skip_radius_sq > 0:
+            too_close = False
+            for failed_gx, failed_gy in failed_route_positions:
+                fdx = gx - failed_gx
+                fdy = gy - failed_gy
+                if fdx * fdx + fdy * fdy <= skip_radius_sq:
+                    too_close = True
+                    break
+            if too_close:
+                continue
 
-    # Sort by distance (closest first)
+        # Skip if inside a pending pad's exclusion zone
+        if pending_pad_zones:
+            in_zone = False
+            for min_gx, min_gy, max_gx, max_gy in pending_pad_zones:
+                if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
+                    in_zone = True
+                    break
+            if in_zone:
+                continue
+
+        dist_sq = dx * dx + dy * dy
+        valid_positions.append((dist_sq, coord.to_float(gx, gy), gx, gy))
+
+    # The Rust query is already nearest-first; sort anyway so the fallback path
+    # (and any future unordered source) is correct.
     valid_positions.sort(key=lambda x: x[0])
 
     # If no routing check needed, return closest valid position
@@ -609,8 +582,11 @@ def build_plane_base_obstacles(
     layer_idx = 0
     obstacles = GridObstacleMap(1)
 
-    # Block other nets' vias as hard obstacles using batched numpy operations
-    via_radius = coord.to_grid_dist(track_via_clearance)
+    # Block other nets' vias as hard obstacles using batched numpy operations.
+    # Ceil the center-to-center radius (matches build_base_obstacles): flooring a
+    # circular keep-out under-reserves by ~1 cell, letting tap traces graze
+    # foreign vias (#155 follow-up).
+    via_radius = max(1, coord.to_grid_dist_safe(track_via_clearance))
     radius_sq = via_radius * via_radius
     # Pre-compute circle template
     circle_offsets = []
@@ -659,13 +635,13 @@ def build_plane_base_obstacles(
         if seg.layer != plane_layer:
             continue
         seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
+        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
 
     # Block previous routes from other nets
     if previous_routes:
         route_expansion_mm = config.track_width + config.clearance
-        route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
+        route_expansion_grid = max(1, coord.to_grid_dist_safe(route_expansion_mm))
         for route_path in previous_routes:
             _block_route_as_obstacle(obstacles, route_path, coord, layer_idx, route_expansion_grid)
 
@@ -1337,6 +1313,92 @@ def _geometric_plane_verification(
     return results
 
 
+def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_width=0.1):
+    """Neck plane tap segments so they clear foreign vias AND pads by `clearance`.
+
+    The tap router (route_via_to_pad) exempts its source/target cells from the
+    obstacle map and appends an un-obstacle-checked stub to the pad centre, so a
+    full-width tap can graze foreign copper that sits inside the keep-out near its
+    target pad (e.g. a GND pad placed ~0.4mm from a signal via, or a power tap
+    landing next to a foreign GND pad). Narrowing a trace only ever REMOVES a
+    clearance conflict, never creates one, so we shrink each tap segment to the
+    widest value that still clears every nearby foreign via and pad, floored at
+    `min_width` (placement-limited residue stays as-is). This is the route_planes
+    side of the terminal-graze issue #157.
+    """
+    import math
+    from check_drc import segment_to_rect_distance, _into_pad_frame  # reuse exact DRC geometry
+    vias = [(v.x, v.y, v.size / 2.0, v.net_id, v.layers) for v in pcb_data.vias]
+    EPS = 1e-4  # stay just inside the rule
+
+    def pad_on_layer(pad, layer):
+        return '*.Cu' in pad.layers or layer in pad.layers
+
+    def pad_corner_radius(pad):
+        if pad.shape in ('circle', 'oval'):
+            return min(pad.size_x, pad.size_y) / 2
+        if pad.shape == 'roundrect':
+            return getattr(pad, 'roundrect_rratio', 0.25) * min(pad.size_x, pad.size_y)
+        return 0.0
+
+    necked = 0
+    for seg in all_new_segments:
+        x0, y0 = seg['start']; x1, y1 = seg['end']
+        base = seg['width']; layer = seg['layer']; nid = seg['net_id']
+        half = base / 2.0
+        new_half = half
+        dx = x1 - x0; dy = y1 - y0; L2 = dx * dx + dy * dy
+        minx, maxx = min(x0, x1), max(x0, x1)
+        miny, maxy = min(y0, y1), max(y0, y1)
+        # foreign vias
+        for vx, vy, vr, vnid, vlayers in vias:
+            if vnid == nid:
+                continue
+            if not (('F.Cu' in vlayers and 'B.Cu' in vlayers) or layer in vlayers):
+                continue
+            margin = half + vr + clearance
+            if vx < minx - margin or vx > maxx + margin or vy < miny - margin or vy > maxy + margin:
+                continue
+            t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((vx - x0) * dx + (vy - y0) * dy) / L2))
+            d = math.hypot(vx - (x0 + t * dx), vy - (y0 + t * dy))
+            allowed = d - vr - clearance - EPS
+            if allowed < new_half:
+                new_half = allowed
+        # foreign pads on this layer (edge-to-edge distance via the DRC geometry)
+        for pnid, pads in pcb_data.pads_by_net.items():
+            if pnid == nid:
+                continue
+            for pad in pads:
+                if not pad_on_layer(pad, layer):
+                    continue
+                pext = max(pad.size_x, pad.size_y) / 2.0
+                margin = half + pext + clearance
+                if pad.global_x < minx - margin or pad.global_x > maxx + margin or \
+                   pad.global_y < miny - margin or pad.global_y > maxy + margin:
+                    continue
+                sx0, sy0, ex0, ey0 = x0, y0, x1, y1
+                if pad.rect_rotation:
+                    rad = math.radians(pad.rect_rotation)
+                    cr, sr = math.cos(rad), math.sin(rad)
+                    sx0, sy0 = _into_pad_frame(sx0, sy0, pad, cr, sr)
+                    ex0, ey0 = _into_pad_frame(ex0, ey0, pad, cr, sr)
+                d, _ = segment_to_rect_distance(sx0, sy0, ex0, ey0,
+                                                pad.global_x, pad.global_y,
+                                                pad.size_x / 2, pad.size_y / 2,
+                                                pad_corner_radius(pad))
+                allowed = d - clearance - EPS  # d is already edge-to-edge from the pad
+                if allowed < new_half:
+                    new_half = allowed
+        floor_half = min(base, min_width) / 2.0
+        new_half = max(new_half, floor_half)
+        if new_half < half - 1e-9:
+            seg['width'] = round(2.0 * new_half, 4)
+            necked += 1
+    if necked:
+        print(f"  Necked {necked} plane tap segment(s) to clear foreign vias/pads")
+    return necked
+
+
 def _write_output_and_reroute(
     input_file: str,
     output_file: str,
@@ -1373,6 +1435,11 @@ def _write_output_and_reroute(
     combined_zone_sexpr = '\n'.join(all_sexprs) if all_sexprs else None
     if all_debug_lines:
         print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
+
+    # Neck tap segments that graze foreign vias/pads near their target pads (the
+    # tap router exempts source/target cells, so the obstacle keep-out can't
+    # enforce clearance at the pad). Narrowing only removes conflicts (#157).
+    _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
 
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
@@ -1847,13 +1914,6 @@ def create_plane(
         # Cache for incremental obstacle updates during rip-up
         # Computed lazily when we first encounter each blocker net
         via_obstacle_cache: Dict[int, ViaPlacementObstacleData] = {}
-
-        def ensure_via_obstacle_cache(blocker_net_id: int):
-            """Ensure we have cached obstacles for a net (computed lazily)."""
-            if blocker_net_id not in via_obstacle_cache:
-                via_obstacle_cache[blocker_net_id] = precompute_via_placement_obstacles(
-                    pcb_data, blocker_net_id, config, all_layers
-                )
 
         # Build list of pads needing vias for this net
         pads_needing_vias = [p for p in target_pads if p['needs_via']]
@@ -2549,6 +2609,12 @@ Examples:
     # Board edge clearance
     parser.add_argument("--board-edge-clearance", type=float, default=0.5,
                         help="Clearance from board edge for zones in mm (default: 0.5)")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not adjust the output's .kicad_pro DRC constraints to match the "
+                             "routed clearances/sizes afterwards (issue #160).")
+    parser.add_argument("--keep-thermal", action="store_true",
+                        help="When fixing DRC settings, leave thermal-relief severity "
+                             "(starved_thermal) untouched instead of demoting it to a warning")
 
     # Same-net pad clearance (avoid via-in-pad)
     parser.add_argument("--same-net-pad-clearance", type=float,
@@ -2684,7 +2750,10 @@ Examples:
             track_width=args.track_width,
             clearance=args.clearance,
             grid_step=args.grid_step,
-            layers=args.layers
+            layers=args.layers,
+            # Thread the fab hole-to-hole minimum through so GND-via placement
+            # enforces the real drill spacing (issue #125), not the 0.2mm default.
+            hole_to_hole_clearance=args.hole_to_hole_clearance
         )
         coord = GridCoord(gnd_config.grid_step)
 
@@ -2730,6 +2799,21 @@ Examples:
         _snapped, _removed = clean_plane_copper(args.output_file, net_names, args.clearance)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
+    # Make the output project's KiCad DRC constraints consistent with the routed
+    # clearances/sizes (issue #160); only edits the .kicad_pro, never the board.
+    if not args.no_fix_drc_settings and not args.dry_run \
+            and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                args.output_file, input_pcb=args.input_file,
+                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                via_diameter=args.via_size, via_drill=args.via_drill,
+                keep_thermal=args.keep_thermal)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")
 
 
 if __name__ == "__main__":

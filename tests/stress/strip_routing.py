@@ -50,8 +50,8 @@ def simplify_closed(points, eps):
     out = rdp(closed, eps)
     return out[:-1] if len(out) > 3 else list(points)
 
-SRC = STRESS / "boards"
-DST = STRESS / "boards_unrouted"
+SRC = STRESS / "boards_set1"
+DST = STRESS / "boards_unrouted_set1"
 DST.mkdir(parents=True, exist_ok=True)
 
 # pcbnew segfaults processing multiple boards per process; pass one name as argv

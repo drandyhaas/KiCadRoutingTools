@@ -204,29 +204,43 @@ def analyze_frontier_blocking(
     # Use provided cache or create local one
     local_cache = obstacle_cache if obstacle_cache is not None else {}
 
+    # The blocked frontier is small and constant across the net loop; iterate IT
+    # against each net's (large) obstacle-cell SET rather than re-sorting the big
+    # array with np.intersect1d every call (~8s of the signal route). blocked_list
+    # is sorted-unique, so filtering it in order yields the same sorted result
+    # intersect1d did -- byte-for-byte identical blocker counts/ranking.
+    blocked_fs = frozenset(blocked_keys.tolist())
+
     for net_id, path in routed_net_paths.items():
         if net_id in exclude_net_ids:
             continue
 
-        # Get obstacle cells from cache or compute
-        # Cache key includes extra_clearance since it affects expansion radius
+        # Get obstacle cells from cache or compute. Cache key includes
+        # extra_clearance since it affects expansion radius. Cached as frozensets
+        # for O(1) membership (the values are private to this intersection).
         cache_key = (net_id, extra_clearance)
-        if cache_key in local_cache:
-            track_keys, via_keys = local_cache[cache_key]
-        else:
+        cached = local_cache.get(cache_key)
+        if cached is None:
             track_keys, via_keys = compute_net_obstacle_cells(
                 pcb_data, net_id, path, config, extra_clearance
             )
-            # Store in cache for future calls
-            local_cache[cache_key] = (track_keys, via_keys)
+            cached = (frozenset(track_keys.tolist()), frozenset(via_keys.tolist()))
+            local_cache[cache_key] = cached
+        track_set, via_set = cached
 
-        # Count how many blocked frontier cells this net is responsible for
-        blocking_track = np.intersect1d(blocked_keys, track_keys, assume_unique=True)
-        blocking_via = np.intersect1d(blocked_keys, via_keys, assume_unique=True)
+        # Count how many blocked frontier cells this net is responsible for.
+        # frozenset & frozenset is a C-level intersection that iterates the SMALLER
+        # (blocked) set, so it costs O(blocked) without a Python loop or re-sorting
+        # the net's big cell array. sorted() restores intersect1d's ordering, so the
+        # blocker counts/ranking stay byte-for-byte identical.
+        bt = blocked_fs & track_set
+        bv = blocked_fs & via_set
+        if not bt and not bv:
+            continue
+        blocking_track = np.array(sorted(bt), dtype=np.int64)
+        blocking_via = np.array(sorted(bv), dtype=np.int64)
         blocking_total = np.union1d(blocking_track, blocking_via)
-
-        if len(blocking_total) > 0:
-            net_blocking_data[net_id] = (blocking_track, blocking_via, blocking_total)
+        net_blocking_data[net_id] = (blocking_track, blocking_via, blocking_total)
 
     # Cells blocked by exactly one net (each net contributes each cell once)
     if net_blocking_data:

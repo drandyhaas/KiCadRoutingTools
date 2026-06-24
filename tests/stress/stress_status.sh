@@ -14,11 +14,11 @@
 # the corpus changes. Override the data root with $1 or $STRESS_ROOT.
 ROOT="${1:-${STRESS_ROOT:-$HOME/Documents/kicad_stress_test}}"
 
-# Pairs across set 1 (boards_unrouted/) and every set N (boards_unrouted_setN/).
+# Pairs across every set N (boards_unrouted_setN/; set 1 = boards_unrouted_set1).
 PAIRS=""
-for d in "$ROOT"/boards_unrouted "$ROOT"/boards_unrouted_set*; do
+for d in "$ROOT"/boards_unrouted_set*; do
   [ -d "$d" ] || continue
-  case "$d" in *_set*) s="${d##*_set}";; *) s=1;; esac
+  s="${d##*_set}"
   for f in "$d"/*.kicad_pcb; do
     [ -e "$f" ] || continue
     PAIRS="$PAIRS $(basename "$f" .kicad_pcb):$s"
@@ -30,7 +30,7 @@ done_n=0; run_n=0; todo_n=0
 done_l=""; run_l=""; todo_l=""
 check() { # $1 board, $2 set(1|2|3...)
   local b=$1 s=$2 resdir rundir
-  if [ "$s" = "1" ]; then resdir="$ROOT/results"; rundir="runs/$b"; else resdir="$ROOT/results_set$s"; rundir="runs_set$s/$b"; fi
+  resdir="$ROOT/results_set$s"; rundir="runs_set$s/$b"
   if [ -f "$resdir/$b.json" ]; then done_n=$((done_n+1)); done_l="$done_l $b"; return; fi
   if pgrep -f "$rundir" >/dev/null 2>&1; then run_n=$((run_n+1)); run_l="$run_l ${b}[s$s]"; return; fi
   if [ -d "$ROOT/$rundir" ] && [ -n "$(find "$ROOT/$rundir" -mmin -45 2>/dev/null | head -1)" ]; then

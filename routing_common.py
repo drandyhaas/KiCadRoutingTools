@@ -208,63 +208,6 @@ def filter_already_routed(
     return nets_to_route, already_routed
 
 
-def build_obstacle_infrastructure(
-    pcb_data: PCBData,
-    config: GridRouteConfig,
-    all_net_ids_to_route: List[int],
-    all_unrouted_net_ids: List[int],
-    debug_memory: bool = False,
-    mem_start: float = 0.0
-) -> Tuple:
-    """
-    Build base obstacles, net cache, and working obstacles.
-
-    Args:
-        pcb_data: Parsed PCB data
-        config: Routing configuration
-        all_net_ids_to_route: Net IDs being routed (excluded from base obstacles)
-        all_unrouted_net_ids: All unrouted net IDs for cache
-        debug_memory: Print memory stats if True
-        mem_start: Starting memory for delta calculation
-
-    Returns:
-        Tuple of (base_obstacles, net_obstacles_cache, working_obstacles)
-    """
-    # Build base obstacle map
-    print("Building base obstacle map...")
-    base_start = time.time()
-    base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route)
-    base_elapsed = time.time() - base_start
-    print(f"Base obstacle map built in {base_elapsed:.2f}s")
-    if debug_memory:
-        mem_after_base = get_process_memory_mb()
-        print(format_memory_stats("After base obstacle map", mem_after_base, mem_after_base - mem_start))
-
-    # Pre-compute net obstacles cache
-    print("Pre-computing net obstacle cache...")
-    cache_start = time.time()
-    net_obstacles_cache = precompute_all_net_obstacles(
-        pcb_data, list(all_unrouted_net_ids), config,
-        extra_clearance=0.0, diagonal_margin=0.25
-    )
-    cache_time = time.time() - cache_start
-    print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
-    if debug_memory:
-        mem_after_cache = get_process_memory_mb()
-        cache_size = estimate_net_obstacles_cache_mb(net_obstacles_cache)
-        print(format_memory_stats("After net obstacles cache", mem_after_cache, mem_after_cache - mem_start))
-        print(f"[MEMORY]   Cache estimated size: {cache_size:.1f} MB for {len(net_obstacles_cache)} nets")
-
-    # Build working obstacle map
-    working_obstacles = build_working_obstacle_map(base_obstacles, net_obstacles_cache)
-    working_obstacles.shrink_to_fit()
-    if debug_memory:
-        mem_after_working = get_process_memory_mb()
-        print(format_memory_stats("After working obstacle map", mem_after_working, mem_after_working - mem_start))
-
-    return base_obstacles, net_obstacles_cache, working_obstacles
-
-
 def run_length_matching(
     routed_results: Dict[int, Dict],
     length_match_groups: List[List[str]],

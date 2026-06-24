@@ -108,22 +108,6 @@ def detect_bus_groups(
     return bus_groups
 
 
-def _all_within_radius(
-    net_ids: List[int],
-    positions: Dict[int, Tuple[float, float]],
-    radius: float
-) -> bool:
-    """Check if all positions are within radius of each other (pairwise)."""
-    for i, nid1 in enumerate(net_ids):
-        x1, y1 = positions[nid1]
-        for nid2 in net_ids[i+1:]:
-            x2, y2 = positions[nid2]
-            dist = math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
-            if dist > radius:
-                return False
-    return True
-
-
 def _find_largest_clique(
     positions: Dict[int, Tuple[float, float]],
     radius: float,

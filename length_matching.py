@@ -519,64 +519,6 @@ def get_safe_amplitude_at_point(
     return 0
 
 
-def check_meander_clearance(
-    segment: Segment,
-    amplitude: float,
-    pcb_data: PCBData,
-    net_id: int,
-    config: GridRouteConfig,
-    paired_net_id: int = None
-) -> bool:
-    """
-    Check if a meander at this segment would have clearance from other traces/vias.
-    This is a quick check - detailed per-bump checking is done during generation.
-
-    Args:
-        segment: The segment where meander would be placed
-        amplitude: Height of meander perpendicular to trace
-        pcb_data: PCB data with all segments and vias
-        net_id: Net ID of the route being meandered (to exclude self)
-        config: Routing configuration
-        paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
-
-    Returns:
-        True if meander area appears clear, False if obviously blocked
-    """
-    # Calculate segment direction and perpendicular
-    dx = segment.end_x - segment.start_x
-    dy = segment.end_y - segment.start_y
-    seg_len = math.sqrt(dx * dx + dy * dy)
-
-    if seg_len < MIN_SEGMENT_LENGTH:
-        return False
-
-    ux = dx / seg_len
-    uy = dy / seg_len
-    px = -uy
-    py = ux
-
-    margin = config.track_width / 2 + config.clearance * 1.5
-
-    # Quick check: is there ANY space for meanders?
-    # Sample a few points along the segment
-    for t in [0.25, 0.5, 0.75]:
-        cx = segment.start_x + ux * seg_len * t
-        cy = segment.start_y + uy * seg_len * t
-
-        # Check both directions
-        amp_pos = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, 1, amplitude, 0.1,
-                                               segment.layer, pcb_data, net_id, config,
-                                               paired_net_id=paired_net_id)
-        amp_neg = get_safe_amplitude_at_point(cx, cy, ux, uy, px, py, -1, amplitude, 0.1,
-                                               segment.layer, pcb_data, net_id, config,
-                                               paired_net_id=paired_net_id)
-
-        if amp_pos >= 0.1 or amp_neg >= 0.1:
-            return True  # At least some meanders possible
-
-    return False
-
-
 def segments_are_colinear(seg1: Segment, seg2: Segment, tolerance: float = POSITION_TOLERANCE) -> bool:
     """
     Check if two segments are colinear (same direction and connected).
@@ -616,67 +558,6 @@ def segments_are_colinear(seg1: Segment, seg2: Segment, tolerance: float = POSIT
     # Check if same direction (dot product close to 1)
     dot = dx1*dx2 + dy1*dy2
     return dot > COLINEAR_DOT_THRESHOLD
-
-
-def find_longest_straight_run(segments: List[Segment], min_length: float = 1.0) -> Optional[Tuple[int, int, float]]:
-    """
-    Find the longest run of colinear segments suitable for meander insertion.
-
-    Args:
-        segments: List of route segments
-        min_length: Minimum run length to consider (mm)
-
-    Returns:
-        (start_idx, end_idx, length) of longest run, or None if none found
-    """
-    if not segments:
-        return None
-
-    best_run = None
-    best_length = 0.0
-
-    i = 0
-    while i < len(segments):
-        # Start a new run
-        run_start = i
-        run_length = segment_length(segments[i])
-
-        # Extend the run while segments are colinear
-        j = i + 1
-        while j < len(segments) and segments_are_colinear(segments[j-1], segments[j]):
-            run_length += segment_length(segments[j])
-            j += 1
-
-        if run_length >= min_length and run_length > best_length:
-            best_length = run_length
-            best_run = (run_start, j - 1, run_length)
-
-        i = j
-
-    return best_run
-
-
-def find_longest_segment(segments: List[Segment], min_length: float = 1.0) -> Optional[int]:
-    """
-    Find the index of the longest segment suitable for meander insertion.
-
-    Args:
-        segments: List of route segments
-        min_length: Minimum segment length to consider (mm)
-
-    Returns:
-        Index of longest segment, or None if no suitable segment found
-    """
-    best_idx = None
-    best_length = 0.0
-
-    for i, seg in enumerate(segments):
-        length = segment_length(seg)
-        if length >= min_length and length > best_length:
-            best_length = length
-            best_idx = i
-
-    return best_idx
 
 
 def generate_trombone_meander(
@@ -1272,7 +1153,6 @@ def _apply_meanders_to_net_with_iteration(
     group_clearance_index,
     metric_func,
     extra_length_func,
-    metric_unit: str = "mm"
 ) -> Tuple[dict, List[Segment], int]:
     """
     Apply meanders to a single net with bump iteration and amplitude scaling.
@@ -1293,7 +1173,6 @@ def _apply_meanders_to_net_with_iteration(
         group_clearance_index: Spatial index for clearance checking
         metric_func: Function(segments, vias) -> current metric value
         extra_length_func: Function(metric_deficit) -> extra_length in mm
-        metric_unit: Unit string for printing ("mm" or "ps")
 
     Returns:
         Tuple of (modified_result_or_segments, final_segments, bump_count)
@@ -2338,7 +2217,6 @@ def apply_meanders_to_diff_pair(
     Returns:
         (modified_result, bump_count)
     """
-    from diff_pair_routing import create_parallel_path_float
     from routing_config import GridCoord
 
     # Extract data from result

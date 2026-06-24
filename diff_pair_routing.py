@@ -108,7 +108,37 @@ def get_pair_end_direction(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     dir_y = (p_dir[1] + n_dir[1]) / 2
     dir_len = math.sqrt(dir_x * dir_x + dir_y * dir_y)
     if dir_len > 1e-6:
-        return (dir_x / dir_len, dir_y / dir_len, False)
+        dir_x, dir_y = dir_x / dir_len, dir_y / dir_len
+        # get_stub_direction expects the stub FREE END; the multipoint diff-pair
+        # path passes the PAD position instead, so for a pad with an escape stub
+        # (e.g. a fanned-out QFN pin) it returns the direction reversed - pointing
+        # INTO the component body, which backs the centerline setback into the
+        # chip and the route dies on the pad field.
+        #
+        # Correct it ONLY when the query point IS a pad of the owning component
+        # (_footprint_pad_centroid returns non-None), which is exactly the buggy
+        # case. A true free-end terminal is not at a pad -> centroid is None -> no
+        # orientation, so a genuine stub that legitimately doesn't point straight
+        # outward is left untouched (avoids false-flipping free-end stubs).
+        #
+        # When the query point is a pad: orient the escape away from the
+        # component's pad centroid; but if that centroid coincides with the
+        # terminal center (a 2-pad component - resistor/2-pin part - whose two pads
+        # ARE the pair), there is no "body" to point away from, so orient toward
+        # the other terminal instead.
+        centroid = (_footprint_pad_centroid(pcb_data, p_net_id, p_x, p_y) or
+                    _footprint_pad_centroid(pcb_data, n_net_id, n_x, n_y))
+        if centroid:
+            cx, cy = (p_x + n_x) / 2, (p_y + n_y) / 2
+            if math.hypot(cx - centroid[0], cy - centroid[1]) > 0.05:
+                away = (cx - centroid[0], cy - centroid[1])          # away from body
+            elif other_center is not None:
+                away = (other_center[0] - cx, other_center[1] - cy)  # toward other end
+            else:
+                away = None
+            if away is not None and dir_x * away[0] + dir_y * away[1] < 0:
+                dir_x, dir_y = -dir_x, -dir_y
+        return (dir_x, dir_y, False)
 
     # Bare pads (or cancelling stub directions): synthesize from pad geometry.
     axis_x, axis_y = p_x - n_x, p_y - n_y
@@ -563,6 +593,85 @@ def _calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_
         return 0.0, n_ext
 
     return 0.0, 0.0
+
+
+def _routing_copper_layers(pcb_data, config) -> List[str]:
+    """Copper layer names for check_drc's pad/via layer-wildcard expansion: the
+    board's copper segment layers unioned with the configured routing layers."""
+    layers = {s.layer for s in pcb_data.segments if s.layer.endswith('.Cu')}
+    layers.update(config.layers)
+    return list(layers)
+
+
+def _rect_ray_exit(hx: float, hy: float, dx: float, dy: float) -> float:
+    """Distance from an axis-aligned rectangle's center to its boundary along the
+    unit direction (dx, dy). hx, hy are the half-extents."""
+    tx = hx / abs(dx) if abs(dx) > 1e-9 else float('inf')
+    ty = hy / abs(dy) if abs(dy) > 1e-9 else float('inf')
+    return min(tx, ty)
+
+
+def _ellipse_ray_exit(a: float, b: float, dx: float, dy: float) -> float:
+    """Distance from an ellipse center (semi-axes a, b) to its boundary along the
+    unit direction (dx, dy). For a circle (a == b) this is just the radius."""
+    denom = (dx / a) ** 2 + (dy / b) ** 2 if a > 1e-9 and b > 1e-9 else 0.0
+    return 1.0 / math.sqrt(denom) if denom > 1e-12 else float('inf')
+
+
+def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.05):
+    """Issue #165 (tier-2 root-cause 2): move a bare-pad connector launch point
+    from the pad CENTER to the pad edge facing the route, so the connector leaves
+    the pad toward the route instead of cutting back across the (long) pad field
+    - e.g. a 1.45mm USB-C pad whose center-launched connector grazes a neighbour.
+
+    Only fires when (cx, cy) actually sits on a pad of net_id (a bare-pad
+    endpoint - its coords ARE the pad center); a stub-tip launch point is away
+    from any pad center, so no pad is found and the launch is left untouched
+    (the connector must stay attached to the existing stub). Returns
+    (x, y, shift): the shifted launch point (clamped to stay inside the pad copper
+    and never past the route start) and how far along the route direction it
+    moved (0.0 when no pad / no move) -- the caller subtracts that from the
+    centerline setback so the setback point stays put instead of being pushed
+    past the pad into a downstream blockage (issue #166).
+    """
+    pad, best = None, tol
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        d = math.hypot(p.global_x - cx, p.global_y - cy)
+        if d <= best:
+            best, pad = d, p
+    if pad is None:
+        return cx, cy, 0.0
+
+    dx, dy = route_x - cx, route_y - cy
+    norm = math.hypot(dx, dy)
+    if norm < 1e-6:
+        return cx, cy, 0.0
+    dx, dy = dx / norm, dy / norm
+
+    # Rotate the direction into the pad's local frame for diagonal pads, matching
+    # check_drc's R(-rect_rotation) convention, so the axis-aligned exit applies.
+    ldx, ldy = dx, dy
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        cr, sr = math.cos(rad), math.sin(rad)
+        ldx, ldy = dx * cr + dy * sr, -dx * sr + dy * cr
+
+    # Round pads use the ellipse boundary so the launch stays on copper (the rect
+    # bounding box would put it in a corner outside a circle/oval).
+    if pad.shape in ('circle', 'oval'):
+        reach = _ellipse_ray_exit(pad.size_x / 2, pad.size_y / 2, ldx, ldy)
+    else:
+        reach = _rect_ray_exit(pad.size_x / 2, pad.size_y / 2, ldx, ldy)
+    if not math.isfinite(reach) or reach <= 0:
+        return cx, cy, 0.0
+
+    # Stay just inside the pad edge so the track endpoint lands on pad copper,
+    # and never launch past the route's first point (very short connectors).
+    margin = min(config.track_width / 2, reach * 0.25)
+    shift = min(reach - margin, max(0.0, norm - config.track_width / 2))
+    if shift <= 1e-6:
+        return cx, cy, 0.0
+    return cx + dx * shift, cy + dy * shift, shift
 
 
 def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs):
@@ -1462,11 +1571,41 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             return None, 0, [], None
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
 
-    # Calculate setback distance (default to 4x spacing = 2x total P-N distance)
+    # Calculate setback distance (default to 4x spacing = 2x total P-N distance).
+    # Computed BEFORE the pad-edge launch so the launch shift can be subtracted
+    # from it (issue #166).
     if config.diff_pair_centerline_setback is not None:
         setback = config.diff_pair_centerline_setback
     else:
         setback = spacing_mm * 4  # Default: 4x the P-N half-spacing = 2x total P-N distance
+
+    # Issue #165 root-cause 2 (routing side): for a long pad (USB-C, 1.45mm) the
+    # terminal CENTER sits deep inside the pad, so the centerline setback point
+    # lands within the pad's own copper (added as an obstacle) and the route can't
+    # reach it. Launch the routing terminal from the pad EDGE nearest the escape
+    # direction, so the setback sits in open space just past the pad. No-op for
+    # stub/small terminals (their launch point isn't a pad center, or the edge ~
+    # the center).
+    _FAR = 10.0
+    p_src_x, p_src_y, p_src_shift = _pad_edge_launch(pcb_data, p_net_id, p_src_x, p_src_y,
+                                        p_src_x + src_dir_x * _FAR, p_src_y + src_dir_y * _FAR, config)
+    n_src_x, n_src_y, n_src_shift = _pad_edge_launch(pcb_data, n_net_id, n_src_x, n_src_y,
+                                        n_src_x + src_dir_x * _FAR, n_src_y + src_dir_y * _FAR, config)
+    p_tgt_x, p_tgt_y, p_tgt_shift = _pad_edge_launch(pcb_data, p_net_id, p_tgt_x, p_tgt_y,
+                                        p_tgt_x + tgt_dir_x * _FAR, p_tgt_y + tgt_dir_y * _FAR, config)
+    n_tgt_x, n_tgt_y, n_tgt_shift = _pad_edge_launch(pcb_data, n_net_id, n_tgt_x, n_tgt_y,
+                                        n_tgt_x + tgt_dir_x * _FAR, n_tgt_y + tgt_dir_y * _FAR, config)
+    center_src_x, center_src_y = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
+    center_tgt_x, center_tgt_y = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
+
+    # The launch moved toward the pad edge; pull the centerline setback in by the
+    # same (averaged) amount so the setback POINT stays where a centre launch
+    # would have put it, instead of being pushed a full pad-length further out
+    # into a downstream blockage (issue #166 esp_prog). Floored so the setback
+    # still clears the pad edge it launched from.
+    _setback_floor = config.track_width / 2 + config.clearance
+    setback_src = max(_setback_floor, setback - (p_src_shift + n_src_shift) / 2)
+    setback_tgt = max(_setback_floor, setback - (p_tgt_shift + n_tgt_shift) / 2)
 
     if direction_label and config.verbose:
         print(f"  Probing {direction_label}...")
@@ -1485,7 +1624,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Get all valid setback positions for source and target, sorted by
     # preference, scanning a ladder of radii per terminal (issue #90)
     src_candidates, _, src_rotated = _find_open_positions_laddered(
-        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
         src_pad_gap_half, "source",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
@@ -1493,19 +1632,19 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         # Synthesized direction blocked - try escaping from the opposite side
         src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
         src_candidates, _, src_rotated = _find_open_positions_laddered(
-            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
             src_pad_gap_half, "source",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not src_candidates:
         blocked = _collect_setback_blocked_cells(
-            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
             config, obstacles, connector_obstacles, coord
         )
         return None, 0, blocked, None
 
     tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
-        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
         tgt_pad_gap_half, "target",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
@@ -1513,13 +1652,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         # Synthesized direction blocked - try escaping from the opposite side
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
         tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
-            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
             tgt_pad_gap_half, "target",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not tgt_candidates:
         blocked = _collect_setback_blocked_cells(
-            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
             config, obstacles, connector_obstacles, coord
         )
         return None, 0, blocked, None
@@ -1866,6 +2005,71 @@ def _pn_tracks_cross_full(new_segments, pcb_data, p_net_id, n_net_id,
                                         (ns.start_x, ns.start_y), (ns.end_x, ns.end_y)):
                 return True
     return False
+
+
+# Tolerance fraction matching check_drc's default --clearance-margin, so a graze
+# reject here is consistent with the DRC checker (won't false-reject a route that
+# DRC passes, won't pass one DRC would flag). See issue #165.
+_DRC_CLEARANCE_MARGIN = 0.05
+
+
+def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id, config):
+    """Issue #165: the pair's connector/setback segments are clearance-checked
+    during routing against an obstacle map that excludes BOTH halves of the pair,
+    so a connector can graze the PARTNER net's pad/via (or other foreign copper)
+    completely unseen (e.g. a USB-C P connector cutting across the adjacent N pad,
+    or grazing the partner's underpad escape via).
+
+    Re-validate the final P/N geometry against every foreign pad AND via (any not
+    on this pair's own nets, which includes the partner net's copper) using the
+    SAME geometry and tolerance as check_drc, so a graze reported here is one
+    check_drc would also flag - not tight-but-legal packing sitting at clearance.
+
+    Returns (kind, obj, segment, overlap_mm) where kind is 'pad' or 'via', or None.
+    """
+    from check_drc import check_pad_segment_overlap, check_via_segment_overlap
+
+    own = (p_net_id, n_net_id)
+    pair_segs = [s for s in new_segments if s.net_id in own]
+    if not pair_segs:
+        return None
+
+    routing_layers = _routing_copper_layers(pcb_data, config)
+    clearance = config.clearance
+    pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+    vias = getattr(pcb_data, 'vias', None) or []
+
+    for seg in pair_segs:
+        sxmin, sxmax = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
+        symin, symax = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
+        seg_margin = clearance + seg.width / 2
+        # vs foreign pads (includes the partner net's pads)
+        for pad_net, pads in pads_by_net.items():
+            if pad_net == seg.net_id:
+                continue  # the connector legitimately lands on its own-net pad
+            for pad in pads:
+                # Coarse bounding-box reject before the exact rect-distance test.
+                pm = seg_margin + max(pad.size_x, pad.size_y) / 2
+                if (pad.global_x < sxmin - pm or pad.global_x > sxmax + pm or
+                        pad.global_y < symin - pm or pad.global_y > symax + pm):
+                    continue
+                hit, overlap, _ = check_pad_segment_overlap(
+                    pad, seg, clearance, routing_layers, _DRC_CLEARANCE_MARGIN)
+                if hit:
+                    return ('pad', pad, seg, overlap)
+        # vs foreign vias (includes the partner net's escape/underpad vias)
+        for via in vias:
+            if via.net_id == seg.net_id:
+                continue  # the connector legitimately lands on its own-net via
+            vm = seg_margin + via.size / 2
+            if (via.x < sxmin - vm or via.x > sxmax + vm or
+                    via.y < symin - vm or via.y > symax + vm):
+                continue
+            hit, overlap = check_via_segment_overlap(
+                via, seg, clearance, _DRC_CLEARANCE_MARGIN)
+            if hit:
+                return ('via', via, seg, overlap)
+    return None
 
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
@@ -2407,19 +2611,21 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     src_stub_dir_tuple = (src_dir_x, src_dir_y)
     tgt_stub_dir_tuple = (tgt_dir_x, tgt_dir_y)
 
-    # Pre-calculate extensions for source and target connectors
-    # These ensure P and N connector segments are parallel
-    # Source end
+    # Route's first/last points - the setback positions the connectors run to.
+    # The terminal launch points (p_src_x/p_tgt_x etc.) are already shifted to the
+    # pad EDGE facing the route by _try_route_direction (issue #165), so the
+    # connectors leave the pad toward the route - nothing to re-shift here.
     p_src_route = p_float_path[0][:2] if p_float_path else p_start
     n_src_route = n_float_path[0][:2] if n_float_path else n_start
+    p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
+    n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
+
+    # Pre-calculate extensions for source and target connectors (from the
+    # pad-edge launch points) - these ensure P and N connector segments are parallel.
     src_p_ext, src_n_ext = _calculate_parallel_extension(
         p_start, n_start, p_src_route, n_src_route,
         src_stub_dir_tuple, p_sign
     )
-
-    # Target end
-    p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
-    n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
     tgt_p_ext, tgt_n_ext = _calculate_parallel_extension(
         p_end, n_end, p_tgt_route, n_tgt_route,
         tgt_stub_dir_tuple, p_sign
@@ -2624,6 +2830,32 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             'failed': True,
             'iterations': result.get('iterations', 0),
             'pn_crossing': True,
+        }
+
+    # Issue #165: the connector/setback segments are clearance-checked during
+    # routing against an obstacle map that excludes BOTH halves of the pair, so a
+    # connector can graze the PARTNER net's pad (or other foreign copper) unseen.
+    # Validate the final geometry against foreign pads with the SAME geometry and
+    # tolerance as check_drc, so a reject here is a graze check_drc would also flag
+    # (not tight-but-legal packing). Honest minimum: don't emit a known short.
+    graze = _connector_grazes_foreign_copper(result.get('new_segments', []),
+                                             pcb_data, p_net_id, n_net_id, config)
+    if graze:
+        kind, obj, seg, overlap = graze
+        if kind == 'pad':
+            what = f"pad {obj.component_ref}.{obj.pad_number} (net {obj.net_name})"
+        else:
+            net = pcb_data.nets.get(obj.net_id)
+            what = f"via at ({obj.x:.2f},{obj.y:.2f}) (net {net.name if net else obj.net_id})"
+        print(f"  Connector grazes foreign {what} by {overlap:.3f}mm on {seg.layer} - "
+              f"rejecting pair route (issue #165)")
+        print("  (a connector/setback segment violates clearance to the partner or "
+              "foreign copper; needs a cleaner connector route or a different "
+              "terminal join)")
+        return {
+            'failed': True,
+            'iterations': result.get('iterations', 0),
+            'connector_graze': True,
         }
 
     return result

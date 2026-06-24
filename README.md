@@ -159,6 +159,10 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 # Optionally optimize an existing placement for routability (before routing)
 python place_optimize.py my_board.kicad_pcb --max-displacement 3
 
+# Fan out a BGA, then tidy decoupling caps off the new vias (issue #130)
+python bga_fanout.py my_board.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
+python place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+
 # Route all nets
 python route.py my_board.kicad_pcb
 
@@ -283,6 +287,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 **Fanout Tab:**
 - BGA fanout with exit margin, escape direction, differential pair support
 - Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](bga_fanout/README.md#escape-methods)
+- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls (issue #130) — see [Placement](placement/README.md#place_fanout_clearancepy--decoupling-cap-clearance-repair-issue-130)
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 
@@ -456,6 +461,13 @@ python check_orphan_stubs.py kicad_files/output.kicad_pcb
 python check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
 python check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
 python check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
+
+# Flag long non-orthonormal tracks. An on-grid router emits only 0/45/90-degree
+# segments; the only legitimate non-orthonormal segment is a short (<=1 grid cell)
+# terminal connector to an off-grid pad/ball. Anything longer is a routing defect
+# (it can cut diagonally across foreign copper). qfn_fanout escape stubs are
+# excluded automatically; bga_fanout's short stub-end jogs clear the 0.25mm default.
+python check_orthonormal.py kicad_files/output.kicad_pcb
 ```
 
 ### 5. Power Net Analysis
@@ -596,7 +608,7 @@ KiCadRoutingTools/
 ├── check_connected.py        # Connectivity checker (with T-junction detection)
 ├── check_orphan_stubs.py     # Orphan stub detector
 ├── check_cycles.py           # Redundant-loop (cycle) + overlapping-via checker
-├── fix_kicad_drc_settings.py # Fix .kicad_pro DRC rules/severities (hole clearance, courtyard/mask noise)
+├── fix_kicad_drc_settings.py # Make .kicad_pro DRC constraints consistent with the routed floors (clearance, track/via/drill, hole, edge; courtyard/mask/footprint noise)
 ├── bga_fanout.py             # BGA fanout CLI wrapper
 ├── bga_fanout/               # BGA fanout package
 │   ├── __init__.py           # Main fanout logic and public API
@@ -1032,6 +1044,12 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb [output.kicad_pc
 --dry-run                   # Analyze without writing output
 --verbose, -v               # Print detailed debug messages
 --debug-lines               # Add debug lines on User.4 layer showing route paths
+
+# DRC settings
+--no-fix-drc-settings       # Skip making the output project's DRC rules match the
+                            # plane routing floors (done by default; issue #160)
+--keep-thermal              # Leave starved_thermal at its severity instead of
+                            # demoting it to a warning when fixing DRC settings
 ```
 
 Features:

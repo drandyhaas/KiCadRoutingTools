@@ -20,6 +20,12 @@ Options:
   --debug-lines        Output debug lines on User.7 showing violation locations
   --max-print INT      Max violations listed per type before "... and N more"
                        (0 = print all; default 20)
+  --no-size-checks     Skip the track-width and via/hole-size fab-floor checks
+  --min-track-width FLOAT   Minimum manufacturable track width in mm
+                            (default: JLC fab floor for the board layer count)
+  --min-via-diameter FLOAT  Minimum via outer diameter in mm (default: fab floor)
+  --min-via-drill FLOAT     Minimum via drill diameter in mm (default: fab floor)
+  --size-margin FLOAT       Absolute tolerance in mm for the size checks (default: 0)
 ```
 
 The per-type listing is capped at `--max-print` (default 20); when a type has
@@ -55,6 +61,10 @@ The DRC checker validates:
 6. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
 7. **Board edge clearance** - Tracks and vias maintain clearance from the board outline
 8. **Same-net crossings** - Detects tracks crossing on the same layer within a net
+9. **Track width** - Segments are at least the fab-floor minimum track width (JLC: 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
+10. **Via / hole size** - Via outer diameter and drill are at least the fine-via fab floor (JLC: 0.45mm/0.20mm on 2-layer, 0.30mm/0.15mm on 4+ layer).
+
+Checks 9–10 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
 
 ### Clearance Margin
 
@@ -736,27 +746,62 @@ which that pass does not yet handle.
 ## DRC Settings Fixer (`fix_kicad_drc_settings.py`)
 
 Rewrites a board's **project file** (`.kicad_pro`) so that a manual DRC in the
-KiCad GUI shows only the routing-relevant errors instead of stock-default noise.
+KiCad GUI shows only the routing-relevant errors instead of stock-default noise,
+making KiCad's enforced constraints consistent with the floors the board was
+actually routed to (issue #160).
 
 KiCad stores DRC *design rules* and *violation severities* in the `.kicad_pro`,
 not in the `.kicad_pcb`. A freshly written board gets a project with KiCad's
-defaults, which produce two kinds of noise:
+defaults, which produce noise in two ways:
 
-1. **`min_hole_clearance` defaults to 0.25 mm** — far stricter than the copper
-   clearance the board was routed to — so every fanout via drill near another
-   net's copper fires a "Hole clearance" violation (often hundreds). These are
-   spurious at the real manufacturing floor; `check_drc.py` never reports them.
-2. **Placement / fabrication categories** (courtyard overlaps, solder-mask
-   bridges) fire as errors even though they are not routing problems.
-3. **Footprint / library categories** (`annular_width`, `lib_footprint_issues`,
-   `lib_footprint_mismatch`) are inherited from the source board's footprints —
-   the router neither creates nor fixes them — yet they often dominate the report
-   (e.g. ~200 annular + ~150 library markers on the orangecrab stress board).
+1. **Constraint floors stricter than the routed board** — stock `min_clearance`
+   0.2 mm, `min_via_diameter` 0.45 mm, `min_track_width` 0.2 mm,
+   `min_hole_clearance` 0.25 mm — fire on every track/via/drill the router placed
+   below them (hundreds of markers). They are spurious at the real manufacturing
+   floor; `check_drc.py` never reports them.
+2. **Non-routing categories** — courtyard overlaps, solder-mask bridges and
+   footprint/library markers (`annular_width`, `lib_footprint_*`) the router
+   neither creates nor fixes — often dominate the report (e.g. ~200 annular +
+   ~150 library markers on the orangecrab stress board).
 
-The script sets `min_hole_clearance` to the board's copper-clearance floor and
-sets the courtyard / solder-mask / footprint severities to `ignore`. `clearance`,
-`shorting_items` and `unconnected_items` are left untouched (KiCad shows
-unconnected items in their own tab).
+The script sets the relevant **Constraints / Net Classes** to the per-object
+minima the board uses — copper `min_clearance` (+ Default net-class clearance),
+`min_hole_to_hole`, `min_hole_clearance`, `min_copper_edge_clearance`, and the
+min track / via / drill / annular sizes — sets the courtyard / solder-mask /
+footprint severities to `ignore`, and demotes `starved_thermal` (thermal-relief
+spoke shortfall) from error to a **warning** (`--keep-thermal` keeps it an error).
+For the **size** floors (track / via / drill) it uses the **smaller** of the
+routing param you pass and the smallest such object actually on the board, so a
+later coarse step (say a 0.3 mm repair pass) can't raise the floor above 0.127 mm
+tracks that earlier steps left — the floor always sits at or below the smallest
+object physically present. **Clearance / hole-to-hole / edge** can't be read back
+from the board (a spacing isn't stored per object, and the *achieved* spacing may
+dip below the intended value at real violations, which we must not mask), so they
+come from the routing param; across a chain they accumulate the **minimum** used
+in any step via the only-loosen rule as each step threads its `.kicad_pro` to the
+next. Clearance defaults to the project's Default net-class clearance when not
+passed. Pass the routing parameters (`--clearance`, `--hole-to-hole`,
+`--edge-clearance`, `--track-width`, `--via-size`, `--via-drill` — the same values
+you gave `route.py`) to pin them exactly.
+
+If the project has **no** Default net class (a bare/stub project), the script
+seeds a *complete* one before lowering its clearance — KiCad silently ignores a
+sparse net class and falls back to the stock 0.2 mm clearance, so an incomplete
+class would leave the board flagging 0.2 mm clearance everywhere.
+
+**Only loosen, never tighten.** Every constraint is set to `min(current, target)`
+— lowered toward the fab floor but never raised — so the fix can never introduce
+a new violation or silently strengthen a rule you set looser. `clearance` shorts
+and `unconnected_items` are left untouched (KiCad shows unconnected items in
+their own tab).
+
+**KiCad-version safe.** The script edits only the `.kicad_pro` (JSON); it never
+touches the `.kicad_pcb`, so a KiCad-9 board (`version 20241229`) stays
+KiCad-9 — unlike a `pcbnew`/GUI round-trip, which upgrades the board to the
+running KiCad's format on save. (One caveat: copper **zones** are not refilled by
+`kicad-cli pcb drc`, so a stale GND pour can still show "zone clearance" markers
+on the command line; KiCad's *interactive* DRC refills zones first, so those
+do not appear in the GUI.)
 
 > **Close the board in KiCad before running.** KiCad keeps the project in memory
 > and overwrites an externally-edited `.kicad_pro` on save/close, reverting the
@@ -768,12 +813,18 @@ unconnected items in their own tab).
 python3 fix_kicad_drc_settings.py board.kicad_pcb [OPTIONS]
 
 Options:
-  --hole-clearance MM   Hole-clearance floor (default: the project's copper
-                        clearance -- the Default netclass, else rules.min_clearance)
+  --clearance MM        Copper clearance floor (default: project Default net-class clearance)
+  --hole-clearance MM   Hole/copper clearance floor (default: the copper clearance)
+  --hole-to-hole MM     Hole-to-hole clearance floor (routing --hole-to-hole-clearance)
+  --edge-clearance MM   Copper-to-edge clearance floor (routing --board-edge-clearance)
+  --track-width MM      Min track width (default: smallest track on the board)
+  --via-size MM         Min via diameter (default: smallest via on the board)
+  --via-drill MM        Min hole/drill diameter (default: smallest drill on the board)
   --keep-courtyards     Do not ignore the courtyard categories
   --keep-mask           Do not ignore solder_mask_bridge
   --keep-footprint      Do not ignore footprint/library categories
                         (annular_width, lib_footprint_issues, lib_footprint_mismatch)
+  --keep-thermal        Keep starved_thermal an error (default: demote to warning)
   --ignore CAT [CAT...] Additional severity categories to set to "ignore"
   --ignore-warnings     Set EVERY category currently at "warning" severity to
                         "ignore" (hides all warning markers; errors untouched)
@@ -785,12 +836,40 @@ KiCad has one). If it is missing, open the board in KiCad once to generate it,
 then re-run. The script is idempotent and accepts either the `.kicad_pcb` or the
 `.kicad_pro` path.
 
+### Runs automatically after routing
+
+You normally don't run this by hand: **`route.py`, `route_diff.py`,
+`route_planes.py`, and `route_disconnected_planes.py` invoke it as their final
+step** (issue #160), pinning the floors to the clearances/sizes they just routed
+with, so the written project is DRC-consistent by default. If the output is a new
+file with no project yet, they copy the input board's `.kicad_pro` (or seed a
+complete one when the input has none). Pass `--no-fix-drc-settings` to skip it, or
+`--keep-thermal` to leave `starved_thermal` at its original severity instead of
+demoting it to a warning (all four routing CLIs accept both flags).
+
+The **GUI plugin** does the equivalent on the live board via the pcbnew API
+(`BOARD_DESIGN_SETTINGS` + the Default net class + severities) after routing, and
+marks the board modified so your next save keeps it. A single **"Fix DRC settings
+after routing"** checkbox on the **Basic tab** controls this for every routing
+action in the dialog — single-ended routing, differential pairs, and plane
+create/repair all read that one shared toggle (it is on by default); a **"Keep
+thermal-relief DRC severity"** checkbox on the **Advanced tab** is the GUI
+counterpart of `--keep-thermal` (off by default). Both front-ends share the same
+target-computing logic (`compute_targets` / `severity_plan` in
+`fix_kicad_drc_settings.py`) and differ only in how they apply it (`.kicad_pro`
+file vs. pcbnew API).
+
 ### Examples
 
 ```bash
-# Default: hole clearance -> copper floor; ignore courtyard, solder-mask and
-# footprint/library (annular_width, lib_footprint_*) noise
+# Default: derive floors from the board's own minima + project clearance; ignore
+# courtyard, solder-mask and footprint/library (annular_width, lib_footprint_*) noise
 python3 fix_kicad_drc_settings.py routed.kicad_pcb
+
+# Pin every floor to the routing parameters you gave route.py (recommended)
+python3 fix_kicad_drc_settings.py routed.kicad_pcb \
+    --clearance 0.15 --track-width 0.15 --via-size 0.4 --via-drill 0.3 \
+    --hole-to-hole 0.2 --edge-clearance 0.0
 
 # Preview without writing
 python3 fix_kicad_drc_settings.py routed.kicad_pcb --dry-run

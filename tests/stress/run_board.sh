@@ -17,7 +17,7 @@ BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-sonnet}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${STRESS_ROOT:-$HOME/Documents/kicad_stress_test}"
 REPO="${STRESS_REPO:-$(cd "$SELF/../.." && pwd)}"
-if [ "$SET" = "1" ]; then SFX=""; else SFX="_set$SET"; fi
+SFX="_set$SET"   # set 1 lives in *_set1 dirs too (uniform suffix)
 RUNDIR="$ROOT/runs${SFX}/$BOARD"
 RESULT="$ROOT/results${SFX}/$BOARD.json"
 mkdir -p "$RUNDIR"

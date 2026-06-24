@@ -11,12 +11,51 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Set, Union
 
 
+def split_net_patterns(patterns: List[str],
+                       known_net_names: Optional[Set[str]] = None) -> Tuple[List[str], List[str]]:
+    """
+    Split filter patterns into (include_patterns, exclude_patterns).
+
+    A leading "!" normally marks an exclusion pattern, but the active-low net
+    naming convention (e.g. !RESET, !CS, !MIX_BYPASS) means a net can legitimately
+    have a name that starts with "!". To keep such nets routable by literal name
+    (issue #177):
+
+    - "\\!FOO" is an *escaped literal* -- the leading backslash is stripped and
+      "!FOO" is treated as an inclusion pattern.
+    - "!FOO" is an exclusion of "FOO", *unless* "!FOO" verbatim names a known net,
+      in which case it is treated as a literal inclusion of that active-low net.
+    - everything else is an inclusion pattern.
+
+    Args:
+        patterns: Raw filter patterns.
+        known_net_names: Net names that exist on the board; a "!"-prefixed pattern
+            matching one verbatim is treated as a literal include rather than an
+            exclusion. Defaults to empty (every "!"-pattern is an exclusion).
+
+    Returns:
+        (include_patterns, exclude_patterns) with the leading "!"/"\\" removed.
+    """
+    known = known_net_names or set()
+    include_patterns: List[str] = []
+    exclude_patterns: List[str] = []
+    for p in patterns:
+        if p.startswith('\\!'):
+            include_patterns.append(p[1:])       # escaped literal "!FOO"
+        elif p.startswith('!') and p not in known:
+            exclude_patterns.append(p[1:])       # genuine exclusion of "FOO"
+        else:
+            include_patterns.append(p)           # include (covers literal "!FOO" nets)
+    return include_patterns, exclude_patterns
+
+
 def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     """
     Check if a net name matches a list of filter patterns.
 
     Patterns can include * and ? wildcards (fnmatch style).
-    Patterns starting with "!" are exclusion patterns.
+    Patterns starting with "!" are exclusion patterns (but see split_net_patterns
+    for how active-low net names like "!RESET" stay selectable by literal name).
 
     Logic:
     - If there are inclusion patterns (not starting with !), net must match at least one
@@ -29,6 +68,8 @@ def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
         matches_net_filter("VCC", ["*", "!GND"])   -> True
         matches_net_filter("NET1", ["!GND", "!VCC"]) -> True (no inclusion = match all)
         matches_net_filter("GND", ["!GND", "!VCC"])  -> False
+        matches_net_filter("!RESET", ["!RESET"])     -> True (literal active-low net)
+        matches_net_filter("!RESET", ["\\!RESET"])   -> True (escaped literal)
 
     Args:
         net_name: The net name to check
@@ -40,8 +81,9 @@ def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     if not patterns:
         return True  # No filter = include all
 
-    include_patterns = [p for p in patterns if not p.startswith('!')]
-    exclude_patterns = [p[1:] for p in patterns if p.startswith('!')]
+    # Treat a "!"-pattern that verbatim names the net under test as a literal
+    # include, so active-low nets (!RESET, !MIX_BYPASS) match by name (issue #177).
+    include_patterns, exclude_patterns = split_net_patterns(patterns, {net_name})
 
     # Check exclusion first: if net matches any exclude pattern, reject it
     if exclude_patterns:
@@ -154,6 +196,10 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
     exclude patterns remove them.
     Example: "*" "!GND" "!VCC" - all nets except GND and VCC
 
+    A "!"-pattern that verbatim names an existing net is treated as a literal
+    inclusion of that (active-low) net, and "\\!FOO" is an escaped literal "!FOO",
+    so active-low nets like !RESET / !MIX_BYPASS stay routable by name (issue #177).
+
     Args:
         pcb_data: PCB data with nets and pads
         patterns: List of net name patterns (may include wildcards)
@@ -177,14 +223,27 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
         all_net_names = {name for name in all_net_names
                         if name and not name.lower().startswith('unconnected-')}
 
+    known_net_names = set(all_net_names)
     all_net_names = list(all_net_names)
     result = []
     seen = set()
     excluded = set()
 
-    for pattern in patterns:
+    for raw_pattern in patterns:
+        # Classify the pattern: exclusion ("!FOO"), escaped literal ("\!FOO"), or
+        # plain include. A "!FOO" that verbatim names a real net is a literal
+        # active-low include, not an exclusion (issue #177).
+        is_exclude = False
+        if raw_pattern.startswith('\\!'):
+            pattern = raw_pattern[1:]                      # escaped literal "!FOO"
+        elif raw_pattern.startswith('!') and raw_pattern not in known_net_names:
+            is_exclude = True
+            pattern = raw_pattern                          # handled in exclusion branch
+        else:
+            pattern = raw_pattern                          # include (covers literal "!FOO" nets)
+
         # Check for exclusion pattern (starts with !)
-        if pattern.startswith('!'):
+        if is_exclude:
             exclude_pattern = pattern[1:]  # Remove the !
             if '*' in exclude_pattern or '?' in exclude_pattern:
                 # Wildcard exclusion
@@ -292,8 +351,22 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     # KiCad auto-names a netless pin's net 'Net-(<ref>-<pin>)'. The trailing ')'
     # buries the polarity suffix (e.g. Net-(U12-USB_D+) ends in '+)'), so peel a
     # matching wrapper before applying the suffix rules (issue #91, bitaxe USB).
-    if net_name.startswith('Net-(') and net_name.endswith(')'):
+    is_auto_name = net_name.startswith('Net-(') and net_name.endswith(')')
+    if is_auto_name:
         net_name = net_name[5:-1]
+
+    # In a 'Net-(<ref>-<pin path>)' auto-name the pin path encodes the chip's
+    # internal signal path, e.g. 'U12-GPIO19/U1RTS/.../USB_D-'. The diff marker
+    # lives in the final path segment, but the per-pin prefix differs between the
+    # two halves (GPIO19 vs GPIO20), so the full path never pairs. Use the leaf
+    # so USB_D+/USB_D- pair (issue #181). Only for auto-names: user-named
+    # hierarchical nets like '/bank1/CLK_N' must keep their full path so they
+    # don't pair across banks. KiCad escapes '/' in net names as '{slash}', so
+    # split on either form.
+    if is_auto_name:
+        path = net_name.replace('{slash}', '/')
+        if '/' in path:
+            net_name = path.rsplit('/', 1)[-1]
 
     # DDR true/complement, _t/_c, case-insensitive (CK_t/CK_c, CK_T/CK_C).
     # With an explicit channel separator: DQS0_t_A / DQS0_c_A
@@ -357,10 +430,14 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
         if net_name[-2] in '0123456789_' or net_name[-2].isupper():
             return (net_name[:-1], False, 'P')
 
-    # Try +/- suffix
-    if net_name.endswith('+'):
+    # Try +/- suffix. Reject the KiCad 'Net-(<ref>-+)' / 'Net-(<ref>--)' form,
+    # where the '+'/'-' is a 2-terminal passive's pad name (buzzers, etc.) sitting
+    # right after the ref-pad '-' separator -- those are DC polarity terminals,
+    # not a coupled signal pair (issue #181). A genuine pair is 'FOO+' / 'FOO-',
+    # never 'FOO-+' / 'FOO--'.
+    if net_name.endswith('+') and not net_name.endswith('-+'):
         return (net_name[:-1], True, '+')
-    if net_name.endswith('-'):
+    if net_name.endswith('-') and not net_name.endswith('--'):
         return (net_name[:-1], False, '+')
 
     return None

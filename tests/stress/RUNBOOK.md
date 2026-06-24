@@ -35,7 +35,7 @@ notification stream entirely.
 
 **Monitoring:** `bash tests/stress/stress_status.sh` — prints DONE/RUNNING/TODO
 across all 30 boards plus free slots. (For detail: `QUEUE_STATUS.txt` is the
-manager heartbeat; `runs[_set2]/<board>/worker.log` holds the wrapper markers +
+manager heartbeat; `runs_set<N>/<board>/worker.log` holds the wrapper markers +
 stderr, the per-tool `*.log` files update live, and after the run
 `agent_narrative.md` is the readable routing decision trail derived from
 `transcript.jsonl`.)
@@ -62,17 +62,17 @@ summarization).
 
 ### Clean restart (re-run the whole corpus from scratch)
 
-Don't delete prior results — archive them. Move `results/`, `results_set2/`,
-`runs/`, `runs_set2/` to `*_archive_<timestamp>/`, then recreate the four as
-empty dirs. The originals (`boards/`, `boards_set2/`) and the stripped
-inputs (`boards_unrouted/`, `boards_unrouted_set2/`) are never touched. Also
+Don't delete prior results — archive them. Move `results_set1/`, `results_set2/`,
+`runs_set1/`, `runs_set2/` to `*_archive_<timestamp>/`, then recreate them as
+empty dirs. The originals (`boards_set1/`, `boards_set2/`) and the stripped
+inputs (`boards_unrouted_set1/`, `boards_unrouted_set2/`) are never touched. Also
 sweep stray top-level `runs_*T0*` temp files. After that, the status script
 reports 0/30 DONE and the recipe above drives the rest.
 
 ## Paths
 
 Two corpora share this harness; pick the SET's paths and stay consistent
-within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
+within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for set 2).
 
 
 - Tools repo (READ-ONLY — never write/modify anything here):
@@ -85,8 +85,9 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
 - Original (compare + ground-truth DRC): `~/Documents/kicad_stress_test/boards<SET>/<BOARD>.kicad_pcb`
 - Final results JSON: `~/Documents/kicad_stress_test/results<SET>/<BOARD>.json`
 
-  (set 1 → `boards_unrouted/`, `runs/`, `boards/`, `results/`;
-   set 2 → `boards_unrouted_set2/`, `runs_set2/`, `boards_set2/`, `results_set2/`)
+  (`<SET>` is always `_set<N>`, e.g. set 1 → `boards_unrouted_set1/`, `runs_set1/`,
+   `boards_set1/`, `results_set1/`; set 2 → `boards_unrouted_set2/`, `runs_set2/`,
+   `boards_set2/`, `results_set2/`)
 
 ## Rules
 
@@ -135,10 +136,16 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
      route_planes pour (#99/#122).
    - PLANE REPAIR (Step 5): run route_disconnected_planes with the SAME signal
      params as Step 3 (clearance/via/track-width/grid + `--power-nets`/
-     `--power-nets-widths` + `--no-bga-zone` if used) AND `--rip-blocker-nets
-     --reroute-ripped-nets`, so a plane-net pad blocked by a signal trace (e.g. a
-     connector GND pin) is connected by tracing to an adjacent same-net pad,
-     ripping the blocker and re-routing it at the right width (#112).
+     `--power-nets-widths` + `--no-bga-zone` if used) AND `--rip-blocker-nets`, so
+     a plane-net pad blocked by a signal trace (e.g. a connector GND pin) is
+     connected by tracing to an adjacent same-net pad, ripping the blocker out of
+     the way (#112). The ripped blockers are LEFT UNROUTED here -- this step no
+     longer re-routes them (its in-step restore-on-failure shorted nets; #141
+     reverted, `--reroute-ripped-nets` is a deprecated no-op).
+   - RECONNECT (Step 5c): after plane repair, run a final route.py pass (same
+     signal params + `--power-nets`/`--power-nets-widths`) to reconnect the nets
+     Step 5 ripped. route.py routes against the live obstacle map with safe
+     rip-up/restore, so it reconnects them without shorts.
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.
@@ -195,6 +202,17 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    UNDER the pad field on inner layers and escapes what channel can't (-> 0). It
    routes diff pairs single-ended and skips power/plane nets (plane them first).
    Do not start signal routing while balls are dropped.
+   DECOUPLING-CAP OPTIMIZE (issue #130): after EACH BGA/PGA fanout completes
+   (escaped == requested) and BEFORE signal routing, run
+   `python3 place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
+   --clearance <floor>` (same clearance as the fanout). A foreign-net fanout via
+   landing under a decoupling cap is a real PAD-VIA at the floor; this nudges
+   those caps clear and pulls each pad toward its nearest same-net ball (so a
+   later power/GND via shares the via). It reads each via's real size from the
+   board, only moves 2-pad caps near a BGA, never overlaps caps, and is a no-op
+   when nothing collides. It prints `resolved R/M ... K unresolved`; unresolved
+   caps need a manual nudge. Feed `<out>` into the next step; verify with
+   `check_drc.py <out> -c <floor>` (PAD-VIA drops).
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap from --design-rules; use
    --no-gnd-vias). CRITICAL: a pair whose pads are on a BGA/PGA being fanned
@@ -218,7 +236,7 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    floor and record the count — real boards have pre-existing pad-to-pad
    proximity that is not the router's fault. Report post-route DRC as total AND delta.
    GROUND-TRUTH BASELINE (do this too): run `check_drc.py
-   ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb --clearance <floor>
+   ~/Documents/kicad_stress_test/boards_set<N>/<board>.kicad_pcb --clearance <floor>
    --hole-to-hole-clearance <floor>` on the ORIGINAL human-routed board (SAME
    floor flags) and record that count as `drc.original_routed_violations`. That —
    not 0 — is the achievable floor under our DRC model (the originals carry a few
@@ -266,7 +284,7 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
     - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
 11b. COMPARE-TO-ORIGINAL (always, final step): run
     `python3 /Users/andy/Documents/KiCadRoutingTools/tests/stress/compare_to_original.py
-     --ours <final> --orig ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb
+     --ours <final> --orig ~/Documents/kicad_stress_test/boards_set<N>/<board>.kicad_pcb
      --json 2>&1 | tee compare.log`
     It contrasts OUR routing with the human-routed original (vias, total copper
     length, track-width strategy, layer balance, nets-with-copper) and prints

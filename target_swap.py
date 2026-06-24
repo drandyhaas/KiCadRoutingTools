@@ -27,8 +27,7 @@ from pcb_modification import swap_pad_nets_in_pcb_data
 from net_queries import compute_routing_aware_distance, find_containing_or_nearest_bga_zone
 from chip_boundary import (
     ChipBoundary, build_chip_list, identify_chip_for_point,
-    compute_far_side, compute_boundary_position, crossings_from_boundary_order,
-    generate_boundary_debug_labels
+    compute_far_side, compute_boundary_position, crossings_from_boundary_order
 )
 from geometry_utils import segments_intersect_tuple as segments_cross
 
@@ -953,47 +952,6 @@ def apply_single_swap(
     return True
 
 
-def _swap_net_at_positions(
-    pcb_data: PCBData,
-    positions: Set[Tuple[float, float]],
-    old_net_id: int,
-    new_net_id: int
-) -> Tuple[int, int]:
-    """
-    Swap net IDs for segments and vias at given positions.
-
-    Args:
-        pcb_data: PCB data to modify in place
-        positions: Set of position tuples to swap at
-        old_net_id: Original net ID to match
-        new_net_id: New net ID to assign
-
-    Returns:
-        (segment_count, via_count) - number of segments and vias swapped
-    """
-    seg_count = 0
-    via_count = 0
-
-    for seg in pcb_data.segments:
-        if seg.net_id != old_net_id:
-            continue
-        seg_positions = {pos_key(seg.start_x, seg.start_y),
-                        pos_key(seg.end_x, seg.end_y)}
-        if seg_positions & positions:
-            seg.net_id = new_net_id
-            seg_count += 1
-
-    for via in pcb_data.vias:
-        if via.net_id != old_net_id:
-            continue
-        via_pos = pos_key(via.x, via.y)
-        if via_pos in positions:
-            via.net_id = new_net_id
-            via_count += 1
-
-    return seg_count, via_count
-
-
 def _swap_segments_and_vias(
     pcb_data: PCBData,
     segments: List,
@@ -1002,7 +960,7 @@ def _swap_segments_and_vias(
     """
     Swap net IDs for specific segments and any vias at their positions.
 
-    Unlike _swap_net_at_positions which matches by position (and can accidentally
+    Unlike position-based matching (which can accidentally
     match segments from other nets that share a position), this function swaps
     only the specific segment objects provided.
 

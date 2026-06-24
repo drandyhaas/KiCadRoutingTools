@@ -205,8 +205,16 @@ def _points_edge_distance(px, py, x1, y1, x2, y2):
     return out
 
 
-def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
+def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds=None):
     """Rasterize a closed polygon over its grid bounding box (expanded by `margin` mm).
+
+    ``clip_bounds`` (min_x, min_y, max_x, max_y) restricts the rasterized region
+    to the obstacle map's actual extent. Without it, a large polygon -- e.g. a
+    whole-board ring keep-out -- rasterizes the entire board on EVERY build, even
+    a tiny local-window build, dominating route_disconnected_planes and the
+    via-in-pad unblock (the map only covers the window, so cells outside it are
+    never blocked anyway). Clipping is a pure optimisation: no cell inside the map
+    changes. A full-board build passes the board bounds, so nothing is clipped.
 
     Shared geometry kernel for the polygon obstacle passes (board cutouts, KiCad
     keep-out rule areas, and user-drawn keepout zones). Returns four parallel
@@ -228,6 +236,11 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
 
     cmin_x, cmax_x = poly[:, 0].min() - margin, poly[:, 0].max() + margin
     cmin_y, cmax_y = poly[:, 1].min() - margin, poly[:, 1].max() + margin
+    if clip_bounds is not None:
+        cmin_x = max(cmin_x, clip_bounds[0]); cmin_y = max(cmin_y, clip_bounds[1])
+        cmax_x = min(cmax_x, clip_bounds[2]); cmax_y = min(cmax_y, clip_bounds[3])
+        if cmin_x > cmax_x or cmin_y > cmax_y:
+            return None, None, None, None  # polygon doesn't overlap the map
     gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
     gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
     gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
@@ -396,6 +409,11 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     layer_map = build_layer_map(layer_list)
     track_clear = config.clearance + config.track_width / 2
     via_clear = config.clearance + config.via_size / 2
+    # Restrict rasterization to the map's extent: on a local-window build a
+    # whole-board ring keep-out would otherwise rasterize the entire board per
+    # call (the dominant cost of route_disconnected_planes and the via-in-pad
+    # unblock). Full-board builds set board_bounds to the whole board -> no clip.
+    clip = getattr(pcb_data.board_info, 'board_bounds', None)
 
     for ko in keepouts:
         poly = ko.get('polygon') or []
@@ -419,7 +437,7 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # Bounding box gets a clearance margin so we also catch cells just outside
         # the polygon whose track/via copper would still intrude past the boundary.
         margin = max(track_clear, via_clear) + coord.grid_step
-        gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(poly, coord, margin)
+        gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(poly, coord, margin, clip_bounds=clip)
         if gx_flat is None:
             continue
 
@@ -486,9 +504,11 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     track_edge_clearance = edge_clearance + config.track_width / 2 + extra_clearance
     via_edge_clearance = edge_clearance + config.via_size / 2 + extra_clearance
 
-    # Convert to grid coordinates
+    # Convert to grid coordinates. Use to_grid_dist_safe (ceil) for the via
+    # keep-out so grid quantization can't leave a via inside the edge clearance
+    # (#170) - mirrors the via-clearance rounding in the obstacle cache.
     track_expand = coord.to_grid_dist(track_edge_clearance)
-    via_expand = coord.to_grid_dist(via_edge_clearance)
+    via_expand = coord.to_grid_dist_safe(via_edge_clearance)
 
     # Get grid bounds
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
@@ -539,39 +559,70 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
                                      gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
                                      track_expand: int, via_expand: int):
-    """Add obstacles for simple rectangular board outline."""
-    grid_margin = max(track_expand, via_expand) + 5
+    """Add obstacles for simple rectangular board outline.
 
-    # Block left edge
-    for gx in range(gmin_x - grid_margin, gmin_x + track_expand + 1):
+    The via keep-out band (via_expand) reaches FURTHER inboard than the track
+    band (track_expand) because a via is wider than a track. Each edge sweep must
+    therefore cover max(track_expand, via_expand) cells in from the edge and block
+    track layers / vias per-cell: sweeping only track_expand (the old behaviour)
+    never visited the inner via-only band, so route.py dropped vias up to
+    (via_expand - track_expand) cells past the via keep-out, intruding into the
+    board-edge clearance (#170). The track keep-out and the parallel corner
+    handoff to the left/right sweeps are unchanged.
+    """
+    edge_expand = max(track_expand, via_expand)
+    grid_margin = edge_expand + 5
+
+    # Block left edge (full height, so it also covers the via band at both left corners)
+    for gx in range(gmin_x - grid_margin, gmin_x + edge_expand + 1):
+        block_track = gx <= gmin_x + track_expand
+        block_via = gx < gmin_x + via_expand
+        if not (block_track or block_via):
+            continue
         for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gx < gmin_x + via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
-    # Block right edge
-    for gx in range(gmax_x - track_expand, gmax_x + grid_margin + 1):
+    # Block right edge (full height)
+    for gx in range(gmax_x - edge_expand, gmax_x + grid_margin + 1):
+        block_track = gx >= gmax_x - track_expand
+        block_via = gx > gmax_x - via_expand
+        if not (block_track or block_via):
+            continue
         for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gx > gmax_x - via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
-    # Block top edge (excluding corners already done)
-    for gy in range(gmin_y - grid_margin, gmin_y + track_expand + 1):
+    # Block top edge (middle span; corners covered by the left/right sweeps above)
+    for gy in range(gmin_y - grid_margin, gmin_y + edge_expand + 1):
+        block_track = gy <= gmin_y + track_expand
+        block_via = gy < gmin_y + via_expand
+        if not (block_track or block_via):
+            continue
         for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gy < gmin_y + via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
-    # Block bottom edge (excluding corners already done)
-    for gy in range(gmax_y - track_expand, gmax_y + grid_margin + 1):
+    # Block bottom edge (middle span)
+    for gy in range(gmax_y - edge_expand, gmax_y + grid_margin + 1):
+        block_track = gy >= gmax_y - track_expand
+        block_via = gy > gmax_y - via_expand
+        if not (block_track or block_via):
+            continue
         for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gy > gmax_y - via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
 
@@ -1444,6 +1495,47 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     if lc > clearance:
         clearance = lc
     margin = config.track_width / 2 + clearance + extra_clearance
+
+    # Custom comb/finger pads (issue #188): block the REAL copper polygon(s)
+    # expanded by margin, leaving the finger channels open, instead of the
+    # size_x x size_y bounding box (which fills the notches and the empty side of
+    # an off-anchor pad, walling in the pads that route through them).
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        expanded_layers = expand_pad_layers(pad.layers, config.layers)
+        layer_idxs = [layer_map[l] for l in expanded_layers if l in layer_map]
+        on_copper = any(l.endswith('.Cu') for l in expanded_layers)
+        via_margin = config.via_size / 2 + clearance + extra_clearance
+
+        def _emit(poly, m, via_pass):
+            gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, m)
+            if gxf is None:
+                return
+            mask = inside | (edist <= m)
+            if skip_cell is not None and mask.any():
+                idx = np.flatnonzero(mask)
+                keep = np.fromiter((not skip_cell(int(gxf[i]), int(gyf[i])) for i in idx),
+                                   dtype=bool, count=idx.size)
+                mask = np.zeros_like(mask)
+                mask[idx[keep]] = True
+            if not mask.any():
+                return
+            if via_pass:
+                cells = np.column_stack([gxf[mask], gyf[mask]])
+                _batch_vias(obstacles, cells, blocked_vias)
+            else:
+                _block_cells_on_layers(obstacles, gxf, gyf, mask, layer_idxs)
+                if blocked_cells is not None:
+                    for li in layer_idxs:
+                        if li < len(blocked_cells):
+                            blocked_cells[li].update(zip(gxf[mask].tolist(), gyf[mask].tolist()))
+
+        for poly in pad_polys:
+            _emit(poly, margin, via_pass=False)
+            if on_copper:
+                _emit(poly, via_margin, via_pass=True)
+        return
+
     # Compute corner radius based on pad shape:
     # - circle/oval: use min dimension to model as stadium/capsule shape
     # - roundrect: use the roundrect_rratio from pad
@@ -1490,94 +1582,6 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                                dtype=bool, count=len(via_cells))
             via_cells = via_cells[keep]
         _batch_vias(obstacles, via_cells, blocked_vias)
-
-
-def add_routed_path_obstacles(obstacles: GridObstacleMap, path: List[Tuple[int, int, int]],
-                               config: GridRouteConfig, diagonal_margin: float = 0.0):
-    """Add a newly routed path as obstacles to the map.
-
-    Args:
-        diagonal_margin: Extra margin (in grid units) for track blocking around vias to catch
-                        diagonal segments that pass between grid points. Use 0.25 for single-ended routing.
-    """
-    coord = GridCoord(config.grid_step)
-    num_layers = len(config.layers)
-
-    # Precompute per-layer values for impedance-controlled routing
-    # Each layer may have different track widths
-    # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
-    expansion_grid_by_layer = []
-    via_block_grid_by_layer = []
-    via_track_expansion_grid_by_layer = []
-    for layer_name in config.layers:
-        layer_width = config.get_track_width(layer_name)
-        expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2
-        expansion_grid_by_layer.append(max(1, coord.to_grid_dist(expansion_mm)))
-        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance
-        via_block_grid_by_layer.append(max(1, coord.to_grid_dist_safe(via_block_mm)))
-        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance
-        via_track_expansion_grid_by_layer.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
-
-    via_via_expansion_grid = max(1.0, (config.via_size + config.clearance) * coord.inv_step)
-
-    for i in range(len(path) - 1):
-        gx1, gy1, layer1 = path[i]
-        gx2, gy2, layer2 = path[i + 1]
-
-        if layer1 != layer2:
-            # Via - add via obstacle with per-layer track blocking
-            for layer_idx in range(num_layers):
-                via_track_expansion_grid = via_track_expansion_grid_by_layer[layer_idx]
-                effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
-                track_block_range = via_track_expansion_grid + 1
-                for ex in range(-track_block_range, track_block_range + 1):
-                    for ey in range(-track_block_range, track_block_range + 1):
-                        if ex*ex + ey*ey <= effective_track_block_sq:
-                            obstacles.add_blocked_cell(gx1 + ex, gy1 + ey, layer_idx)
-            # via_via_expansion_grid is a float radius (path vias are on-grid, so no
-            # sub-grid offset); ceil the loop bound, threshold on the true radius**2.
-            vv_range = int(math.ceil(via_via_expansion_grid))
-            vv_sq = via_via_expansion_grid * via_via_expansion_grid
-            for ex in range(-vv_range, vv_range + 1):
-                for ey in range(-vv_range, vv_range + 1):
-                    if ex*ex + ey*ey <= vv_sq:
-                        obstacles.add_blocked_via(gx1 + ex, gy1 + ey)
-        else:
-            # Segment on same layer - add track obstacle using Bresenham
-            # Use this layer's track width for via blocking
-            expansion_grid = expansion_grid_by_layer[layer1]
-            via_block_grid = via_block_grid_by_layer[layer1]
-
-            dx = abs(gx2 - gx1)
-            dy = abs(gy2 - gy1)
-            sx = 1 if gx1 < gx2 else -1
-            sy = 1 if gy1 < gy2 else -1
-            err = dx - dy
-
-            # For diagonal segments, add +0.25 margin to via blocking
-            is_diagonal = dx > 0 and dy > 0
-            effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
-            via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
-
-            gx, gy = gx1, gy1
-            while True:
-                for ex in range(-expansion_grid, expansion_grid + 1):
-                    for ey in range(-expansion_grid, expansion_grid + 1):
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer1)
-                for ex in range(-via_block_range, via_block_range + 1):
-                    for ey in range(-via_block_range, via_block_range + 1):
-                        if ex*ex + ey*ey <= effective_via_block_sq:
-                            obstacles.add_blocked_via(gx + ex, gy + ey)
-
-                if gx == gx2 and gy == gy2:
-                    break
-                e2 = 2 * err
-                if e2 > -dy:
-                    err -= dy
-                    gx += sx
-                if e2 < dx:
-                    err += dx
-                    gy += sy
 
 
 def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
@@ -1725,72 +1729,6 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     return obstacles, vis_data
 
 
-def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
-                                net_id: int, config: GridRouteConfig,
-                                extra_clearance: float = 0.0,
-                                blocked_cells: List[Set[Tuple[int, int]]] = None,
-                                blocked_vias: Set[Tuple[int, int]] = None,
-                                diagonal_margin: float = 0.0):
-    """Add a net's segments, vias, and pads as obstacles, capturing vis data.
-
-    This is a combined function for adding all of a net's obstacles at once,
-    useful for incrementally building obstacles during batch routing.
-
-    Args:
-        diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
-                        segments that pass between grid points. Use 0.25 for single-ended routing.
-    """
-    coord = GridCoord(config.grid_step)
-    num_layers = len(config.layers)
-    layer_map = build_layer_map(config.layers)
-
-    if blocked_cells is None:
-        blocked_cells = [set() for _ in range(num_layers)]
-    if blocked_vias is None:
-        blocked_vias = set()
-
-    # Add segments - use actual segment width and layer-specific routing track width
-    for seg in pcb_data.segments:
-        if seg.net_id != net_id:
-            continue
-        layer_idx = layer_map.get(seg.layer)
-        if layer_idx is None:
-            continue
-        # Use layer-specific track width for routing track portion
-        layer_track_width = config.get_track_width(seg.layer)
-        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-        expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-        via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance + extra_clearance
-        via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
-        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              blocked_cells, blocked_vias)
-
-    # Add vias - use actual via size and max track width (vias span all layers)
-    max_track_width = config.get_max_track_width()
-    for via in pcb_data.vias:
-        if via.net_id != net_id:
-            continue
-        via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
-        via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
-        via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
-        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
-        # threshold is radius**2, so this blocks exactly the cells within the real
-        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
-        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
-        # required) -- a real cross-net via-via DRC violation the router never saw.
-        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
-                          diagonal_margin, blocked_cells, blocked_vias)
-
-    # Add pads
-    pads = pcb_data.pads_by_net.get(net_id, [])
-    for pad in pads:
-        _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
-                          blocked_cells, blocked_vias)
-
-
 def check_line_clearance(obstacles: GridObstacleMap,
                          x1: float, y1: float,
                          x2: float, y2: float,
@@ -1833,28 +1771,6 @@ def check_line_clearance(obstacles: GridObstacleMap,
 
         dist += step
 
-    return True
-
-
-def check_stub_layer_clearance(obstacles: GridObstacleMap,
-                                stub_segments: List[Segment],
-                                target_layer_idx: int,
-                                config: GridRouteConfig) -> bool:
-    """Check if all stub segments can be placed on target_layer without conflicts.
-
-    Args:
-        obstacles: The obstacle map to check against
-        stub_segments: List of segments that form the stub
-        target_layer_idx: Layer index to check clearance on
-        config: Routing configuration
-
-    Returns:
-        True if all segments are clear on target_layer, False otherwise
-    """
-    for seg in stub_segments:
-        if not check_line_clearance(obstacles, seg.start_x, seg.start_y,
-                                     seg.end_x, seg.end_y, target_layer_idx, config):
-            return False
     return True
 
 

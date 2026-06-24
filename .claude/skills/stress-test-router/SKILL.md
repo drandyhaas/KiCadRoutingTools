@@ -44,9 +44,15 @@ board workers in flight until every board has a results JSON, deriving all state
 from disk (safe to stop and restart):
 
 ```bash
-bash tests/stress/run_queue.sh [concurrency=4] [model=sonnet]
+bash tests/stress/run_queue.sh [concurrency=<#cores>] [model=sonnet]
 bash tests/stress/stress_status.sh        # monitor: DONE/RUNNING/TODO + free slots
 ```
+
+`run_queue.sh` auto-launches `tests/stress/queue_watchdog.sh`, which caps per-board
+attempts (default 3, `QUEUE_MAX_LAUNCH`) and stubs a FAILED results JSON for any
+board whose worker keeps dying without writing one — otherwise the queue relaunches
+it forever and never terminates. The watchdog also runs standalone next to a
+manually-driven queue.
 
 Each worker (`run_board.sh <board> <set> [model]`) routes one board per
 `RUNBOOK.md` and writes `$STRESS_DIR/results[_set2]/<board>.json` plus a
@@ -62,8 +68,11 @@ approve when prompted.
 Hard operational limits (baked into the scripts; violating these has crashed the
 machine before):
 
-- Concurrency is **4** (the manager default) — most jobs stay well under the
-  4 GB per-job cap; lower the arg if you see swapping.
+- Concurrency defaults to the **core count**. A board worker is mostly *thinking*
+  (LLM latency) and only intermittently in a heavy python route step, so ~Ncore
+  boards keep the cores busy without Ncore heavy processes at once. The real guard
+  is per-step memory, not the worker count — `run_limited.sh` kills any single step
+  that exceeds ~4 GB. Lower the arg only if you actually see swapping.
 - **Every tool command runs through `tests/stress/run_limited.sh`** (~4 GB RSS
   watchdog). An OOM kill is a finding, not noise.
 - On 4+ layer boards, BGA/PGA fanout must pass the inner copper layers to

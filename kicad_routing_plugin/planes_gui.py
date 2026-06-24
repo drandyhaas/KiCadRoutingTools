@@ -293,12 +293,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
         ripup_sizer = wx.StaticBoxSizer(ripup_box, wx.VERTICAL)
 
         self.rip_blocker_check = wx.CheckBox(self, label="Rip up blocking nets")
-        self.rip_blocker_check.SetToolTip("Remove nets that block via placement, then retry (uses Max Rip-up from Basic tab)")
+        self.rip_blocker_check.SetToolTip(
+            "Remove nets that block via placement (uses Max Rip-up from Basic tab). "
+            "Ripped nets are left unrouted - run the routing tab afterward to reconnect "
+            "them (it handles rip-up/restore safely).")
         ripup_sizer.Add(self.rip_blocker_check, 0, wx.ALL, 5)
-
-        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets")
-        self.reroute_ripped_check.SetToolTip("Automatically re-route ripped nets after plane creation")
-        ripup_sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -357,9 +356,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
         return {
             'zone_clearance': self.zone_clearance.GetValue(),
             'max_search_radius': self.max_search_radius.GetValue(),
-            'rip_blocker_nets': self.rip_blocker_check.GetValue(),
-            'reroute_ripped_nets': self.reroute_ripped_check.GetValue(),
-            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
+            'rip_blocker_nets': self.rip_blocker_check.GetValue(),            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
             'same_net_pad_clearance': same_net_clr,
@@ -423,18 +420,14 @@ class RepairPlanesOptionsPanel(wx.Panel):
 
         # Rip blocking nets to connect a pad that can't reach its plane (e.g. a
         # tiny connector GND pin) by tracing to an adjacent same-net pad. Mirrors
-        # the Create tab (CLI --rip-blocker-nets / --reroute-ripped-nets).
+        # the Create tab (CLI --rip-blocker-nets). Ripped nets are left unrouted;
+        # the routing tab reconnects them afterward.
         self.rip_blocker_check = wx.CheckBox(self, label="Rip up blocking nets")
         self.rip_blocker_check.SetToolTip(
             "When a pad can't connect to its plane, trace it to a nearby same-net pad, "
-            "ripping the signal net(s) blocking it (uses Max Rip-up from the Basic tab).")
+            "ripping the signal net(s) blocking it (uses Max Rip-up from the Basic tab). "
+            "Ripped nets are left unrouted - run the routing tab afterward to reconnect them.")
         sizer.Add(self.rip_blocker_check, 0, wx.LEFT | wx.TOP, 5)
-
-        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets")
-        self.reroute_ripped_check.SetToolTip(
-            "Automatically re-route the ripped nets after the repair (deletes their old "
-            "tracks and adds the re-routed ones).")
-        sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.TOP, 5)
 
         # Info text
         info = wx.StaticText(self, label="Leave nets/layers empty to auto-detect existing zones.")
@@ -449,9 +442,7 @@ class RepairPlanesOptionsPanel(wx.Panel):
             'max_track_width': self.max_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
             'repair_pads': self.repair_pads.GetValue(),
-            'rip_blocker_nets': self.rip_blocker_check.GetValue(),
-            'reroute_ripped_nets': self.reroute_ripped_check.GetValue(),
-        }
+            'rip_blocker_nets': self.rip_blocker_check.GetValue(),        }
 
     def _on_max_track_width_changed(self, event):
         """Validate max track width >= track width from Basic tab."""
@@ -864,6 +855,9 @@ class PlanesTab(wx.Panel):
         # The pour doesn't delete ripped tracks via pcbnew; clear any stale set
         # from a prior repair run so the apply step doesn't remove copper.
         self._ripped_net_ids = []
+        # Remember the routed floors so _apply_results_to_board can make the live
+        # board's DRC constraints consistent with them (issue #160).
+        self._plane_drc_config = dict(config)
         from route_planes import create_plane
         from add_gnd_vias import add_gnd_vias_to_existing_board
         from routing_config import GridRouteConfig, GridCoord
@@ -930,9 +924,7 @@ class PlanesTab(wx.Panel):
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
-                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
-                # Re-route a ripped wide power net at its proper width.
+                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                # Re-route a ripped wide power net at its proper width.
                 power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # Match signal routing's No-BGA-Zones intent when rerouting
@@ -966,7 +958,11 @@ class PlanesTab(wx.Panel):
                         track_width=config.get('track_width', defaults.TRACK_WIDTH),
                         clearance=config.get('clearance', defaults.CLEARANCE),
                         grid_step=config.get('grid_step', defaults.GRID_STEP),
-                        layers=all_layers
+                        layers=all_layers,
+                        # Thread the fab hole-to-hole minimum so GND-via placement
+                        # enforces real drill spacing (issue #125), not the default.
+                        hole_to_hole_clearance=config.get(
+                            'hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE)
                     )
                     coord = GridCoord(gnd_config.grid_step)
 
@@ -1020,6 +1016,11 @@ class PlanesTab(wx.Panel):
         """Run disconnected plane repair."""
         from route_disconnected_planes import route_planes as repair_planes
 
+        # Remember the routed floors so _apply_results_to_board can make the live
+        # board's DRC constraints consistent with them (issue #160), mirroring
+        # route_disconnected_planes.py's auto-fix.
+        self._plane_drc_config = dict(config)
+
         # Flatten assignments into parallel net_names and plane_layers lists
         # For each (nets_list, layers_list) assignment, create an entry for
         # each net on each layer
@@ -1056,9 +1057,7 @@ class PlanesTab(wx.Panel):
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
-                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
-                power_nets=config.get('power_nets'),
+                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # The route tab's "ALL" no-BGA-zones intent, mirrored when
                 # re-routing ripped nets on a BGA board (issue #88).

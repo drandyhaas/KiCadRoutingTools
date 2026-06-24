@@ -20,10 +20,17 @@ import math
 from itertools import permutations
 from typing import List, Optional, Tuple
 
+try:
+    from scipy.optimize import linear_sum_assignment
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from diff_pair_routing import (
-    route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross
+    route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross,
+    _DRC_CLEARANCE_MARGIN, _routing_copper_layers
 )
 from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_fallback_layers
 from stub_layer_switching import apply_bare_pad_target_via
@@ -83,10 +90,53 @@ def _oriented(terminal: Tuple[Pad, Pad], pair: DiffPairNet) -> Tuple[Pad, Pad]:
     return terminal
 
 
+def _min_cost_matching(cost: List[List[float]]) -> List[Tuple[int, int]]:
+    """Minimum-total-cost bipartite matching of a rectangular cost matrix
+    (rows x cols). Returns min(rows, cols) (row, col) index pairs, each row and
+    each column used at most once. Uses scipy's Hungarian solver when available
+    (e.g. CLI), else an exact brute force for the tiny pad counts seen here
+    (KiCad's bundled Python has no scipy), with a greedy fallback for the rare
+    large case."""
+    rows = len(cost)
+    cols = len(cost[0]) if rows else 0
+    if rows == 0 or cols == 0:
+        return []
+    if HAS_SCIPY:
+        import numpy as np
+        ri, ci = linear_sum_assignment(np.array(cost, dtype=float))
+        return list(zip(ri.tolist(), ci.tolist()))
+
+    # No scipy: brute-force the smaller side over the larger. Pad counts per net
+    # are tiny (connector redundancy is a handful of pins), so this is cheap.
+    transpose = rows > cols
+    c = [[cost[r][cc] for r in range(rows)] for cc in range(cols)] if transpose else cost
+    nr = len(c)            # nr <= nc after any transpose
+    nc = len(c[0])
+    if math.perm(nc, nr) <= 40320:  # 8! injective assignments
+        best_total, best = None, None
+        for perm in permutations(range(nc), nr):
+            total = sum(c[r][perm[r]] for r in range(nr))
+            if best_total is None or total < best_total:
+                best_total, best = total, perm
+        pairs = [(r, best[r]) for r in range(nr)]
+    else:
+        # Greedy fallback (suboptimal, but only for unrealistically many pads).
+        print(f"  Warning: {nr}x{nc} terminal matching too large for the exact "
+              f"solver without scipy - using greedy (pairing may be suboptimal)")
+        used_r, used_c, pairs = set(), set(), []
+        for _, r, cc in sorted((c[r][cc], r, cc) for r in range(nr) for cc in range(nc)):
+            if r in used_r or cc in used_c:
+                continue
+            used_r.add(r)
+            used_c.add(cc)
+            pairs.append((r, cc))
+    return [(cc, r) for (r, cc) in pairs] if transpose else pairs
+
+
 def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
                             ) -> List[Tuple[Pad, Pad]]:
-    """Group the pair's pads into (p_pad, n_pad) terminals by greedy matching,
-    preferring P/N pads on the SAME component before a globally-closer
+    """Group the pair's pads into (p_pad, n_pad) terminals by minimum-cost
+    matching, preferring P/N pads on the SAME component before a globally-closer
     cross-component pad. Each terminal is a P pad and its physically adjacent N
     pad (connector pins, IC input pair, termination resistor, ...).
 
@@ -98,29 +148,32 @@ def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
     Those bogus terminals then route a coupled leg straight across the partner
     polarity's connector pad, shorting the pair (castor_pollux /MCU/CONN_D).
     Pairing the connector's own pins keeps each leg clear of the partner pad
-    (and a too-wide own-pin terminal is later peeled to single-ended)."""
+    (and a too-wide own-pin terminal is later peeled to single-ended).
+
+    Greedy-by-distance is *locally* optimal but not globally: a closest-first
+    pick can strand the leftover pads into a far pairing. On a USB-C connector
+    whose redundant DP/DN pads interleave (J1 y-order B7,A6,A7,B6), greedy took
+    {A6,A7}(0.5mm) first and was then forced into {B6,B7}(1.5mm) - the wide
+    terminal drives a long diagonal connector that grazes the partner pad
+    (issue #165). Minimum-TOTAL-cost matching instead yields {A6,B7}+{B6,A7}
+    (0.5+0.5), each terminal tight so its connector launches straight out."""
     p_pads = pcb_data.pads_by_net.get(p_net_id, [])
     n_pads = pcb_data.pads_by_net.get(n_net_id, [])
+    if not p_pads or not n_pads:
+        return []
 
-    candidates = []
-    for pp in p_pads:
-        for nn in n_pads:
-            dist = math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
-            cross_comp = 0 if pp.component_ref == nn.component_ref else 1
-            candidates.append((cross_comp, dist, id(pp), id(nn), pp, nn))
-    # All same-component pairs first (closest within that class), then
-    # cross-component leftovers by distance.
-    candidates.sort(key=lambda c: (c[0], c[1]))
+    # Lexicographic cost: cross-component pairings carry a penalty larger than
+    # any achievable total distance, so the matcher minimizes the cross-component
+    # count first (keeping a part's own diff pins paired), then total distance.
+    dist_sum = sum(math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
+                   for pp in p_pads for nn in n_pads)
+    cross_penalty = dist_sum + 1.0
+    cost = [[math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
+             + (0.0 if pp.component_ref == nn.component_ref else cross_penalty)
+             for nn in n_pads]
+            for pp in p_pads]
 
-    terminals = []
-    used_p, used_n = set(), set()
-    for cross_comp, dist, pid, nid, pp, nn in candidates:
-        if pid in used_p or nid in used_n:
-            continue
-        used_p.add(pid)
-        used_n.add(nid)
-        terminals.append((pp, nn))
-    return terminals
+    return [(p_pads[i], n_pads[j]) for (i, j) in _min_cost_matching(cost)]
 
 
 def _terminal_center(terminal: Tuple[Pad, Pad]) -> Tuple[float, float]:
@@ -261,6 +314,7 @@ def _relocate_blocked_terminals(state, pair: DiffPairNet, terminals, obstacles, 
     tgt_idx = config.layers.index(target_layer)
     new_terminals = list(terminals)
     fans = []
+    relocated_pads = []
     for i, (pp, nn) in enumerate(terminals):
         cx, cy = centers[i]
         pad_layer = _pad_layer(pp, config)
@@ -278,18 +332,84 @@ def _relocate_blocked_terminals(state, pair: DiffPairNet, terminals, obstacles, 
         via_p, stub_p = apply_bare_pad_target_via(pcb_data, pp.net_id, pp.global_x, pp.global_y, target_layer, ax, ay, config)
         via_n, stub_n = apply_bare_pad_target_via(pcb_data, nn.net_id, nn.global_x, nn.global_y, target_layer, ax, ay, config)
         fans += [(via_p, stub_p), (via_n, stub_n)]
+        relocated_pads += [pp, nn]
         new_terminals[i] = (_fake_pad(pp, stub_p.end_x, stub_p.end_y, target_layer),
                             _fake_pad(nn, stub_n.end_x, stub_n.end_y, target_layer))
         print(f"    Relocated terminal {pp.component_ref}:{pp.pad_number}/{nn.pad_number} "
               f"{pad_layer}({frac*100:.0f}%) -> {target_layer}({tgt_frac*100:.0f}%)")
+
+    # A relocation drops a through-via on each pad. On a dense connector (USB-C,
+    # fine-pitch headers) those per-pad vias can't fit - 0.5mm-pitch pads with a
+    # 0.5mm via collide - so relocating there just trades the original blockage
+    # for via-via / via-pad violations. Validate the fan vias with the same
+    # clearance check as check_drc; if they don't fit, abort the relocation (the
+    # pair then falls through to single-ended, the right treatment for a dense
+    # connector fan-out). Issue #165.
+    if fans and not _fans_fit(pcb_data, fans, relocated_pads, config):
+        print(f"    Relocation to {target_layer} would collide (dense pads) - "
+              f"skipping (pair falls through to single-ended)")
+        _cleanup_fans(pcb_data, fans)
+        return list(terminals), []
     return new_terminals, fans
 
 
-def _attach_fans(merged, fans):
-    """Record relocation fan copper (via + stub per pad) on the merged route so
-    sync_pcb_data_segments writes it to the output."""
-    merged['new_segments'] = list(merged.get('new_segments', [])) + [s for _, s in fans]
-    merged['new_vias'] = list(merged.get('new_vias', [])) + [v for v, _ in fans]
+def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
+    """True if every relocation fan via clears (at check_drc's clearance) the
+    other fan vias, the existing vias, all foreign pads, and all foreign tracks.
+    The via legitimately sits on its own relocated pad and connects to its own-net
+    stub, so own-net pads/segments are excluded."""
+    from check_drc import (check_via_via_overlap, check_pad_via_overlap,
+                           check_via_segment_overlap)
+    clearance = config.clearance
+    margin = _DRC_CLEARANCE_MARGIN
+    fan_vias = [v for v, _ in fans]
+    fan_ids = {id(v) for v in fan_vias}
+    reloc_ids = {id(p) for p in relocated_pads}
+    routing_layers = _routing_copper_layers(pcb_data, config)
+
+    for i, v in enumerate(fan_vias):
+        for w in fan_vias[i + 1:]:
+            if check_via_via_overlap(v, w, clearance, margin)[0]:
+                return False
+        for ev in pcb_data.vias:
+            if id(ev) not in fan_ids and check_via_via_overlap(v, ev, clearance, margin)[0]:
+                return False
+        for pads in pcb_data.pads_by_net.values():
+            for pad in pads:
+                if id(pad) in reloc_ids:
+                    continue
+                if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
+                    return False
+        for seg in pcb_data.segments:
+            if seg.net_id == v.net_id:
+                continue  # own-net stub the via connects to
+            if check_via_segment_overlap(v, seg, clearance, margin)[0]:
+                return False
+    return True
+
+
+def _attach_fans(merged, fans, legs=None):
+    """Record relocation fan copper (a layer-switch via + inner-layer stub per
+    relocated pad) so it is WRITTEN to the output.
+
+    The output file is generated from the per-leg `results` list, and vias in
+    particular reach the output ONLY through a result's ``new_vias`` -
+    sync_pcb_data_segments syncs segments but not vias. So fan copper recorded
+    only on the `merged` bookkeeping dict (which feeds obstacle sync, not the
+    writer) is dropped from the output: the relocated route then lands on the
+    inner layer with NO via back to its surface pad and is left floating - the
+    whole pair disconnected though DRC-clean (issue #165, tigard /USB_D on a
+    congested F.Cu that forced relocation to In1.Cu). Put the fan copper on a
+    real leg result so the writer emits its vias, and keep `merged` consistent
+    for obstacle sync."""
+    fan_segs = [s for _, s in fans]
+    fan_vias = [v for v, _ in fans]
+    sink = legs[0] if legs else merged
+    sink['new_segments'] = list(sink.get('new_segments', [])) + fan_segs
+    sink['new_vias'] = list(sink.get('new_vias', [])) + fan_vias
+    if merged is not sink:
+        merged['new_segments'] = list(merged.get('new_segments', [])) + fan_segs
+        merged['new_vias'] = list(merged.get('new_vias', [])) + fan_vias
 
 
 def _cleanup_fans(pcb_data, fans):
@@ -483,7 +603,12 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
             legs, m, se_legs = _route_terminal_set(state, pair, pair_name, reloc)
             if legs is not None:
                 if m is not None:
-                    _attach_fans(m, fans)
+                    _attach_fans(m, fans, legs)
+                else:
+                    # Every leg deferred to single-ended - the relocation buys
+                    # nothing (the single-ended pass connects the pads directly),
+                    # so drop its fan copper instead of leaving it floating.
+                    _cleanup_fans(pcb_data, fans)
                 return legs, m, se_legs
             _cleanup_fans(pcb_data, fans)
         return None, None, []
@@ -509,7 +634,17 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
             leg_results, merged, se = _try_relocated(coupled)
             if leg_results is not None:
                 return leg_results, merged, uncoupled + se
-    return None, None, []
+
+    # No coupled chain could be routed and relocation didn't help (e.g. a dense
+    # connector fan-out whose pads are too tightly pitched to drop relocation
+    # vias - tigard /USB_D on a congested F.Cu). Rather than leave the pair
+    # unrouted, defer the WHOLE pair to single-ended: the follow-up pass routes
+    # each net as a plain track to its pads (no coupling, no graze). Signalled
+    # like the all-electrically-short case (empty legs, no merged, all terminals
+    # peeled). Issue #165.
+    print(f"  Coupled routing failed and relocation unavailable - deferring the "
+          f"whole pair to single-ended")
+    return [], None, list(terminals)
 
 
 def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
