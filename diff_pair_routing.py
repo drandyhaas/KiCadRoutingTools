@@ -1707,7 +1707,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     # prox_h_cost is now passed as a parameter (checked before endpoint exemptions are set)
 
-    pose_router = PoseRouter(
+    pose_kwargs = dict(
         via_cost=config.via_cost_units() * 2,
         h_weight=config.heuristic_weight,
         turn_cost=turn_cost,
@@ -1719,8 +1719,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         gnd_via_along_offset=gnd_via_along_grid,
         vertical_attraction_radius=attraction_radius_grid,
         vertical_attraction_bonus=attraction_bonus,
-        proximity_heuristic_cost=prox_h_cost
+        proximity_heuristic_cost=prox_h_cost,
     )
+    # Per-layer bias (issue #193). Only pass layer_costs when they're non-uniform:
+    # a default (all 1.0x) run then omits the kwarg, so it still works on an older
+    # grid_router binary that predates PoseRouter layer-cost support (build_router.py
+    # installs a prebuilt by default). 1000 == 1.0x in the int cost units.
+    _layer_costs = config.get_layer_costs()
+    if any(c != 1000 for c in _layer_costs):
+        pose_kwargs['layer_costs'] = _layer_costs
+    pose_router = PoseRouter(**pose_kwargs)
 
     # Route using pose-based A* with Dubins heuristic
     # Use 8x iterations for diff pairs due to larger pose-based search space

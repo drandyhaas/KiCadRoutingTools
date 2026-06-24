@@ -99,6 +99,7 @@ from grid_router import GridObstacleMap, GridRouter
 
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
+                layer_costs: Optional[List[float]] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -213,6 +214,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']  # Default 4-layer signal stack
     print(f"Using {len(layers)} routing layers: {layers}")
 
+    # Per-layer cost multipliers bias which layer(s) coupled diff pairs prefer
+    # (issue #193). Default is 1.0x on every layer so behavior is unchanged unless
+    # --layer-costs is given; unlike route.py there is no 2-layer F.Cu/B.Cu default.
+    if not layer_costs:
+        layer_costs = [1.0] * len(layers)
+    for i, cost in enumerate(layer_costs):
+        if cost < 1.0 or cost > 1000:
+            from routing_exceptions import ConfigurationError
+            layer_name = layers[i] if i < len(layers) else f"layer {i}"
+            raise ConfigurationError(f"Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
+    if any(c != 1.0 for c in layer_costs):
+        costs_str = ', '.join(f"{layers[i]}={layer_costs[i]}x" for i in range(min(len(layers), len(layer_costs))))
+        print(f"  Layer costs: {costs_str}")
+
     # Calculate layer-specific widths for impedance-controlled routing
     # For diff pairs, we use the diff_pair_gap as the fixed spacing and calculate width
     layer_widths = {}
@@ -280,6 +295,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if layer_widths:
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
+    config_kwargs['layer_costs'] = layer_costs  # per-layer bias for coupled diff routing (#193)
     config = GridRouteConfig(**config_kwargs)
 
     # Find differential pairs from all provided nets
@@ -945,6 +961,11 @@ Examples:
     parser.add_argument("--layers", "-l", nargs="+",
                         default=['F.Cu', 'B.Cu'],
                         help="Routing layers to use (default: F.Cu B.Cu)")
+    parser.add_argument("--layer-costs", nargs="+", type=float, default=None,
+                        help="Per-layer cost multipliers (1.0-1000), one per --layers entry, "
+                             "to bias which layer(s) coupled diff pairs prefer (e.g. '1 1 1 3' "
+                             "to discourage the 4th layer). Default: 1.0 on every layer "
+                             "(behavior unchanged). Matches route.py / route_planes.")
 
     # Track and via geometry
     parser.add_argument("--track-width", type=float, default=0.3,
@@ -1165,6 +1186,7 @@ Examples:
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
                 layers=args.layers,
+                layer_costs=args.layer_costs,
                 track_width=args.track_width,
                 impedance=args.impedance,
                 clearance=args.clearance,

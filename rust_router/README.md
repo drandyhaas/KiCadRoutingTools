@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.16.1**
+**Current Version: 0.16.2**
 
 ## Features
 
@@ -306,6 +306,7 @@ src/
 
 ## Version History
 
+- **0.16.2**: `PoseRouter` (the coupled differential-pair centerline router) now takes an optional `layer_costs` argument (per-layer cost multipliers, 1000 = 1.0x), mirroring `GridRouter`. The A* scales each step's base move cost by the current layer's multiplier and adds a via layer-transition cost (cheaper-layer vias discounted, costlier penalized), so diff pairs can be biased onto preferred layers. Empty/omitted `layer_costs` (the default) leaves every layer at 1.0x — behavior is unchanged. Wires up `route_diff.py --layer-costs` (issue #193).
 - **0.16.1**: Added the `identify_blocking_obstacles(blocked, segments, vias, pads, expansion_grid, via_expansion_grid, num_layers)` free function - a Rust port of `single_ended_routing._identify_blocking_obstacles` (the rip-up blocking analysis). Given the blocked frontier cells and foreign segment/via/pad geometry (as grid-integer numpy arrays), it returns `net_id -> count` of how many of each net's elements overlap the frontier (each element counted at most once, matching the Python break-on-first-hit). Exact integer grid math, so byte-identical to the Python it replaces. Python calls it when available and falls back to the pure-Python implementation on older binaries.
 - **0.16.0**: Added `GridObstacleMap.open_via_cells_within(cx, cy, radius)`, which returns every non-via-blocked grid cell within Chebyshev `radius` of a center, excluding the center, sorted nearest-first by squared Euclidean distance. This lets the Python via-site search (`find_via_position` in `route_planes.py`) replace its per-cell `is_via_blocked()` spiral - one batched FFI query instead of O(radius^2) calls - which matters for the wide-radius plane-tap via search (the forced last-resort plane-pad repair).
 - **0.15.1**: A free via (an existing same-net via-in-pad or through-hole pad, registered in `free_via_positions`) now overrides both the `is_via_blocked` veto and the path's via-too-close test when deciding whether to change layers. Previously the via branch was gated on `!is_via_blocked` *before* `is_free_via` was consulted, so a cell flagged as a free via could still be blocked by its own clearance ring (its center is added to `blocked_vias` by `add_net_vias_as_obstacles`). The router then refused to reuse the existing hole and dropped a redundant via a couple cells away beside a perfectly good via-in-pad (e.g. orangecrab RAM_A15/RAM_CS#/RAM_WE#). Reusing an existing same-net hole is always legal and adds no new drill, so the override is safe.

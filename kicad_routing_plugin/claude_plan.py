@@ -29,7 +29,8 @@ PLAN_RESULT_SCHEMA = (
     'P/N suffix stripped, e.g. /lvds_rx0>", ...], '
     '"params": {"diff_pair_width": <mm>, "diff_pair_gap": <mm>, '
     '"impedance": <target differential ohms, optional - when set, per-layer '
-    'trace width is derived from the stackup and overrides diff_pair_width>}} | '
+    'trace width is derived from the stackup and overrides diff_pair_width>, '
+    '"layer_costs": [<per-copper-layer cost multiplier, in board layer order>, ...]}} | '
     '{"action": "route", "nets": ["<glob>", ...], '
     '"params": {"track_width": <mm>, "clearance": <mm>, "via_size": <mm>, '
     '"via_drill": <mm>, "power_nets": ["<glob>", ...], '
@@ -195,6 +196,14 @@ def apply_step_params(step, dialog):
                 tab.diff_impedance.SetValue(float(params["impedance"]))
             except (TypeError, ValueError):
                 notes.append(f"ignored non-numeric impedance={params['impedance']!r}")
+        # layer_costs lives on the shared Basic-tab control; the Differential tab
+        # reads it via get_routing_config, so set it here too (issue #193).
+        costs = params.get("layer_costs")
+        if costs:
+            try:
+                dialog.layer_costs_ctrl.SetValue(" ".join(f"{float(c):g}" for c in costs))
+            except (TypeError, ValueError):
+                notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_planes":
         opts = dialog.planes_tab.create_options
         if "add_gnd_vias" in params:

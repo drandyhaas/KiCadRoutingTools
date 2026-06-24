@@ -27,13 +27,14 @@ pub struct PoseRouter {
     vertical_attraction_radius: i32,  // Grid units for cross-layer attraction lookup (0 = disabled)
     vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
     proximity_heuristic_cost: i32,  // Expected proximity cost per grid step (added to heuristic)
+    layer_costs: Vec<i32>,  // Per-layer cost multipliers (1000 = 1.0x); empty = all 1.0 (issue #193)
 }
 
 #[pymethods]
 impl PoseRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=4, gnd_via_perp_offset=0, gnd_via_along_offset=0, vertical_attraction_radius=0, vertical_attraction_bonus=0, proximity_heuristic_cost=0))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32, vertical_attraction_radius: i32, vertical_attraction_bonus: i32, proximity_heuristic_cost: i32) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=4, gnd_via_perp_offset=0, gnd_via_along_offset=0, vertical_attraction_radius=0, vertical_attraction_bonus=0, proximity_heuristic_cost=0, layer_costs=None))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32, vertical_attraction_radius: i32, vertical_attraction_bonus: i32, proximity_heuristic_cost: i32, layer_costs: Option<Vec<i32>>) -> Self {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
         let base_straight = (min_radius_grid.ceil() as i32 + 1).max(3);
@@ -46,7 +47,7 @@ impl PoseRouter {
         } else {
             base_straight
         };
-        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset, vertical_attraction_radius, vertical_attraction_bonus, proximity_heuristic_cost }
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset, vertical_attraction_radius, vertical_attraction_bonus, proximity_heuristic_cost, layer_costs: layer_costs.unwrap_or_default() }
     }
 
     /// Set the proximity heuristic cost for subsequent routes.
@@ -170,7 +171,7 @@ impl PoseRouter {
                 let neighbor_key = neighbor.as_key();
 
                 if !closed.contains(&neighbor_key) {
-                    let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                     let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                         + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                     let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -233,7 +234,7 @@ impl PoseRouter {
 
                         if !closed.contains(&neighbor_key) {
                             // Cost = movement + turn arc cost
-                            let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                            let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                             let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                                 + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                             let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -371,7 +372,10 @@ impl PoseRouter {
                         } else {
                             self.via_cost
                         };
-                        let new_g = g + via_cost;
+                        // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
+                        let layer_transition = self.layer_costs.get(layer as usize).copied().unwrap_or(1000)
+                            - self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                        let new_g = g + (via_cost + layer_transition).max(0);
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                         if new_g < existing_g {
@@ -481,7 +485,7 @@ impl PoseRouter {
                 let neighbor_key = neighbor.as_key();
 
                 if !closed.contains(&neighbor_key) {
-                    let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                     let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                         + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                     let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -534,7 +538,7 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !closed.contains(&neighbor_key) {
-                        let move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                         let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                             + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                         let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -672,7 +676,10 @@ impl PoseRouter {
                         } else {
                             self.via_cost
                         };
-                        let new_g = g + via_cost;
+                        // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
+                        let layer_transition = self.layer_costs.get(layer as usize).copied().unwrap_or(1000)
+                            - self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                        let new_g = g + (via_cost + layer_transition).max(0);
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
                         if new_g < existing_g {

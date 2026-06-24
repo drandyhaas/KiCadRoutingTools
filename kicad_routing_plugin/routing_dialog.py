@@ -1452,8 +1452,16 @@ class RoutingDialog(wx.Dialog):
 
         def get_routing_config():
             """Get full routing configuration from the main dialog."""
+            # Per-layer cost multipliers from the shared Basic-tab control, so the
+            # Differential tab honors them too (issue #193). Empty/invalid -> [].
+            lc_text = self.layer_costs_ctrl.GetValue().strip()
+            try:
+                layer_costs = [float(c) for c in lc_text.split()] if lc_text else []
+            except ValueError:
+                layer_costs = []
             return {
                 'layers': self._get_selected_layers(),
+                'layer_costs': layer_costs,
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),

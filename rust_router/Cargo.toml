@@ -1,6 +1,6 @@
 [package]
 name = "grid_router"
-version = "0.16.1"
+version = "0.16.2"
 edition = "2021"
 # Versioning convention: this Rust crate's major.minor is the base for the
 # whole project. The top-level /VERSION file mirrors major.minor and bumps

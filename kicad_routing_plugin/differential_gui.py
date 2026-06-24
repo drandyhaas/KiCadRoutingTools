@@ -785,6 +785,7 @@ class DifferentialTab(wx.Panel):
                 output_file="",  # Not used when return_results=True
                 net_names=net_names,
                 layers=config.get('layers', defaults.DEFAULT_LAYERS),
+                layer_costs=config.get('layer_costs') or None,  # per-layer bias (#193); None -> all 1.0
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
                 impedance=config.get('impedance'),  # when set, overrides per-layer width
                 clearance=config.get('clearance', 0.1),
