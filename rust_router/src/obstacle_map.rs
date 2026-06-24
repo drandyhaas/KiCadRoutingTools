@@ -415,6 +415,30 @@ impl GridObstacleMap {
         false
     }
 
+    /// All open (non-via-blocked) cells within Chebyshev `radius` of (cx, cy),
+    /// excluding the center, returned nearest-first (by squared Euclidean
+    /// distance). Lets the Python via-site search (`find_via_position`) replace
+    /// its per-cell `is_via_blocked()` spiral - one batched query across the FFI
+    /// boundary instead of O(radius^2) calls. (v0.16.0)
+    pub fn open_via_cells_within(&self, cx: i32, cy: i32, radius: i32) -> Vec<(i32, i32)> {
+        let mut cells: Vec<(i64, i32, i32)> = Vec::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let gx = cx + dx;
+                let gy = cy + dy;
+                if !self.is_via_blocked(gx, gy) {
+                    let d2 = (dx as i64) * (dx as i64) + (dy as i64) * (dy as i64);
+                    cells.push((d2, gx, gy));
+                }
+            }
+        }
+        cells.sort_by_key(|c| c.0);
+        cells.into_iter().map(|c| (c.1, c.2)).collect()
+    }
+
     /// Check if position is within BGA proximity radius of any BGA zone
     #[inline]
     pub fn is_in_bga_proximity(&self, gx: i32, gy: i32) -> bool {

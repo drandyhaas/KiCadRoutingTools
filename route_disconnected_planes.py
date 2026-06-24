@@ -505,6 +505,121 @@ def route_planes(
                     net_id=v['net_id']
                 ))
 
+    # Final fill-aware verification (glasgow U30 U1.27 +3V3). The per-pad check
+    # (find_unconnected_plane_pads / _smd_pad_reaches_layer) is layer-aware: it
+    # treats a pad as connected once it reaches the zone LAYER, even via a
+    # floating island, so a reuse-tap onto an island reports success while the pad
+    # never reaches the connected plane FILL. Re-check each plane net with the same
+    # zone/fill-aware union-find check_connected uses (cheap - ~0.5s/board, once at
+    # the end), and force a real via (disable_reuse) for any pad still floating, so
+    # no plane pad is left SILENTLY disconnected after reporting success.
+    if repair_pads:
+        from check_connected import check_net_connectivity
+        # The ripped signal nets' old copper is excluded from the OUTPUT but still
+        # sits in pcb_data here (stripped only at write time). Drop it before the
+        # sweep so a forced via sees the same obstacles as the written board -- else
+        # a via site that is clear in the output looks blocked and the pad is wrongly
+        # left floating.
+        if ripped_net_ids:
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if s.net_id not in ripped_net_ids]
+            pcb_data.vias = [v for v in pcb_data.vias if v.net_id not in ripped_net_ids]
+        zones_by_net: Dict[int, list] = {}
+        for z in (getattr(pcb_data, 'zones', None) or []):
+            if getattr(z, 'net_id', None) is not None:
+                zones_by_net.setdefault(z.net_id, []).append(z)
+        # Forced last-resort via sizes, largest first, as fab-manufacturable
+        # (diameter, drill) pairs: the configured via, then the JLC standard floor,
+        # then the "fine"/advanced floor (0.30/0.15 on 4+ layers, 0.45/0.20 on 2).
+        # A fine-pitch pad flanked by other-net copper often cannot take the nominal
+        # via but fits a smaller fab-legal one; we never go below the fab floor.
+        from list_nets import fab_floors
+        _ncu = len([l for l in (pcb_data.board_info.copper_layers or routing_layers)
+                    if l.endswith('.Cu')]) or 2
+        _ff = fab_floors(_ncu)
+        via_pairs = []
+        for _vd, _dr in ((via_size, via_drill),
+                         (_ff['via_diameter'], _ff['via_drill']),
+                         (_ff['fine_via_diameter'], _ff['fine_via_drill'])):
+            _vd, _dr = round(_vd, 3), round(_dr, 3)
+            if _dr < _vd <= via_size + 1e-9 and (_vd, _dr) not in via_pairs:
+                via_pairs.append((_vd, _dr))
+        for net_id, (net_name, net_zone_layers) in unique_nets.items():
+            net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+            net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+            net_pads = pcb_data.pads_by_net.get(net_id, [])
+            res = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
+                                         zones_by_net.get(net_id, []))
+            if res.get('connected'):
+                continue
+            pad_by_key = {}
+            for p in net_pads:
+                pl = next((l for l in p.layers
+                           if l.endswith('.Cu') and not l.startswith('*')), None)
+                pad_by_key[(round(p.global_x, 3), round(p.global_y, 3),
+                            p.component_ref)] = (p, pl)
+            # Relax the board-edge clearance for this forced last-resort tap: the
+            # pad being repaired is already placed at the edge, so a via INSIDE it
+            # is no closer to the edge than the pad itself (the fab accepts that),
+            # and an edge pad would otherwise be unconnectable -- which is what made
+            # the normal tap fall back to a bogus reuse in the first place.
+            tap_config = replace(config, layers=routing_layers,
+                                 hole_to_hole_clearance=hole_to_hole_clearance,
+                                 board_edge_clearance=0.0)
+            reported = False
+            for (fx, fy, _flayer, fref) in res.get('disconnected_pads', []):
+                pp = pad_by_key.get((round(fx, 3), round(fy, 3), fref))
+                if pp is None:
+                    continue
+                pad, pad_layer = pp
+                if pad_layer is None or pad.drill:   # through-hole already plane-tied by fill
+                    continue
+                name = f"{pad.component_ref}.{pad.pad_number} ({net_name})"
+                if not reported:
+                    print(f"\n[{net_name}] fill-aware re-check: pad(s) reported tapped but "
+                          f"still floating (reached an island, not the plane) -- forcing a via:")
+                    reported = True
+                print(f"    Pad {pad.component_ref}.{pad.pad_number} ({pad_layer})...",
+                      end=" ", flush=True)
+                # Try each fab-legal via (largest first): a fine-pitch pad flanked
+                # by other-net copper often cannot take the nominal via but fits a
+                # smaller fab-floor one. Search the full max_search_radius so a pad
+                # whose only open via site is farther out is still reached (the
+                # batched grid_router query keeps the wide search cheap). Skip the
+                # distant-trace fallback - we want a real via, nearest-first.
+                result = None
+                for vtry, dtry in via_pairs:
+                    result = tap_pad_with_escalation(
+                        pad, pad_layer, net_id, pcb_data,
+                        replace(tap_config, via_size=vtry, via_drill=dtry),
+                        max_search_radius=max_search_radius, via_size=vtry,
+                        via_drill=dtry, verbose=verbose, fine_for_all=True,
+                        distant_trace_radius=0.0, disable_reuse=True)
+                    if result.success and result.via is not None:
+                        break
+                if result.success and result.via is not None:
+                    all_new_vias.append(result.via)
+                    total_vias += 1
+                    pcb_data.vias.append(Via(
+                        x=result.via['x'], y=result.via['y'], size=result.via['size'],
+                        drill=result.via['drill'], layers=['F.Cu', 'B.Cu'], net_id=net_id))
+                    for s in result.segments:
+                        all_new_segments.append(s)
+                        pcb_data.segments.append(Segment(
+                            start_x=s['start'][0], start_y=s['start'][1],
+                            end_x=s['end'][0], end_y=s['end'][1],
+                            width=s['width'], layer=s['layer'], net_id=s['net_id']))
+                    if name in failed_repair_pads:
+                        failed_repair_pads.remove(name)
+                        total_pads_repaired += 1
+                    print(f"{GREEN}forced via at ({result.via['x']:.2f}, "
+                          f"{result.via['y']:.2f}){RESET}")
+                else:
+                    if name not in failed_repair_pads:
+                        failed_repair_pads.append(name)
+                        total_pads_repaired = max(0, total_pads_repaired - 1)
+                    print(f"{RED}STILL FLOATING{RESET}")
+
     # Print summary
     print(f"\n{'='*60}")
     print(f"SUMMARY")

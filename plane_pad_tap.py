@@ -303,8 +303,15 @@ def try_tap_pad(
     verbose: bool = False,
     routing_clearance_cushion: bool = False,
     distant_trace_radius: float = 0.0,
+    disable_reuse: bool = False,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
+
+    ``disable_reuse`` skips the "route a trace to existing same-net copper
+    instead of dropping a via" shortcuts (steps 1 and 1b) and goes straight to
+    placing a NEW via. The caller uses it to force a real via when a prior
+    reuse-tap reported success but the pad turned out not to actually reach the
+    plane (a stale/ripped or not-itself-plane-connected reuse target).
 
     Builds via-placement and routing obstacle maps on a local window around
     the pad (cheap even at fine grid steps), then tries:
@@ -373,7 +380,7 @@ def try_tap_pad(
         d2 = (v.x - pad.global_x) ** 2 + (v.y - pad.global_y) ** 2
         if d2 <= close_radius * close_radius and (best is None or d2 < best[0]):
             best = (d2, (v.x, v.y))
-    if best is not None and pad_layer:
+    if best is not None and pad_layer and not disable_reuse:
         segs = route_via_to_pad(best[1], pad, pad_layer, net_id,
                                 routing_obs, config, verbose=False)
         if segs:  # non-empty trace: actually connects the pad to the via
@@ -385,7 +392,7 @@ def try_tap_pad(
     # reaches the plane, so a new via would be redundant and can box a neighbouring
     # foreign pad (issue #180, castor_pollux U11). Gated on distant_trace_radius>0
     # (the rip-blocker plane repair), same as the distant-trace fallback below.
-    if pad_layer and distant_trace_radius > 0:
+    if pad_layer and distant_trace_radius > 0 and not disable_reuse:
         r = _try_trace_to_plane_connected(
             pad, pad_layer, net_id, local, routing_obs, config,
             route_via_to_pad, distant_trace_radius)
@@ -456,6 +463,7 @@ def tap_pad_with_escalation(
     try_default: bool = True,
     fine_for_all: bool = False,
     distant_trace_radius: float = 0.0,
+    disable_reuse: bool = False,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -475,7 +483,7 @@ def tap_pad_with_escalation(
             pad, pad_layer, net_id, pcb_data, config, max_search_radius,
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
-            distant_trace_radius=distant_trace_radius)
+            distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
         if result.success:
             result.params_label = 'default'
             return result
@@ -496,7 +504,7 @@ def tap_pad_with_escalation(
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
             routing_clearance_cushion=True,
-            distant_trace_radius=distant_trace_radius)
+            distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
         if result.success:
             result.params_label = 'fine'
             return result

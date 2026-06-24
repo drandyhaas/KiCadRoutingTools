@@ -249,51 +249,54 @@ def find_via_position(
     # Collect all valid via positions, sorted by distance
     valid_positions = []
 
-    # Search in expanding rings
-    for radius in range(1, max_radius_grid + 1):
-        # Check all points at this Manhattan radius
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                # Skip if not on the ring edge
-                if abs(dx) != radius and abs(dy) != radius:
-                    continue
-
-                gx, gy = pad_gx + dx, pad_gy + dy
-
-                # Check if via can be placed here
-                if obstacles.is_via_blocked(gx, gy):
-                    continue
-
-                # Skip if too close to a previously failed route position
-                if failed_route_positions and skip_radius_sq > 0:
-                    too_close = False
-                    for failed_gx, failed_gy in failed_route_positions:
-                        fdx = gx - failed_gx
-                        fdy = gy - failed_gy
-                        if fdx * fdx + fdy * fdy <= skip_radius_sq:
-                            too_close = True
-                            break
-                    if too_close:
+    # Open via cells within the search radius. The Rust obstacle map returns
+    # every non-via-blocked cell nearest-first in one batched FFI call
+    # (grid_router 0.16.0), replacing an O(radius^2) per-cell is_via_blocked()
+    # spiral - the wide-radius plane-tap search was thousands of FFI calls. Fall
+    # back to the spiral if the binary predates the batch query.
+    if hasattr(obstacles, 'open_via_cells_within'):
+        open_cells = obstacles.open_via_cells_within(pad_gx, pad_gy, max_radius_grid)
+    else:
+        open_cells = []
+        for radius in range(1, max_radius_grid + 1):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    if abs(dx) != radius and abs(dy) != radius:
                         continue
+                    gx, gy = pad_gx + dx, pad_gy + dy
+                    if not obstacles.is_via_blocked(gx, gy):
+                        open_cells.append((gx, gy))
 
-                # Skip if inside a pending pad's exclusion zone
-                if pending_pad_zones:
-                    in_zone = False
-                    for zone_idx, (min_gx, min_gy, max_gx, max_gy) in enumerate(pending_pad_zones):
-                        if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
-                            in_zone = True
-                            if verbose:
-                                print(f"\n    DEBUG: Skipping ({gx},{gy}) - inside zone {zone_idx}: ({min_gx},{min_gy})-({max_gx},{max_gy})")
-                            break
-                    if in_zone:
-                        continue
+    for gx, gy in open_cells:
+        dx, dy = gx - pad_gx, gy - pad_gy
 
-                # Valid via position - add to list with distance
-                dist_sq = dx * dx + dy * dy
-                via_pos = coord.to_float(gx, gy)
-                valid_positions.append((dist_sq, via_pos, gx, gy))
+        # Skip if too close to a previously failed route position
+        if failed_route_positions and skip_radius_sq > 0:
+            too_close = False
+            for failed_gx, failed_gy in failed_route_positions:
+                fdx = gx - failed_gx
+                fdy = gy - failed_gy
+                if fdx * fdx + fdy * fdy <= skip_radius_sq:
+                    too_close = True
+                    break
+            if too_close:
+                continue
 
-    # Sort by distance (closest first)
+        # Skip if inside a pending pad's exclusion zone
+        if pending_pad_zones:
+            in_zone = False
+            for min_gx, min_gy, max_gx, max_gy in pending_pad_zones:
+                if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
+                    in_zone = True
+                    break
+            if in_zone:
+                continue
+
+        dist_sq = dx * dx + dy * dy
+        valid_positions.append((dist_sq, coord.to_float(gx, gy), gx, gy))
+
+    # The Rust query is already nearest-first; sort anyway so the fallback path
+    # (and any future unordered source) is correct.
     valid_positions.sort(key=lambda x: x[0])
 
     # If no routing check needed, return closest valid position
