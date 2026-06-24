@@ -2984,6 +2984,14 @@ class RoutingDialog(wx.Dialog):
             if cleared:
                 print(f"Cleared {cleared} graphic(s) from the guide/keepout User layer(s)")
 
+        # Make the open project's DRC floors consistent with the routed values
+        # (issue #160), the IPC counterpart of route.py's fix_kicad_drc_settings
+        # auto-fix. Edits the .kicad_pro on disk (kipy can't write live design
+        # settings) and prompts the user to reload. Best-effort.
+        if successful > 0:
+            from gui_utils import apply_drc_settings_fix
+            apply_drc_settings_fix(config)
+
         # Sync pcb_data so subsequent routing and connectivity checks see
         # the new tracks.
         self._sync_pcb_data_from_board()

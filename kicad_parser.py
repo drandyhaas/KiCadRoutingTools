@@ -1803,6 +1803,75 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         return _build_pcb_data_from_board_impl(board)
 
 
+def _kipy_pad_polygon_points(pwh):
+    """Outer outline of a kipy PolygonWithHoles as global-board-mm vertices.
+
+    Returns a single-polygon list ([[(x, y), ...]]) to match Pad.polygons, or
+    None when there is no usable (>=3 point) outline. Holes are ignored: a
+    finger/comb pad's channels are concavities in the OUTLINE, not holes, and
+    treating any genuine hole as copper only over-blocks (conservative, never
+    under-blocks) -- same safety direction as the bbox fallback.
+    """
+    if pwh is None:
+        return None
+    outline = getattr(pwh, "outline", None)
+    if outline is None:
+        return None
+    pts = []
+    for node in getattr(outline, "nodes", None) or []:
+        try:
+            if getattr(node, "has_point", True):
+                p = node.point
+                pts.append((float(p.x_mm), float(p.y_mm)))
+        except Exception:
+            continue
+    if len(pts) < 3:
+        return None
+    return [pts]
+
+
+def _attach_custom_pad_polygons(board, custom_pads):
+    """Populate Pad.polygons with each custom pad's REAL copper outline (issue
+    #188), read from the live board via kipy get_pad_shapes_as_polygons -- the
+    IPC analogue of the text parser's _custom_pad_global_polygons and pcbnew's
+    GetEffectivePolygon. The kipy renderer returns the true comb/finger copper
+    in global board coords for any primitive shape, so the obstacle map / DRC
+    rasterize the actual copper instead of the bounding box that boxes in pads
+    sitting in the channels.
+
+    Best-effort: on any failure (old kipy without the method, IPC error) the
+    bbox model set by _build_pad_from_kipy stays in place -- no regression.
+    custom_pads is a list of (pad_obj, kipy_pad). Front-side pads resolve on
+    F.Cu; pads that return nothing there are retried on B.Cu.
+    """
+    try:
+        from kipy.board_types import BoardLayer
+    except Exception:
+        return
+    get_polys = getattr(board, "get_pad_shapes_as_polygons", None)
+    if get_polys is None:
+        return
+    pad_objs = [po for po, _ in custom_pads]
+    kpads = [kp for _, kp in custom_pads]
+    for layer in (BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu):
+        idx = [i for i, po in enumerate(pad_objs) if not po.polygons]
+        if not idx:
+            break
+        try:
+            results = get_polys([kpads[i] for i in idx], int(layer))
+        except Exception:
+            continue
+        if results is None:
+            continue
+        if not isinstance(results, list):
+            results = [results]
+        for j, i in enumerate(idx):
+            pwh = results[j] if j < len(results) else None
+            pts = _kipy_pad_polygon_points(pwh)
+            if pts:
+                pad_objs[i].polygons = pts
+
+
 def _build_pcb_data_from_board_impl(board) -> PCBData:
     """Inner impl — caller is responsible for holding ipc_lock."""
     from kicad_ipc_adapter import layer_maps, layer_name_for
@@ -1910,6 +1979,10 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
     except Exception:
         fp_iter = []
 
+    # (pad_obj, kipy_pad) for custom-shaped pads, resolved to their real copper
+    # outline in a batch after the loop (issue #188).
+    custom_pads: List[Tuple[Pad, object]] = []
+
     for fp in fp_iter:
         reference = _fp_reference(fp)
         fp_name = _fp_library_name(fp)
@@ -1938,8 +2011,15 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
             pads_by_net.setdefault(pad_obj.net_id, []).append(pad_obj)
             if pad_obj.net_id in nets:
                 nets[pad_obj.net_id].pads.append(pad_obj)
+            if pad_obj.shape == 'custom':
+                custom_pads.append((pad_obj, pad))
 
         footprints[reference] = footprint
+
+    # Replace each custom pad's bbox model with its real copper outline read
+    # from the live board (issue #188); best-effort, no-op on older kipy.
+    if custom_pads:
+        _attach_custom_pad_polygons(board, custom_pads)
 
     # --- Segments (tracks) ---
     segments: List[Segment] = []

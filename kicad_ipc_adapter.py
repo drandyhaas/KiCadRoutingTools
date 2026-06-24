@@ -937,6 +937,97 @@ def apply_planes_results(board, *, pcb_data,
     return counts
 
 
+# --- DRC settings write-back (issue #160) -----------------------------------
+#
+# The CLI route/route_diff/route_planes auto-fix the OUTPUT project's DRC
+# floors + Default net class + non-routing severities to the routed values so
+# the user's manual DRC only flags genuine problems. The old SWIG GUI did the
+# same to the LIVE board via pcbnew's board.GetDesignSettings().
+#
+# kipy exposes NO setter for design settings, net classes, or rule severities
+# (the Project API is read-only for these), so the IPC plugin cannot push the
+# change into KiCad's in-memory project. Instead we edit the sibling
+# `.kicad_pro` on disk via the shared file path -- exactly what the CLI does --
+# and the caller tells the user to RELOAD the project. KiCad holds the project
+# in memory and overwrites an externally-edited `.kicad_pro` on its next
+# save/close, so without a reload the edit is silently lost (never harmful: the
+# fixer only ever loosens, and never touches the `.kicad_pcb`).
+
+def write_drc_settings_to_project(board, *, clearance=None, hole_to_hole=None,
+                                  edge_clearance=None, track_width=None,
+                                  via_diameter=None, via_drill=None,
+                                  keep_thermal=False, diff_pair_gap=None,
+                                  diff_pair_width=None) -> Optional[str]:
+    """Loosen the open project's `.kicad_pro` DRC floors to the routed values.
+
+    Returns the `.kicad_pro` path written (the caller should prompt the user to
+    reload the project), or None if the live board's project file could not be
+    located on disk -- e.g. an unsaved board, where there is no sibling
+    `.kicad_pro` to edit yet.
+    """
+    from fix_kicad_drc_settings import fix_project_for_output
+
+    pcb_path = get_board_full_path()
+    if not pcb_path:
+        return None
+    try:
+        return fix_project_for_output(
+            pcb_path, input_pcb=None,
+            clearance=clearance, hole_to_hole=hole_to_hole,
+            edge_clearance=edge_clearance, track_width=track_width,
+            via_diameter=via_diameter, via_drill=via_drill,
+            diff_pair_gap=diff_pair_gap, diff_pair_width=diff_pair_width,
+            keep_thermal=keep_thermal, verbose=True)
+    except Exception as e:
+        print(f"(skipped DRC-settings write-back: {e})")
+        return None
+
+
+# --- Footprint moves (decoupling-cap optimization, issue #130) --------------
+
+def apply_footprint_moves(board, placements,
+                          message: str = "KiCadRoutingTools: optimize cap placement") -> int:
+    """Move footprints to new positions / orientations in one commit (#130).
+
+    `placements` is the list returned by
+    placement.fanout_clearance.repair_fanout_clearance -- dicts carrying
+    `reference`, `new_x`, `new_y` (mm) and `new_rotation` (degrees). Each
+    footprint is looked up by reference on the live board and its position +
+    orientation set; the IPC analogue of the SWIG GUI's
+    FindFootprintByReference / SetPosition / SetOrientationDegrees. Returns the
+    number of footprints actually moved.
+    """
+    from kicad_parser import _fp_reference
+    try:
+        from kipy.geometry import Angle
+    except Exception:
+        Angle = None
+
+    placements = list(placements or [])
+    if not placements:
+        return 0
+    moved = 0
+    with begin_commit(board, message) as commit:
+        fps = {}
+        for fp in board.get_footprints():
+            ref = _fp_reference(fp)
+            if ref:
+                fps.setdefault(ref, fp)
+        for p in placements:
+            fp = fps.get(p.get("reference"))
+            if fp is None:
+                continue
+            fp.position = vec_mm(p["new_x"], p["new_y"])
+            if Angle is not None and p.get("new_rotation") is not None:
+                try:
+                    fp.orientation = Angle.from_degrees(float(p["new_rotation"]))
+                except Exception:
+                    pass  # leave orientation unchanged if the API shape differs
+            commit.update(fp)
+            moved += 1
+    return moved
+
+
 def _via_from_obj(net_map: NetMap, via, net_name_for) -> object:
     """Build a kipy Via from a kicad_parser.Via dataclass instance."""
     layers = getattr(via, "layers", None) or ["F.Cu", "B.Cu"]

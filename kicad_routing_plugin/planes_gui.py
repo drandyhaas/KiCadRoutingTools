@@ -1243,6 +1243,14 @@ class PlanesTab(wx.Panel):
         # needed under IPC. If a fill is missing, the user can press B in
         # the PCB Editor to trigger a full board re-fill.
 
+        # Make the open project's DRC floors consistent with the plane routing
+        # values (issue #160), mirroring route_planes.py's auto-fix. Edits
+        # .kicad_pro on disk (kipy can't write live design settings); the user
+        # must reload the project. Best-effort.
+        if counts['zones'] or counts['vias'] or counts['tracks']:
+            from gui_utils import apply_drc_settings_fix
+            apply_drc_settings_fix(getattr(self, "_plane_drc_config", None))
+
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 

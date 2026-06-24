@@ -165,6 +165,16 @@ def get_dialog_settings(dialog):
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
         'fanout_bga_underpad': dialog.fanout_tab.bga_options.underpad_escape.GetValue(),
+        'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
+        'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
+        'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
+        'fanout_bga_cap_step': dialog.fanout_tab.bga_options.cap_step.GetValue(),
+        'fanout_bga_cap_max_displacement': dialog.fanout_tab.bga_options.cap_max_displacement.GetValue(),
+        'fanout_bga_cap_max_displacement_cap': dialog.fanout_tab.bga_options.cap_max_displacement_cap.GetValue(),
+        'fanout_bga_cap_displacement_growth': dialog.fanout_tab.bga_options.cap_displacement_growth.GetValue(),
+        'fanout_bga_cap_max_passes': dialog.fanout_tab.bga_options.cap_max_passes.GetValue(),
+        'fanout_bga_cap_prefix': dialog.fanout_tab.bga_options.cap_prefix.GetValue(),
+        'fanout_bga_cap_allow_rotation': dialog.fanout_tab.bga_options.cap_allow_rotation.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
         'fanout_qfn_underpad': dialog.fanout_tab.qfn_options.underpad_escape.GetValue(),
         'fanout_qfn_allow_via_in_pad': dialog.fanout_tab.qfn_options.allow_via_in_pad.GetValue(),
@@ -514,6 +524,26 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.no_inner_top.SetValue(settings['fanout_bga_no_inner_top'])
     if 'fanout_bga_underpad' in settings:
         dialog.fanout_tab.bga_options.underpad_escape.SetValue(settings['fanout_bga_underpad'])
+    if 'fanout_bga_optimize_caps' in settings:
+        dialog.fanout_tab.bga_options.optimize_caps.SetValue(settings['fanout_bga_optimize_caps'])
+    if 'fanout_bga_cap_capture_radius' in settings:
+        dialog.fanout_tab.bga_options.cap_capture_radius.SetValue(settings['fanout_bga_cap_capture_radius'])
+    if 'fanout_bga_cap_near_margin' in settings:
+        dialog.fanout_tab.bga_options.cap_near_margin.SetValue(settings['fanout_bga_cap_near_margin'])
+    if 'fanout_bga_cap_step' in settings:
+        dialog.fanout_tab.bga_options.cap_step.SetValue(settings['fanout_bga_cap_step'])
+    if 'fanout_bga_cap_max_displacement' in settings:
+        dialog.fanout_tab.bga_options.cap_max_displacement.SetValue(settings['fanout_bga_cap_max_displacement'])
+    if 'fanout_bga_cap_max_displacement_cap' in settings:
+        dialog.fanout_tab.bga_options.cap_max_displacement_cap.SetValue(settings['fanout_bga_cap_max_displacement_cap'])
+    if 'fanout_bga_cap_displacement_growth' in settings:
+        dialog.fanout_tab.bga_options.cap_displacement_growth.SetValue(settings['fanout_bga_cap_displacement_growth'])
+    if 'fanout_bga_cap_max_passes' in settings:
+        dialog.fanout_tab.bga_options.cap_max_passes.SetValue(settings['fanout_bga_cap_max_passes'])
+    if 'fanout_bga_cap_prefix' in settings:
+        dialog.fanout_tab.bga_options.cap_prefix.SetValue(settings['fanout_bga_cap_prefix'])
+    if 'fanout_bga_cap_allow_rotation' in settings:
+        dialog.fanout_tab.bga_options.cap_allow_rotation.SetValue(settings['fanout_bga_cap_allow_rotation'])
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
     if 'fanout_qfn_underpad' in settings:

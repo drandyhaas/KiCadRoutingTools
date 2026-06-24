@@ -752,7 +752,77 @@ class BGAOptionsPanel(wx.Panel):
             "Use a small via/track for dense pitch (e.g. via 0.35, track 0.12).")
         options_sizer.Add(self.underpad_escape, 0, wx.LEFT | wx.BOTTOM, 5)
 
+        self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
+        self.optimize_caps.SetValue(False)
+        self.optimize_caps.SetToolTip(
+            "After fanout, nudge decoupling caps near the BGA so their pads "
+            "clear every foreign-net fanout via (and any foreign track on the "
+            "cap's side), and pull each pad toward the nearest same-net ball so "
+            "a power/GND via dropped there later also lands on the cap (#130). "
+            "Caps move as little as possible, never overlap each other, and a "
+            "cap that can't clear is reported. Uses the Basic-tab clearance/via "
+            "settings. Off by default.")
+        options_sizer.Add(self.optimize_caps, 0, wx.LEFT | wx.BOTTOM, 5)
+
         main_sizer.Add(options_sizer, 0, wx.EXPAND)
+
+        # Decoupling-cap placement (advanced) -- knobs for the "Optimize
+        # decoupling cap placement" repair (place_fanout_clearance.py / #130).
+        # Only take effect when that checkbox is on; clearance/grid/via come
+        # from the Basic tab.
+        cap_box = wx.StaticBox(self, label="Cap Placement (advanced)")
+        cap_sizer = wx.StaticBoxSizer(cap_box, wx.VERTICAL)
+        cap_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=4)
+        cap_grid.AddGrowableCol(1)
+
+        def _cap_spin(label, initial, lo, hi, inc, digits, tip):
+            cap_grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            ctrl = wx.SpinCtrlDouble(self, min=lo, max=hi, initial=initial, inc=inc)
+            ctrl.SetDigits(digits)
+            ctrl.SetToolTip(tip)
+            cap_grid.Add(ctrl, 0, wx.EXPAND)
+            return ctrl
+
+        self.cap_capture_radius = _cap_spin(
+            "Capture radius (mm):", 2.0, 0.0, 20.0, 0.5, 2,
+            "How far from a BGA edge a cap is considered for nudging (--capture-radius)")
+        self.cap_near_margin = _cap_spin(
+            "Near margin (mm):", 1.0, 0.0, 10.0, 0.25, 2,
+            "Extra slack pulling a cap pad toward its nearest same-net ball (--near-margin)")
+        self.cap_step = _cap_spin(
+            "Search step (mm):", 0.2, 0.05, 2.0, 0.05, 2,
+            "Displacement search step (--step)")
+        self.cap_max_displacement = _cap_spin(
+            "Max displacement (mm):", 2.0, 0.0, 20.0, 0.5, 2,
+            "Initial cap of how far a cap may move (--max-displacement)")
+        self.cap_max_displacement_cap = _cap_spin(
+            "Max displacement cap (mm):", 3.0, 0.0, 40.0, 0.5, 2,
+            "Hard ceiling the per-pass growth can reach (--max-displacement-cap)")
+        self.cap_displacement_growth = _cap_spin(
+            "Displacement growth:", 1.5, 1.0, 4.0, 0.1, 2,
+            "Per-pass multiplier on the displacement budget (--displacement-growth)")
+
+        cap_grid.Add(wx.StaticText(self, label="Max passes:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.cap_max_passes = wx.SpinCtrl(self, min=1, max=200, initial=30)
+        self.cap_max_passes.SetToolTip("Maximum refinement passes (--max-passes)")
+        cap_grid.Add(self.cap_max_passes, 0, wx.EXPAND)
+
+        cap_grid.Add(wx.StaticText(self, label="Movable prefix(es):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.cap_prefix = wx.TextCtrl(self, value="C,R")
+        self.cap_prefix.SetToolTip("Comma-separated reference prefix(es) for movable "
+                                   "passives near a BGA (--cap-prefix; default C,R = "
+                                   "caps and resistors; RN-style arrays auto-excluded "
+                                   "by the 2-copper-pad test)")
+        cap_grid.Add(self.cap_prefix, 0, wx.EXPAND)
+
+        cap_sizer.Add(cap_grid, 0, wx.EXPAND | wx.ALL, 5)
+
+        self.cap_allow_rotation = wx.CheckBox(self, label="Allow cap rotation")
+        self.cap_allow_rotation.SetValue(True)
+        self.cap_allow_rotation.SetToolTip("Allow 90-degree cap rotation to fit (off = --no-rotate)")
+        cap_sizer.Add(self.cap_allow_rotation, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        main_sizer.Add(cap_sizer, 0, wx.EXPAND | wx.TOP, 5)
 
         self.SetSizer(main_sizer)
 
@@ -776,6 +846,17 @@ class BGAOptionsPanel(wx.Panel):
             'check_for_previous': self.check_previous.GetValue(),
             'no_inner_top_layer': self.no_inner_top.GetValue(),
             'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'channel',
+            'optimize_caps': self.optimize_caps.GetValue(),
+            # Decoupling-cap placement (advanced) knobs (#130)
+            'cap_capture_radius': self.cap_capture_radius.GetValue(),
+            'cap_near_margin': self.cap_near_margin.GetValue(),
+            'cap_step': self.cap_step.GetValue(),
+            'cap_max_displacement': self.cap_max_displacement.GetValue(),
+            'cap_max_displacement_cap': self.cap_max_displacement_cap.GetValue(),
+            'cap_displacement_growth': self.cap_displacement_growth.GetValue(),
+            'cap_max_passes': self.cap_max_passes.GetValue(),
+            'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R',
+            'cap_allow_rotation': self.cap_allow_rotation.GetValue(),
         }
 
 
@@ -1075,10 +1156,14 @@ class FanoutTab(wx.Panel):
             self._apply_fanout_results(
                 tracks, vias_to_add,
                 failed_nets=failed_nets,
+                # Carry the full BGA config (incl. the #130 cap knobs and
+                # optimize_caps) plus the shared-tab floors so the cap repair
+                # can run after the fanout commit.
                 fanout_config={
+                    **config,
                     'track_width': track_width, 'clearance': clearance,
                     'via_size': via_size, 'via_drill': via_drill,
-                    'exit_margin': config.get('exit_margin'),
+                    'grid_step': shared.get('grid_step', defaults.GRID_STEP),
                 })
 
         except Exception as e:
@@ -1208,10 +1293,19 @@ class FanoutTab(wx.Panel):
             f"Complete: {tracks_added} tracks, {vias_added} vias added")
         self.progress_bar.SetValue(100)
 
+        # Optionally tidy decoupling caps around the fresh fanout vias (#130).
+        # The fanout commit is already pushed, so the rebuilt PCBData sees the
+        # new vias; the cap moves land as their own undo step.
+        cap_summary = None
+        if (fanout_config or {}).get('optimize_caps') and fanout_kind == 'bga':
+            cap_summary = self._optimize_decoupling_caps(board, dict(fanout_config))
+
         msg = f"Fanout complete!\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} tracks\n"
         msg += f"  {vias_added} vias\n"
+        if cap_summary:
+            msg += "\n" + cap_summary + "\n"
         if failed_nets:
             if fanout_kind == 'qfn':
                 msg += f"\nNets whose stubs are too close to neighbours ({len(failed_nets)}):\n"
@@ -1243,3 +1337,83 @@ class FanoutTab(wx.Panel):
         wx.MessageBox(msg, "Fanout Complete", wx.OK | wx.ICON_INFORMATION)
         if self.on_fanout_complete:
             self.on_fanout_complete()
+
+    def _optimize_decoupling_caps(self, board, cfg):
+        """Run the fanout-clearance cap repair on the live board via IPC (#130).
+
+        Rebuilds PCBData from the just-fanned board (so the new vias are
+        present), runs the shared engine, and applies the resulting footprint
+        moves through the IPC adapter (the kipy analogue of the SWIG GUI's
+        FindFootprintByReference / SetPosition / SetOrientationDegrees).
+        Courtyards/locked refs come from the saved file (position-independent,
+        unchanged by fanout). Returns a one-line summary, or an error string.
+
+        `cfg` must carry the Basic-tab floors (clearance / grid_step / via_size)
+        and the advanced cap_* knobs.
+        """
+        try:
+            from kicad_parser import build_pcb_data_from_board
+            from placement.fanout_clearance import repair_fanout_clearance
+            from kicad_ipc_adapter import apply_footprint_moves
+
+            self.status_text.SetLabel("Optimizing decoupling cap placement...")
+            wx.Yield()
+
+            pcb_data = build_pcb_data_from_board(board)
+            result = repair_fanout_clearance(
+                pcb_data,
+                pcb_file=self.board_filename,
+                clearance=cfg.get('clearance', defaults.BGA_CLEARANCE),
+                grid_step=cfg.get('grid_step', defaults.GRID_STEP),
+                default_via_size=cfg.get('via_size', defaults.BGA_VIA_SIZE),
+                # Advanced cap-placement knobs from the BGA fanout tab (#130)
+                capture_radius=cfg.get('cap_capture_radius', 2.0),
+                near_margin=cfg.get('cap_near_margin', 1.0),
+                step=cfg.get('cap_step', 0.2),
+                max_displacement=cfg.get('cap_max_displacement', 2.0),
+                max_displacement_cap=cfg.get('cap_max_displacement_cap', 3.0),
+                displacement_growth=cfg.get('cap_displacement_growth', 1.5),
+                max_passes=int(cfg.get('cap_max_passes', 30)),
+                cap_prefix=cfg.get('cap_prefix', 'C,R'),
+                allow_rotations=cfg.get('cap_allow_rotation', True),
+            )
+
+            moved = apply_footprint_moves(board, result.get('placements', []))
+            unresolved = result.get('unresolved', [])
+            summary = f"Decoupling caps optimized: {moved} moved"
+            if unresolved:
+                summary += (f"; {len(unresolved)} could not clear a foreign via "
+                            f"(manual: {', '.join(sorted(unresolved))})")
+            return summary
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return f"Cap optimization skipped (error: {e})"
+
+    def run_cap_optimization(self, log=None):
+        """Standalone decoupling-cap optimization on the live board (#130, IPC).
+
+        Entry point for the Claude-plan executor's "optimize_caps" step (and any
+        caller that wants the repair without running a fanout). Reads the
+        clearance/grid/via from the Basic tab and the advanced cap knobs from the
+        BGA options panel, runs the shared engine, and applies the moves through
+        the IPC adapter. Synchronous, no modal dialog. Returns a one-line summary
+        or None.
+        """
+        from kicad_ipc_adapter import get_board
+        board = get_board()
+        if board is None:
+            return None
+        shared = self.get_shared_params() if self.get_shared_params else {}
+        cfg = dict(self.bga_options.get_config())  # advanced cap_* knobs
+        cfg.update({
+            'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
+            'grid_step': shared.get('grid_step', defaults.GRID_STEP),
+            'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
+        })
+        summary = self._optimize_decoupling_caps(board, cfg)
+        if summary:
+            self.status_text.SetLabel(summary)
+            if log:
+                log(summary)
+        return summary

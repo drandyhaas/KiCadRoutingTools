@@ -928,6 +928,15 @@ class DifferentialTab(wx.Panel):
             )
             return 0, 0
 
+        # Make the open project's DRC floors consistent with the routed diff-pair
+        # values, including the Default net class's diff-pair gap/width (issue
+        # #160), mirroring route_diff.py's auto-fix. Edits .kicad_pro on disk;
+        # the user must reload the project. Best-effort.
+        if counts["tracks"] > 0:
+            from gui_utils import apply_drc_settings_fix
+            apply_drc_settings_fix(getattr(self, "_diff_drc_config", None),
+                                   diff_pair=True)
+
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
         return counts["tracks"], counts["vias"]
