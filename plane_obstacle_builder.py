@@ -16,7 +16,9 @@ from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
-                          block_via_cells_near_drills)
+                          block_via_cells_near_drills,
+                          _rasterize_polygon, _points_inside_polygon,
+                          _points_edge_distance, _block_cells_on_layers)
 
 import sys
 import os
@@ -518,6 +520,39 @@ def _is_rectangular_outline(board_outline: List[Tuple[float, float]],
     return True
 
 
+def _edge_band_grid(gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int, grid_margin: int):
+    """Flattened (gx, gy) int32 arrays over the bounding box expanded by grid_margin."""
+    gx_range = np.arange(gmin_x - grid_margin, gmax_x + grid_margin + 1, dtype=np.int32)
+    gy_range = np.arange(gmin_y - grid_margin, gmax_y + grid_margin + 1, dtype=np.int32)
+    gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
+    return gx_grid.ravel(), gy_grid.ravel()
+
+
+def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: int,
+                          gmax_x: int, gmax_y: int, grid_margin: int, edge_clearance: float):
+    """Cells to block for a polygon board outline: those whose centre is outside the
+    board, or inside but within `edge_clearance` mm of an edge. Vectorized even-odd
+    ray cast + edge-distance (the same kernels the signal router uses). Returns
+    (gx_flat, gy_flat, mask)."""
+    gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
+    px = gx_flat.astype(np.float64) * coord.grid_step
+    py = gy_flat.astype(np.float64) * coord.grid_step
+
+    poly = np.array(board_outline, dtype=np.float64)
+    x1 = poly[:, 0]
+    y1 = poly[:, 1]
+    x2 = np.roll(poly[:, 0], -1)
+    y2 = np.roll(poly[:, 1], -1)
+
+    inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
+    mask = ~inside
+    in_idx = np.nonzero(inside)[0]
+    if in_idx.size:
+        edge_dist = _points_edge_distance(px[in_idx], py[in_idx], x1, y1, x2, y2)
+        mask[in_idx[edge_dist < edge_clearance]] = True
+    return gx_flat, gy_flat, mask
+
+
 def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig):
     """Block via placement near board edges.
@@ -545,58 +580,33 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
 
     if use_polygon:
-        # Polygon-based via blocking for non-rectangular boards
-        # Optimization: only check cells in a band near the boundary, not the entire grid
-        band_width = via_expand + 10  # Check cells within this distance of bounding box edges
-
-        # Block all cells outside bounding box (fast)
-        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
-            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-                if gx < gmin_x or gx > gmax_x or gy < gmin_y or gy > gmax_y:
-                    obstacles.add_blocked_via(gx, gy)
-
-        # For cells near the boundary, do detailed polygon check
-        for gx in range(gmin_x, gmax_x + 1):
-            for gy in range(gmin_y, gmax_y + 1):
-                # Skip cells far from any edge (in interior)
-                dist_to_edge = min(gx - gmin_x, gmax_x - gx, gy - gmin_y, gmax_y - gy)
-                if dist_to_edge > band_width:
-                    continue
-
-                x, y = coord.to_float(gx, gy)
-                inside = point_in_polygon(x, y, board_outline)
-                if not inside:
-                    obstacles.add_blocked_via(gx, gy)
-                else:
-                    edge_dist = point_to_polygon_edge_distance(x, y, board_outline)
-                    if edge_dist < via_edge_clearance:
-                        obstacles.add_blocked_via(gx, gy)
+        # Polygon board: rasterize the outline bbox + margin in one shot. Every
+        # cell outside the board (ray-cast) is blocked, plus inside cells within the
+        # via edge clearance. Same vectorized kernels as the signal router's
+        # obstacle_map._add_polygon_edge_obstacles - the per-cell Python scan and
+        # its band optimization are no longer needed (issue #81).
+        gx_flat, gy_flat, via_mask = _board_edge_cell_mask(
+            coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y, grid_margin, via_edge_clearance)
+        if via_mask.any():
+            obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
     else:
-        # Rectangular board - use simple bounding box logic
-        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
-            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-                # Outside board + margin
-                if gx < gmin_x + via_expand or gx > gmax_x - via_expand or \
-                   gy < gmin_y + via_expand or gy > gmax_y - via_expand:
-                    obstacles.add_blocked_via(gx, gy)
+        # Rectangular board - simple bounding box band, vectorized.
+        gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
+        mask = ((gx_flat < gmin_x + via_expand) | (gx_flat > gmax_x - via_expand) |
+                (gy_flat < gmin_y + via_expand) | (gy_flat > gmax_y - via_expand))
+        if mask.any():
+            obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[mask], gy_flat[mask]]))
 
     # Block vias inside board cutouts
     for cutout in pcb_data.board_info.board_cutouts:
         if len(cutout) < 3:
             continue
-        cut_xs = [p[0] for p in cutout]
-        cut_ys = [p[1] for p in cutout]
-        cg_min_x, cg_min_y = coord.to_grid(min(cut_xs) - via_edge_clearance, min(cut_ys) - via_edge_clearance)
-        cg_max_x, cg_max_y = coord.to_grid(max(cut_xs) + via_edge_clearance, max(cut_ys) + via_edge_clearance)
-        for gx in range(cg_min_x, cg_max_x + 1):
-            for gy in range(cg_min_y, cg_max_y + 1):
-                x, y = coord.to_float(gx, gy)
-                if point_in_polygon(x, y, cutout):
-                    obstacles.add_blocked_via(gx, gy)
-                else:
-                    edge_dist = point_to_polygon_edge_distance(x, y, cutout)
-                    if edge_dist < via_edge_clearance:
-                        obstacles.add_blocked_via(gx, gy)
+        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, via_edge_clearance)
+        if cgx is None:
+            continue
+        cmask = c_inside | (c_edge < via_edge_clearance)
+        if cmask.any():
+            obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
 
 
 def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -626,58 +636,28 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
 
     if use_polygon:
-        # Polygon-based track blocking for non-rectangular boards
-        # Optimization: only check cells in a band near the boundary, not the entire grid
-        band_width = track_expand + 10
-
-        # Block all cells outside bounding box (fast)
-        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
-            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-                if gx < gmin_x or gx > gmax_x or gy < gmin_y or gy > gmax_y:
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
-
-        # For cells near the boundary, do detailed polygon check
-        for gx in range(gmin_x, gmax_x + 1):
-            for gy in range(gmin_y, gmax_y + 1):
-                # Skip cells far from any edge (in interior)
-                dist_to_edge = min(gx - gmin_x, gmax_x - gx, gy - gmin_y, gmax_y - gy)
-                if dist_to_edge > band_width:
-                    continue
-
-                x, y = coord.to_float(gx, gy)
-                inside = point_in_polygon(x, y, board_outline)
-                if not inside:
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
-                else:
-                    edge_dist = point_to_polygon_edge_distance(x, y, board_outline)
-                    if edge_dist < track_edge_clearance:
-                        obstacles.add_blocked_cell(gx, gy, layer_idx)
+        # Polygon board: rasterize the outline bbox + margin once and block (on this
+        # one layer) every cell outside the board plus inside cells within the track
+        # edge clearance. Mirrors obstacle_map._add_polygon_edge_obstacles (issue #81).
+        gx_flat, gy_flat, cell_mask = _board_edge_cell_mask(
+            coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y, grid_margin, track_edge_clearance)
+        _block_cells_on_layers(obstacles, gx_flat, gy_flat, cell_mask, [layer_idx])
     else:
-        # Rectangular board - use simple bounding box logic
-        for gx in range(gmin_x - grid_margin, gmax_x + grid_margin + 1):
-            for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-                # Outside board + margin
-                if gx < gmin_x + track_expand or gx > gmax_x - track_expand or \
-                   gy < gmin_y + track_expand or gy > gmax_y - track_expand:
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+        # Rectangular board - simple bounding box band, vectorized.
+        gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
+        mask = ((gx_flat < gmin_x + track_expand) | (gx_flat > gmax_x - track_expand) |
+                (gy_flat < gmin_y + track_expand) | (gy_flat > gmax_y - track_expand))
+        _block_cells_on_layers(obstacles, gx_flat, gy_flat, mask, [layer_idx])
 
     # Block tracks inside board cutouts
     for cutout in pcb_data.board_info.board_cutouts:
         if len(cutout) < 3:
             continue
-        cut_xs = [p[0] for p in cutout]
-        cut_ys = [p[1] for p in cutout]
-        cg_min_x, cg_min_y = coord.to_grid(min(cut_xs) - track_edge_clearance, min(cut_ys) - track_edge_clearance)
-        cg_max_x, cg_max_y = coord.to_grid(max(cut_xs) + track_edge_clearance, max(cut_ys) + track_edge_clearance)
-        for gx in range(cg_min_x, cg_max_x + 1):
-            for gy in range(cg_min_y, cg_max_y + 1):
-                x, y = coord.to_float(gx, gy)
-                if point_in_polygon(x, y, cutout):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
-                else:
-                    edge_dist = point_to_polygon_edge_distance(x, y, cutout)
-                    if edge_dist < track_edge_clearance:
-                        obstacles.add_blocked_cell(gx, gy, layer_idx)
+        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, track_edge_clearance)
+        if cgx is None:
+            continue
+        cmask = c_inside | (c_edge < track_edge_clearance)
+        _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])
 
 
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,

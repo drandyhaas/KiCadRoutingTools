@@ -468,6 +468,40 @@ class ViaPlacementObstacleData:
     blocked_cells_by_layer: Dict[str, np.ndarray]
 
 
+def _bresenham_line_points(gx1: int, gy1: int, gx2: int, gy2: int) -> "np.ndarray":
+    """Grid cells along the Bresenham line (both endpoints inclusive) as an (L, 2)
+    int32 array. Reproduces precompute_via_placement_obstacles' original integer
+    midpoint walk (err = d // 2) cell-for-cell so the broadcast circle stamps land
+    on exactly the same line as the old scalar loops."""
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+
+    pts = []
+    x, y = gx1, gy1
+    if dx > dy:
+        err = dx // 2
+        while x != gx2:
+            pts.append((x, y))
+            err -= dy
+            if err < 0:
+                y += sy
+                err += dx
+            x += sx
+    else:
+        err = dy // 2
+        while y != gy2:
+            pts.append((x, y))
+            err -= dx
+            if err < 0:
+                x += sx
+                err += dy
+            y += sy
+    pts.append((x, y))  # final point
+    return np.array(pts, dtype=np.int32)
+
+
 def precompute_via_placement_obstacles(
     pcb_data: PCBData,
     net_id: int,
@@ -495,15 +529,14 @@ def precompute_via_placement_obstacles(
     import math
     coord = GridCoord(config.grid_step)
 
-    # Collect blocked via positions from this net's segments and vias
-    # Use lists (not sets) to preserve duplicate counts - the obstacle map uses
-    # reference counting, so we need to remove exactly as many times as we added
-    blocked_vias_list: List[Tuple[int, int]] = []
-
-    # Collect blocked routing cells per layer
-    blocked_cells_by_layer: Dict[str, List[Tuple[int, int]]] = {
-        layer: [] for layer in all_copper_layers
-    }
+    # Collect blocked positions as numpy chunks (one per segment/via stamp), then
+    # concatenate. Duplicate counts are preserved - the obstacle map uses
+    # reference counting, so removal must match exactly what was added. Each stamp
+    # is the Bresenham line broadcast against a circular offset mask (circle_offsets
+    # reproduces the legacy ex/ey<=r^2 loops cell-for-cell, in the same order), so
+    # the cell multiset is identical to the old scalar double loops (issue #35 pattern).
+    via_chunks: List["np.ndarray"] = []
+    cell_chunks: Dict[str, List["np.ndarray"]] = {layer: [] for layer in all_copper_layers}
 
     # Process this net's segments - they block via placement
     for seg in pcb_data.segments:
@@ -520,61 +553,18 @@ def precompute_via_placement_obstacles(
         route_expansion_sq = (route_expansion_mm / config.grid_step) ** 2
         route_expansion_grid = max(1, int(math.ceil(math.sqrt(route_expansion_sq))))
 
-        # Walk along segment using Bresenham
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        dx = abs(gx2 - gx1)
-        dy = abs(gy2 - gy1)
-        sx = 1 if gx1 < gx2 else -1
-        sy = 1 if gy1 < gy2 else -1
+        line = _bresenham_line_points(gx1, gy1, gx2, gy2)  # (L, 2) int32
 
-        x, y = gx1, gy1
-        if dx > dy:
-            err = dx // 2
-            while x != gx2:
-                # Block via positions
-                for ex in range(-seg_expansion_int, seg_expansion_int + 1):
-                    for ey in range(-seg_expansion_int, seg_expansion_int + 1):
-                        if ex*ex + ey*ey <= seg_expansion_sq:
-                            blocked_vias_list.append((x + ex, y + ey))
-                # Block routing cells on this segment's layer (circular, matching build_routing_obstacle_map)
-                if seg.layer in blocked_cells_by_layer:
-                    for ex in range(-route_expansion_grid, route_expansion_grid + 1):
-                        for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                            if ex*ex + ey*ey <= route_expansion_sq:
-                                blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
-                err -= dy
-                if err < 0:
-                    y += sy
-                    err += dx
-                x += sx
-        else:
-            err = dy // 2
-            while y != gy2:
-                for ex in range(-seg_expansion_int, seg_expansion_int + 1):
-                    for ey in range(-seg_expansion_int, seg_expansion_int + 1):
-                        if ex*ex + ey*ey <= seg_expansion_sq:
-                            blocked_vias_list.append((x + ex, y + ey))
-                if seg.layer in blocked_cells_by_layer:
-                    for ex in range(-route_expansion_grid, route_expansion_grid + 1):
-                        for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                            if ex*ex + ey*ey <= route_expansion_sq:
-                                blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
-                err -= dx
-                if err < 0:
-                    x += sx
-                    err += dy
-                y += sy
-        # Final point
-        for ex in range(-seg_expansion_int, seg_expansion_int + 1):
-            for ey in range(-seg_expansion_int, seg_expansion_int + 1):
-                if ex*ex + ey*ey <= seg_expansion_sq:
-                    blocked_vias_list.append((x + ex, y + ey))
-        if seg.layer in blocked_cells_by_layer:
-            for ex in range(-route_expansion_grid, route_expansion_grid + 1):
-                for ey in range(-route_expansion_grid, route_expansion_grid + 1):
-                    if ex*ex + ey*ey <= route_expansion_sq:
-                        blocked_cells_by_layer[seg.layer].append((x + ex, y + ey))
+        # Via positions: stamp the via keep-out disc at every line cell.
+        via_offs = circle_offsets(seg_expansion_int, seg_expansion_sq)
+        via_chunks.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
+
+        # Routing cells on this segment's layer (circular, matching build_routing_obstacle_map)
+        if seg.layer in cell_chunks:
+            route_offs = circle_offsets(route_expansion_grid, route_expansion_sq)
+            cell_chunks[seg.layer].append((line[:, None, :] + route_offs[None, :, :]).reshape(-1, 2))
 
     # Process this net's vias - they block via placement and routing on all layers
     via_via_expansion_mm = config.via_size + config.clearance
@@ -584,32 +574,31 @@ def precompute_via_placement_obstacles(
     via_route_expansion_sq = ((config.via_size / 2 + config.track_width / 2 + config.clearance) / config.grid_step) ** 2
     via_route_expansion = max(1, int(math.ceil(math.sqrt(via_route_expansion_sq))))
 
+    via_via_offs = circle_offsets(via_via_radius_int, via_via_radius_sq)
+    via_route_offs = circle_offsets(via_route_expansion, via_route_expansion_sq)
+
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
+        center = np.array([[gx, gy]], dtype=np.int32)  # (1, 2)
         # Block via positions (via-via clearance)
-        for ex in range(-via_via_radius_int, via_via_radius_int + 1):
-            for ey in range(-via_via_radius_int, via_via_radius_int + 1):
-                if ex*ex + ey*ey <= via_via_radius_sq:
-                    blocked_vias_list.append((gx + ex, gy + ey))
+        via_chunks.append(center + via_via_offs)
         # Block routing cells on all layers (via spans all layers)
+        route_block = center + via_route_offs
         for layer in all_copper_layers:
-            for ex in range(-via_route_expansion, via_route_expansion + 1):
-                for ey in range(-via_route_expansion, via_route_expansion + 1):
-                    if ex*ex + ey*ey <= via_route_expansion_sq:
-                        blocked_cells_by_layer[layer].append((gx + ex, gy + ey))
+            cell_chunks[layer].append(route_block)
 
-    # Convert to numpy arrays (keep duplicates for reference counting)
-    if blocked_vias_list:
-        blocked_vias_arr = np.array(blocked_vias_list, dtype=np.int32)
+    # Concatenate chunks into the final arrays (keep duplicates for reference counting)
+    if via_chunks:
+        blocked_vias_arr = np.concatenate(via_chunks).astype(np.int32, copy=False)
     else:
         blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
 
     blocked_cells_arrays = {}
-    for layer, cells in blocked_cells_by_layer.items():
-        if cells:
-            blocked_cells_arrays[layer] = np.array(cells, dtype=np.int32)
+    for layer, chunks in cell_chunks.items():
+        if chunks:
+            blocked_cells_arrays[layer] = np.concatenate(chunks).astype(np.int32, copy=False)
         else:
             blocked_cells_arrays[layer] = np.empty((0, 2), dtype=np.int32)
 

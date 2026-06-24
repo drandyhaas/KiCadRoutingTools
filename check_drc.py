@@ -6,6 +6,7 @@ import sys
 import argparse
 import math
 import fnmatch
+import numpy as np
 from collections import defaultdict
 from typing import List, Tuple, Set, Optional, Dict, Any
 from kicad_parser import parse_kicad_pcb, Segment, Via, Pad
@@ -1155,18 +1156,33 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if hole_to_hole_clearance > 0:
         if not quiet:
             print("Checking via drill hole-to-hole clearances...")
+        # Via drill hole-to-hole: vectorized over all via pairs. For each via i we
+        # compute the center distance to every via j>i at once; the violation test
+        # (overlap = drill_i/2 + drill_j/2 + clearance - dist > tolerance) and the
+        # reported overlap mirror check_via_drill_overlap exactly. The default
+        # clearance_margin there is 0.05, so tolerance = clearance * 0.05.
         all_vias = list(pcb_data.vias)
-        for i in range(len(all_vias)):
-            via1 = all_vias[i]
-            via1_matches = matching_via_nets is None or via1.net_id in matching_via_nets
-            for j in range(i + 1, len(all_vias)):
-                via2 = all_vias[j]
-                # Skip if neither net matches filter
-                via2_matches = matching_via_nets is None or via2.net_id in matching_via_nets
-                if not via1_matches and not via2_matches:
-                    continue
-                has_violation, overlap = check_via_drill_overlap(via1, via2, hole_to_hole_clearance)
-                if has_violation:
+        nv = len(all_vias)
+        if nv >= 2:
+            vx = np.array([v.x for v in all_vias], dtype=np.float64)
+            vy = np.array([v.y for v in all_vias], dtype=np.float64)
+            vdrill = np.array([v.drill for v in all_vias], dtype=np.float64)
+            if matching_via_nets is None:
+                vmatch = None
+            else:
+                vmatch = np.array([v.net_id in matching_via_nets for v in all_vias], dtype=bool)
+            tolerance = hole_to_hole_clearance * 0.05
+            for i in range(nv - 1):
+                required = vdrill[i] / 2 + vdrill[i + 1:] / 2 + hole_to_hole_clearance
+                actual = np.sqrt((vx[i] - vx[i + 1:]) ** 2 + (vy[i] - vy[i + 1:]) ** 2)
+                overlap = required - actual
+                viol = overlap > tolerance
+                if vmatch is not None:
+                    # Skip pairs where neither net matches the filter.
+                    viol &= vmatch[i] | vmatch[i + 1:]
+                for k in np.nonzero(viol)[0].tolist():
+                    via1 = all_vias[i]
+                    via2 = all_vias[i + 1 + k]
                     net1_name = pcb_data.nets.get(via1.net_id, None)
                     net2_name = pcb_data.nets.get(via2.net_id, None)
                     net1_str = net1_name.name if net1_name else f"net_{via1.net_id}"
@@ -1175,7 +1191,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'type': 'via-drill-hole',
                         'net1': net1_str,
                         'net2': net2_str,
-                        'overlap_mm': overlap,
+                        'overlap_mm': float(overlap[k]),
                         'loc1': (via1.x, via1.y),
                         'loc2': (via2.x, via2.y),
                     })
@@ -1184,32 +1200,54 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # NOTE: Hole-to-hole clearance applies regardless of net (manufacturing constraint)
         if not quiet:
             print("Checking via drill to pad drill clearances...")
-        for via in all_vias:
-            via_matches = matching_via_nets is None or via.net_id in matching_via_nets
-            for pad_net, pads in pads_by_net.items():
-                # Don't skip same-net - hole clearance is a manufacturing constraint
-                pad_net_matches = matching_pad_nets is None or pad_net in matching_pad_nets
-                if not via_matches and not pad_net_matches:
-                    continue
-                for pad in pads:
-                    if pad.drill <= 0:
-                        continue  # SMD pad
-                    has_violation, overlap = check_pad_drill_via_overlap(pad, via, hole_to_hole_clearance)
-                    if has_violation:
-                        via_net_name = pcb_data.nets.get(via.net_id, None)
-                        pad_net_name = pcb_data.nets.get(pad_net, None)
-                        via_net_str = via_net_name.name if via_net_name else f"net_{via.net_id}"
-                        pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
-                        same_net = pad_net == via.net_id
-                        violations.append({
-                            'type': 'pad-drill-via-drill-same-net' if same_net else 'pad-drill-via-drill',
-                            'net1': pad_net_str,
-                            'net2': via_net_str,
-                            'overlap_mm': overlap,
-                            'pad_loc': (pad.global_x, pad.global_y),
-                            'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
-                            'via_loc': (via.x, via.y),
-                        })
+        # Flatten through-hole pads (SMD pads have no drill) keeping their net key,
+        # then vectorize each via against all of them. Iteration order (via outer,
+        # pad inner in pads_by_net order) and the overlap formula match the scalar
+        # check_pad_drill_via_overlap so the violation list is identical.
+        th_pads = []
+        th_pad_nets = []
+        for pad_net, pads in pads_by_net.items():
+            for pad in pads:
+                if pad.drill <= 0:
+                    continue  # SMD pad
+                th_pads.append(pad)
+                th_pad_nets.append(pad_net)
+        if th_pads and all_vias:
+            px = np.array([p.global_x for p in th_pads], dtype=np.float64)
+            py = np.array([p.global_y for p in th_pads], dtype=np.float64)
+            pdrill = np.array([p.drill for p in th_pads], dtype=np.float64)
+            if matching_pad_nets is None:
+                pmatch = None
+            else:
+                pmatch = np.array([pn in matching_pad_nets for pn in th_pad_nets], dtype=bool)
+            tolerance = hole_to_hole_clearance * 0.05
+            for via in all_vias:
+                via_matches = matching_via_nets is None or via.net_id in matching_via_nets
+                required = pdrill / 2 + via.drill / 2 + hole_to_hole_clearance
+                actual = np.sqrt((px - via.x) ** 2 + (py - via.y) ** 2)
+                overlap = required - actual
+                viol = overlap > tolerance
+                # Skip (via, pad) where neither net matches the filter. When the via
+                # matches, every pad is checked; otherwise only filter-matching pads.
+                if not via_matches and pmatch is not None:
+                    viol &= pmatch
+                for k in np.nonzero(viol)[0].tolist():
+                    pad = th_pads[k]
+                    pad_net = th_pad_nets[k]
+                    via_net_name = pcb_data.nets.get(via.net_id, None)
+                    pad_net_name = pcb_data.nets.get(pad_net, None)
+                    via_net_str = via_net_name.name if via_net_name else f"net_{via.net_id}"
+                    pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
+                    same_net = pad_net == via.net_id
+                    violations.append({
+                        'type': 'pad-drill-via-drill-same-net' if same_net else 'pad-drill-via-drill',
+                        'net1': pad_net_str,
+                        'net2': via_net_str,
+                        'overlap_mm': float(overlap[k]),
+                        'pad_loc': (pad.global_x, pad.global_y),
+                        'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                        'via_loc': (via.x, via.y),
+                    })
 
     # Check board edge clearances
     board_bounds = pcb_data.board_info.board_bounds
