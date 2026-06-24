@@ -2315,6 +2315,8 @@ def route_multipoint_taps(
         inner layer instead. Returns (segments, vias) on success, else None.
         Only attempted on a real failure, so it never changes a routable edge.
         """
+        if os.environ.get('DISABLE_VIA_ESCAPE'):
+            return None
         if len(layer_names) < 2:
             return None
         tgt_pad_obj = tgt_pad[5] if len(tgt_pad) > 5 else None
@@ -2328,6 +2330,22 @@ def route_multipoint_taps(
             return None
         pad_layer_idx = tgt_pad[2]
         pad_layer = layer_names[pad_layer_idx]
+
+        # Skip a pad whose escape already failed this run. The placement below
+        # builds a local via-obstacle window (a full-board geometry scan) per
+        # candidate via size, and route_multipoint_taps is re-entered for every
+        # rip-and-reroute pass -- without this memo a genuinely-boxed pad pays
+        # that scan on every pass, dominating the route (glasgow signal route
+        # went 3.4min -> 15min+). A boxed fine-pitch pad's escapability is
+        # essentially static, so caching the failure costs no real coverage.
+        # Keyed on pcb_data so it is naturally scoped to one routing run.
+        _ecache = getattr(pcb_data, '_via_escape_failed', None)
+        if _ecache is None:
+            _ecache = set()
+            pcb_data._via_escape_failed = _ecache
+        _ekey = (net_id, round(tgt_pad[3], 3), round(tgt_pad[4], 3))
+        if _ekey in _ecache:
+            return None
 
         # Find a DRC-legal via INSIDE the pad copper (max_search_radius=0 keeps
         # the search to the pad's own footprint, so the via's annular ring
@@ -2343,12 +2361,20 @@ def route_multipoint_taps(
         from list_nets import fab_floors
         ncu = len([l for l in layer_names if l.endswith('.Cu')]) or 2
         _ff = fab_floors(ncu)
+        # Candidate vias, largest diameter first. Dedupe by DIAMETER: the via's
+        # copper-clearance halo (what decides whether it fits beside a neighbour
+        # pad) depends only on diameter, not drill, so two pairs with the same
+        # diameter would run an identical -- expensive -- placement search. On a
+        # 4-layer board the configured via and the fab fine via are both 0.30mm,
+        # so this halves the placement work (speedup 1).
         via_pairs = []
+        seen_dia = set()
         for _vd, _dr in ((config.via_size, config.via_drill),
                          (_ff['via_diameter'], _ff['via_drill']),
                          (_ff['fine_via_diameter'], _ff['fine_via_drill'])):
             _vd, _dr = round(_vd, 3), round(_dr, 3)
-            if _dr < _vd <= config.via_size + 1e-9 and (_vd, _dr) not in via_pairs:
+            if _dr < _vd <= config.via_size + 1e-9 and _vd not in seen_dia:
+                seen_dia.add(_vd)
                 via_pairs.append((_vd, _dr))
         # A via INSIDE an already-placed edge pad is no closer to the board edge
         # than the pad itself (the fab accepts that), so relax the board-edge
@@ -2365,6 +2391,7 @@ def route_multipoint_taps(
             if tap_res.success and tap_res.via is not None:
                 break
         if tap_res is None or not tap_res.success or tap_res.via is None:
+            _ecache.add(_ekey)  # no legal via in the pad: don't retry this run
             return None
         via = tap_res.via
         via_pos = (via['x'], via['y'])
@@ -2389,6 +2416,7 @@ def route_multipoint_taps(
         nonlocal total_iterations
         total_iterations += eiters
         if epath is None:
+            _ecache.add(_ekey)  # via placed but no inner-layer route out: don't retry
             return None
         if ereversed:
             epath = list(reversed(epath))
