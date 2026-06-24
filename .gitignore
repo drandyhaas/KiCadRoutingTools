@@ -51,3 +51,8 @@ rust_*/target/
 /kicad_files/sonde_u_*.kicad_pcb
 kicad_files/.history/
 /kicad_files/*kicad_pro
+
+# Test-fixture boards used as INPUT by tests/ - keep tracked despite the broad
+# output patterns above (test_bga_fanout_summary, test_diff_pair_route).
+!/kicad_files/interf_u_unrouted_placed.kicad_pcb
+!/kicad_files/routed_output.kicad_pcb
