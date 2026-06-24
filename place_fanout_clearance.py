@@ -27,6 +27,13 @@ from placement.writer import write_placed_output
 def main():
     import argparse
 
+    # This step mutates the board mid-pipeline (moves caps), so it must appear in
+    # the stress-test redo manifest -- otherwise a pure redo_stress_test.py replay
+    # breaks at the next step that reads the *_capopt board. No-op unless
+    # REDO_MANIFEST is set (#132).
+    from redo_record import record_invocation
+    record_invocation()
+
     parser = argparse.ArgumentParser(
         description="Tidy near-BGA decoupling caps around fanout vias (#130).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
