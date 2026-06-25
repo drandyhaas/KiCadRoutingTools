@@ -865,7 +865,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
         _add_segment_obstacle_with_exclusion(
             obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-            exclude_grid_cells
+            exclude_grid_cells, expansion_mm=expansion_mm
         )
 
 
@@ -940,7 +940,8 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
 
 def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,
                                           layer_idx: int, expansion_grid: int, via_block_grid: int,
-                                          exclude_cells: Set[Tuple[int, int]]):
+                                          exclude_cells: Set[Tuple[int, int]],
+                                          expansion_mm: float = None):
     """Add a segment as obstacle, excluding certain grid cells."""
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
@@ -958,6 +959,24 @@ def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord:
     is_diagonal = dx > 0 and dy > 0
     effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
     via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
+
+    if _EXACT_KEEPOUT and expansion_mm is not None:
+        # Exact capsule track keep-out (same shape build_base/cache use), minus the
+        # excluded cells. Via keep-out stays Bresenham+circle, gated per line cell
+        # exactly as the legacy path.
+        for cgx, cgy in segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                                    seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
+            c = (int(cgx), int(cgy))
+            if c not in exclude_cells:
+                obstacles.add_blocked_cell(c[0], c[1], layer_idx)
+        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+            if (gx, gy) in exclude_cells:
+                continue
+            for ex in range(-via_block_range, via_block_range + 1):
+                for ey in range(-via_block_range, via_block_range + 1):
+                    if ex*ex + ey*ey <= effective_via_block_sq and (gx + ex, gy + ey) not in exclude_cells:
+                        obstacles.add_blocked_via(gx + ex, gy + ey)
+        return
 
     gx, gy = gx1, gy1
     while True:
