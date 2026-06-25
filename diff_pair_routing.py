@@ -2300,7 +2300,8 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     return None
 
 
-def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names):
+def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
+                                 leg_obstacles=None):
     """Hybrid coupled middle (last resort): route a clean parallel P/N pair
     straight from the source via-midpoint to the target via-midpoint on the
     open layer -- no escape-direction setback, no connectors, no polarity stage.
@@ -2430,7 +2431,12 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         pair_vias = [v for v in (getattr(pcb_data, 'vias', None) or [])
                      if v.net_id in (p_net_id, n_net_id)]
         # Carry each terminal's own copper layer (src[4]/tgt[4]) so a leg off a
-        # BARE pad starts on the pad's layer, not the coupled middle's.
+        # BARE pad starts on the pad's layer, not the coupled middle's. The legs
+        # are SINGLE-ENDED, so route them on a single-ended-clearance map
+        # (leg_obstacles) when one is supplied -- the diff-pair map carries the
+        # coupled extra clearance, which would over-block a leg's escape via and
+        # is wrong for a one-track leg (watchy USB_D).
+        leg_obs = leg_obstacles if leg_obstacles is not None else obstacles
         for net_id, mid_float, t_src, t_tgt in (
                 (p_net_id, p_float, (p_src_x, p_src_y, src[4]), (p_tgt_x, p_tgt_y, tgt[4])),
                 (n_net_id, n_float, (n_src_x, n_src_y, src[4]), (n_tgt_x, n_tgt_y, tgt[4]))):
@@ -2439,7 +2445,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             partner_s = [s for s in mid_segs if s.net_id != net_id] + committed_segs
             partner_v = [v for v in pair_vias if v.net_id != net_id] + committed_vias
             ls, lv, it = _route_hybrid_legs(
-                pcb_data, net_id, config, obstacles, layer_names, coord,
+                pcb_data, net_id, config, leg_obs, layer_names, coord,
                 mid_float, t_src, t_tgt, partner_s, partner_v, pair_vias)
             if ls is None:
                 ok = False
@@ -2515,6 +2521,12 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
                 for oy in range(-2, 3):
                     obstacles.add_allowed_cell(tgx + ox, tgy + oy)
                     obstacles.add_allowed_cell(mgx + ox, mgy + oy)
+            # Mark the endpoint cells as source/target so the A* can start/end ON
+            # them even when foreign clearance blocks them (the F.Cu pad sits in a
+            # neighbour stub's keep-out) -- same as the single-ended router does.
+            for sgx, sgy, slayer in sources:
+                obstacles.add_source_target_cell(sgx, sgy, slayer)
+            obstacles.add_source_target_cell(mgx, mgy, mid_pt[2])
             path, it = _route_leg(router, obstacles, config, sources, targets, 0, pcb_data, net_id)
             obstacles.clear_allowed_cells()
             obstacles.clear_source_target_cells()
