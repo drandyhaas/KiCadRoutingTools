@@ -472,20 +472,41 @@ from the terminal escapes (`_route_direct_coupled_middle`):
    where polarity is resolved: at the pads, by independent A*, with no coupled
    crossing.
 
+   **Boxed-endpoint escape.** A bare-pad stub tip can sit in a foreign keep-out
+   tight enough that the leg can't get a via in *at the tip* — but a via still
+   fits a short walk away (the human fix is to nudge the via ~0.05 mm into the
+   roomier pocket). Two grid-approximation artefacts used to trap the leg there,
+   both fixed by `single_ended_routing.apply_endpoint_escape`, which recomputes a
+   small window around the endpoint with exact, DRC-grade geometry: the
+   conservative **square** obstacle expansion blocks every cell around the tip (so
+   the leg can't step onto its own copper to walk out) — it **un-blocks** the
+   cells that are genuinely track-clear; and the grid via-block **under-covers a
+   diagonal** foreign stub (so an escaping leg would drop its via a hair too
+   close) — it **blocks** the cells where a via would actually graze. The leg then
+   walks `F.Cu` off the boxed tip and vias down at a clean spot. This is what
+   routes the stock *surface-fanned* watchy `USB_D` pair (boxed by the adjacent
+   `USB_DET` stub, ~0.225 mm away) 1/1 with no hand-placed vias — issue #197.
+
+   The same helper is shared by the single-ended router (`route_net_with_obstacles`
+   applies it, gated on a fully-boxed endpoint, so the common un-boxed endpoint
+   pays nothing): any net whose terminal is sealed in by the square keep-out gets
+   the same exact-geometry escape.
+
 The result is a fully-connected, DRC-clean pair: coupled where it matters (the
 parallel run) and single-ended only on the last millimetre at each terminal,
 where coupling buys nothing and flexibility is everything.
 
 **Scope.** The hybrid needs each terminal to have *room* for inner-layer access —
-a through-via/THT pad, or a bare pad with enough clearance for the leg to drop an
-escape via. It does **not** rewrite placement: a terminal that is physically
-**boxed** on the surface layer (e.g. a stock *surface* fanout that packs a
-neighbour stub hard against the pad) has nowhere to put an escape via, and no
-amount of routing fixes that — fan such pairs out **under-pad** (escape vias
-instead of surface stubs) so they are not boxed, or open the obstruction in
-placement. The hybrid is gated by `diff_pair_hybrid_escape` (default on) and
-returns the pair to the normal failure path (single-ended follow-up) when it
-can't lay a clean route, so it never makes a pair worse.
+a through-via/THT pad, or a bare pad with a clean via spot within a short walk of
+the tip (the boxed-tip escape above finds it even when the tip itself is packed
+against a neighbour stub). It does **not** rewrite placement: a terminal with **no
+via-legal cell anywhere near** it (a neighbour stub hard against the pad on every
+side) genuinely has nowhere to escape, and no amount of routing fixes that — fan
+such pairs out **under-pad** (escape vias instead of surface stubs) so they are
+not boxed, or open the obstruction in placement. The hybrid is gated by
+`diff_pair_hybrid_escape` (default on) and returns the pair to the normal failure
+path (single-ended follow-up) when it can't lay a clean route, so it never makes a
+pair worse.
 
 ## Debug Visualization
 

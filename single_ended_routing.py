@@ -665,6 +665,23 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     for gx, gy, layer in sources_grid + targets_grid:
         obstacles.add_source_target_cell(gx, gy, layer)
 
+    # If an endpoint is fully boxed in -- it can neither via down nor step to a free
+    # neighbour because the conservative square obstacle expansion sealed it (a
+    # foreign stub hard against the pad) -- correct the grid map locally with exact
+    # geometry so the route can still escape: un-block the cells genuinely clear for
+    # a track (walk off the boxed endpoint) and exact-block the cells where a via
+    # would really graze (so the diagonal-segment via-raster miss can't drop a
+    # sub-clearance via). Gated, so the common un-boxed endpoint pays ~9 lookups.
+    escape_via_blocks = []
+    for gx, gy, layer in sources_grid + targets_grid:
+        if endpoint_is_boxed(obstacles, gx, gy, layer):
+            escape_via_blocks += apply_endpoint_escape(
+                obstacles, pcb_data, net_id, gx, gy, layer, layer_names, coord, config)
+
+    def _undo_escape_via_blocks():
+        if escape_via_blocks:
+            obstacles.remove_blocked_vias_batch(np.array(escape_via_blocks, dtype=np.int32))
+
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
     attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
@@ -745,6 +762,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         reversed_path = not reversed_path
 
     if path is None:
+        _undo_escape_via_blocks()
         dir_msg = "single direction" if use_single_direction else "both directions"
         print(f"No route found after {total_iterations} iterations ({dir_msg})")
         return {
@@ -878,6 +896,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # (issue #189); connects the inner-layer path end to the pad by copper overlap.
     new_vias = list(new_vias) + unblock_vias
 
+    _undo_escape_via_blocks()
     return {
         'new_segments': new_segments,
         'new_vias': new_vias,
@@ -1004,6 +1023,108 @@ def _point_segment_dist2(px, py, ax, ay, bx, by):
     t = max(0.0, min(1.0, t))
     cx, cy = ax + t * dx, ay + t * dy
     return (px - cx) ** 2 + (py - cy) ** 2
+
+
+def endpoint_is_boxed(obstacles, gx, gy, layer_idx):
+    """Cheap gate for `apply_endpoint_escape`: True when a net endpoint can neither
+    via down NOR step to any free neighbour on its own layer -- the conservative
+    square obstacle expansion has sealed it in (a foreign stub hard against the
+    pad). The common, un-boxed endpoint fails this in ~9 lookups and pays nothing
+    for the (heavier) exact escape."""
+    if not obstacles.is_via_blocked(gx, gy):
+        return False
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if (dx or dy) and not obstacles.is_blocked(gx + dx, gy + dy, layer_idx):
+                return False
+    return True
+
+
+def compute_endpoint_escape(pcb_data, net_id, ep_gx, ep_gy, layer_idx, layer_names,
+                            coord, config, extra_segs=(), extra_vias=(), radius=10):
+    """A net endpoint (stub tip / pad) can sit in a foreign keep-out tight enough
+    that the conservative SQUARE obstacle expansion blocks every neighbour cell
+    (the route can't step onto its own copper to walk to where a via fits), while
+    the grid via-block can MISS a graze around a DIAGONAL foreign segment (a via
+    dropped near the endpoint then lands a hair too close). Both are
+    grid-approximation artefacts at the same boxed endpoint -- the square keepout
+    over-states clearance by up to sqrt(2), and the bresenham via-raster of a
+    diagonal segment under-covers the true line.
+
+    Recompute, over a small window around the endpoint and with exact, DRC-grade
+    Euclidean geometry, the two corrections the grid map gets wrong here:
+      - track_ok : cells genuinely clear for this net's track. Un-blocking them
+        lets the route walk off the boxed endpoint to where an escape via fits.
+      - via_bad  : cells where a via would actually graze foreign copper. Blocking
+        them stops the route vias landing on a grid-missed graze.
+
+    Returns (track_ok, via_bad) as lists of (gx, gy). Foreign copper = everything
+    not on this net: the board's segments/vias (other nets) plus `extra_segs` /
+    `extra_vias` -- not-yet-committed foreign copper to also avoid (e.g. a diff
+    pair's partner middle + the legs committed earlier this round)."""
+    lname = layer_names[layer_idx]
+    ex, ey = coord.to_float(ep_gx, ep_gy)
+    win = radius * config.grid_step + config.via_size / 2 + config.clearance + 0.5
+
+    def _near_seg(s):
+        return (min(s.start_x, s.end_x) - win <= ex <= max(s.start_x, s.end_x) + win and
+                min(s.start_y, s.end_y) - win <= ey <= max(s.start_y, s.end_y) + win)
+    board_segs = getattr(pcb_data, 'segments', None) or []
+    board_vias = getattr(pcb_data, 'vias', None) or []
+    fseg = ([s for s in board_segs if s.net_id != net_id and _near_seg(s)] +
+            [s for s in extra_segs if s.net_id != net_id and _near_seg(s)])
+    fvia = ([v for v in board_vias if v.net_id != net_id and abs(v.x - ex) <= win and abs(v.y - ey) <= win] +
+            [v for v in extra_vias if v.net_id != net_id and abs(v.x - ex) <= win and abs(v.y - ey) <= win])
+
+    # Exact thresholds, compared squared to skip the per-cell sqrt.
+    track_need = config.get_net_track_width(net_id, lname) / 2 + config.clearance
+    via_r = config.via_size / 2
+    track_ok, via_bad = [], []
+    for ox in range(-radius, radius + 1):
+        for oy in range(-radius, radius + 1):
+            gx, gy = ep_gx + ox, ep_gy + oy
+            x, y = coord.to_float(gx, gy)
+            # genuinely clear for a track on THIS layer? (segments share the layer;
+            # vias span every layer; foreign pads own/cover it)
+            t_clear = all(
+                _point_segment_dist2(x, y, s.start_x, s.start_y, s.end_x, s.end_y) >=
+                (track_need + s.width / 2) ** 2
+                for s in fseg if s.layer == lname)
+            if t_clear:
+                t_clear = all(math.hypot(v.x - x, v.y - y) - v.size / 2 >= track_need for v in fvia)
+            if t_clear and _pt_foreign_pad_dist(pcb_data, net_id, x, y, lname) >= track_need:
+                track_ok.append((gx, gy))
+            # a via here would graze foreign copper? (a via spans every layer, so
+            # any-layer foreign segment counts) -- catches the diagonal-segment
+            # via-raster under-cover the grid map misses
+            v_bad = any(
+                _point_segment_dist2(x, y, s.start_x, s.start_y, s.end_x, s.end_y) <
+                (via_r + s.width / 2 + config.clearance) ** 2
+                for s in fseg)
+            if not v_bad:
+                v_bad = any(math.hypot(v.x - x, v.y - y) < via_r + v.size / 2 + config.clearance for v in fvia)
+            if v_bad:
+                via_bad.append((gx, gy))
+    return track_ok, via_bad
+
+
+def apply_endpoint_escape(obstacles, pcb_data, net_id, ep_gx, ep_gy, layer_idx,
+                          layer_names, coord, config, extra_segs=(), extra_vias=(),
+                          radius=10):
+    """Apply `compute_endpoint_escape` to the obstacle map: un-block the genuinely
+    track-clear cells (mark them source/target on the endpoint's layer) and
+    exact-block the genuine via grazes. Returns the via-block cells added, so the
+    caller undoes exactly them (`remove_blocked_vias_batch`) once the net routes --
+    the block counters are reference-counted, so this never disturbs the map's own
+    blocks."""
+    track_ok, via_bad = compute_endpoint_escape(
+        pcb_data, net_id, ep_gx, ep_gy, layer_idx, layer_names, coord, config,
+        extra_segs, extra_vias, radius)
+    for gx, gy in track_ok:
+        obstacles.add_source_target_cell(gx, gy, layer_idx)
+    for gx, gy in via_bad:
+        obstacles.add_blocked_via(gx, gy)
+    return via_bad
 
 
 def assign_waypoints_to_mst_edges(waypoints, pad_grid, mst_edges):

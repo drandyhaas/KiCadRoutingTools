@@ -2473,7 +2473,7 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
     """Point-to-point single-ended legs joining each terminal to the coupled
     middle's near end, routing around partner copper. Returns (segs, vias, iters)
     or (None, None, 0) if either leg can't be routed."""
-    from single_ended_routing import _route_leg, _path_to_segments_vias
+    from single_ended_routing import _route_leg, _path_to_segments_vias, apply_endpoint_escape
     from obstacle_map import (add_segments_list_as_obstacles, remove_segments_list_from_obstacles,
                               add_vias_list_as_obstacles, remove_vias_list_from_obstacles)
     router = GridRouter(
@@ -2502,6 +2502,7 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
 
     add_segments_list_as_obstacles(obstacles, partner_segs, config)
     add_vias_list_as_obstacles(obstacles, partner_vias, config)
+    added_via_blocks = []  # exact via-blocks we add near boxed tips; undone in finally
     try:
         segs, vias, iters = [], [], 0
         for term, mid_pt in ((term_src, mid_float[0]), (term_tgt, mid_float[-1])):
@@ -2527,6 +2528,17 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
             for sgx, sgy, slayer in sources:
                 obstacles.add_source_target_cell(sgx, sgy, slayer)
             obstacles.add_source_target_cell(mgx, mgy, mid_pt[2])
+            # A bare-pad tip can be boxed by a foreign keep-out tight enough that
+            # the conservative square obstacle expansion blocks every neighbour (the
+            # leg can't step off the tip) yet a via still fits a short walk away.
+            # Recompute, with exact geometry, the cells genuinely clear for a track
+            # (un-block so the leg can walk F.Cu out of the moat) and the cells
+            # where an escape via would actually graze (block so the grid via-block
+            # miss around a diagonal foreign stub can't drop a sub-clearance via).
+            if not on_via:
+                added_via_blocks += apply_endpoint_escape(
+                    obstacles, pcb_data, net_id, tgx, tgy, alayer, layer_names,
+                    coord, config, extra_segs=partner_segs, extra_vias=partner_vias)
             path, it = _route_leg(router, obstacles, config, sources, targets, 0, pcb_data, net_id)
             obstacles.clear_allowed_cells()
             obstacles.clear_source_target_cells()
@@ -2544,6 +2556,9 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
     finally:
         remove_segments_list_from_obstacles(obstacles, partner_segs, config)
         remove_vias_list_from_obstacles(obstacles, partner_vias, config)
+        if added_via_blocks:
+            import numpy as np
+            obstacles.remove_blocked_vias_batch(np.array(added_via_blocks, dtype=np.int32))
 
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
