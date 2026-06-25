@@ -2437,12 +2437,19 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         # coupled extra clearance, which would over-block a leg's escape via and
         # is wrong for a one-track leg (watchy USB_D).
         leg_obs = leg_obstacles if leg_obstacles is not None else obstacles
+        board_segs = getattr(pcb_data, 'segments', None) or []
         for net_id, mid_float, t_src, t_tgt in (
                 (p_net_id, p_float, (p_src_x, p_src_y, src[4]), (p_tgt_x, p_tgt_y, tgt[4])),
                 (n_net_id, n_float, (n_src_x, n_src_y, src[4]), (n_tgt_x, n_tgt_y, tgt[4]))):
             # The other net's middle + terminal vias (and, this round, the first
             # net's legs/vias) must block, so a side-swap leg routes around them.
-            partner_s = [s for s in mid_segs if s.net_id != net_id] + committed_segs
+            # The partner's ORIGINAL fanout stub also blocks: the diff-pair map
+            # excludes BOTH pair nets, so the partner stub isn't an obstacle there
+            # -- re-add it here or a leg vias straight into it (watchy USB_D- via
+            # grazing the USB_D+ stub).
+            partner_net = n_net_id if net_id == p_net_id else p_net_id
+            partner_stub = [s for s in board_segs if s.net_id == partner_net]
+            partner_s = [s for s in mid_segs if s.net_id != net_id] + committed_segs + partner_stub
             partner_v = [v for v in pair_vias if v.net_id != net_id] + committed_vias
             ls, lv, it = _route_hybrid_legs(
                 pcb_data, net_id, config, leg_obs, layer_names, coord,

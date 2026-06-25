@@ -1025,12 +1025,19 @@ def _point_segment_dist2(px, py, ax, ay, bx, by):
     return (px - cx) ** 2 + (py - cy) ** 2
 
 
+# Experiment gate: disable the #197 endpoint escape, to A/B whether the exact
+# obstacle keep-out (EXACT_KEEPOUT) + partner-stub wiring fully subsumes it.
+_DISABLE_ESCAPE = bool(os.environ.get("DISABLE_ESCAPE"))
+
+
 def endpoint_is_boxed(obstacles, gx, gy, layer_idx):
     """Cheap gate for `apply_endpoint_escape`: True when a net endpoint can neither
     via down NOR step to any free neighbour on its own layer -- the conservative
     square obstacle expansion has sealed it in (a foreign stub hard against the
     pad). The common, un-boxed endpoint fails this in ~9 lookups and pays nothing
     for the (heavier) exact escape."""
+    if _DISABLE_ESCAPE:
+        return False
     if not obstacles.is_via_blocked(gx, gy):
         return False
     for dx in (-1, 0, 1):
@@ -1145,6 +1152,8 @@ def apply_endpoint_escape(obstacles, pcb_data, net_id, ep_gx, ep_gy, layer_idx,
     caller undoes exactly them (`remove_blocked_vias_batch`) once the net routes --
     the block counters are reference-counted, so this never disturbs the map's own
     blocks."""
+    if _DISABLE_ESCAPE:
+        return []
     track_ok, via_bad = compute_endpoint_escape(
         pcb_data, net_id, ep_gx, ep_gy, layer_idx, layer_names, coord, config,
         extra_segs, extra_vias, radius)
