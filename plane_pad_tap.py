@@ -524,6 +524,14 @@ def try_tap_pad(
     # in-pad position when the exact centre is blocked (issue #99).
     in_pad = point_in_pad_rect(via_pos[0], via_pos[1], pad, 1e-6)
     if pad_layer and not in_pad:
+        # The via landed OUTSIDE the pad copper, so a via->pad trace IS needed --
+        # but _needs_trace_map can be False (e.g. find_via_position returns an
+        # in-bbox ring spot that point_in_pad_rect rejects on a rotated/non-rect
+        # pad), leaving routing_obs None. Build it lazily here instead of
+        # dereferencing None in route_via_to_pad.
+        if routing_obs is None:
+            routing_obs = build_routing_obstacle_map(
+                local, config, net_id, pad_layer, skip_pad_blocking=False, verbose=False)
         # Capture the search frontier on failure so a caller doing rip-up can
         # identify which net is blocking the via->pad trace (route_disconnected_
         # planes --rip-blocker-nets).
