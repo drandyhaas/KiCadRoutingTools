@@ -193,6 +193,14 @@ def _setback_ladder(setback, spacing_mm, pad_gap_half, config):
     return ladder
 
 
+def _launch_assoc_tol(config):
+    """Distance within which a via/THT pad is treated as belonging to (escaping)
+    a diff-pair terminal: hand- or auto-placed escape vias sit at/near the pad or
+    stub tip, offset by up to ~a via radius, not grid-coincident (watchy USB_D).
+    Stays below a fine pad pitch so it can't grab a neighbour terminal's via."""
+    return max(config.grid_step * 1.5, config.via_size * 0.75 + config.track_width / 2)
+
+
 def _endpoint_launch_layer_indices(pcb_data, net_id, x, y, config, tol=None):
     """Routing-layer indices a coupled launch may use at endpoint (x, y) of `net_id`.
 
@@ -204,13 +212,7 @@ def _endpoint_launch_layer_indices(pcb_data, net_id, x, y, config, tol=None):
     an open inner layer when the stub layer's corridor is jammed.
     """
     if tol is None:
-        # Associate a via/THT pad whose copper plausibly CONNECTS to this terminal
-        # (one placed at/near the pad or stub free-end to escape it), not only a
-        # grid-coincident one: hand- or auto-placed escape vias are often offset
-        # from the exact stub tip by up to ~a via radius (watchy USB_D). Stays
-        # below a fine pad pitch so it can't grab a neighbour terminal's via.
-        tol = max(config.grid_step * 1.5,
-                  config.via_size * 0.75 + config.track_width / 2)
+        tol = _launch_assoc_tol(config)
     copper = getattr(pcb_data.board_info, 'copper_layers', None) or list(config.layers)
     cu_index = {name: i for i, name in enumerate(copper)}
     routing_idx = {name: i for i, name in enumerate(config.layers)}
@@ -261,14 +263,16 @@ def _terminal_escape_vias(pcb_data, p_net_id, n_net_id, p_term, n_term, config):
     (x, y, size, net_id) for vias of either net within the launch-association
     tolerance of either terminal.
     """
-    tol = max(config.grid_step * 1.5, config.via_size * 0.75 + config.track_width / 2)
+    tol = _launch_assoc_tol(config)
     out = []
     for via in getattr(pcb_data, 'vias', None) or []:
         if via.net_id not in (p_net_id, n_net_id):
             continue
         if (math.hypot(via.x - p_term[0], via.y - p_term[1]) <= tol or
                 math.hypot(via.x - n_term[0], via.y - n_term[1]) <= tol):
-            out.append((via.x, via.y, via.size, via.net_id))
+            # Guard size like obstacle_map does, so a 0/missing size can't shrink
+            # the graze clearance and let a real partner-via graze slip through.
+            out.append((via.x, via.y, via.size if via.size > 0 else config.via_size, via.net_id))
     return out
 
 
@@ -288,7 +292,7 @@ def _make_offset_connector_check(p_term, n_term, escape_vias, spacing_mm, config
     # A via this close to a terminal IS that terminal's own launch via (it need
     # not sit exactly on the stub tip) -- the connector legitimately starts on
     # it, so don't count it as a graze of its own leg.
-    own_tol = max(config.grid_step * 1.5, config.via_size * 0.75 + config.track_width / 2)
+    own_tol = _launch_assoc_tol(config)
 
     def _leg_grazes(term, off):
         for vx, vy, vsize, _ in escape_vias:
@@ -2303,9 +2307,10 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
 
     Both terminals carry through-vias (or THT pads), so the centerline can start
     and end as close as possible to each terminal on whichever spanned layer is
-    open, and the two terminal legs are then finished by the point-to-point
-    single-ended follow-up pass (which fixes polarity at the pads). Returns a
-    result dict flagged hybrid_defer, or None if no clean middle could be laid.
+    open. Each terminal is then attached to its middle near-end with a
+    point-to-point single-ended leg (_route_hybrid_legs), which routes around the
+    partner copper -- that is where polarity is resolved, at the pads. Returns a
+    complete (fully-connected) route dict, or None if no clean route was found.
     """
     if PoseRouter is None:
         return None
@@ -2419,9 +2424,11 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         committed_segs, committed_vias = [], []  # partner copper accumulates
         pair_vias = [v for v in (getattr(pcb_data, 'vias', None) or [])
                      if v.net_id in (p_net_id, n_net_id)]
+        # Carry each terminal's own copper layer (src[4]/tgt[4]) so a leg off a
+        # BARE pad starts on the pad's layer, not the coupled middle's.
         for net_id, mid_float, t_src, t_tgt in (
-                (p_net_id, p_float, (p_src_x, p_src_y), (p_tgt_x, p_tgt_y)),
-                (n_net_id, n_float, (n_src_x, n_src_y), (n_tgt_x, n_tgt_y))):
+                (p_net_id, p_float, (p_src_x, p_src_y, src[4]), (p_tgt_x, p_tgt_y, tgt[4])),
+                (n_net_id, n_float, (n_src_x, n_src_y, src[4]), (n_tgt_x, n_tgt_y, tgt[4]))):
             # The other net's middle + terminal vias (and, this round, the first
             # net's legs/vias) must block, so a side-swap leg routes around them.
             partner_s = [s for s in mid_segs if s.net_id != net_id] + committed_segs
@@ -2463,11 +2470,12 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
         layer_costs=config.get_layer_costs())
     nlayers = len(config.layers)
-    own_tol = max(config.grid_step * 1.5, config.via_size * 0.75 + config.track_width / 2)
+    own_tol = _launch_assoc_tol(config)
 
     def _term_anchor(term, mid_layer):
         """The leg endpoint: the terminal's own-net through-via (its access to
-        the middle layer) if one sits at the terminal, else the pad itself."""
+        the middle layer) if one sits at the terminal, else the pad itself.
+        term is (x, y, pad_layer_idx). Returns (x, y, leg_layer, on_via)."""
         best = None
         for v in pair_vias:
             if v.net_id != net_id:
@@ -2477,7 +2485,9 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
                 best = (d, v.x, v.y, mid_layer)  # via spans layers -> use mid layer
         if best:
             return best[1], best[2], best[3], True
-        return term[0], term[1], mid_layer, False
+        # Bare pad: the leg must start on the pad's OWN copper layer (not the
+        # middle's) or it lands where the pad has no copper and never connects.
+        return term[0], term[1], term[2], False
 
     add_segments_list_as_obstacles(obstacles, partner_segs, config)
     add_vias_list_as_obstacles(obstacles, partner_vias, config)

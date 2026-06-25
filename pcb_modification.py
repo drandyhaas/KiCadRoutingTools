@@ -947,26 +947,21 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     # board-wide settle). collapse_appendices above now only fixes
     # self-intersections (#148); this unwinds dead-end spurs and chains via
     # prune_dead_end_segments.
-    # A hybrid coupled middle is INTENTIONALLY a floating parallel pair (its
-    # terminal connectors are deferred to the single-ended follow-up), so both
-    # ends are legitimately dead-ends -- skip the per-commit dead-end prune that
-    # would otherwise strip it (watchy USB_D).
-    if not result.get('hybrid_defer'):
-        all_zones = getattr(pcb_data, 'zones', []) or []
-        pruned_segments = []
-        for net_id in net_ids:
-            net_new = [s for s in cleaned_segments if s.net_id == net_id]
-            if not net_new:
-                continue
-            anchor = [s for s in pcb_data.segments if s.net_id == net_id]
-            net_vias = [v for v in new_vias if v.net_id == net_id]
-            net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
-            net_pads = pcb_data.pads_by_net.get(net_id, [])
-            net_zones = [z for z in all_zones if z.net_id == net_id]
-            kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
-                                          anchor_segments=anchor, aggressive=False)
-            pruned_segments.extend(kept_net)
-        cleaned_segments = pruned_segments
+    all_zones = getattr(pcb_data, 'zones', []) or []
+    pruned_segments = []
+    for net_id in net_ids:
+        net_new = [s for s in cleaned_segments if s.net_id == net_id]
+        if not net_new:
+            continue
+        anchor = [s for s in pcb_data.segments if s.net_id == net_id]
+        net_vias = [v for v in new_vias if v.net_id == net_id]
+        net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_zones = [z for z in all_zones if z.net_id == net_id]
+        kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
+                                      anchor_segments=anchor, aggressive=False)
+        pruned_segments.extend(kept_net)
+    cleaned_segments = pruned_segments
 
     for seg in cleaned_segments:
         pcb_data.segments.append(seg)
