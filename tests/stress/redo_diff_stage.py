@@ -89,15 +89,21 @@ def resolve_diff_output(argv):
     return out, str(ns.clearance)
 
 
-def diffstage_min_clearance(kept_lines, route_diff_clearance):
-    """The DRC floor a diff-stage board must meet is the MIN --clearance among the
-    steps that actually laid copper on it (fanout + route_diff) -- NOT the
-    route_diff step's own value. Grading at the route_diff clearance over-counts
-    when that step used a looser (numerically larger) clearance than the fanout
-    (e.g. eis/lily58 routed diff pairs at 0.2 over a 0.1/0.127 board). Falls back
-    to the route_diff clearance if no step set one explicitly."""
+ROUTE_DIFF_DEFAULT_CLEARANCE = 0.25  # route_diff.py argparse default
+
+def board_floor_clearance(all_lines):
+    """The DRC floor a board must ultimately meet is the MIN --clearance over ALL
+    steps in its manifest (fanout, route_diff AND the downstream route/plane
+    passes that tighten it) -- "the minimum of any step used". Grading the diff
+    output at the route_diff step's own (often looser) clearance over-counts:
+    e.g. eis/lily58 route diff pairs at 0.2 on a board whose floor is 0.1/0.127,
+    and tigard's diff step defaults to 0.25 while downstream steps use 0.1. The
+    diff router guarantees >= its own clearance, so grading at the smaller
+    board floor only removes false positives -- real diff-copper overlaps/pad
+    violations still surface. Falls back to route_diff's default if no step set
+    a clearance anywhere."""
     cls = []
-    for ln in kept_lines:
+    for ln in all_lines:
         if ln.lstrip().startswith("#") or "--clearance" not in ln:
             continue
         try:
@@ -110,12 +116,7 @@ def diffstage_min_clearance(kept_lines, route_diff_clearance):
                 cls.append(float(a[i + 1]))
             except (IndexError, ValueError):
                 pass
-    if route_diff_clearance is not None:
-        try:
-            cls.append(float(route_diff_clearance))
-        except ValueError:
-            pass
-    return f"{min(cls):g}" if cls else str(route_diff_clearance)
+    return f"{min(cls):g}" if cls else str(ROUTE_DIFF_DEFAULT_CLEARANCE)
 
 
 def parse_json_summary(text):
@@ -194,10 +195,10 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
     # strip leading interpreter tokens so resolve_diff_output sees the route_diff argv
     while rd_argv and (rd_argv[0].endswith(("python", "python3")) or rd_argv[0] in ("-X", "utf8")):
         rd_argv.pop(0)
-    out_board, rd_clearance = resolve_diff_output(rd_argv)
-    # grade DRC at the floor the board must meet (min over fanout + route_diff),
-    # not the route_diff step's own clearance
-    clearance = diffstage_min_clearance(kept, rd_clearance)
+    out_board, _rd_clearance = resolve_diff_output(rd_argv)
+    # grade DRC at the floor the board must meet (min --clearance over the whole
+    # manifest), not the route_diff step's own (often looser) clearance
+    clearance = board_floor_clearance(lines)
 
     log = os.path.join(wdir, "replay.log")
     print(f"\n===== {set_board} (DRC clearance {clearance}, out {os.path.basename(out_board)}) =====",
