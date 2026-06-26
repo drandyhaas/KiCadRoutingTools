@@ -246,14 +246,16 @@ impl GridRouter {
 
 
         // Find minimum layer cost for initial g penalty
-        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
+        // and pollutes the start penalty + the admissibility-scaled heuristic.
+        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
         let mut best_initial_h = i32::MAX;
 
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
             // Penalize starting on expensive layers
-            let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+            let layer_cost = self.layer_cost_or_default(layer as usize);
             let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state, &target_states);
             best_initial_h = best_initial_h.min(h);
@@ -378,6 +380,7 @@ impl GridRouter {
 
             // Expand neighbors - 8 directions
             for (dx, dy) in DIRECTIONS {
+                if self.layer_forbidden(current.layer as usize) { break; }  // G2: no track on a forbidden source layer
                 // If we have a required exact direction (just came through via), only allow that direction
                 if let Some((req_dx, req_dy)) = required_direction {
                     if dx != req_dx || dy != req_dy {
@@ -421,7 +424,7 @@ impl GridRouter {
 
                 let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
-                let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                let layer_multiplier = self.layer_cost_or_default(current.layer as usize);
                 let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
                 // Add turn cost if direction changes (encourages straighter paths)
                 let turn_cost = match prev_direction {
@@ -546,6 +549,9 @@ impl GridRouter {
                     if layer == current.layer {
                         continue;
                     }
+                    if self.layer_forbidden(layer as usize) {
+                        continue;  // FORBIDDEN LAYER: never end a via here
+                    }
 
                     // Check if destination layer is blocked at this position
                     if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
@@ -566,8 +572,8 @@ impl GridRouter {
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
                     // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
-                    let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
-                    let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+                    let current_layer_cost = self.layer_cost_or_default(current.layer as usize);
+                    let dest_layer_cost = self.layer_cost_or_default(layer as usize);
                     let layer_transition_cost = dest_layer_cost - current_layer_cost;
                     // Combined via cost can be as low as 0 when switching to a much cheaper layer
                     let combined_via_cost = (via_cost + layer_transition_cost).max(0);
@@ -689,13 +695,15 @@ impl GridRouter {
         };
 
         // Find minimum layer cost for initial g penalty
-        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
+        // and pollutes the start penalty + the admissibility-scaled heuristic.
+        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
 
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
             // Penalize starting on expensive layers
-            let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+            let layer_cost = self.layer_cost_or_default(layer as usize);
             let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state, &target_states);
             open_set.push(OpenEntry { f_score: initial_g + h, g_score: initial_g, state, counter });
@@ -759,6 +767,7 @@ impl GridRouter {
             });
 
             for (dx, dy) in DIRECTIONS {
+                if self.layer_forbidden(current.layer as usize) { break; }  // G2: no track on a forbidden source layer
                 if let Some((req_dx, req_dy)) = required_direction {
                     if dx != req_dx || dy != req_dy { continue; }
                 } else if let Some((base_dx, base_dy)) = allowed_45deg_from {
@@ -790,7 +799,7 @@ impl GridRouter {
 
                 let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
-                let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                let layer_multiplier = self.layer_cost_or_default(current.layer as usize);
                 let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
                 let turn_cost = match prev_direction {
                     Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
@@ -872,6 +881,7 @@ impl GridRouter {
                 && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer { continue; }
+                    if self.layer_forbidden(layer as usize) { continue; }  // FORBIDDEN LAYER: never end a via here
 
                     if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
                         tracker.track(current.gx, current.gy, layer);
@@ -890,8 +900,8 @@ impl GridRouter {
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
                     // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
-                    let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
-                    let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+                    let current_layer_cost = self.layer_cost_or_default(current.layer as usize);
+                    let dest_layer_cost = self.layer_cost_or_default(layer as usize);
                     let layer_transition_cost = dest_layer_cost - current_layer_cost;
                     // Combined via cost can be as low as 0 when switching to a much cheaper layer
                     let combined_via_cost = (via_cost + layer_transition_cost).max(0);
@@ -925,12 +935,33 @@ impl GridRouter {
 }
 
 impl GridRouter {
+    /// FORBIDDEN LAYER (`--layer-costs -1` => a negative entry in `layer_costs`):
+    /// the router never places a track on, nor ends a via on, such a layer. It
+    /// still acts as an obstacle (its copper blocks via barrels) and through-vias
+    /// may SPAN it (a via is one direct edge to its target layer).
+    #[inline]
+    fn layer_forbidden(&self, layer: usize) -> bool {
+        self.layer_costs.get(layer).map_or(false, |&c| c < 0)
+    }
+
+    /// Cost to use in arithmetic; a forbidden/missing layer folds to the neutral
+    /// 1.0x (1000) so the sentinel can never leak into a subtraction/multiply.
+    #[inline]
+    fn layer_cost_or_default(&self, layer: usize) -> i32 {
+        match self.layer_costs.get(layer).copied() {
+            Some(c) if c >= 0 => c,
+            _ => 1000,
+        }
+    }
+
     /// Octile distance heuristic to nearest target
     /// Uses minimum layer cost to remain admissible (never overestimate)
     #[inline]
     fn heuristic_to_targets(&self, state: &GridState, targets: &[GridState]) -> i32 {
         // Use minimum layer cost for admissibility
-        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
+        // and pollutes the start penalty + the admissibility-scaled heuristic.
+        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
 
         let mut min_h = i32::MAX;
         for target in targets {

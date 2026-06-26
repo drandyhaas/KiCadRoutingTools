@@ -166,12 +166,12 @@ impl PoseRouter {
             let nx = current.gx + dx;
             let ny = current.gy + dy;
 
-            if !obstacles.is_blocked(nx, ny, current.layer as usize) {
+            if !self.layer_forbidden(current.layer as usize) && !obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
                 let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
                 let neighbor_key = neighbor.as_key();
 
                 if !closed.contains(&neighbor_key) {
-                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                     let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                         + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                     let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -211,7 +211,7 @@ impl PoseRouter {
             // - First move from start must be straight in src_theta direction
             // - After a via, must go straight for 2 steps (no turns)
             // - For diff pairs, limit cumulative turn to prevent loops
-            if current_key != start_key && current_straight_remaining <= 0 {
+            if !self.layer_forbidden(current.layer as usize) && current_key != start_key && current_straight_remaining <= 0 {  // G2: no turns on a forbidden source layer
                 for delta in [-1i8, 1i8] {
                     let new_steps = current_steps + 1;
                     // Calculate new turn values, resetting at respective intervals
@@ -228,13 +228,13 @@ impl PoseRouter {
                     let nx = current.gx + dx;
                     let ny = current.gy + dy;
 
-                    if !obstacles.is_blocked(nx, ny, current.layer as usize) {
+                    if !self.layer_forbidden(current.layer as usize) && !obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
                         let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
                         let neighbor_key = neighbor.as_key();
 
                         if !closed.contains(&neighbor_key) {
                             // Cost = movement + turn arc cost
-                            let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                            let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                             let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                                 + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                             let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -357,6 +357,9 @@ impl PoseRouter {
                     if layer == current.layer {
                         continue;
                     }
+                    if self.layer_forbidden(layer as usize) {
+                        continue;  // FORBIDDEN LAYER: never end a via here
+                    }
 
                     if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
                         continue;
@@ -373,8 +376,8 @@ impl PoseRouter {
                             self.via_cost
                         };
                         // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
-                        let layer_transition = self.layer_costs.get(layer as usize).copied().unwrap_or(1000)
-                            - self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                        let layer_transition = self.layer_cost_or_default(layer as usize)
+                            - self.layer_cost_or_default(current.layer as usize);
                         let new_g = g + (via_cost + layer_transition).max(0);
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -478,14 +481,14 @@ impl PoseRouter {
             let nx = current.gx + dx;
             let ny = current.gy + dy;
 
-            if obstacles.is_blocked(nx, ny, current.layer as usize) {
+            if self.layer_forbidden(current.layer as usize) || obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
                 tracker.track(nx, ny, current.layer);
             } else {
                 let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
                 let neighbor_key = neighbor.as_key();
 
                 if !closed.contains(&neighbor_key) {
-                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                     let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                         + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                     let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -513,7 +516,7 @@ impl PoseRouter {
             }
 
             // 2. Move + turn by ±45°
-            if current_key != start_key && current_straight_remaining <= 0 {
+            if !self.layer_forbidden(current.layer as usize) && current_key != start_key && current_straight_remaining <= 0 {  // G2: no turns on a forbidden source layer
                 for delta in [-1i8, 1i8] {
                     let new_steps = current_steps + 1;
                     let new_turn_1 = if new_steps % 100 == 0 { delta as i32 } else { current_turn_1 + delta as i32 };
@@ -529,7 +532,7 @@ impl PoseRouter {
                     let nx = current.gx + dx;
                     let ny = current.gy + dy;
 
-                    if obstacles.is_blocked(nx, ny, current.layer as usize) {
+                    if self.layer_forbidden(current.layer as usize) || obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
                         tracker.track(nx, ny, current.layer);
                         continue;
                     }
@@ -538,7 +541,7 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !closed.contains(&neighbor_key) {
-                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                         let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                             + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                         let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -660,6 +663,7 @@ impl PoseRouter {
             if can_place_via && via_positions_clear {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer { continue; }
+                    if self.layer_forbidden(layer as usize) { continue; }  // FORBIDDEN LAYER: never end a via here
 
                     if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
                         tracker.track(current.gx, current.gy, layer);
@@ -677,8 +681,8 @@ impl PoseRouter {
                             self.via_cost
                         };
                         // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
-                        let layer_transition = self.layer_costs.get(layer as usize).copied().unwrap_or(1000)
-                            - self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                        let layer_transition = self.layer_cost_or_default(layer as usize)
+                            - self.layer_cost_or_default(current.layer as usize);
                         let new_g = g + (via_cost + layer_transition).max(0);
 
                         let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
@@ -701,6 +705,24 @@ impl PoseRouter {
 }
 
 impl PoseRouter {
+    /// FORBIDDEN LAYER (`--layer-costs -1` => a negative entry in `layer_costs`):
+    /// the router never places a track on, nor ends a via on, such a layer. It
+    /// still acts as an obstacle and through-vias may SPAN it.
+    #[inline]
+    fn layer_forbidden(&self, layer: usize) -> bool {
+        self.layer_costs.get(layer).map_or(false, |&c| c < 0)
+    }
+
+    /// Cost for arithmetic; forbidden/missing folds to neutral 1.0x (1000) so the
+    /// sentinel can never leak into a subtraction.
+    #[inline]
+    fn layer_cost_or_default(&self, layer: usize) -> i32 {
+        match self.layer_costs.get(layer).copied() {
+            Some(c) if c >= 0 => c,
+            _ => 1000,
+        }
+    }
+
     /// Dubins heuristic: estimate shortest path considering orientation
     fn dubins_heuristic(&self, dubins: &DubinsCalculator, state: &PoseState, goal: &PoseState) -> i32 {
         let theta1 = state.theta_radians();
