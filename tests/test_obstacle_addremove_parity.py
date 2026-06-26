@@ -117,14 +117,12 @@ def test_base_cache_parity(verbose):
 
         # build_base primitive
         mb = GridObstacleMap(len(LAYERS))
-        _add_segment_obstacle(mb, seg, coord, li, expansion_grid, via_block_grid,
-                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
+        _add_segment_obstacle(mb, seg, coord, li, expansion_mm, via_block_mm)
 
         # cache primitive: collect then batch into a fresh map
         mc = GridObstacleMap(len(LAYERS))
         bc, bv = [], []
-        _collect_segment_obstacles(seg, coord, li, expansion_mm, via_block_grid, bc, bv,
-                                   via_block_mm=via_block_mm)
+        _collect_segment_obstacles(seg, coord, li, expansion_mm, bc, bv, via_block_mm)
         if bc:
             mc.add_blocked_cells_batch(np.ascontiguousarray(np.vstack(bc).astype(np.int32)))
         if bv:

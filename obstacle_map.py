@@ -13,8 +13,7 @@ import math
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
-    square_offsets, circle_offsets, segment_blocked_cells_array
-from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
+    circle_offsets, segment_blocked_cells_array
 from net_queries import expand_pad_layers
 from obstacle_costs import add_bga_proximity_costs
 
@@ -89,12 +88,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
         expansion_mm = layer_track_width / 2 + seg_width / 2 + effective_clearance + extra_clearance
-        expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
         # For via blocking by segments: via half-size + segment half-width + clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + effective_clearance + extra_clearance
-        via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
-        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
+        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
 
     # Add vias as obstacles (excluding nets we'll route)
     # Vias span all layers, so use max track width for track blocking
@@ -801,11 +797,8 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
         expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-        expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
         via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance + extra_clearance
-        via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
-        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
+        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
 
 
 def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -860,12 +853,9 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
         expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-        expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
         via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance + extra_clearance
-        via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
         _add_segment_obstacle_with_exclusion(
-            obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-            exclude_grid_cells, expansion_mm=expansion_mm, via_block_mm=via_block_mm
+            obstacles, seg, coord, layer_idx, exclude_grid_cells, expansion_mm, via_block_mm
         )
 
 
@@ -939,65 +929,21 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
 
 
 def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,
-                                          layer_idx: int, expansion_grid: int, via_block_grid: int,
-                                          exclude_cells: Set[Tuple[int, int]],
-                                          expansion_mm: float = None, via_block_mm: float = None):
-    """Add a segment as obstacle, excluding certain grid cells."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    # Bresenham line with expansion
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    err = dx - dy
-
-    # For diagonal segments, the actual line passes between grid points,
-    # so we need a slightly larger blocking radius to ensure clearance is maintained.
-    # Using +0.25 catches sqrt(10)~3.16 but not sqrt(11)~3.32.
-    is_diagonal = dx > 0 and dy > 0
-    effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
-    via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
-
-    if _EXACT_KEEPOUT and expansion_mm is not None and via_block_mm is not None:
-        # Exact capsule track + via keep-out (same shape build_base/cache use),
-        # each minus the excluded cells.
-        for cgx, cgy in segment_blocked_cells_array(seg.start_x, seg.start_y,
-                                                    seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
-            c = (int(cgx), int(cgy))
-            if c not in exclude_cells:
-                obstacles.add_blocked_cell(c[0], c[1], layer_idx)
-        for cgx, cgy in segment_blocked_cells_array(seg.start_x, seg.start_y,
-                                                    seg.end_x, seg.end_y, via_block_mm, coord.grid_step):
-            c = (int(cgx), int(cgy))
-            if c not in exclude_cells:
-                obstacles.add_blocked_via(c[0], c[1])
-        return
-
-    gx, gy = gx1, gy1
-    while True:
-        # Skip if this cell is in the exclusion zone
-        if (gx, gy) not in exclude_cells:
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    if (gx + ex, gy + ey) not in exclude_cells:
-                        obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
-            for ex in range(-via_block_range, via_block_range + 1):
-                for ey in range(-via_block_range, via_block_range + 1):
-                    if ex*ex + ey*ey <= effective_via_block_sq:
-                        if (gx + ex, gy + ey) not in exclude_cells:
-                            obstacles.add_blocked_via(gx + ex, gy + ey)
-
-        if gx == gx2 and gy == gy2:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            gx += sx
-        if e2 < dx:
-            err += dx
-            gy += sy
+                                          layer_idx: int, exclude_cells: Set[Tuple[int, int]],
+                                          expansion_mm: float, via_block_mm: float):
+    """Add a segment as obstacle (exact capsule keep-out from the true float
+    segment), excluding certain grid cells (the stub-endpoint connection cells).
+    Track keep-out at `expansion_mm`, via keep-out at `via_block_mm`."""
+    for cgx, cgy in segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                                seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
+        c = (int(cgx), int(cgy))
+        if c not in exclude_cells:
+            obstacles.add_blocked_cell(c[0], c[1], layer_idx)
+    for cgx, cgy in segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                                seg.end_x, seg.end_y, via_block_mm, coord.grid_step):
+        c = (int(cgx), int(cgy))
+        if c not in exclude_cells:
+            obstacles.add_blocked_via(c[0], c[1])
 
 
 def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -1101,11 +1047,8 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             layer_track_width = config.get_track_width(seg.layer)
             seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
             expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-            expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
             via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance
-            via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
-            _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
+            _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
 
 
 def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: list,
@@ -1135,44 +1078,19 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         if layer_idx is None:
             continue
 
-        # Use layer-specific track width for routing track portion (must match add function)
+        # Must match the ADD shape exactly (same capsule from the true float
+        # segment) or the Rust ref-counts desync on rip-up.
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
         expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-        expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
         via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance
-        via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
 
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-        is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
-        effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
-
-        # Track cells must match the ADD shape exactly or the Rust ref-counts
-        # desync (cells added by one shape, removed by the other): capsule when
-        # exact, else the square stamp.
-        if _EXACT_KEEPOUT:
-            for cgx, cgy in segment_blocked_cells_array(
-                    seg.start_x, seg.start_y, seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
-                cells_to_remove.append((int(cgx), int(cgy), layer_idx))
-        else:
-            for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-                for ex in range(-expansion_grid, expansion_grid + 1):
-                    for ey in range(-expansion_grid, expansion_grid + 1):
-                        cells_to_remove.append((gx + ex, gy + ey, layer_idx))
-        # Via cells must also match the ADD shape: capsule (via margin) when
-        # exact, else Bresenham + circle.
-        if _EXACT_KEEPOUT:
-            for cgx, cgy in segment_blocked_cells_array(
-                    seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step):
-                vias_to_remove.append((int(cgx), int(cgy)))
-        else:
-            for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-                for ex in range(-via_block_range, via_block_range + 1):
-                    for ey in range(-via_block_range, via_block_range + 1):
-                        if ex*ex + ey*ey <= effective_via_block_sq:
-                            vias_to_remove.append((gx + ex, gy + ey))
+        for cgx, cgy in segment_blocked_cells_array(
+                seg.start_x, seg.start_y, seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
+            cells_to_remove.append((int(cgx), int(cgy), layer_idx))
+        for cgx, cgy in segment_blocked_cells_array(
+                seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step):
+            vias_to_remove.append((int(cgx), int(cgy)))
 
     # Batch remove cells and vias
     if cells_to_remove:
@@ -1395,66 +1313,35 @@ def _batch_vias(obstacles, vias_xy: "np.ndarray", blocked_vias=None):
         blocked_vias.update(map(tuple, vias_xy.tolist()))
 
 
-# Exact point-to-segment (capsule) track + via keep-out, matching what the
-# obstacle CACHE already uses for already-routed nets (segment_blocked_cells_array,
-# issue #70/B). The legacy square stamp over-reaches sqrt(2) in diagonal corners
-# (traps boxed endpoints -- #197) and under-covers off-grid lines (#173). Now the
-# default; set EXACT_KEEPOUT=0 to fall back to the square stamp (A/B / debugging).
-_EXACT_KEEPOUT = os.environ.get("EXACT_KEEPOUT", "1") != "0"
 
 
 def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
-                          layer_idx: int, expansion_grid: int, via_block_grid: int,
+                          layer_idx: int, expansion_mm: float, via_block_mm: float,
                           blocked_cells: List[Set[Tuple[int, int]]] = None,
-                          blocked_vias: Set[Tuple[int, int]] = None,
-                          expansion_mm: float = None, via_block_mm: float = None):
-    """Add a segment as obstacle to the map.
+                          blocked_vias: Set[Tuple[int, int]] = None):
+    """Add a segment as obstacle: an exact point-to-segment (capsule) keep-out
+    measured from the TRUE float segment -- the track keep-out at `expansion_mm`
+    and the via keep-out at `via_block_mm`. Matches the obstacle cache
+    (`segment_blocked_cells_array`, issue #70/B); replaced the square/bresenham
+    stamp that over-reached sqrt(2) in diagonal corners (#197) and under-covered
+    off-grid lines (#173).
 
     Args:
         obstacles: The obstacle map to add to
         seg: Segment object with start_x, start_y, end_x, end_y
         coord: GridCoord for coordinate conversion
         layer_idx: Layer index for track blocking
-        expansion_grid: Expansion radius for track blocking
-        via_block_grid: Expansion radius for via blocking
+        expansion_mm: track keep-out distance (mm) from the segment centreline
+        via_block_mm: via keep-out distance (mm) from the segment centreline
         blocked_cells: Optional per-layer sets to collect blocked cells for visualization
         blocked_vias: Optional set to collect blocked via positions for visualization
-        expansion_mm: True track keep-out distance (mm); enables the exact
-            point-to-segment track keep-out when EXACT_KEEPOUT is set.
-        via_block_mm: True via keep-out distance (mm); enables the exact
-            point-to-segment via keep-out when EXACT_KEEPOUT is set.
     """
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
-    effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
-
-    # Batched rasterization (issue #35): every line step contributes its full
-    # offset pattern, so the emitted (cell, layer) MULTISET - including the
-    # duplicates where patterns of adjacent steps overlap - is identical to
-    # the per-cell loops this replaces. Reference counts in the Rust map (and
-    # therefore later removals during rip-up) are unchanged.
-    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
-
-    if _EXACT_KEEPOUT and expansion_mm is not None:
-        # Exact capsule from the TRUE float segment -- same helper the obstacle
-        # cache uses for already-routed nets, so build_base now matches it.
-        cells = segment_blocked_cells_array(seg.start_x, seg.start_y,
-                                            seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
-    else:
-        track_offs = square_offsets(expansion_grid)
-        cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
+    cells = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                        seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
     _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
-    if _EXACT_KEEPOUT and via_block_mm is not None:
-        # Exact via keep-out: a via centre this close to the true segment grazes
-        # it (the Bresenham+circle stamp under-covers off-grid/diagonal lines).
-        vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
-                                           seg.end_x, seg.end_y, via_block_mm, coord.grid_step)
-    else:
-        via_offs = circle_offsets(via_block_range, effective_via_block_sq)
-        vias = (line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
+    vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                       seg.end_x, seg.end_y, via_block_mm, coord.grid_step)
     _batch_vias(obstacles, vias, blocked_vias)
 
 
@@ -1733,12 +1620,9 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
         expansion_mm = layer_track_width / 2 + seg_width / 2 + effective_clearance + extra_clearance
-        expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
         via_block_mm = config.via_size / 2 + seg_width / 2 + effective_clearance + extra_clearance
-        via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
-        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              blocked_cells, blocked_vias,
-                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
+        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm,
+                              blocked_cells, blocked_vias)
 
     # Add vias as obstacles (excluding nets we'll route)
     # Use actual via size and max track width (vias span all layers)
