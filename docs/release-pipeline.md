@@ -62,6 +62,17 @@ You do **not** need to update `metadata.json` — Python deps live entirely outs
 #   rust_router/README.md  (only if Rust changed, version-history table)
 ```
 
+Then verify the bump is consistent **before** tagging — this is the same check
+CI runs first, so catch a half-bumped `VERSION`/`metadata.json` here instead of
+~10 minutes into the release build:
+
+```bash
+python3 check_release_version.py --tag v0.15.5
+```
+
+It must print `OK:`. (A `VERSION`-only bump that forgets `metadata.json` is the
+exact mistake that failed the v0.17.0 release.)
+
 ### 2. Commit and tag
 
 ```bash

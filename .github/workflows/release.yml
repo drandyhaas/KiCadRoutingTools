@@ -18,8 +18,27 @@ permissions:
   contents: write  # needed to create/update the GitHub Release
 
 jobs:
+  validate:
+    name: Validate version consistency
+    runs-on: ubuntu-latest
+    # Fail in seconds — before the ~10-min build matrix — if VERSION,
+    # metadata.json, and the pushed tag disagree (the half-bumped state that
+    # broke v0.17.0). Otherwise the mismatch only surfaces in the package job
+    # after every binary is built.
+    steps:
+      - uses: actions/checkout@v6
+      - name: VERSION <-> metadata.json (and tag) agree
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            python3 check_release_version.py --tag "${GITHUB_REF#refs/tags/}"
+          else
+            python3 check_release_version.py
+          fi
+
   build:
     name: Build ${{ matrix.target_name }}
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
