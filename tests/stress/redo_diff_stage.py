@@ -89,6 +89,35 @@ def resolve_diff_output(argv):
     return out, str(ns.clearance)
 
 
+def diffstage_min_clearance(kept_lines, route_diff_clearance):
+    """The DRC floor a diff-stage board must meet is the MIN --clearance among the
+    steps that actually laid copper on it (fanout + route_diff) -- NOT the
+    route_diff step's own value. Grading at the route_diff clearance over-counts
+    when that step used a looser (numerically larger) clearance than the fanout
+    (e.g. eis/lily58 routed diff pairs at 0.2 over a 0.1/0.127 board). Falls back
+    to the route_diff clearance if no step set one explicitly."""
+    cls = []
+    for ln in kept_lines:
+        if ln.lstrip().startswith("#") or "--clearance" not in ln:
+            continue
+        try:
+            a = shlex.split(ln)
+        except ValueError:
+            continue
+        if "--clearance" in a:
+            i = a.index("--clearance")
+            try:
+                cls.append(float(a[i + 1]))
+            except (IndexError, ValueError):
+                pass
+    if route_diff_clearance is not None:
+        try:
+            cls.append(float(route_diff_clearance))
+        except ValueError:
+            pass
+    return f"{min(cls):g}" if cls else str(route_diff_clearance)
+
+
 def parse_json_summary(text):
     summary = None
     for m in re.finditer(r"JSON_SUMMARY:\s*(\{.*\})", text):
@@ -165,10 +194,13 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
     # strip leading interpreter tokens so resolve_diff_output sees the route_diff argv
     while rd_argv and (rd_argv[0].endswith(("python", "python3")) or rd_argv[0] in ("-X", "utf8")):
         rd_argv.pop(0)
-    out_board, clearance = resolve_diff_output(rd_argv)
+    out_board, rd_clearance = resolve_diff_output(rd_argv)
+    # grade DRC at the floor the board must meet (min over fanout + route_diff),
+    # not the route_diff step's own clearance
+    clearance = diffstage_min_clearance(kept, rd_clearance)
 
     log = os.path.join(wdir, "replay.log")
-    print(f"\n===== {set_board} (clearance {clearance}, out {os.path.basename(out_board)}) =====",
+    print(f"\n===== {set_board} (DRC clearance {clearance}, out {os.path.basename(out_board)}) =====",
           flush=True)
     with open(log, "w") as lf:
         # --workdir forces every command into wdir (so relative inputs -- incl.
