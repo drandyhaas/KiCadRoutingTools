@@ -220,11 +220,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # --layer-costs is given; unlike route.py there is no 2-layer F.Cu/B.Cu default.
     if not layer_costs:
         layer_costs = [1.0] * len(layers)
+    from routing_constants import FORBIDDEN_LAYER_COST
     for i, cost in enumerate(layer_costs):
-        if cost < 1.0 or cost > 1000:
+        if cost != FORBIDDEN_LAYER_COST and (cost < 1.0 or cost > 1000):
             from routing_exceptions import ConfigurationError
             layer_name = layers[i] if i < len(layers) else f"layer {i}"
-            raise ConfigurationError(f"Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
+            raise ConfigurationError(f"Layer cost for {layer_name} must be -1 (forbidden) or "
+                                     f"between 1.0 and 1000, got {cost}")
     if any(c != 1.0 for c in layer_costs):
         costs_str = ', '.join(f"{layers[i]}={layer_costs[i]}x" for i in range(min(len(layers), len(layer_costs))))
         print(f"  Layer costs: {costs_str}")
@@ -970,8 +972,9 @@ Examples:
                         default=['F.Cu', 'B.Cu'],
                         help="Routing layers to use (default: F.Cu B.Cu)")
     parser.add_argument("--layer-costs", nargs="+", type=float, default=None,
-                        help="Per-layer cost multipliers (1.0-1000), one per --layers entry, "
-                             "to bias which layer(s) coupled diff pairs prefer (e.g. '1 1 1 3' "
+                        help="Per-layer cost multipliers (1.0-1000, or -1 = forbidden: the layer is "
+                             "an obstacle / via span but carries no routed copper), one per --layers "
+                             "entry, to bias which layer(s) coupled diff pairs prefer (e.g. '1 1 1 3' "
                              "to discourage the 4th layer). Default: 1.0 on every layer "
                              "(behavior unchanged). Matches route.py / route_planes.")
 

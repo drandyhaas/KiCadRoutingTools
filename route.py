@@ -86,7 +86,7 @@ from routing_common import (
 import routing_defaults as defaults
 import re
 from terminal_colors import RED, RESET
-from routing_constants import DEFAULT_4_LAYER_STACK, POWER_NET_EXCLUSION_PATTERNS
+from routing_constants import DEFAULT_4_LAYER_STACK, POWER_NET_EXCLUSION_PATTERNS, FORBIDDEN_LAYER_COST
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
@@ -270,12 +270,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         else:
             layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
 
-    # Validate layer costs are in range [1.0, 1000]
+    # Validate layer costs: -1 = forbidden (no copper placed; still an obstacle),
+    # otherwise a multiplier in [1.0, 1000].
     for i, cost in enumerate(layer_costs):
-        if cost < 1.0 or cost > 1000:
+        if cost != FORBIDDEN_LAYER_COST and (cost < 1.0 or cost > 1000):
             layer_name = layers[i] if i < len(layers) else f"layer {i}"
             from routing_exceptions import ConfigurationError
-            raise ConfigurationError(f"Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
+            raise ConfigurationError(f"Layer cost for {layer_name} must be -1 (forbidden) or "
+                                     f"between 1.0 and 1000, got {cost}")
 
     costs_str = ', '.join(f"{layers[i]}={layer_costs[i]}x" for i in range(min(len(layers), len(layer_costs))))
     print(f"  Layer costs: {costs_str}")
@@ -1442,8 +1444,11 @@ For differential pair routing, use route_diff.py:
 
     # Layer preference options
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
-                        help="Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0). "
-                             "Order matches --layers. Example: --layer-costs 1.0 5.0")
+                        help="Per-layer cost multipliers (1.0-1000, default: F.Cu=1.0, others=3.0), "
+                             "or -1 = FORBIDDEN: the layer stays an obstacle (its copper blocks vias) "
+                             "and through-vias may span it, but NO track copper is placed on it. "
+                             "Order matches --layers. Example (route only F.Cu/B.Cu, In1/In2 obstacle-"
+                             "only): --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 -1 -1 3.0")
 
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",

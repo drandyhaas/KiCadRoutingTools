@@ -6,6 +6,8 @@ import math
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass, field
 
+from routing_constants import FORBIDDEN_LAYER_COST
+
 # Cost knobs (proximity costs, via_cost, attraction bonuses) are calibrated at
 # this grid step: GridRouteConfig.cell_cost / via_cost_units scale them so the
 # cost per mm of path is the same at any --grid-step, and identical to
@@ -181,12 +183,21 @@ class GridRouteConfig:
 
         Returns costs scaled by 1000 (1000 = 1.0x, 1500 = 1.5x penalty).
         If layer_costs is empty or shorter than layers list, uses 1000 (1.0x) for missing layers.
+        A cost of -1 (FORBIDDEN_LAYER_COST) is emitted VERBATIM (not scaled): the Rust
+        router skips track placement on any layer whose cost is negative, while the layer
+        stays an obstacle and through-vias may span it.
         """
         layer_costs = self.layer_costs or []  # may be None when set explicitly
         costs = []
         for i in range(len(self.layers)):
             if i < len(layer_costs):
-                costs.append(int(layer_costs[i] * 1000))
+                cost = layer_costs[i]
+                if cost == FORBIDDEN_LAYER_COST:
+                    # Forbidden: pass the sentinel through UNSCALED (do NOT do
+                    # int(-1 * 1000) -> -1000, which Rust would read as a discount).
+                    costs.append(FORBIDDEN_LAYER_COST)
+                else:
+                    costs.append(int(cost * 1000))
             else:
                 costs.append(1000)  # Default 1.0x
         return costs

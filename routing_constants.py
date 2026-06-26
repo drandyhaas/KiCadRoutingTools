@@ -7,6 +7,13 @@ Centralizes magic numbers and default values for consistency.
 # Default layer stack for 4-layer boards
 DEFAULT_4_LAYER_STACK = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
 
+# --layer-costs sentinel: the layer is included in --layers (full obstacle
+# awareness; foreign copper on it blocks via barrels, and through-vias may span
+# it) but the router places NO track copper on it. Emitted verbatim into the
+# i32 layer_costs vector; the Rust router treats any negative layer cost as
+# "forbidden" (canonical value -1). NOT scaled by 1000.
+FORBIDDEN_LAYER_COST = -1
+
 # Power net detection patterns (used for auto-exclusion from component routing)
 POWER_NET_EXCLUSION_PATTERNS = [
     '*GND*', '*VCC*', '*VDD*', '+*V', '-*V', 'unconnected-*', ''
