@@ -29,8 +29,8 @@ from routing_config import GridRouteConfig, GridCoord
 from obstacle_map import (GridObstacleMap, build_layer_map,
                           add_segments_list_as_obstacles, remove_segments_list_from_obstacles,
                           add_vias_list_as_obstacles, remove_vias_list_from_obstacles,
-                          _add_segment_obstacle)
-from obstacle_cache import _collect_segment_obstacles
+                          _add_segment_obstacle, _add_via_obstacle)
+from obstacle_cache import _collect_segment_obstacles, _collect_via_obstacles
 
 LAYERS = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
 
@@ -143,6 +143,40 @@ def test_base_cache_parity(verbose):
                          f"sym-diff {len(vb ^ vc)})")
         if not (cb != cc or vb != vc) and verbose:
             print(f"  seg/{name}: base==cache ({len(cb)} track, {len(vb)} via cells)  OK")
+
+    # via-as-obstacle parity. Uniform track width here, so build_base's MAX-width
+    # single value equals the cache's per-layer list. (For per-LAYER/impedance
+    # widths build_base uses max_track_width -- a conservative over-cover, not a
+    # graze; documented on #199, intentionally not asserted bit-identical.)
+    max_tw = config.get_max_track_width()
+    inv = 1.0 / config.grid_step
+    for name, via in VIAS.items():
+        vs = via.size
+        via_track_grid = max(1, coord.to_grid_dist_safe(vs / 2 + max_tw / 2 + config.clearance))
+        via_via_grid = max(1.0, (vs / 2 + config.via_size / 2 + config.clearance) * inv)
+        layer_widths = [config.get_net_track_width(via.net_id, l) for l in LAYERS]
+        via_track_list = [max(1, coord.to_grid_dist_safe(vs / 2 + lw / 2 + config.clearance))
+                          for lw in layer_widths]
+
+        mb = GridObstacleMap(len(LAYERS))
+        _add_via_obstacle(mb, via, coord, len(LAYERS), via_track_grid, via_via_grid, diagonal_margin=0.25)
+
+        mc = GridObstacleMap(len(LAYERS))
+        bc, bv = [], []
+        _collect_via_obstacles(via, coord, len(LAYERS), via_track_list, via_via_grid, 0.25, bc, bv)
+        if bc:
+            mc.add_blocked_cells_batch(np.ascontiguousarray(np.vstack(bc).astype(np.int32)))
+        if bv:
+            mc.add_blocked_vias_batch(np.ascontiguousarray(np.vstack(bv).astype(np.int32)))
+
+        cb, vb = _blocked_sets(mb, coord, via.x, via.y, via.x, via.y)
+        cc, vc = _blocked_sets(mc, coord, via.x, via.y, via.x, via.y)
+        if cb != cc:
+            fails.append(f"via-obstacle/{name}: track cells differ (base {len(cb)} vs cache {len(cc)})")
+        if vb != vc:
+            fails.append(f"via-obstacle/{name}: via cells differ (base {len(vb)} vs cache {len(vc)})")
+        if cb == cc and vb == vc and verbose:
+            print(f"  via-obstacle/{name}: base==cache ({len(cb)} track, {len(vb)} via cells)  OK")
     return fails
 
 
