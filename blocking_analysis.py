@@ -28,8 +28,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map, square_offsets, circle_offsets, pad_rect_halfspan
-from bresenham_utils import walk_line
+from routing_utils import build_layer_map, segment_blocked_cells_array, pad_rect_halfspan
 
 _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
 _COORD_MASK = (1 << 21) - 1
@@ -90,26 +89,34 @@ def compute_net_obstacle_cells(
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
     num_layers = len(config.layers)
-
-    # Match the expansion used in obstacle_map.py add_net_stubs_as_obstacles
-    # expansion = existing_track_half + clearance + routing_track_half
-    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_expansion_grid = max(1, coord.to_grid_dist(
-        config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
-
-    track_offs = square_offsets(expansion_grid)
-    via_offs = circle_offsets(via_expansion_grid, via_expansion_grid * via_expansion_grid)
+    grid_step = config.grid_step
     all_layers = np.arange(num_layers, dtype=np.int64)
 
     track_parts: List["np.ndarray"] = []
     via_parts: List["np.ndarray"] = []
-    via_centers: List[Tuple[int, int]] = []
 
-    def add_track_line(gx1, gy1, gx2, gy2, layer_idx):
-        line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
-        cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
-        track_parts.append(_pack_cells(cells, layer_idx))
+    def add_track_segment(x1, y1, x2, y2, layer_idx, seg_width):
+        # Exact capsule keep-out from the TRUE float segment, matching
+        # obstacle_map.add_net_stubs_as_obstacles / _add_segment_obstacle. The old
+        # square box + bresenham line over-reached by ~sqrt(2) in diagonal corners
+        # and shifted off-grid endpoints, so a frontier cell blocked by one net's
+        # real capsule also fell inside another net's square over-reach and the
+        # wrong net got ripped (#203). Distances are measured from the real segment.
+        layer_track_width = config.get_track_width(config.layers[layer_idx])
+        expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
+        cells = segment_blocked_cells_array(x1, y1, x2, y2, expansion_mm, grid_step)
+        if len(cells):
+            track_parts.append(_pack_cells(cells, layer_idx))
+
+    def add_via_keepout(x, y, via_size):
+        # A via blocks tracks on EVERY layer within its via->track keep-out radius.
+        # A zero-length capsule is a disc, measured from the true float via centre
+        # (so an off-grid via is covered without the old floored-circle drift).
+        via_margin = via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
+        cells = segment_blocked_cells_array(x, y, x, y, via_margin, grid_step)
+        if len(cells):
+            base = _pack_cells(cells, 0)
+            via_parts.append((base[:, None] | all_layers[None, :]).ravel())
 
     # Add cells from routed path
     if path:
@@ -117,9 +124,13 @@ def compute_net_obstacle_cells(
             gx1, gy1, layer1 = path[i]
             gx2, gy2, layer2 = path[i + 1]
             if layer1 != layer2:
-                via_centers.append((gx1, gy1))  # via blocks all layers
+                # via blocks all layers
+                vx, vy = coord.to_float(gx1, gy1)
+                add_via_keepout(vx, vy, config.via_size)
             else:
-                add_track_line(gx1, gy1, gx2, gy2, layer1)
+                x1, y1 = coord.to_float(gx1, gy1)
+                x2, y2 = coord.to_float(gx2, gy2)
+                add_track_segment(x1, y1, x2, y2, layer1, config.track_width)
 
     # Add cells from original stubs
     for seg in pcb_data.segments:
@@ -128,21 +139,15 @@ def compute_net_obstacle_cells(
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        add_track_line(gx1, gy1, gx2, gy2, layer_idx)
+        seg_width = seg.width if getattr(seg, 'width', 0) > 0 else config.get_track_width(seg.layer)
+        add_track_segment(seg.start_x, seg.start_y, seg.end_x, seg.end_y, layer_idx, seg_width)
 
     # Add cells from existing vias (block all layers)
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        via_centers.append(coord.to_grid(via.x, via.y))
-
-    if via_centers:
-        centers = np.array(via_centers, dtype=np.int32)
-        cells = (centers[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
-        layerless = _pack_cells(cells, 0)
-        via_parts.append((layerless[:, None] | all_layers[None, :]).ravel())
+        via_size = via.size if getattr(via, 'size', 0) > 0 else config.via_size
+        add_via_keepout(via.x, via.y, via_size)
 
     track_keys = np.unique(np.concatenate(track_parts)) if track_parts else np.empty(0, dtype=np.int64)
     via_keys = np.unique(np.concatenate(via_parts)) if via_parts else np.empty(0, dtype=np.int64)
