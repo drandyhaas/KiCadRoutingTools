@@ -115,6 +115,87 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     return float(np.min(np.hypot(dx, dy)))
 
 
+def _foreign_seg_arrays(pcb_data, layer):
+    """Cached per-layer numpy arrays (net_id, x1, y1, x2, y2, half_width) for every
+    routed SEGMENT on `layer`, plus every VIA folded in as a degenerate (zero-length)
+    segment of half_width = via radius. Unlike pads, copper changes as nets route, so
+    the cache is keyed on the (segment, via) counts and rebuilt when they change."""
+    sig = (len(pcb_data.segments), len(pcb_data.vias))
+    cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
+    if cache is None or cache[0] != sig:
+        cache = (sig, {})
+        pcb_data._foreign_seg_arr_cache = cache
+    per_layer = cache[1]
+    arr = per_layer.get(layer)
+    if arr is None:
+        nid, ax, ay, bx, by, hw = [], [], [], [], [], []
+        for s in pcb_data.segments:
+            if s.layer == layer:
+                nid.append(s.net_id); ax.append(s.start_x); ay.append(s.start_y)
+                bx.append(s.end_x); by.append(s.end_y)
+                hw.append((s.width if s.width > 0 else 0.0) / 2.0)
+        # A via spans its drilled layers; treat every via as present on this copper
+        # layer (a conservative over-approximation -- it only ever necks MORE).
+        for v in pcb_data.vias:
+            r = (v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
+            nid.append(v.net_id); ax.append(v.x); ay.append(v.y)
+            bx.append(v.x); by.append(v.y); hw.append(r)
+        arr = (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
+               np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
+               np.asarray(by, dtype=float), np.asarray(hw, dtype=float))
+        per_layer[layer] = arr
+    return arr
+
+
+def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+    """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
+    via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
+    the terminal centreline to the foreign copper EDGE (point-to-segment distance to
+    the foreign centreline minus the foreign half-width), sampled along the terminal
+    and vectorized over windowed foreign segments. A negative result (centreline
+    inside foreign copper) is returned as-is so the caller necks to the floor."""
+    nid, fax, fay, fbx, fby, fhw = _foreign_seg_arrays(pcb_data, layer)
+    if nid.size == 0:
+        return 1e9
+    n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
+    R = _FOREIGN_PAD_WINDOW
+    fminx = np.minimum(fax, fbx) - fhw; fmaxx = np.maximum(fax, fbx) + fhw
+    fminy = np.minimum(fay, fby) - fhw; fmaxy = np.maximum(fay, fby) + fhw
+    near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
+            (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
+    if not near.any():
+        return 1e9
+    ax, ay, bx, by, hw = fax[near], fay[near], fbx[near], fby[near], fhw[near]
+    t = np.linspace(0.0, 1.0, n + 1)
+    sx = x1 + (x2 - x1) * t
+    sy = y1 + (y2 - y1) * t
+    abx = bx - ax; aby = by - ay                      # (M,)
+    L2 = abx * abx + aby * aby                         # (M,)
+    pax = sx[:, None] - ax[None, :]                    # (S, M)
+    pay = sy[:, None] - ay[None, :]
+    safe_L2 = np.where(L2 > 0, L2, 1.0)
+    tt = (pax * abx[None, :] + pay * aby[None, :]) / safe_L2[None, :]
+    tt = np.where(L2[None, :] > 0, np.clip(tt, 0.0, 1.0), 0.0)
+    projx = ax[None, :] + tt * abx[None, :]
+    projy = ay[None, :] + tt * aby[None, :]
+    dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
+    return float(np.min(dist))
+
+
+def _emit_via_size(pcb_data, gx, gy, config):
+    """(size, drill) for a via the route conversion emits at cell (gx, gy). If a #189
+    via-in-pad unblock placed a DRC-legal shrunk via here, return THAT size so the
+    emitted via matches it -- a full config.via_size via at the same cell would graze
+    the neighbouring foreign pad the shrunk via was sized to clear (issue #212).
+    Otherwise return the configured via size."""
+    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+    if sizes is not None:
+        rec = sizes.get((gx, gy))
+        if rec is not None:
+            return rec
+    return (config.via_size, config.via_drill)
+
+
 def _fab_track_floor(pcb_data) -> float:
     """Smallest manufacturable track width for this board (issue #176): the JLC
     fab minimum for the board's copper-layer count (0.0889 mm on 4+ layers,
@@ -131,17 +212,19 @@ def _fab_track_floor(pcb_data) -> float:
 
 
 def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None):
-    """Neck a TERMINAL-connection segment that grazes a foreign pad, down to `floor`.
+    """Neck a TERMINAL-connection segment that grazes foreign copper, down to `floor`.
 
     A route's terminal connects to an off-grid pad / fanout escape: the
     exact-endpoint stub and the first/last on-grid leg are laid geometrically and
     the endpoint region is obstacle-exempt (so the net can reach its own pad), so a
-    full-width terminal can sit sub-clearance to a NEIGHBOURING foreign pad (#157,
-    e.g. tigard Net-(R7-Pad2) grazing the VREG pad by 8um). Narrowing the offending
-    terminal segment restores clearance without moving the centreline, so
-    connectivity is preserved; a graze the floor width still can't clear is left for
-    the DRC report. Only segments touching a terminal point are considered (the A*
-    body keep-outs already enforce clearance mid-route). Returns the count necked.
+    full-width terminal can sit sub-clearance to NEIGHBOURING foreign copper -- a pad
+    (#157, e.g. tigard Net-(R7-Pad2) grazing the VREG pad by 8um) OR another net's
+    track/via (#212: a +1V2 terminal into a cap pad grazing a wide +3V3 trace by
+    ~15um). Narrowing the offending terminal segment restores clearance without
+    moving the centreline, so connectivity is preserved; a graze the floor width
+    still can't clear is left for the DRC report. Only segments touching a terminal
+    point are considered (the A* body keep-outs already enforce clearance mid-route).
+    Returns the count necked.
 
     `floor` defaults to the board's fab track-width minimum (issue #176): necking
     to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
@@ -157,7 +240,9 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     for s in segments:
         if not touches(s):
             continue
-        d = _seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer)
+        # Nearest foreign EDGE on this layer -- pad or track/via, whichever is closer.
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer),
+                _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer))
         allowed_half = d - config.clearance - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
             new_w = max(floor, 2.0 * allowed_half)
@@ -165,6 +250,24 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                 s.width = round(new_w, 4)
                 necked += 1
     return necked
+
+
+def _neck_route_terminal_grazes(segments, path, coord, start_original, end_original,
+                                pcb_data, net_id, config):
+    """Run _neck_terminal_grazes for a converted multipoint edge/tap, recomputing the
+    terminal points from the path endpoints + original pad positions. Called AFTER
+    _apply_neckdown_widths / uniform_width so the graze-neck is authoritative: those
+    passes rebuild every width from the pad-distance taper and would otherwise restore
+    a grazing terminal to full/base width, undoing the neck (issue #212)."""
+    if pcb_data is None or not path:
+        return
+    term_pts = [coord.to_float(path[0][0], path[0][1]),
+                coord.to_float(path[-1][0], path[-1][1])]
+    if start_original:
+        term_pts.append((start_original[0], start_original[1]))
+    if end_original:
+        term_pts.append((end_original[0], end_original[1]))
+    _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
 
 
 def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
@@ -821,10 +924,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             # Check if layer change is at an existing through-hole pad
             # If so, skip creating a via - the pad provides the layer transition
             if (gx1, gy1) not in through_hole_positions:
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config)
                 via = Via(
                     x=x1, y=y1,
-                    size=config.via_size,
-                    drill=config.via_drill,
+                    size=_vsz,
+                    drill=_vdr,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
                     net_id=net_id
                 )
@@ -1140,7 +1244,18 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
     v = tap_res.via
     via = Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
               layers=v.get('layers', [layer_names[0], layer_names[-1]]), net_id=net_id)
-    return via, coord.to_grid(v['x'], v['y']), layer_names.index(pad_layer)
+    vgx, vgy = coord.to_grid(v['x'], v['y'])
+    # Record this cell's DRC-legal shrunk via size so route conversion emits THAT
+    # size (not the full config.via_size) if the path later changes layer here
+    # through the registered free via. The free via is what lets the boxed pad
+    # connect; a full via at the cell grazes a neighbouring foreign pad (only the
+    # shrunk via fits) -- issue #212, glasgow_revC Z5 via vs RN4.6.
+    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+    if sizes is None:
+        sizes = {}
+        pcb_data._unblock_via_sizes = sizes
+    sizes[(vgx, vgy)] = (v['size'], v['drill'])
+    return via, (vgx, vgy), layer_names.index(pad_layer)
 
 
 def _net_pad_near(pcb_data, net_id, cells, coord):
@@ -1680,10 +1795,11 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
             # Check if layer change is at an existing through-hole pad
             # If so, skip creating a via - the pad provides the layer transition
             if (gx1, gy1) not in through_hole_positions:
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config)
                 via = Via(
                     x=x1, y=y1,
-                    size=config.via_size,
-                    drill=config.via_drill,
+                    size=_vsz,
+                    drill=_vdr,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
                     net_id=net_id
                 )
@@ -2001,6 +2117,12 @@ def route_multipoint_main(
         # that width, so obstacle blocking (reads seg.width) and output match.
         for _s in segments:
             _s.width = uniform_width
+    # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
+    # passes above rebuild widths and would otherwise restore a grazing terminal leg
+    # to base/power width, undoing the graze-neck applied during conversion.
+    _neck_route_terminal_grazes(segments, path, coord,
+                                (pad_a[3], pad_a[4]), (pad_b[3], pad_b[4]),
+                                pcb_data, net_id, config)
     # Fab-floor via dropped inside a boxed main-edge pad to unblock it (#189).
     vias = list(vias) + main_unblock_vias
 
@@ -2421,6 +2543,12 @@ def route_multipoint_taps(
             # so obstacle blocking (reads seg.width) and output match.
             for _s in segments:
                 _s.width = uniform_width
+        # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
+        # passes rebuild widths and would otherwise restore a grazing terminal leg to
+        # base/power width, undoing the graze-neck applied during conversion.
+        _neck_route_terminal_grazes(segments, path, coord,
+                                    (tap_x, tap_y), (tgt_x, tgt_y),
+                                    pcb_data, net_id, config)
         # Any fab-floor via dropped INSIDE the boxed target pad to unblock this
         # edge (issue #189) -- it connects the inner-layer path end to the pad by
         # copper overlap, no extra trace needed.
@@ -2573,10 +2701,11 @@ def _path_to_segments_vias(
                 pass
             else:
                 vx, vy = coord.to_float(gx1, gy1)  # via stays on the grid cell
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config)
                 via = Via(
                     x=vx, y=vy,
-                    size=config.via_size,
-                    drill=config.via_drill,
+                    size=_vsz,
+                    drill=_vdr,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
                     net_id=net_id
                 )
