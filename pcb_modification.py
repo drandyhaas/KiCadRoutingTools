@@ -44,15 +44,34 @@ def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
     layers), on a same-net pad (on a shared layer), or in the middle of another
     same-net segment on the same layer (a T-junction). Anchored endpoints are
     real connections, never dead ends."""
+    # A pad/via anchors a segment endpoint only when the segment's copper actually
+    # reaches the pad/via copper: dist < (pad|via)_half + seg_half. The old fixed
+    # +0.05 slop anchored a near-miss -- a fine-track (0.0889mm) plane-repair stub
+    # that stopped 0.049mm OUTSIDE a 0.27mm BGA ball, its copper 0.0045mm short of
+    # touching -- so a useless, GND-grazing dead-end stub was never swept (#209/#216).
+    # Tying the slop to the segment's own half-width keeps wide power traces lenient
+    # while a fine stub must genuinely reach the copper; the _safe_prune_net
+    # connectivity gate still backstops any real connection this would flag.
+    seg_half = (getattr(ignore_seg, 'width', 0.0) or 0.0) / 2.0
     for vx, vy, vsize in via_pts:
-        if math.hypot(x - vx, y - vy) < vsize / 2 + 0.05:
+        if math.hypot(x - vx, y - vy) < vsize / 2 + seg_half:
             return True
     for px, py, psize, players in pad_pts:
         on_layer = (not players) or layer in players or any('*' in L for L in players)
-        if on_layer and math.hypot(x - px, y - py) < psize / 2 + 0.05:
+        if on_layer and math.hypot(x - px, y - py) < psize / 2 + seg_half:
             return True
+    ig_ends = (((ignore_seg.start_x, ignore_seg.start_y),
+                (ignore_seg.end_x, ignore_seg.end_y)) if ignore_seg is not None else ())
     for s in all_segs:
         if s is ignore_seg or s.layer != layer:
+            continue
+        # Skip a segment that shares a vertex with ignore_seg: a dead-end stub that
+        # bends sharply lands its loose end near its OWN chain-neighbour, and that
+        # fold is not a real T-junction onto independent copper -- counting it kept
+        # a useless GND-grazing plane-repair stub un-swept (#209/#216 lpddr4 C30.2).
+        if any((abs(s.start_x - ax) < tol and abs(s.start_y - ay) < tol) or
+               (abs(s.end_x - ax) < tol and abs(s.end_y - ay) < tol)
+               for ax, ay in ig_ends):
             continue
         dx = s.end_x - s.start_x
         dy = s.end_y - s.start_y
