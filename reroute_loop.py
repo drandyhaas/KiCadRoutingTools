@@ -8,7 +8,9 @@ during diff pair or single-ended routing, extracted from route.py.
 import time
 from typing import List, Tuple
 
-from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
+from routing_state import (RoutingState, record_net_event, record_rip_ancestry,
+                           record_pair_rip_ancestry, rip_exclude_set,
+                           diff_pair_rip_exclude)
 from obstacle_costs import compute_track_proximity_for_net
 from connectivity import get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
 from net_queries import calculate_route_length
@@ -578,7 +580,8 @@ def run_reroute_loop(
                     if blocked_cells:
                         blockers = analyze_frontier_blocking(
                             blocked_cells, pcb_data, config, routed_net_paths,
-                            exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
+                            exclude_net_ids=diff_pair_rip_exclude(
+                                state, ripped_pair.p_net_id, ripped_pair.n_net_id),
                             extra_clearance=diff_pair_extra_clearance,
                             target_xy=reroute_target_xy,
                             source_xy=reroute_source_xy,
@@ -608,7 +611,8 @@ def run_reroute_loop(
                                 print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                    exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
+                                    exclude_net_ids=diff_pair_rip_exclude(
+                                        state, ripped_pair.p_net_id, ripped_pair.n_net_id),
                                     extra_clearance=diff_pair_extra_clearance,
                                     target_xy=reroute_target_xy,
                                     source_xy=reroute_source_xy,
@@ -693,6 +697,10 @@ def run_reroute_loop(
                                 # Invalidate obstacle cache for ripped nets and record rip events
                                 for rid in ripped_ids:
                                     invalidate_obstacle_cache(obstacle_cache, rid)
+                                    # Cycle guard (issue #219): the rerouting pair
+                                    # ripped rid, so rid must not rip either half back.
+                                    record_pair_rip_ancestry(state, ripped_pair.p_net_id,
+                                                             ripped_pair.n_net_id, rid)
                                     record_net_event(state, rid, "ripped_by", {
                                         "ripping_net_id": ripped_pair.p_net_id,
                                         "ripping_net_name": ripped_pair_name,

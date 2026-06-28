@@ -6,12 +6,28 @@ used during the routing process, enabling cleaner extraction of routing loops
 into separate functions.
 """
 
+import os
 from typing import List, Dict, Set, Tuple, Optional, Any
 from dataclasses import dataclass, field
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig
 from routing_utils import build_layer_map
+
+
+# Issue #219: the diff-pair extension of the rip-up cycle-guard is OFF by default.
+# The single-ended guard (record_rip_ancestry, commit e3e4b57's queue-level sibling)
+# stays always-on; this flag gates only the diff-pair rip/reroute paths. A clean
+# per-board A/B (committed vs guard, identical input) showed the diff-pair guard is
+# a no-op whenever no diff-pair rip war occurs (the common case, incl. the
+# motivating cparti board -- whose +1V8<->B_{n}ON war is single-ended) and a
+# sign-unstable butterfly when one does: -13% router iterations on one congested
+# config, +12% on another, and one config traded a DRC-clean board for a P/N
+# self-crossing on a "successfully" rerouted pair. No measured win, so it ships
+# disabled. Kept (not deleted) so it can be graded against a real diff-pair rip war
+# if the stress corpus ever surfaces one. Enable with KICAD_DIFFPAIR_RIP_GUARD=1.
+DIFF_PAIR_RIP_GUARD = os.environ.get(
+    "KICAD_DIFFPAIR_RIP_GUARD", "").strip().lower() not in ("", "0", "false", "no")
 
 
 @dataclass
@@ -223,6 +239,36 @@ def record_rip_ancestry(state: RoutingState, ripper_net_id: int, ripped_net_id: 
     anc = (frozenset({ripper_net_id})
            | state.rip_ancestry.get(ripper_net_id, frozenset())) - {ripped_net_id}
     state.rip_ancestry[ripped_net_id] = anc
+
+
+def record_pair_rip_ancestry(state: RoutingState, ripper_p_id: int,
+                             ripper_n_id: int, ripped_net_id: int):
+    """Diff-pair ripper variant of record_rip_ancestry (issue #219).
+
+    OFF by default (see DIFF_PAIR_RIP_GUARD) -- a no-op unless explicitly enabled.
+    When on: the ripper is a differential pair (both halves rip as one unit), so
+    the ripped net must not rip back EITHER half (or their ancestors). Recording
+    the two halves with two record_rip_ancestry calls would not work -- the second
+    REPLACES the first -- so set the ripped net's ancestry to the UNION of both
+    halves' exclude sets in one shot. Like record_rip_ancestry it replaces any
+    prior value (a net only re-routes after being ripped)."""
+    if not DIFF_PAIR_RIP_GUARD:
+        return
+    anc = (rip_exclude_set(state, ripper_p_id)
+           | rip_exclude_set(state, ripper_n_id)) - {ripped_net_id}
+    if anc:
+        state.rip_ancestry[ripped_net_id] = anc
+
+
+def diff_pair_rip_exclude(state: RoutingState, p_net_id: int, n_net_id: int) -> Set[int]:
+    """Blocker-exclude set for a (re)routing diff pair (issue #219).
+
+    Guard OFF (default): just the pair's own two nets, as before. Guard ON: also
+    excludes the pair's rip-ancestry, so the pair won't rip a net that ripped it
+    (the A->B->A cycle guard). Mirrors rip_exclude_set for the single-ended path."""
+    if DIFF_PAIR_RIP_GUARD:
+        return rip_exclude_set(state, p_net_id) | rip_exclude_set(state, n_net_id)
+    return {p_net_id, n_net_id}
 
 
 def rip_exclude_set(state: RoutingState, net_id: int) -> Set[int]:

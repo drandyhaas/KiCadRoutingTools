@@ -8,7 +8,7 @@ extracted from route.py for better maintainability.
 import time
 from typing import List, Tuple
 
-from routing_state import RoutingState
+from routing_state import RoutingState, record_pair_rip_ancestry, diff_pair_rip_exclude
 from routing_config import DiffPairNet
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_costs import compute_track_proximity_for_net
@@ -214,7 +214,7 @@ def route_diff_pairs(
             # Analyze which routed nets are blocking
             blockers = analyze_frontier_blocking(
                 blocked_cells, pcb_data, config, routed_net_paths,
-                exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                exclude_net_ids=diff_pair_rip_exclude(state, pair.p_net_id, pair.n_net_id),
                 extra_clearance=config.diff_pair_gap / 2,
                 target_xy=target_xy,
                 source_xy=source_xy,
@@ -267,6 +267,10 @@ def route_diff_pairs(
                 layer_map
             )
             probe_ripped_items.append((blocker, saved_result, ripped_ids, was_in_results))
+            # Cycle guard (issue #219): this pair ripped these nets, so they must
+            # not rip either half back when they later re-route.
+            for rid in (ripped_ids or []):
+                record_pair_rip_ancestry(state, pair.p_net_id, pair.n_net_id, rid)
 
             # Rebuild obstacles without ripped net
             retry_obstacles, _ = build_diff_pair_obstacles(
@@ -451,7 +455,7 @@ def route_diff_pairs(
                 if blocked_cells:
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
-                        exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                        exclude_net_ids=diff_pair_rip_exclude(state, pair.p_net_id, pair.n_net_id),
                         extra_clearance=diff_pair_extra_clearance,
                         target_xy=target_xy,
                         source_xy=source_xy,
@@ -475,7 +479,7 @@ def route_diff_pairs(
                             print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                             fresh_blockers = analyze_frontier_blocking(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                exclude_net_ids={pair.p_net_id, pair.n_net_id},
+                                exclude_net_ids=diff_pair_rip_exclude(state, pair.p_net_id, pair.n_net_id),
                                 extra_clearance=diff_pair_extra_clearance,
                                 target_xy=target_xy,
                                 source_xy=source_xy,
@@ -563,6 +567,10 @@ def route_diff_pairs(
                             # Invalidate obstacle cache for ripped nets
                             for rid in ripped_ids:
                                 invalidate_obstacle_cache(obstacle_cache, rid)
+                                # Cycle guard (issue #219): this pair ripped rid,
+                                # so rid must not rip either half back.
+                                record_pair_rip_ancestry(state, pair.p_net_id,
+                                                         pair.n_net_id, rid)
                             if was_in_results:
                                 successful -= 1
                             if blocker.net_id in diff_pair_by_net_id:
