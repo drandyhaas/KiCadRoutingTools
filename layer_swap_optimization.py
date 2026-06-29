@@ -25,6 +25,64 @@ from stub_layer_switching import (
 from diff_pair_routing import get_diff_pair_endpoints
 from connectivity import get_net_endpoints, get_multipoint_net_pads
 
+_DRC_CLEARANCE_MARGIN = 0.05
+
+
+def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
+    """Issue #241: the bare-pad target swap drops a through-via on EACH of a diff
+    pair's P and N pads to fan them onto an inner layer. At a tight connector pad
+    pitch (e.g. SYZYGY/DDR headers at 0.5mm) two 0.45mm via bodies inherently
+    collide (VIA-VIA) and graze the neighbouring cap/connector pads (PAD-VIA) -
+    the existing via_barrel_clear_of_foreign_copper guard only catches a via
+    PUNCHING THROUGH foreign copper (a short), not a sub-clearance graze.
+
+    Re-validate the two new vias the way check_drc would - body clearance AND
+    drill hole-to-hole - against each other, the existing foreign vias, and the
+    foreign pads. Pads/vias on the pair's OWN nets are excluded (the via
+    legitimately sits on its own pad, and a tight P/N via-via collision is the
+    very thing we test for here via the new_vias[i+1:] pass). Mirrors
+    diff_pair_multipoint._fans_fit, which already guards the multipoint relocation.
+
+    Returns (fit, reason).
+    """
+    from check_drc import (check_via_via_overlap, check_via_drill_overlap,
+                            check_pad_via_overlap, check_pad_drill_via_overlap)
+    clearance = config.clearance
+    h2h = config.hole_to_hole_clearance
+    margin = _DRC_CLEARANCE_MARGIN
+    routing_layers = [l for l in config.layers if l.endswith('.Cu')]
+    new_ids = {id(v) for v in new_vias}
+    pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+
+    for i, v in enumerate(new_vias):
+        # vs the partner net's new pad via (the P/N via-via at the pad pitch).
+        for w in new_vias[i + 1:]:
+            if check_via_via_overlap(v, w, clearance, margin)[0]:
+                return False, "P/N pad vias collide (via-via)"
+            if check_via_drill_overlap(v, w, h2h, margin)[0]:
+                return False, "P/N pad via drills collide (hole-to-hole)"
+        # vs existing foreign vias (their bodies and drills).
+        for ev in pcb_data.vias:
+            if id(ev) in new_ids or ev.net_id == v.net_id:
+                continue
+            if check_via_via_overlap(v, ev, clearance, margin)[0]:
+                return False, "pad via grazes a foreign via (via-via)"
+            if check_via_drill_overlap(v, ev, h2h, margin)[0]:
+                return False, "pad via drill grazes a foreign via drill (hole-to-hole)"
+        # vs foreign AND partner pads. Exclude only the via's OWN-net pad (the one
+        # it legitimately sits on); the PARTNER net's pad IS checked, since a P-pad
+        # via grazing the adjacent N pad (a 0.5mm-pitch connector) is a real PAD-VIA
+        # short - the /SYZYGY1.C2P_CLK_P via-vs-C2P_CLK_N(J4.36) case.
+        for pad_net, pads in pads_by_net.items():
+            if pad_net == v.net_id:
+                continue
+            for pad in pads:
+                if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
+                    return False, "pad via grazes a foreign pad (pad-via)"
+                if check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
+                    return False, "pad via drill grazes a foreign pad drill (hole-to-hole)"
+    return True, ""
+
 
 def _find_blocking_single_ended_nets(
     stub_p, stub_n, dest_layer: str, pcb_data: PCBData, diff_pair_net_ids: Set[int]
@@ -670,6 +728,23 @@ def apply_diff_pair_layer_swaps(
                 via_n, stub_n = apply_bare_pad_target_via(
                     pcb_data, pair.n_net_id, n_tgt_x, n_tgt_y, fan_layer,
                     src_cx, src_cy, config)
+                # Issue #241: the two pad vias can't fit at a tight connector pad
+                # pitch (0.5mm) - they collide with each other / graze neighbouring
+                # pads below clearance. Validate at check_drc's clearance and, if
+                # they don't fit, undo the swap so the pair routes to the bare pads
+                # instead (the right treatment for a dense connector fan-out).
+                fit, why = _bare_pad_pair_vias_fit(
+                    pcb_data, [via_p, via_n], config)
+                if not fit:
+                    for _v in (via_p, via_n):
+                        if _v in pcb_data.vias:
+                            pcb_data.vias.remove(_v)
+                    for _s in (stub_p, stub_n):
+                        if _s in pcb_data.segments:
+                            pcb_data.segments.remove(_s)
+                    print(f"    Bare-pad target swap skipped for {pair_name}: {why} "
+                          f"(pair routes to the bare pads instead)")
+                    continue
                 all_swap_vias.extend([via_p, via_n])
                 all_swap_segments.extend([stub_p, stub_n])
 
