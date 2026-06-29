@@ -383,6 +383,46 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
+    # ----- Fanout DRC pre-check (#242) ------------------------------------
+    # A pair whose fanout escape stubs ALREADY pinch their own P/N below clearance
+    # (a bga_fanout escape-fan defect) cannot be coupled-routed cleanly: routing it
+    # only spreads or relocates the bad copper (a solo source switch silently moves
+    # the overlap to another layer). Detect it up front from the existing stub
+    # copper, skip the pair entirely (not routed here, and -- by dropping it from
+    # the routed-net set -- left as an obstacle and not handed to the single-ended
+    # follow-up), and report it. The fanout must be fixed, not routed over.
+    from diff_pair_routing import _seg_to_seglist_min_edge as _fanout_edge
+
+    def _fanout_self_overlaps(p_net_id, n_net_id):
+        # Match check_drc's seg-seg verdict: it ignores an overlap <= clearance*5%
+        # (a coupled escape laid right at the gap dips a hair below clearance at
+        # bends but is DRC-clean). Only a REAL violation (e.g. a touching escape
+        # fan, edge ~0) should skip the pair.
+        thr = config.clearance * 0.95
+        p_segs = [s for s in pcb_data.segments if s.net_id == p_net_id]
+        n_segs = [s for s in pcb_data.segments if s.net_id == n_net_id]
+        if not p_segs or not n_segs:
+            return False
+        return any(_fanout_edge(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer, n_segs)
+                   < thr for s in p_segs)
+
+    skipped_bad_fanout = [name for name, pair in diff_pair_ids_to_route_set
+                          if _fanout_self_overlaps(pair.p_net_id, pair.n_net_id)]
+    if skipped_bad_fanout:
+        skip_set = set(skipped_bad_fanout)
+        skip_net_ids = {nid for name, pair in diff_pair_ids_to_route_set if name in skip_set
+                        for nid in (pair.p_net_id, pair.n_net_id)}
+        diff_pair_ids_to_route_set = [(n, p) for n, p in diff_pair_ids_to_route_set
+                                      if n not in skip_set]
+        net_ids = [(nm, nid) for nm, nid in net_ids if nid not in skip_net_ids]
+        diff_pair_net_ids = {nid for nid in diff_pair_net_ids if nid not in skip_net_ids}
+        print("\n" + "=" * 60)
+        print(f"Skipping {len(skipped_bad_fanout)} pair(s): fanout escape stubs already pinch "
+              f"their own P/N below clearance ({config.clearance}mm) -- fix the fanout (#242):")
+        for n in skipped_bad_fanout:
+            print(f"  {n}")
+        print("=" * 60)
+
     # Apply target swaps for swappable-nets feature
     # This swaps net IDs at targets BEFORE routing, so routing sees the swapped configuration
     target_swaps: Dict[str, str] = {}  # pair_name -> swapped_target_pair_name
@@ -827,6 +867,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if single_ended_diff_pairs:
         print(f"  Single-ended:  {len(single_ended_diff_pairs)} (electrically short - "
               f"deferred to single-ended routing)")
+    if skipped_bad_fanout:
+        print(f"  {RED}Skipped:       {len(skipped_bad_fanout)} (fanout stubs self-overlap - "
+              f"fix the fanout, #242){RESET}")
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
@@ -838,6 +881,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
         'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
+        'skipped_bad_fanout': sorted(skipped_bad_fanout),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
