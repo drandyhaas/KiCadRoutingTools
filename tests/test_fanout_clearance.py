@@ -124,6 +124,46 @@ def test_foreign_pad_blocks_move_into_short():
     assert st.pad_penalty(CAP, cap, tx, ty, tr) <= 1e-6
 
 
+def test_via_clear_fallback_rescues_stuck_caps():
+    """#213: a cap the normal cost descent leaves grazing a foreign via is
+    relocated to a via-clearing spot by the fallback. Isolate it by freezing
+    the descent (zero budget, single pass) so the fallback is the ONLY thing
+    that can resolve a violation."""
+    common = dict(clearance=CLEAR, max_displacement=0.0, max_passes=1)
+    off = repair_fanout_clearance(parse_kicad_pcb(BOARD), BOARD,
+                                  via_clear_fallback=False, **common)
+    on = repair_fanout_clearance(parse_kicad_pcb(BOARD), BOARD,
+                                 via_clear_fallback=True, **common)
+    # With the descent frozen, nothing clears without the fallback...
+    assert off['unresolved'], "fixture should leave caps stuck without fallback"
+    assert off['resolved'] == []
+    # ...and the fallback resolves them (never makes things worse).
+    assert set(on['unresolved']) < set(off['unresolved'])
+    assert on['resolved']
+
+
+def test_via_clear_fallback_respects_hard_clearances():
+    """The fallback must not create a new foreign-pad short to clear a via: no
+    cap it moves ends up grazing a foreign pad worse than at its seed (the
+    hard_blocked guard is enforced inside the fallback's cost() gate)."""
+    seed = _new_repair(parse_kicad_pcb(BOARD))  # base_pad at seed placement
+    pcb = parse_kicad_pcb(BOARD)
+    res = repair_fanout_clearance(pcb, BOARD, clearance=CLEAR,
+                                  max_displacement=0.0, max_passes=1,
+                                  via_clear_fallback=True)
+    from placement.writer import write_placed_output
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, 'o.kicad_pcb')
+        write_placed_output(BOARD, out, res['placements'])
+        after = _Repair(parse_kicad_pcb(out), out, CLEAR, 0.1, 0.55, 1.0,
+                        2.0, 0.3, 'C', set())
+    for ref, cap in after.caps.items():
+        got = after.pad_penalty(ref, cap, cap.x, cap.y, cap.rot)
+        assert got <= seed.base_pad.get(ref, 0.0) + 1e-6, \
+            f"{ref} grazes a foreign pad worse than seed after fallback"
+
+
 def test_foreign_pad_other_side_smd_ignored():
     """An SMD foreign pad on the opposite side does not constrain the cap."""
     pcb = parse_kicad_pcb(BOARD)
@@ -149,4 +189,6 @@ if __name__ == '__main__':
     test_no_vias_means_noop()
     test_foreign_pad_blocks_move_into_short()
     test_foreign_pad_other_side_smd_ignored()
+    test_via_clear_fallback_rescues_stuck_caps()
+    test_via_clear_fallback_respects_hard_clearances()
     print("ALL PASS")

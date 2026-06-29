@@ -541,6 +541,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             cap_prefix: str = "C,R",
                             lock_refs: Optional[List[str]] = None,
                             max_passes: int = 30,
+                            via_clear_fallback: bool = True,
                             verbose: bool = False,
                             on_move=None) -> Dict:
     """Nudge near-BGA decoupling caps off foreign-net fanout vias and toward
@@ -549,6 +550,11 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     Returns a dict with 'placements' (list of {reference,new_x,new_y,
     new_rotation} for moved caps), 'resolved', 'unresolved' (refs still
     overlapping a foreign via), and 'bga_refs'.
+
+    via_clear_fallback (#213): when True (default), any cap the normal cost
+    descent leaves grazing a foreign via is jumped to the nearest position that
+    fully clears it (still respecting every hard clearance). It is deliberately
+    NOT exposed on the CLI / GUI -- flip this argument in code to disable.
 
     on_move, if given, is a callback invoked with the internal _Repair state
     once at the seed placement and again after every accepted cap move. It is
@@ -644,6 +650,43 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                 break
             if verbose:
                 print(f"  escalating budget/rotation for {len(still)} cap(s)")
+
+    # Fallback (#213): a cap may still graze a foreign via because the soft cost
+    # (same-net attraction + displacement) judged the tiny penetration cheaper
+    # than a clear-but-distant spot, so the greedy descent never relocates it.
+    # A shipped PAD-VIA short is worse than a displaced decap, so for any cap
+    # still in via-conflict, jump it to the best position (within the full
+    # displacement budget) that FULLY clears every foreign via -- cost() still
+    # rejects any hard-constraint violation (board edge, courtyard, foreign
+    # track/pad #235), so this can never introduce a new short/overlap; it only
+    # overrides the soft trade-off. If no clean via-clearing spot exists the cap
+    # is left as-is and reported unresolved (needs a via re-drop, not a move).
+    if via_clear_fallback:
+        stuck = [r for r in st.caps
+                 if st.via_penalty(st.caps[r], st.caps[r].x, st.caps[r].y,
+                                   st.caps[r].rot, st.cap_vias[r]) > EPS]
+        rots_all = ROTATIONS if allow_rotations else None
+        for ref in stuck:
+            cap = st.caps[ref]
+            rots = rots_all if rots_all is not None else [cap.rot]
+            best = None  # (cost, x, y, rot)
+            for cx, cy in _candidate_positions(cap, max_displacement_cap,
+                                               step, grid_step):
+                for rot in rots:
+                    if st.via_penalty(cap, cx, cy, rot, st.cap_vias[ref]) > EPS:
+                        continue
+                    c = st.cost(ref, cap, cx, cy, rot)  # inf if hard-blocked
+                    if c == float('inf'):
+                        continue
+                    if best is None or c < best[0] - EPS:
+                        best = (c, cx, cy, rot)
+            if best is not None:
+                cap.x, cap.y, cap.rot = best[1], best[2], best[3]
+                disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
+                if verbose:
+                    print(f"  fallback: {ref} relocated to clear via at "
+                          f"disp {disp:.2f}mm -> ({cap.x:.3f},{cap.y:.3f}) "
+                          f"rot {cap.rot:g}")
 
     placements = []
     resolved = []
