@@ -66,10 +66,14 @@ TIERS = ('standard', 'advanced')
 
 # --- Process-wide selected tier ----------------------------------------------
 # The active tier is a module-global so the dozens of deep ``fab_floors(n)`` call
-# sites need not each thread a tier param. Each CLI sets it once after arg parsing;
-# the public engine entrypoints set+restore it around their body (try/finally) so
-# the in-process GUI can run tabs back-to-back without one tab's custom file leaking
-# into the next. NOTE: process-wide, not thread-local — engines run serially.
+# sites need not each thread a tier param. It is set once per run, near the start:
+# each CLI calls ``set_default_fab_tier`` after arg parsing, and each in-process GUI
+# routing action calls ``set_fab_tier_from_config`` at entry. There is no
+# save/restore around an engine body — the global simply holds the last value set,
+# so a caller that routes without first setting the tier inherits the previous run's
+# value. The in-process GUI avoids one tab's custom file leaking into the next by
+# re-setting the tier from its own config at the start of every routing action.
+# NOTE: process-wide, not thread-local — engines run serially.
 _DEFAULT_TIER = 'standard'
 _DEFAULT_OVERRIDES = {}
 _escalation_warned = set()
