@@ -1503,13 +1503,16 @@ For differential pair routing, use route_diff.py:
     add_fab_tier_args(parser)
     args = parser.parse_args()
     set_default_fab_tier(*fab_tier_from_args(args))
-    enforce_fab_floors(
+    _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
+    # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
+    for _pname, _pfloor in _pinned_floors.items():
+        setattr(args, _pname, _pfloor)
 
     # --output is a named alias for the positional output_file; reject giving both differently.
     if args.output is not None:

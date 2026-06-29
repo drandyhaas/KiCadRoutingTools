@@ -30,13 +30,18 @@ def _vias(ladder):
 
 def test_tiers_and_ladder(v):
     fails = []
-    # standard ladder = [standard, advanced]; advanced ladder = [advanced]
+    # standard ladder = [standard, (fine-via rung on 4+ layers), advanced];
+    # advanced ladder = [advanced]. The 0.30/0.15 fine-via rung is 4+-layer only
+    # (fine BGA-pitch escape), restored on the standard ladder in commit 926bf3f.
+    expected_standard = {
+        2: [(0.45, 0.20), (0.25, 0.15)],
+        4: [(0.45, 0.20), (0.30, 0.15), (0.25, 0.15)],
+    }
     for ncu in (2, 4):
         lad = ft.fab_floor_ladder(ncu, 'standard')
-        if len(lad) != 2:
-            fails.append(f"{ncu}L standard ladder len {len(lad)} != 2")
-        if _vias(lad) != [(0.45, 0.20), (0.25, 0.15)]:
-            fails.append(f"{ncu}L standard ladder vias {_vias(lad)} unexpected")
+        if _vias(lad) != expected_standard[ncu]:
+            fails.append(f"{ncu}L standard ladder vias {_vias(lad)} != "
+                         f"{expected_standard[ncu]}")
         adv = ft.fab_floor_ladder(ncu, 'advanced')
         if len(adv) != 1 or _vias(adv) != [(0.25, 0.15)]:
             fails.append(f"{ncu}L advanced ladder {_vias(adv)} unexpected")
@@ -145,12 +150,15 @@ def test_param_floors(v):
     # at/above floor -> no violation
     if ft.check_param_floors(4, 'standard', via_size=0.25, track_width=0.0762):
         fails.append("at-floor values wrongly flagged")
-    # enforce raises
-    try:
-        ft.enforce_fab_floors(4, 'standard', via_drill=0.05)
-        fails.append("enforce_fab_floors did not raise on sub-floor via_drill")
-    except SystemExit:
-        pass
+    # enforce pins up to the floor and reports the clamp (issue #237: warn + pin,
+    # don't abort the run -- the fab can't make sub-floor, so clamp and continue).
+    pinned = ft.enforce_fab_floors(4, 'standard', via_drill=0.05)
+    if pinned.get('via_drill') != ft.fab_floor_min(4, 'standard')['via_drill']:
+        fails.append(f"enforce_fab_floors did not pin sub-floor via_drill up to "
+                     f"the floor (got {pinned})")
+    # at/above-floor params return no clamps
+    if ft.enforce_fab_floors(4, 'standard', via_drill=0.2):
+        fails.append("enforce_fab_floors clamped an at/above-floor via_drill")
     # an override lowering the floor lets the value through
     if ft.check_param_floors(4, 'standard', {'via_drill': 0.04}, via_drill=0.05):
         fails.append("override-lowered floor still flagged 0.05 drill")

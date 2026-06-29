@@ -190,17 +190,24 @@ def count_copper_layers_in_file(pcb_path):
 
 
 def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
-    """CLI guard: raise SystemExit if any routing parameter is below the fab floor
-    for the active tier. Each CLI passes the params it accepts (track_width,
-    clearance, via_size, via_drill, hole_to_hole_clearance); None values skip."""
+    """CLI guard: pin any routing parameter that is below the fab floor UP to the
+    floor, warn, and keep running (issue #237). The fab physically can't make
+    sub-floor geometry, so rather than abort the run we clamp each out-of-range
+    value to the smallest the selected --fab-tier can make and print a warning.
+
+    Each CLI passes the params it accepts (track_width, clearance, via_size,
+    via_drill, hole_to_hole_clearance); None values skip. Returns a
+    ``{param_name: pinned_floor}`` dict of the clamps applied (empty if all in
+    range) so the caller can write the pinned values back onto its parsed args."""
     viols = check_param_floors(copper_layer_count, tier, overrides, **params)
-    if viols:
-        details = "; ".join(f"--{n.replace('_', '-')} {v} is below the fab floor {f}"
-                            for n, v, f in viols)
-        raise SystemExit(
-            f"error: {details}. The fab cannot make these for the selected --fab-tier; "
-            f"raise the value(s), or pass a --fab-overrides file declaring a smaller fab "
-            f"capability.")
+    pinned = {}
+    for name, val, floor in viols:
+        print(f"  ⚠ --{name.replace('_', '-')} {val} is below the fab floor {floor} "
+              f"for the selected --fab-tier; pinning up to {floor} (the fab can't "
+              f"make it smaller). Pass --fab-overrides to declare a smaller fab "
+              f"capability, or raise the value to silence this.")
+        pinned[name] = floor
+    return pinned
 
 
 def check_param_floors(copper_layer_count, tier=None, overrides=None, **params):
