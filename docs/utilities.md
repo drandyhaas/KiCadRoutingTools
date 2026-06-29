@@ -30,6 +30,9 @@ Options:
   --min-via-diameter FLOAT  Minimum via outer diameter in mm (default: fab floor)
   --min-via-drill FLOAT     Minimum via drill diameter in mm (default: fab floor)
   --size-margin FLOAT       Absolute tolerance in mm for the size checks (default: 0)
+  --check-pad-edge          Also check pad-to-board-edge clearance. Off by default:
+                            pad-edge violations are almost always pre-existing
+                            edge-connector pads, not router-introduced.
 ```
 
 The per-type listing is capped at `--max-print` (default 20); when a type has
@@ -62,13 +65,15 @@ The DRC checker validates:
 3. **Via-to-track clearance** - Vias maintain clearance from tracks on other nets
 4. **Via-to-via clearance** - Vias maintain clearance from each other
 5. **Pad-to-via clearance** - Vias maintain clearance from pads on other nets
-6. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
-7. **Board edge clearance** - Tracks and vias maintain clearance from the board outline
-8. **Same-net crossings** - Detects tracks crossing on the same layer within a net
-9. **Track width** - Segments are at least the fab-floor minimum track width (JLC: 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
-10. **Via / hole size** - Via outer diameter and drill are at least the fine-via fab floor (JLC: 0.45mm/0.20mm on 2-layer, 0.30mm/0.15mm on 4+ layer).
+6. **Pad-to-pad clearance** - Pads of different nets on a shared copper layer maintain clearance (catches overlaps/shorts, e.g. a placement step nudging a part onto a foreign pad). Pads of the *same* footprint are skipped — a component's own fine-pitch pin gaps are fixed library geometry, not a pipeline-introduced defect.
+7. **Copper-to-hole clearance** - Tracks maintain clearance from NPTH (no-copper) drill holes of other nets — a real fab short the via-drill hole check misses (e.g. a track across a mounting hole)
+8. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
+9. **Board edge clearance** - Tracks and vias maintain clearance from the real `Edge.Cuts` outline (outer ring **plus interior cutouts/slots**), so copper routed into a cutout — which sits inside the bounding box — is caught. Falls back to the bounding box when the parser finds no usable outline. With `--check-pad-edge`, pads are checked too.
+10. **Same-net crossings** - Detects tracks crossing on the same layer within a net
+11. **Track width** - Segments are at least the fab-floor minimum track width (JLC: 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
+12. **Via / hole size** - Via outer diameter and drill are at least the fine-via fab floor (JLC: 0.45mm/0.20mm on 2-layer, 0.30mm/0.15mm on 4+ layer).
 
-Checks 9–10 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
+Checks 11–12 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
 
 ### Clearance Margin
 
