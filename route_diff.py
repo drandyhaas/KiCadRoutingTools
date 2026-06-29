@@ -755,6 +755,39 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Sync pcb_data with length-matched segments
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
 
+    # ----- Post-route cleanup (#215) --------------------------------------
+    # Mirror route.py's single-ended cleanup on the diff-pair copper. A redundant
+    # connector overshoot can poke within clearance of the PARTNER track (a tight
+    # terminal jog, a bare-pad target-swap stub): drop it when the net stays fully
+    # connected without it (connectivity-gated, so a load-bearing track is kept),
+    # then break any redundant cycle and trim the dead-end spur left behind.
+    # Scoped to the diff-pair nets so other copper is untouched.
+    from pcb_modification import prune_grazing_segments, prune_redundant_cycles, sweep_dead_ends
+    # ONLY fully-routed pairs: a failed / single-ended-deferred pair's fanout stubs
+    # have free ends by design (the single-ended follow-up connects them), so a
+    # dead-end sweep there would strip copper the next pass needs.
+    dp_scope = set()
+    for _pn, _pair in diff_pair_ids_to_route:
+        if _pair.p_net_id in routed_results and _pair.n_net_id in routed_results:
+            dp_scope.add(_pair.p_net_id)
+            dp_scope.add(_pair.n_net_id)
+    cleanup_input_strip = []
+    _gz, _gzn, _gz_in = prune_grazing_segments(
+        results, pcb_data, dp_scope, clearance=config.clearance,
+        check_foreign_segments=True)
+    if _gz:
+        print(f"Diff-pair graze prune: removed {_gz} grazing segment(s) across {_gzn} net(s)")
+        cleanup_input_strip += _gz_in
+    _cy, _cyn, _cy_in = prune_redundant_cycles(
+        results, pcb_data, dp_scope, clearance=config.clearance)
+    if _cy:
+        print(f"Diff-pair cycle prune: removed {_cy} redundant loop segment(s) across {_cyn} net(s)")
+        cleanup_input_strip += _cy_in
+    _de, _dev, _de_in = sweep_dead_ends(results, pcb_data, dp_scope)
+    if _de or _dev:
+        print(f"Diff-pair dead-end sweep: trimmed {_de} segment(s), {_dev} via(s)")
+        cleanup_input_strip += _de_in
+
     # Build summary data
     import json
     routed_diff_pairs = []
@@ -851,7 +884,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             exclusion_zone_lines=exclusion_zone_lines,
             boundary_debug_labels=boundary_debug_labels,
             skip_routing=skip_routing,
-            add_teardrops=add_teardrops
+            add_teardrops=add_teardrops,
+            segments_to_remove=cleanup_input_strip or None
         )
         # When no coupled copper was written -- every pair was deferred to
         # single-ended (electrically short), OR a pair could not be routed at all

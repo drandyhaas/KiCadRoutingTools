@@ -923,10 +923,33 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
 
 
+def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
+    """Minimum Euclidean distance between segments AB and CD (endpoint sampling,
+    exact for the non-crossing case a clearance test cares about; crossing -> ~0
+    which still flags)."""
+    def pt_seg(px, py, x1, y1, x2, y2):
+        vx, vy = x2 - x1, y2 - y1
+        l2 = vx * vx + vy * vy
+        if l2 <= 0.0:
+            return math.hypot(px - x1, py - y1)
+        t = ((px - x1) * vx + (py - y1) * vy) / l2
+        t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+        return math.hypot(px - (x1 + t * vx), py - (y1 + t * vy))
+    return min(pt_seg(ax, ay, cx, cy, dx, dy), pt_seg(bx, by, cx, cy, dx, dy),
+               pt_seg(cx, cy, ax, ay, bx, by), pt_seg(dx, dy, ax, ay, bx, by))
+
+
 def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
-                           clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+                           clearance: float = 0.1,
+                           check_foreign_segments: bool = False) -> Tuple[int, int, List[Segment]]:
     """Drop a segment that grazes a FOREIGN pad/via below clearance when the net
     stays fully connected without it (issue #224).
+
+    With ``check_foreign_segments`` (diff-pair cleanup, #215) a segment that grazes
+    another NET's track below clearance is also a candidate -- e.g. a redundant P
+    connector overshoot that pokes within clearance of the partner N track. Same
+    connectivity gate, so a load-bearing track (the partner's own through-run) is
+    kept; only the redundant overshoot is dropped.
 
     The router lays a terminal/tap segment toward its own pad/via through the
     obstacle-exempt endpoint region, so at tight connector / fine pad pitch it can
@@ -959,12 +982,34 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         for s in r.get('new_segments') or []:
             routed_seg_ids.add(id(s))
 
+    # Foreign-segment index by layer (only when segment grazing is requested).
+    segs_by_layer = defaultdict(list)
+    if check_foreign_segments:
+        for s in pcb_data.segments:
+            segs_by_layer[s.layer].append(s)
+
     def grazes(s):
         thr = clearance + s.width / 2.0 - 1e-4
-        return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr or
+        if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                  s.end_x, s.end_y, s.layer) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr)
+                                      s.end_x, s.end_y, s.layer) < thr):
+            return True
+        if check_foreign_segments:
+            slo_x, shi_x = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
+            slo_y, shi_y = min(s.start_y, s.end_y), max(s.start_y, s.end_y)
+            for o in segs_by_layer.get(s.layer, ()):
+                if o.net_id == s.net_id:
+                    continue
+                margin = clearance + (s.width + o.width) / 2.0
+                if (max(o.start_x, o.end_x) < slo_x - margin or min(o.start_x, o.end_x) > shi_x + margin or
+                        max(o.start_y, o.end_y) < slo_y - margin or min(o.start_y, o.end_y) > shi_y + margin):
+                    continue  # bbox prefilter
+                d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
+                                      o.start_x, o.start_y, o.end_x, o.end_y)
+                if d - (s.width + o.width) / 2.0 < clearance - 1e-4:
+                    return True
+        return False
 
     zones_by_net = defaultdict(list)
     for z in (getattr(pcb_data, 'zones', []) or []):
