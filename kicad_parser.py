@@ -298,28 +298,86 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
     the footprint rotation), applied with KiCad's negate convention -- same as
     local_to_global. Verified against pcbnew GetEffectivePolygon for bitaxe Q1/Q2.
 
-    Returns a list of vertex lists, or None when the pad has no primitives or has
-    any NON-gr_poly primitive (gr_circle/gr_line/gr_rect) -- those rarer shapes are
-    left to the conservative bounding-box model rather than approximated here.
-    """
+    Handles gr_poly, gr_circle, gr_rect and gr_line primitives -- each becomes one
+    polygon (their union is the real copper; the obstacle map and DRC already treat
+    polygons as a list and OR/min over them). A round mounting/logo pad drawn as a
+    gr_circle thus models its true disc instead of the (size) bounding box, killing
+    the phantom over-block on the empty side of the anchor (issue #232).
+
+    Returns a list of vertex lists, or None when the pad has no primitives, only
+    sub-3-vertex shapes, or any gr_arc / gr_curve primitive -- those curved shapes
+    are still left to the conservative bounding-box model rather than approximated."""
     pm = re.search(r'\(primitives\b', pad_text)
     if not pm:
         return None
     prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
-    # Bail out (bbox fallback) if any non-polygon primitive is present.
-    if re.search(r'\(gr_(circle|line|rect|arc|curve)\b', prim):
+    # Arcs/beziers aren't approximated yet -- fall back to the bbox for the whole pad.
+    if re.search(r'\(gr_(arc|curve)\b', prim):
         return None
     rad = math.radians(-pad_abs_rotation_deg)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
+
+    def to_global(local_pts):
+        return [(global_x + (vx * cos_r - vy * sin_r),
+                 global_y + (vx * sin_r + vy * cos_r)) for vx, vy in local_pts]
+
+    def _field(block, name, n):
+        m = re.search(r'\(' + name + r'\s+' + r'\s+'.join([r'(-?[\d.]+)'] * n) + r'\)', block)
+        return tuple(map(float, m.groups())) if m else None
+
+    def _width(block):
+        m = re.search(r'\(width\s+(-?[\d.]+)\)', block)
+        return float(m.group(1)) if m else 0.0
+
     polys = []
-    for pm2 in re.finditer(r'\(gr_poly\b', prim):
+    # Iterate primitives in order; one polygon per primitive, transformed to global.
+    for pm2 in re.finditer(r'\(gr_(poly|circle|rect|line)\b', prim):
+        kind = pm2.group(1)
         block = prim[pm2.start():find_matching_paren(prim, pm2.start()) - 1]
-        pts = [(float(a), float(b))
-               for a, b in re.findall(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)]
-        if len(pts) < 3:
-            continue
-        polys.append([(global_x + (vx * cos_r - vy * sin_r),
-                       global_y + (vx * sin_r + vy * cos_r)) for vx, vy in pts])
+        local = None
+        if kind == 'poly':
+            pts = [(float(a), float(b))
+                   for a, b in re.findall(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)]
+            local = pts if len(pts) >= 3 else None
+        elif kind == 'circle':
+            c = _field(block, 'center', 2)
+            e = _field(block, 'end', 2)
+            if c and e:
+                # Solid disc out to the outer copper edge (centerline radius + half
+                # stroke); a filled circle has the same outer extent. The interior
+                # is modelled solid (the union has no holes) -- conservative, and
+                # exact for clearance to external copper, which is all that matters.
+                R = math.hypot(e[0] - c[0], e[1] - c[1]) + _width(block) / 2.0
+                if R > 0:
+                    N = 32
+                    local = [(c[0] + R * math.cos(2 * math.pi * k / N),
+                              c[1] + R * math.sin(2 * math.pi * k / N)) for k in range(N)]
+        elif kind == 'rect':
+            s = _field(block, 'start', 2)
+            e = _field(block, 'end', 2)
+            if s and e:
+                hw = _width(block) / 2.0
+                x0, x1 = min(s[0], e[0]) - hw, max(s[0], e[0]) + hw
+                y0, y1 = min(s[1], e[1]) - hw, max(s[1], e[1]) + hw
+                local = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        elif kind == 'line':
+            s = _field(block, 'start', 2)
+            e = _field(block, 'end', 2)
+            if s and e:
+                hw = _width(block) / 2.0 or 1e-6
+                dx, dy = e[0] - s[0], e[1] - s[1]
+                L = math.hypot(dx, dy)
+                if L > 0:
+                    ux, uy = dx / L, dy / L          # along
+                    px, py = -uy, ux                 # perpendicular
+                    # Capsule approximated by its oriented bounding rectangle:
+                    # extend each end by hw and offset +/- hw perpendicular.
+                    sx, sy = s[0] - ux * hw, s[1] - uy * hw
+                    ex, ey = e[0] + ux * hw, e[1] + uy * hw
+                    local = [(sx + px * hw, sy + py * hw), (ex + px * hw, ey + py * hw),
+                             (ex - px * hw, ey - py * hw), (sx - px * hw, sy - py * hw)]
+        if local:
+            polys.append(to_global(local))
     return polys or None
 
 
