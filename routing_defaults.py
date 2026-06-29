@@ -130,6 +130,21 @@ SAME_NET_PAD_CLEARANCE = -1.0  # mm - edge-to-edge clearance between via and sam
                                # Any value >= 0 forces vias to be placed outside same-net pads
                                # with that much edge-to-edge clearance.
 
+# Fine-pitch tap escalation (plane_pad_tap.py, issues #99/#104)
+# When a tap can't be placed at the nominal clearance/grid on dense fine-pitch
+# QFN/LQFP/BGA pads, the router escalates to a finer grid and steps the clearance
+# DOWN toward the manufacturing floor (list_nets.fab_floors for the board's layer
+# count), narrowing the tap track to the fab track floor. There is deliberately
+# NO hard-coded "fine clearance"/"fine track" magic number -- the floor is the
+# fab limit, and the ladder stops at the first clearance that routes (issue #226).
+FINE_PITCH_NEIGHBOR_DIST = 0.65  # mm - same-component neighbor spacing => fine-pitch
+FINE_PITCH_MIN_PAD_DIM = 0.35    # mm - pad min dimension below this => fine-pitch
+FINE_TAP_GRID_STEP = 0.05        # mm - fine routing grid for tight tap retries
+FINE_TAP_CLEARANCE_STEPS = 4     # clearance steps from nominal down to the fab floor
+FINE_TAP_SEARCH_RADIUS = 3.0     # mm - cap on NEW-via search during the fine retry
+                                 # (a far new via at fine width butterflies neighbours;
+                                 # far EXISTING vias are reached via the distant-trace path)
+
 # Repair disconnected planes defaults (route_disconnected_planes.py)
 REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
 REPAIR_MIN_TRACK_WIDTH = 0.2  # mm - minimum track width for connections

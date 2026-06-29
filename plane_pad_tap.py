@@ -28,20 +28,18 @@ from plane_obstacle_builder import (
     _smd_pad_reaches_layer,
 )
 
-# Fine-pitch detection thresholds (issue #104)
-FINE_PITCH_NEIGHBOR_DIST = 0.65   # mm - same-component neighbor pad spacing
-FINE_PITCH_MIN_PAD_DIM = 0.35     # mm - pad min dimension below this is fine-pitch
-_DIST_TOL = 1e-3                  # mm - tolerance so exactly-0.65mm pitch qualifies
+# Fine-pitch detection thresholds and fine-tap escalation parameters are
+# centralized in routing_defaults (issues #104/#226).
+from routing_defaults import (
+    FINE_PITCH_NEIGHBOR_DIST,
+    FINE_PITCH_MIN_PAD_DIM,
+    FINE_TAP_GRID_STEP,
+    FINE_TAP_CLEARANCE_STEPS,
+    FINE_TAP_SEARCH_RADIUS,
+)
+from list_nets import fab_floors
 
-# Fine tap parameters (verified on castor_pollux: 27 failures -> 1)
-FINE_TAP_GRID_STEP = 0.05         # mm
-FINE_TAP_CLEARANCE = 0.15         # mm
-FINE_TAP_TRACK_WIDTH = 0.15       # mm (capped by pad min dimension)
-# NEW-via search radius for the fine retry. Kept smaller than max_search_radius
-# on purpose: placing a brand-new via far from the pad at fine width butterflies
-# neighbouring plane pads. Reaching a far EXISTING via is done via the
-# distant-trace path (= max_search_radius) instead.
-FINE_TAP_SEARCH_RADIUS = 3.0      # mm
+_DIST_TOL = 1e-3                  # mm - tolerance so exactly-0.65mm pitch qualifies
 
 # Window half-size margin beyond the via search radius
 _WINDOW_MARGIN = 3.0              # mm
@@ -87,23 +85,40 @@ def note_clearance_used(pcb_data: PCBData, clearance: float) -> None:
     clearance_ledger.record(clearance)
 
 
-def make_fine_tap_config(config: GridRouteConfig, pad: Pad) -> GridRouteConfig:
-    """Build the scoped fine-parameter config for one pad's tap retry.
+def _clearance_ladder(nominal: float, fab_floor: float, n_steps: int) -> List[float]:
+    """Descending clearances from just below ``nominal`` down to ``fab_floor``
+    (inclusive) in ``n_steps`` even steps. If ``nominal`` is already at/below the
+    fab floor, the single ``min(nominal, fab_floor)`` value is returned. Replaces
+    the old hard-coded 0.15 mm jump: the floor is the manufacturing limit, and the
+    caller stops at the first clearance that routes so the loosest one wins (#226)."""
+    floor = min(nominal, fab_floor)
+    if nominal <= floor or n_steps < 1:
+        return [round(floor, 4)]
+    step = (nominal - floor) / n_steps
+    return [round(nominal - step * i, 4) for i in range(1, n_steps + 1)]
 
-    grid 0.05 / clearance 0.15 / track = min(pad min dimension, 0.15);
-    never coarser/wider than what the caller already uses. The via is NOT
-    shrunk here -- the caller chooses the via (the standard working via, or the
-    smaller fine-pitch escape via that plan-pcb-routing passes on 4+ layer
-    fine-pitch boards), so the fab-capability gating lives in one place.
-    """
-    fine_track = min(min(pad.size_x, pad.size_y),
-                     FINE_TAP_TRACK_WIDTH, config.track_width)
-    return replace(
-        config,
-        grid_step=min(config.grid_step, FINE_TAP_GRID_STEP),
-        clearance=min(config.clearance, FINE_TAP_CLEARANCE),
-        track_width=fine_track,
-    )
+
+def fab_floor_clearance_track(pcb_data: PCBData):
+    """(clearance, track_width) manufacturing floor for this board's layer count."""
+    n_layers = len(pcb_data.board_info.copper_layers) or 2
+    floors = fab_floors(n_layers)
+    return floors['clearance'], floors['track_width']
+
+
+def fine_tap_configs(config: GridRouteConfig, pad: Pad, pcb_data: PCBData):
+    """Yield progressively tighter tap configs for a fine-pitch pad: a finer grid
+    and a narrowed track (floored at the fab track minimum), with the clearance
+    stepped DOWN from the caller's value toward the fab clearance floor for the
+    board's layer count. Never coarser/wider than the caller already uses. The via
+    is NOT shrunk here -- the caller chooses the via, so fab-capability via gating
+    lives in one place. Replaces the single hard-coded fine-parameter jump (#226)."""
+    fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
+    fine_grid = min(config.grid_step, FINE_TAP_GRID_STEP)
+    # Narrow the tap track to fit between fine-pitch pads, never below the fab floor.
+    fine_track = max(fab_track, min(min(pad.size_x, pad.size_y), config.track_width))
+    for clearance in _clearance_ladder(config.clearance, fab_clear, FINE_TAP_CLEARANCE_STEPS):
+        yield replace(config, grid_step=fine_grid, clearance=clearance,
+                      track_width=fine_track)
 
 
 def _segment_overlaps_window(seg: Segment, min_x: float, min_y: float,
@@ -611,27 +626,29 @@ def tap_pad_with_escalation(
         last_failure = result
 
     if fine_for_all or pad_is_fine_pitch(pad, pcb_data):
-        fine_config = make_fine_tap_config(config, pad)
-        # The fine pass searches for a NEW via site at a thin trace / fine grid.
-        # Keep its NEW-via search capped (FINE_TAP_SEARCH_RADIUS) rather than the
-        # full max_search_radius: placing a brand-new via far from the pad at fine
-        # width is disruptive (it butterflies neighbouring plane pads -- measured
-        # on castor_pollux). Reaching a far EXISTING via is handled separately and
-        # safely by distant_trace_radius (= max_search_radius), so a boxed pad is
-        # still connected by trace; see try_tap_pad step 1b.
-        result = try_tap_pad(
-            pad, pad_layer, net_id, pcb_data, fine_config,
-            min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
-            via_size, via_drill, same_net_pad_clearance,
-            pending_pads, extra_vias, extra_segments, verbose,
-            routing_clearance_cushion=True,
-            distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
-        if result.success:
-            result.params_label = 'fine'
-            result.clearance_used = fine_config.clearance
-            note_clearance_used(pcb_data, fine_config.clearance)
-            return result
-        last_failure = result
+        # Step the clearance down toward the fab floor (finer grid + narrower
+        # track), trying each rung until one routes so the LOOSEST working
+        # clearance wins (#226). The fine pass searches for a NEW via site at a
+        # thin trace / fine grid; keep its NEW-via search capped
+        # (FINE_TAP_SEARCH_RADIUS) rather than the full max_search_radius: placing
+        # a brand-new via far from the pad at fine width is disruptive (it
+        # butterflies neighbouring plane pads -- measured on castor_pollux).
+        # Reaching a far EXISTING via is handled separately and safely by
+        # distant_trace_radius (= max_search_radius); see try_tap_pad step 1b.
+        for fine_config in fine_tap_configs(config, pad, pcb_data):
+            result = try_tap_pad(
+                pad, pad_layer, net_id, pcb_data, fine_config,
+                min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
+                via_size, via_drill, same_net_pad_clearance,
+                pending_pads, extra_vias, extra_segments, verbose,
+                routing_clearance_cushion=True,
+                distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
+            if result.success:
+                result.params_label = 'fine'
+                result.clearance_used = fine_config.clearance
+                note_clearance_used(pcb_data, fine_config.clearance)
+                return result
+            last_failure = result
 
     # Return the last failure so a rip-up caller sees its via_blocked /
     # blocked_cells diagnostics.

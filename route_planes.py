@@ -59,9 +59,8 @@ from plane_zone_geometry import (
 from plane_pad_tap import (
     pad_is_fine_pitch,
     tap_pad_with_escalation,
+    fab_floor_clearance_track,
     FINE_TAP_GRID_STEP,
-    FINE_TAP_CLEARANCE,
-    FINE_TAP_TRACK_WIDTH
 )
 from terminal_colors import GREEN, RED, RESET
 
@@ -2296,9 +2295,10 @@ def create_plane(
         fine_candidates = [e for e in net_failed
                            if pad_is_fine_pitch(e[3]['pad'], pcb_data)]
         if fine_candidates:
+            _fab_clear, _fab_track = fab_floor_clearance_track(pcb_data)
             print(f"\nRetrying {len(fine_candidates)} failed fine-pitch pad(s) with scoped "
-                  f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance "
-                  f"{FINE_TAP_CLEARANCE}mm, track <= {FINE_TAP_TRACK_WIDTH}mm):")
+                  f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance stepped down "
+                  f"to the fab floor {_fab_clear}mm, track >= {_fab_track}mm):")
             recovered_entries = []
             for entry in fine_candidates:
                 pad_info = entry[3]
