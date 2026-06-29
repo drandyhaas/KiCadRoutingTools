@@ -462,15 +462,28 @@ def generate_qfn_fanout(footprint: Footprint,
     _obstacles = build_base_obstacle_map(pcb_data, _obs_cfg, nets_to_route=_fanned_net_ids,
                                          extra_clearance=track_width / 2)
     _obs_layer_idx = _obs_layer_map.get(layer)
-    # Global bbox of this part's pads (layout.min_* are in the footprint LOCAL
-    # frame now, so they can't bound the global foreign-pad search window).
-    _gxs = [p.global_x for p in footprint.pads]
-    _gys = [p.global_y for p in footprint.pads]
-    fp_lo_x, fp_hi_x = min(_gxs) - 3.0, max(_gxs) + 3.0
-    fp_lo_y, fp_hi_y = min(_gys) - 3.0, max(_gys) + 3.0
-    foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist
-                    if p.component_ref != footprint.reference
-                    and fp_lo_x <= p.global_x <= fp_hi_x and fp_lo_y <= p.global_y <= fp_hi_y]
+    # Window the foreign-pad scan by the actual STUB extent (every stub endpoint),
+    # not the part's pad bbox: on large packages (LQFP) a straight escape runs
+    # several mm past the pad bbox and grazes a nearby foreign component pad (a
+    # connector/header) that a pad-bbox+3mm window misses -- and the grid obstacle
+    # map is too coarse to catch a sub-grid graze (issue #214). Each pad is
+    # included if its OWN footprint can reach the stub span within `margin`, so the
+    # window is correct for large pads too.
+    _sxs = [pt[0] for s in stubs for pt in (s.pad_pos, s.corner_pos, s.stub_end)]
+    _sys = [pt[1] for s in stubs for pt in (s.pad_pos, s.corner_pos, s.stub_end)]
+    if _sxs:
+        _lo_x, _hi_x = min(_sxs), max(_sxs)
+        _lo_y, _hi_y = min(_sys), max(_sys)
+
+        def _pad_near(p):
+            r = 0.5 * math.hypot(p.size_x or 0.0, p.size_y or 0.0) + margin
+            return (_lo_x - r <= p.global_x <= _hi_x + r
+                    and _lo_y - r <= p.global_y <= _hi_y + r)
+
+        foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist
+                        if p.component_ref != footprint.reference and _pad_near(p)]
+    else:
+        foreign_pads = []
 
     def _seg_grazes(p1, p2, net_id):
         # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
