@@ -46,11 +46,13 @@ def _pad(sx, sy):
 def test_clamp_math(verbose):
     """clamp_via_to_pad: fits / clamped / floor along the standard-tier ladder.
 
-    The clamp now walks the fab-tier floor ladder (issue #237): standard tier =
-    [standard 0.45/0.20, advanced 0.25/0.15]. A pad below the standard via escalates
-    to the advanced rung (rung 1); a pad below even the advanced via is held at it.
+    The clamp walks the fab-tier floor ladder (issue #237): the multilayer standard
+    tier = [standard 0.45/0.20, fine 0.30/0.15, advanced 0.25/0.15]. A pad below the
+    standard via escalates to the fine rung (rung 1), then the advanced rung; a pad
+    below even the deepest via is held at it.
     """
-    lad = fab_floor_ladder(4)   # [0.45/0.20, 0.25/0.15] (2- and 4-layer share these vias)
+    lad = fab_floor_ladder(4)   # [0.45/0.20, 0.30/0.15, 0.25/0.15]
+    deepest = len(lad) - 1
     fails = []
 
     def check(label, got, exp_size, exp_status, exp_rung, pad_min, configured):
@@ -75,14 +77,14 @@ def test_clamp_math(verbose):
     check("fits", clamp_via_to_pad(0.3, 0.2, _pad(0.5, 0.5), lad), 0.3, 'fits', 0, 0.5, 0.3)
     # 0.46 pad still >= standard 0.45 via -> clamps at rung 0 (no escalation)
     check("0.5->0.46 std", clamp_via_to_pad(0.5, 0.3, _pad(0.46, 0.46), lad), 0.46, 'clamped', 0, 0.46, 0.5)
-    # keks: Ø0.5 in 0.41 pad < 0.45 standard -> escalate to advanced rung, shrink to 0.41
+    # keks: Ø0.5 in 0.41 pad < 0.45 standard -> escalate to the fine 0.30 rung, shrink to 0.41
     check("keks 0.5->0.41", clamp_via_to_pad(0.5, 0.3, _pad(0.41, 0.41), lad), 0.41, 'clamped', 1, 0.41, 0.5)
-    # ulx3s: Ø0.5 in 0.40 pad -> 0.40 at advanced rung
+    # ulx3s: Ø0.5 in 0.40 pad -> 0.40 at the fine 0.30 rung
     check("0.5->0.40", clamp_via_to_pad(0.5, 0.3, _pad(0.40, 0.40), lad), 0.40, 'clamped', 1, 0.40, 0.5)
-    # rect/oval pad: clamp to the MIN dimension (advanced rung)
+    # rect/oval pad: clamp to the MIN dimension (fine 0.30 rung)
     check("oval min-dim", clamp_via_to_pad(0.5, 0.3, _pad(0.9, 0.42), lad), 0.42, 'clamped', 1, 0.42, 0.5)
-    # pad below the advanced via floor (0.25) -> held at the deepest floor, still bulges
-    check("below floor", clamp_via_to_pad(0.5, 0.3, _pad(0.22, 0.22), lad), 0.25, 'floor', 1, 0.22, 0.5)
+    # pad below the deepest via floor (0.25) -> held at the deepest floor, still bulges
+    check("below floor", clamp_via_to_pad(0.5, 0.3, _pad(0.22, 0.22), lad), 0.25, 'floor', deepest, 0.22, 0.5)
     # advanced tier directly = single-rung [0.25/0.15] ladder, no escalation possible
     lad_adv = fab_floor_ladder(4, 'advanced')
     check("adv 0.5->0.40", clamp_via_to_pad(0.5, 0.3, _pad(0.40, 0.40), lad_adv), 0.40, 'clamped', 0, 0.40, 0.5)

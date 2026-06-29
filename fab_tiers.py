@@ -122,7 +122,24 @@ def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
         floor.update({k: v for k, v in overrides.items() if k in floor})
         return [floor]
     if tier == 'standard':
-        return [dict(base['standard']), dict(base['advanced'])]
+        std = dict(base['standard'])
+        adv = dict(base['advanced'])
+        rungs = [std]
+        # Intermediate fan-out / via-in-pad escape rung: the 0.30/0.15 "fine" via
+        # the router used pre-#237. Multilayer boards try it before escalating to
+        # the advanced 0.25/0.15, so fine-pitch escapes that fit a 0.30 via keep
+        # their previous result instead of jumping straight to the smaller (more
+        # costly) advanced via. (2-layer had no smaller-than-standard fine via, and
+        # the rung is only added when 0.30 sits strictly between the two floors.)
+        # Only the via dia/drill differ from standard; this is NOT the ladder's
+        # first rung (fab_floors -> nominal) nor its last (fab_floor_min -> DRC).
+        if (copper_layer_count or 2) > 2 and adv['via_diameter'] < 0.30 < std['via_diameter']:
+            fine = dict(std)
+            fine.update({'via_diameter': 0.30, 'via_drill': 0.15,
+                         'annular': round((0.30 - 0.15) / 2.0, 4)})
+            rungs.append(fine)
+        rungs.append(adv)
+        return rungs
     return [dict(base['advanced'])]
 
 
