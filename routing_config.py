@@ -100,6 +100,7 @@ class GridRouteConfig:
     meander_amplitude: float = 1.0  # mm - height of meander perpendicular to trace
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
+    ac_couple_match: bool = False  # End-to-end length-match AC-coupled pairs split by series caps (#196)
     # Hybrid escape: when a coupled pair's terminal connector can't clear foreign
     # copper (#165 graze), keep the coupled middle and defer each terminal leg to
     # a point-to-point single-ended join instead of failing the whole pair.

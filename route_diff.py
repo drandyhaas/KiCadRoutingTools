@@ -163,6 +163,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 time_match_tolerance: float = defaults.TIME_MATCH_TOLERANCE,
                 diff_chamfer_extra: float = defaults.DIFF_PAIR_CHAMFER_EXTRA,
                 diff_pair_intra_match: bool = False,
+                ac_couple_match: bool = False,
                 debug_memory: bool = False,
                 mps_reverse_rounds: bool = False,
                 mps_layer_swap: bool = False,
@@ -191,6 +192,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         gnd_via_enabled: Add GND vias near diff pair signal vias (default: True)
         diff_chamfer_extra: Chamfer multiplier for diff pair meanders (default: 1.5)
         diff_pair_intra_match: Enable intra-pair P/N length matching (default: False)
+        ac_couple_match: End-to-end length-match AC-coupled diff pairs split by series
+            DC-blocking caps, matching the concatenated P vs N path (#196) (default: False)
         return_results: If True, return results data instead of writing to file
         pcb_data: Optional pre-parsed PCBData (if None, loads from input_file)
 
@@ -291,6 +294,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         gnd_via_enabled=gnd_via_enabled,
         diff_chamfer_extra=diff_chamfer_extra,
         diff_pair_intra_match=diff_pair_intra_match,
+        ac_couple_match=ac_couple_match,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -303,6 +307,21 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Find differential pairs from all provided nets
     diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, net_names)
     diff_pair_net_ids = set()  # Net IDs that are part of differential pairs
+
+    # Detect AC-coupled XNets (#196): differential pairs split into two base-named
+    # pairs by series DC-blocking caps, to be length-matched END-TO-END after
+    # routing (see the AC-couple pass below). Pure read of pcb_data -- gathers a
+    # side-structure only, never touching diff_pairs / net order / pcb_data, so the
+    # routed result is byte-identical when --ac-couple-match is off.
+    ac_xnets = []
+    if config.ac_couple_match:
+        from diff_xnet import find_ac_coupled_xnets
+        ac_xnets, ac_warnings = find_ac_coupled_xnets(pcb_data, diff_pairs)
+        for _w in ac_warnings:
+            print(f"  WARNING: {_w}")
+        for _xn in ac_xnets:
+            print(f"  AC-coupled XNet: {'+'.join(_xn.base_names)} "
+                  f"(coupled via {', '.join(_xn.bridge_refs)})")
 
     if not diff_pairs:
         print(f"Error: No differential pairs found matching the patterns!")
@@ -775,6 +794,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
         # Process each diff pair once (using p_net_id as key to avoid duplicates)
         processed_pairs = set()
+        # AC-coupled (XNet) member pairs are matched end-to-end below, not per-side;
+        # skip them here so the two passes don't fight (double-meander). Gated on
+        # the flag so intra-pair behavior is unchanged when --ac-couple-match is off.
+        xnet_member_p_net_ids = set()
+        if config.ac_couple_match:
+            for _xn in ac_xnets:
+                for _m in _xn.members:
+                    xnet_member_p_net_ids.add(_m.p_net_id)
         for net_id, result in routed_results.items():
             if not result.get('is_diff_pair'):
                 continue
@@ -782,6 +809,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             if p_net_id is None or p_net_id in processed_pairs:
                 continue
             processed_pairs.add(p_net_id)
+            if p_net_id in xnet_member_p_net_ids:
+                continue  # matched end-to-end by the AC-couple pass (#196)
 
             # Get pair name for logging
             pair_info = diff_pair_by_net_id.get(net_id)
@@ -791,6 +820,25 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             seg_count_before = len(result.get('new_segments', []))
             apply_intra_pair_length_matching(result, config, pcb_data)
             seg_count_after = len(result.get('new_segments', []))
+
+    # Apply end-to-end AC-coupled (XNet) length matching if configured (#196).
+    # Runs AFTER group + intra-pair matching; for its member pairs it supersedes
+    # per-side intra-pair (skipped above) by matching the concatenated P vs N path
+    # and placing the compensating meanders on whichever segment has room.
+    ac_coupled_summary = []
+    if config.ac_couple_match and ac_xnets:
+        from length_matching import apply_ac_coupled_length_matching
+        print("\n" + "=" * 60)
+        print("End-to-end AC-coupled diff-pair length matching (#196)")
+        print("=" * 60)
+        for _xn in ac_xnets:
+            _skew = apply_ac_coupled_length_matching(_xn, routed_results, config, pcb_data)
+            if _skew is not None:
+                ac_coupled_summary.append({
+                    'nets': "+".join(_xn.base_names),
+                    'skew_mm': round(_skew, 4),
+                    'bridges': _xn.bridge_refs,
+                })
 
     # Sync pcb_data with length-matched segments
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
@@ -893,6 +941,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # taps below the nominal). Grade/check_drc the board at this floor.
         'min_clearance_used': __import__('clearance_ledger').effective(clearance),
     }
+    if ac_coupled_summary:
+        summary['ac_coupled_xnets'] = ac_coupled_summary
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -1170,6 +1220,10 @@ Examples:
                         help="Chamfer multiplier for diff pair meanders (default: 1.5, >1 avoids P/N crossings)")
     parser.add_argument("--diff-pair-intra-match", action="store_true",
                         help="Enable intra-pair P/N length matching (add meanders to shorter track of each diff pair)")
+    parser.add_argument("--ac-couple-match", action="store_true",
+                        help="End-to-end length-match AC-coupled differential pairs split by series DC-blocking "
+                             "caps (#196): auto-detect the cap chain, match the concatenated P path vs the N path, "
+                             "and place the compensating meanders on whichever segment has room. Off by default.")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -1349,6 +1403,7 @@ Examples:
                 time_match_tolerance=args.time_match_tolerance,
                 diff_chamfer_extra=args.diff_chamfer_extra,
                 diff_pair_intra_match=args.diff_pair_intra_match,
+                ac_couple_match=args.ac_couple_match,
                 debug_memory=args.debug_memory,
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,

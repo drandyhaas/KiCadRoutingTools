@@ -2056,6 +2056,7 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.fix_polarity_check.SetValue(False)
         self.differential_tab.gnd_via_check.SetValue(False)
         self.differential_tab.intra_match_check.SetValue(False)
+        self.differential_tab.ac_couple_check.SetValue(False)
 
         # Reset fanout tab
         self.fanout_tab.fanout_type.SetSelection(0)

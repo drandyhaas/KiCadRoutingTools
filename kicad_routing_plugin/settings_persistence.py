@@ -158,6 +158,7 @@ def get_dialog_settings(dialog):
         'fix_polarity_check': dialog.differential_tab.fix_polarity_check.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
+        'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
         'diff_hide_short': dialog.differential_tab.hide_short_check.GetValue(),
 
         # Fanout tab settings
@@ -511,6 +512,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:
         dialog.differential_tab.intra_match_check.SetValue(settings['intra_match_check'])
+    if 'ac_couple_check' in settings:
+        dialog.differential_tab.ac_couple_check.SetValue(settings['ac_couple_check'])
     if 'diff_hide_short' in settings:
         dialog.differential_tab.hide_short_check.SetValue(settings['diff_hide_short'])
         dialog.differential_tab.pair_panel.set_hide_short(settings['diff_hide_short'])

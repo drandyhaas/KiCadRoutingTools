@@ -572,6 +572,13 @@ class DifferentialTab(wx.Panel):
         self.intra_match_check.SetToolTip("Add meanders to shorter track of each pair for P/N matching")
         options_sizer.Add(self.intra_match_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        self.ac_couple_check = wx.CheckBox(self, label="AC-coupled end-to-end matching")
+        self.ac_couple_check.SetValue(False)
+        self.ac_couple_check.SetToolTip("Length-match diff pairs split by series DC-blocking caps "
+                                        "end-to-end: detect the cap chain and match the whole P path "
+                                        "vs N path across the caps, not each side alone (#196)")
+        options_sizer.Add(self.ac_couple_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.hide_short_check = wx.CheckBox(self, label="Hide short routes")
         self.hide_short_check.SetValue(True)
         self.hide_short_check.SetToolTip(
@@ -905,6 +912,7 @@ class DifferentialTab(wx.Panel):
                 fix_polarity=config.get('fix_polarity', True),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
+                ac_couple_match=config.get('ac_couple_match', False),
                 enable_layer_switch=config.get('enable_layer_switch', True),
                 debug_lines=config.get('debug_lines', False),
                 verbose=config.get('verbose', False),
@@ -1134,6 +1142,7 @@ class DifferentialTab(wx.Panel):
             'fix_polarity': self.fix_polarity_check.GetValue(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
+            'ac_couple_match': self.ac_couple_check.GetValue(),
         }
 
     def _on_use_netclass_changed(self, event):
