@@ -951,9 +951,14 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                 state.gnd_net_id, state.track_proximity_cache, state.layer_map)
             hyb_eps = (_terminal_stub_endpoint(pcb_data, term_a, config) or endpoints[0],
                        _terminal_stub_endpoint(pcb_data, term_b, config) or endpoints[1])
+            # Only THIS leg's two terminals (term_a/term_b are (P pad, N pad)) must
+            # connect -- the net's OTHER terminals are separate legs routed later, so
+            # the hybrid's connectivity gate must not demand the whole net (#250).
+            _leg_pads = {pair.p_net_id: [term_a[0], term_b[0]],
+                         pair.n_net_id: [term_a[1], term_b[1]]}
             hyb = _route_direct_coupled_middle(
                 pcb_data, pair, config, obstacles, config.layers,
-                leg_obstacles=leg_obstacles, endpoints=hyb_eps)
+                leg_obstacles=leg_obstacles, endpoints=hyb_eps, terminal_pads=_leg_pads)
             if (hyb is not None and not hyb.get('failed') and
                     not _pn_tracks_cross(hyb.get('new_segments', []), pair.p_net_id, pair.n_net_id) and
                     not _crosses_committed_legs(hyb.get('new_segments', []), committed_segments)):

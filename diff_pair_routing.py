@@ -2367,7 +2367,7 @@ def _pad_obstacle_segments(pad, layer_names):
 
 
 def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
-                                 leg_obstacles=None, endpoints=None):
+                                 leg_obstacles=None, endpoints=None, terminal_pads=None):
     """Hybrid coupled middle (last resort): route a clean parallel P/N pair
     straight from the source via-midpoint to the target via-midpoint on the
     open layer -- no escape-direction setback, no connectors, no polarity stage.
@@ -2857,7 +2857,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         # check (new copper + the pair's existing fanout stubs) and reject if either
         # half isn't fully connected -- then this layer is retried / the pair fails
         # honestly instead of counting as routed.
-        if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias):
+        if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias,
+                                      terminal_pads=terminal_pads):
             _rej(a_layer, b_layer, "assembled route leaves a terminal unconnected")
             continue
         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
@@ -2875,18 +2876,30 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     return None
 
 
-def _hybrid_route_connects(pcb_data, p_net_id, n_net_id, new_segs, new_vias) -> bool:
+def _hybrid_route_connects(pcb_data, p_net_id, n_net_id, new_segs, new_vias,
+                           terminal_pads=None) -> bool:
     """True only if BOTH halves of the pair connect terminal-to-terminal with the
     new hybrid copper added to the pair's existing (fanout-stub) copper. Used to
-    reject a hybrid route that left a terminal orphaned (#215)."""
+    reject a hybrid route that left a terminal orphaned (#215).
+
+    ``terminal_pads`` ({net_id: [Pad, ...]}) restricts the check to ONE leg's two
+    terminals -- the multipoint case: ``_route_direct_coupled_middle`` routes a
+    single leg of a 3+-terminal net, and the OTHER terminals (the deferred
+    electrically-short ESD/series legs) are routed by later passes, so a whole-net
+    check would wrongly fail because those aren't connected yet (HDMI TMDS on
+    fpga_sdram: the U1<->J3 leg coupled fine but the deferred J3->U7 ESD tap left
+    U7 'unconnected', rejecting the good coupled leg). When None (the 2-terminal
+    hybrid) the whole net IS the leg, so all pads are checked as before."""
     from check_connected import check_net_connectivity
     board_segs = getattr(pcb_data, 'segments', None) or []
     board_vias = getattr(pcb_data, 'vias', None) or []
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
     for nid in (p_net_id, n_net_id):
+        pads = (terminal_pads.get(nid, []) if terminal_pads is not None
+                else pads_by_net.get(nid, []))
         segs = [s for s in board_segs if s.net_id == nid] + [s for s in new_segs if s.net_id == nid]
         vias = [v for v in board_vias if v.net_id == nid] + [v for v in new_vias if v.net_id == nid]
-        r = check_net_connectivity(nid, segs, vias, pads_by_net.get(nid, []))
+        r = check_net_connectivity(nid, segs, vias, pads)
         if not r.get('connected') or r.get('disconnected_pads'):
             return False
     return True
