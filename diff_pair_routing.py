@@ -2248,12 +2248,22 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     completely unseen (e.g. a USB-C P connector cutting across the adjacent N pad,
     or grazing the partner's underpad escape via).
 
-    Re-validate the final P/N geometry against every foreign pad AND via (any not
-    on this pair's own nets, which includes the partner net's copper) using the
+    Re-validate the final P/N geometry against every foreign pad, via AND track (any
+    not on this pair's own nets, which includes the partner net's copper) using the
     SAME geometry and tolerance as check_drc, so a graze reported here is one
     check_drc would also flag - not tight-but-legal packing sitting at clearance.
 
-    Returns (kind, obj, segment, overlap_mm) where kind is 'pad' or 'via', or None.
+    The TRACK check (issue #246) matters because the pose router only validates the
+    diff-pair CENTERLINE cell during routing -- the P/N OFFSET tracks are generated
+    geometrically (create_parallel_path_from_float) and the standard connector/setback
+    is centerline-only -- so an offset or a hybrid leg can graze or CROSS an already-
+    committed foreign track unseen (D2's offset across D3's committed leg). A foreign
+    TRACK excludes BOTH pair nets (the pair's own P/N legitimately run at diff_pair_gap,
+    tighter than clearance); the pad/via checks instead exclude only the segment's own
+    net so the PARTNER's pad/via is still caught (#165/#241).
+
+    Returns (kind, obj, segment, overlap_mm) where kind is 'pad', 'via' or 'track',
+    or None.
     """
     from check_drc import check_pad_segment_overlap, check_via_segment_overlap
 
@@ -2266,6 +2276,12 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     clearance = config.clearance
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
     vias = getattr(pcb_data, 'vias', None) or []
+    # Foreign tracks (not on either pair net), bucketed by layer for a cheap prefilter.
+    foreign_tracks_by_layer = {}
+    for o in (getattr(pcb_data, 'segments', None) or []):
+        if o.net_id in own:
+            continue
+        foreign_tracks_by_layer.setdefault(o.layer, []).append(o)
 
     for seg in pair_segs:
         sxmin, sxmax = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
@@ -2297,43 +2313,12 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
                 via, seg, clearance, _DRC_CLEARANCE_MARGIN)
             if hit:
                 return ('via', via, seg, overlap)
-    return None
-
-
-def _route_grazes_foreign_track(new_segments, pcb_data, p_net_id, n_net_id, config):
-    """Issue #244: the coupled middle's P/N OFFSET tracks are generated geometrically
-    from the centerline (create_parallel_path_from_float); only the CENTERLINE was
-    routed against the obstacle map, so an offset track -- or a leg near a junction --
-    can graze or even CROSS an already-committed FOREIGN net's track completely unseen
-    (butterstick D3_N's In2.Cu offset crossing the committed D2_N track -> an inter-net
-    short). The pad/via graze gate above never checks foreign TRACKS. Re-validate every
-    new pair segment against every foreign-net track on the same layer at check_drc's
-    clearance+margin; a hit means this candidate would emit a DRC violation, so the
-    hybrid must reject it and try another layer/route. Returns True if it grazes.
-    """
-    own = (p_net_id, n_net_id)
-    pair_segs = [s for s in new_segments if s.net_id in own]
-    if not pair_segs:
-        return False
-    clearance = config.clearance
-    margin = _DRC_CLEARANCE_MARGIN
-    # Bucket foreign tracks by layer, with a bbox, for a cheap pre-filter.
-    foreign_by_layer = {}
-    for o in (getattr(pcb_data, 'segments', None) or []):
-        if o.net_id in own:
-            continue
-        foreign_by_layer.setdefault(o.layer, []).append(o)
-    for seg in pair_segs:
-        foreign = foreign_by_layer.get(seg.layer)
-        if not foreign:
-            continue
-        sxmin, sxmax = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
-        symin, symax = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
-        for o in foreign:
-            need = clearance + seg.width / 2.0 + (o.width or seg.width) / 2.0 - margin
+        # vs foreign tracks on the same layer (issue #246)
+        for o in foreign_tracks_by_layer.get(seg.layer, ()):
+            ow = o.width if getattr(o, 'width', 0) else seg.width
+            need = clearance + seg.width / 2 + ow / 2 - _DRC_CLEARANCE_MARGIN
             if need <= 0:
                 continue
-            # bbox reject (expand by need) before the exact distance.
             if (max(o.start_x, o.end_x) < sxmin - need or
                     min(o.start_x, o.end_x) > sxmax + need or
                     max(o.start_y, o.end_y) < symin - need or
@@ -2342,8 +2327,8 @@ def _route_grazes_foreign_track(new_segments, pcb_data, p_net_id, n_net_id, conf
             d = _seg_seg_distance(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
                                   o.start_x, o.start_y, o.end_x, o.end_y)
             if d < need:
-                return True
-    return False
+                return ('track', o, seg, need - d)
+    return None
 
 
 def _pad_obstacle_segments(pad, layer_names):
@@ -2374,32 +2359,6 @@ def _pad_obstacle_segments(pad, layer_names):
         cu = [L for L in cu if L in layer_names]
     return [Segment(start_x=a[0], start_y=a[1], end_x=a[2], end_y=a[3],
                     width=a[4], layer=L, net_id=pad.net_id) for L in cu]
-
-
-# Issue #244 visual-debug state: ensures the partial-hybrid board is dumped only
-# once (for the first candidate that routes a middle but fails leg attachment).
-_HYBRID_DUMP_STATE = {}
-
-
-def _dump_partial_hybrid(segs, vias, pcb_data, desc):
-    """Write the partial hybrid state (coupled middle + attached legs) to a board so
-    a leg-attachment failure can be inspected in KiCad. Driven by env vars:
-    HYBRID_DUMP_INPUT (source board) and HYBRID_DUMP_OUT (destination). Dev-only."""
-    import os
-    inp = os.environ.get('HYBRID_DUMP_INPUT')
-    out = os.environ.get('HYBRID_DUMP_OUT')
-    if not inp or not out:
-        print(f"  HYBRID_DUMP: set HYBRID_DUMP_INPUT and HYBRID_DUMP_OUT to dump ({desc})")
-        return
-    from kicad_writer import add_tracks_and_vias_to_pcb
-    tracks = [{'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
-               'width': s.width, 'layer': s.layer, 'net_id': s.net_id} for s in segs]
-    vlist = [{'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill,
-              'layers': v.layers, 'net_id': v.net_id} for v in vias]
-    n2n = {nid: n.name for nid, n in (getattr(pcb_data, 'nets', None) or {}).items()}
-    ok = add_tracks_and_vias_to_pcb(inp, out, tracks, vlist, net_id_to_name=n2n)
-    print(f"  HYBRID_DUMP [{desc}]: wrote {len(tracks)} seg(s) + {len(vlist)} via(s) "
-          f"-> {out} ({'ok' if ok else 'FAILED'})")
 
 
 def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
@@ -2627,39 +2586,13 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         return opts
 
     probe_cap = max(int(config.max_probe_iterations), 1)
-    import os as _os
-    _HDBG = _os.environ.get('HYBRID_DEBUG')
-
-    def _dbg(msg):
-        if _HDBG:
-            print(f"    [hybdbg] {msg}")
-    _dbg(f"layer_pairs={[(layer_names[a],layer_names[b]) for a,b in layer_pairs]} "
-         f"src_via={src_has_via} tgt_via={tgt_has_via}")
-
-    _src_step = int(_os.environ.get('HYBRID_SRC_STEP', '0'))
 
     for a_layer, b_layer in layer_pairs:
         # Couple as close to each terminal as this candidate's launch layer allows.
         _sl = _closest_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
         _tl = _closest_launch(t_gx0, t_gy0, s_gx0, s_gy0, b_layer)
         if _sl is None or _tl is None:
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: no launch "
-                 f"(src={_sl} tgt={_tl})")
             continue
-        # EXPERIMENT (issue #244): step the SOURCE coupling point further back toward
-        # the target so the source leg attaches in opener copper (it spans the larger
-        # remaining gap). Couple less, leg more.
-        if _src_step:
-            _sgx, _sgy = _sl
-            _ddx, _ddy = t_gx0 - _sgx, t_gy0 - _sgy
-            _dl = math.hypot(_ddx, _ddy) or 1.0
-            _nsx = int(round(_sgx + _ddx / _dl * _src_step))
-            _nsy = int(round(_sgy + _ddy / _dl * _src_step))
-            _sl2 = _closest_launch(_nsx, _nsy, t_gx0, t_gy0, a_layer)
-            if _sl2 is not None:
-                _sl = _sl2
-                _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: src stepped back "
-                     f"{_src_step} -> {_sl}")
         s_gx, s_gy = _sl
         t_gx, t_gy = _tl
         csx, csy = coord.to_float(s_gx, s_gy)
@@ -2717,10 +2650,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if not path:
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: middle A* found "
-                 f"no path (src_thetas={src_thetas} tgt_thetas={tgt_thetas})")
             continue
-        _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: middle routed ({iters} it)")
         grid_path = []
         for gx, gy, _th, lyr in path:
             if grid_path and grid_path[-1] == (gx, gy, lyr):
@@ -2779,16 +2709,6 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             cost_plus = ((_d2((p_src_x, p_src_y), off_plus[0]) > _d2((p_src_x, p_src_y), off_minus[0])) +
                          (_d2((p_tgt_x, p_tgt_y), off_plus[-1]) > _d2((p_tgt_x, p_tgt_y), off_minus[-1])))
             p_sign = 1 if cost_plus <= 1 else -1
-        if _os.environ.get('HYBRID_OLDPOL'):
-            def _d2o(a, b):
-                return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
-            _cp = ((_d2o((p_src_x, p_src_y), off_plus[0]) > _d2o((p_src_x, p_src_y), off_minus[0])) +
-                   (_d2o((p_tgt_x, p_tgt_y), off_plus[-1]) > _d2o((p_tgt_x, p_tgt_y), off_minus[-1])))
-            p_sign = 1 if _cp <= 1 else -1
-        if _os.environ.get('HYBRID_PSIGN'):
-            p_sign = int(_os.environ['HYBRID_PSIGN'])
-        _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: src_plus={src_plus} "
-             f"tgt_plus={tgt_plus} -> p_sign={p_sign}")
         n_sign = -p_sign
         p_float = off_plus if p_sign == 1 else off_minus
         n_float = off_minus if p_sign == 1 else off_plus
@@ -2799,10 +2719,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             n_float, n_net_id, None, None, n_sign, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
         mid_segs = p_segs + n_segs
         if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: rejected - P/N cross")
             continue
         if _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config):
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: rejected - mid grazes foreign")
             continue
 
         # Attach each terminal to its middle near-end with point-to-point single-ended
@@ -2855,7 +2773,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         ]
         ok = False
         leg_segs, leg_vias = [], []
-        for _pi, plan in enumerate(leg_plans):
+        for plan in leg_plans:
             leg_state['s'] = {p_net_id: [], n_net_id: []}
             leg_state['v'] = {p_net_id: [], n_net_id: []}
             plan_iters = 0
@@ -2865,7 +2783,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 pseg, pvia, ppads = _leg_partner_copper(net_id)
                 ls, lv, it = _route_hybrid_leg(
                     pcb_data, net_id, config, leg_obs, layer_names, coord,
-                    mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads, which=_side)
+                    mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads)
                 plan_iters += it
                 if ls is None:
                     good = False
@@ -2877,34 +2795,17 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 total_iters += plan_iters
                 leg_segs = leg_state['s'][p_net_id] + leg_state['s'][n_net_id]
                 leg_vias = leg_state['v'][p_net_id] + leg_state['v'][n_net_id]
-                if _pi:
-                    _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: legs via "
-                         f"fallback plan {_pi}")
                 break
         if not ok:
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: legs failed in all "
-                 f"{len(leg_plans)} order plans")
-        if not ok:
-            # Issue #244 visual debug: when HYBRID_DUMP is set, write the partial
-            # state (coupled middle + the legs that DID attach) to a board for the
-            # FIRST candidate that routed a middle, even though the pair fails. Lets
-            # the leg-attachment failure be inspected in KiCad. Env-gated, dev-only.
-            if _os.environ.get('HYBRID_DUMP') and not _HYBRID_DUMP_STATE.get('done'):
-                _dump_partial_hybrid(mid_segs + leg_segs,
-                                     p_vias + n_vias + leg_vias, pcb_data,
-                                     f"{layer_names[a_layer]}->{layer_names[b_layer]}")
-                _HYBRID_DUMP_STATE['done'] = True
             continue
         all_segs = mid_segs + leg_segs
         all_vias = p_vias + n_vias + leg_vias
         if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: rejected - P/N cross (with legs)")
             continue
-        # Airtight foreign-track gate (#244): the coupled-middle offsets / leg near a
-        # junction must not graze or cross an already-committed neighbour track, or the
+        # Airtight foreign-copper gate (#246): the assembled route (coupled-middle
+        # offsets + legs) must not graze/cross a foreign pad, via OR track, or the
         # hybrid emits a DRC short unseen (D3_N offset x D2_N). Reject -> try next layer.
-        if _route_grazes_foreign_track(all_segs, pcb_data, p_net_id, n_net_id, config):
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: rejected - grazes foreign track")
+        if _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config):
             continue
         # Connectivity gate: the hybrid validates crossings/grazes but never that
         # the assembled route actually JOINS terminal-to-terminal -- a leg can fail
@@ -2915,7 +2816,6 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         # half isn't fully connected -- then this layer is retried / the pair fails
         # honestly instead of counting as routed.
         if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias):
-            _dbg(f"{layer_names[a_layer]}->{layer_names[b_layer]}: rejected - not connected")
             continue
         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
@@ -3031,7 +2931,7 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
 
 def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                       mid_pt, term, partner_segs, partner_vias, pair_vias,
-                      partner_pads=None, which=''):
+                      partner_pads=None):
     """Route ONE point-to-point single-ended leg joining a terminal to the coupled
     middle's near end (term -> mid_pt), routing around partner copper. Returns
     (segs, vias, iters), ([], [], 0) when the terminal already coincides with the
@@ -3068,12 +2968,6 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         if _v.net_id == net_id:
             reuse_holes.add(coord.to_grid(_v.x, _v.y))
 
-    import os as _os
-    _LDBG = _os.environ.get('HYBRID_DEBUG')
-
-    def _ldbg(msg):
-        if _LDBG:
-            print(f"      [legdbg net{net_id}] {msg}")
     # The leg endpoint: the terminal's own-net through-via (its access to the middle
     # layer) if one sits at the terminal, else the pad itself.
     ax, ay, alayer, on_via = term[0], term[1], term[2], False
@@ -3093,9 +2987,6 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     try:
         tgx, tgy = coord.to_grid(ax, ay)
         mgx, mgy = coord.to_grid(mid_pt[0], mid_pt[1])
-        _ldbg(f"{which} leg: anchor=({ax:.2f},{ay:.2f}) L{alayer} on_via={on_via} "
-              f"-> mid=({mid_pt[0]:.2f},{mid_pt[1]:.2f}) L{mid_pt[2]} "
-              f"dist={math.hypot(mgx-tgx,mgy-tgy)}")
         if (tgx, tgy) == (mgx, mgy) and (on_via or alayer == mid_pt[2]):
             # Truly coincident: the terminal already sits on the middle's end cell on
             # the SAME layer (or carries a through-via that spans all layers). If the
@@ -3124,10 +3015,7 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if path is None:
-            _ldbg(f"{which} leg: _route_leg FOUND NO PATH ({it} it) "
-                  f"src={sources[:1]}.. tgt={targets}")
             return None, None, 0
-        _ldbg(f"{which} leg: routed {len(path)} pts, {it} it")
         ps, pv = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
             (ax, ay, layer_names[path[0][2]]),
@@ -3873,6 +3761,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         # terminals (e.g. USB-C rows) that the detector missed. (Skip for the
         # no-swap probe: its caller checks the crossing and falls back to a swap.)
         swap_end = 'source' if routing_backwards else 'target'
+        swap_result = None
         if (not force_swap and not force_no_swap and config.fix_polarity
                 and swap_end in swap_allowed_ends):
             print("  Retrying with a polarity pad swap to untangle the crossing...")
@@ -3896,11 +3785,20 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             print("  Pad-swap retry did not produce a clean route either")
         print("  (terminals likely have opposite P/N pad order; needs a polarity "
               "swap, a layer change, or opposite-side joins)")
-        return {
+        out = {
             'failed': True,
             'iterations': result.get('iterations', 0),
             'pn_crossing': True,
         }
+        # If the swap retry was itself rejected for grazing a committed foreign net,
+        # propagate that so the caller can rip the grazed net and route this pair
+        # first, then re-route the ripped net later (#246) -- the crossing is only
+        # resolvable once the neighbour is out of the way.
+        if (swap_result and swap_result.get('connector_graze')
+                and swap_result.get('graze_net_id') is not None):
+            out['connector_graze'] = True
+            out['graze_net_id'] = swap_result['graze_net_id']
+        return out
 
     # Issue #165: the connector/setback segments are clearance-checked during
     # routing against an obstacle map that excludes BOTH halves of the pair, so a
@@ -3914,6 +3812,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         kind, obj, seg, overlap = graze
         if kind == 'pad':
             what = f"pad {obj.component_ref}.{obj.pad_number} (net {obj.net_name})"
+        elif kind == 'track':
+            net = pcb_data.nets.get(obj.net_id)
+            what = (f"track ({obj.start_x:.2f},{obj.start_y:.2f})-({obj.end_x:.2f},"
+                    f"{obj.end_y:.2f}) (net {net.name if net else obj.net_id})")
         else:
             net = pcb_data.nets.get(obj.net_id)
             what = f"via at ({obj.x:.2f},{obj.y:.2f}) (net {net.name if net else obj.net_id})"
@@ -3926,6 +3828,11 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             'failed': True,
             'iterations': result.get('iterations', 0),
             'connector_graze': True,
+            # The foreign net this route would graze/cross. The caller can rip it as
+            # a blocker and re-route this pair clean, then re-route the ripped net
+            # later (#246): there are no blocked cells to analyse here -- the route
+            # SUCCEEDED but was rejected post-hoc -- so name the blocker explicitly.
+            'graze_net_id': getattr(obj, 'net_id', None),
         }
 
     return result

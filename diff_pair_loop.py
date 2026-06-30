@@ -61,6 +61,38 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
     base_ov = _count_pn_overlaps(p_segs, n_segs, config)
     if base_ov == 0:
         return result
+    # The pinch is a connector-taper artifact at the terminal. Before falling to the
+    # hybrid, RETRY the plain coupled route at other connector setbacks (user request /
+    # #246): the centerline starts at a different setback, so the taper geometry shifts
+    # and a gentler/closer one often clears the pinch -- keeping a standard coupled
+    # route, with the hybrid a true last resort. (The route's internal ladder picks the
+    # first setback that ROUTES, not the first pinch-FREE one, so we drive it here.)
+    spacing_mm = (config.track_width + config.diff_pair_gap) / 2
+    base_sb = (config.diff_pair_centerline_setback
+               if config.diff_pair_centerline_setback is not None else spacing_mm * 4)
+    saved_sb = config.diff_pair_centerline_setback
+    try:
+        tried = {round(base_sb, 4)}
+        for sb in (base_sb * 1.5, base_sb * 2.0, base_sb * 3.0,
+                   base_sb * 0.75, base_sb * 0.5):
+            sb = round(sb, 4)
+            if sb in tried or sb < spacing_mm:
+                continue
+            tried.add(sb)
+            config.diff_pair_centerline_setback = sb
+            alt = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles,
+                                                 base_obstacles)
+            if not alt or alt.get('failed') or alt.get('probe_blocked'):
+                continue
+            a_ns = alt.get('new_segments', [])
+            a_ov = _count_pn_overlaps([s for s in a_ns if s.net_id == pair.p_net_id],
+                                      [s for s in a_ns if s.net_id == pair.n_net_id], config)
+            if a_ov == 0:
+                print(f"  Standard coupled route clean at setback {sb:.2f}mm "
+                      f"(was {base_ov} P/N overlap(s)); kept standard, no hybrid")
+                return alt
+    finally:
+        config.diff_pair_centerline_setback = saved_sb
     # Single-ended-clearance map for the legs (extra_clearance=0), as the
     # last-resort hybrid does -- the coupled map over-blocks a leg escape via.
     leg_obstacles, _ = build_diff_pair_obstacles(
@@ -134,7 +166,15 @@ def route_diff_pairs(
 
     user_cancelled = False
 
-    for pair_name, pair in diff_pair_ids_to_route:
+    # Mutable work queue (was a plain for-loop): a pair ripped to clear a graze (#246)
+    # is re-inserted right after the current pair so it re-routes IMMEDIATELY (with only
+    # the pairs routed so far committed), not deferred to the end-of-run reroute queue
+    # where the board is fully congested.
+    _pair_queue = list(diff_pair_ids_to_route)
+    _qi = 0
+    while _qi < len(_pair_queue):
+        pair_name, pair = _pair_queue[_qi]
+        _qi += 1
         # Check for cancellation request
         if state.cancel_check is not None and state.cancel_check():
             print("\nRouting cancelled by user")
@@ -251,6 +291,71 @@ def route_diff_pairs(
         # Route the differential pair
         result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles, base_obstacles,
                                                  unrouted_stubs)
+
+        # Connector/offset-graze rip-up (#246): the route was rejected because its
+        # emitted geometry would graze/cross a committed FOREIGN net (the pose router
+        # only validates the centerline, so the offset can cross an existing track
+        # unseen -- e.g. D2's offset across D3's committed leg). There are no blocked
+        # cells to analyse (the route succeeded then was rejected post-hoc), so rip the
+        # NAMED grazed net as a blocker, re-route this pair clean, and queue the ripped
+        # net to re-route later (it will then avoid this pair's committed copper).
+        graze_ripped_items = []
+        graze_attempts = 0
+        while (result and result.get('connector_graze')
+               and result.get('graze_net_id') is not None
+               and graze_attempts < config.max_rip_up_count):
+            graze_attempts += 1
+            gnet = result['graze_net_id']
+            canonical = get_canonical_net_id(gnet, diff_pair_by_net_id)
+            if (gnet not in routed_results
+                    or canonical in diff_pair_rip_exclude(state, pair.p_net_id, pair.n_net_id)):
+                break  # not ours to rip, or the cycle guard forbids it
+            print(f"  Route would graze net {gnet}; ripping it to route {pair_name} "
+                  f"first, then re-routing it (#246)")
+            grazed_pair_info = diff_pair_by_net_id.get(gnet)  # (name, pair) -- before rip
+            saved_result, ripped_ids, was_in_results = rip_up_net(
+                gnet, pcb_data, routed_net_ids, routed_net_paths,
+                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                results, config, track_proximity_cache,
+                state.working_obstacles, state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                layer_map)
+            graze_ripped_items.append((gnet, saved_result, ripped_ids, was_in_results,
+                                       grazed_pair_info))
+            for rid in (ripped_ids or []):
+                record_pair_rip_ancestry(state, pair.p_net_id, pair.n_net_id, rid)
+            obstacles, _ = build_diff_pair_obstacles(
+                diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
+                track_proximity_cache, layer_map, diff_pair_extra_clearance,
+                add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions)
+            result = route_diff_pair_with_obstacles(pcb_data, pair, config, obstacles,
+                                                    base_obstacles, unrouted_stubs)
+        if graze_ripped_items:
+            clean = (result and not result.get('failed')
+                     and not result.get('probe_blocked') and not result.get('connector_graze'))
+            if clean:
+                for gnet, _sr, _ri, was_in_results, grazed_pair_info in graze_ripped_items:
+                    if was_in_results:
+                        successful -= 1
+                    if grazed_pair_info is not None:
+                        # Re-route the ripped DIFF PAIR right NOW: insert it at the next
+                        # queue slot so it routes immediately (with only pairs so far +
+                        # this pair committed), not at the end where the board is full.
+                        _pair_queue.insert(_qi, grazed_pair_info)
+                    elif gnet not in queued_net_ids:
+                        net = pcb_data.nets.get(gnet)
+                        reroute_queue.append(('single', net.name if net else f"Net {gnet}", gnet))
+                        queued_net_ids.add(gnet)
+            else:
+                # rip-up didn't produce a clean route -> restore the ripped net(s)
+                for gnet, _sr, _ri, was_in_results, _gp in reversed(graze_ripped_items):
+                    restore_ripped_net(
+                        pcb_data, _sr, _ri, was_in_results,
+                        routed_net_ids, remaining_net_ids, routed_results, results,
+                        config, track_proximity_cache, layer_map)
 
         # Handle probe_blocked: try progressive rip-up before full route
         probe_ripup_attempts = 0
