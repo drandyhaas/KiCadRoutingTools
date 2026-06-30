@@ -939,8 +939,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # (the chains route '*' from the diff step's output); without this the
         # whole chain FileNotFoundErrors on the missing board (issues #90, #167).
         if not wrote and output_file:
-            import shutil
-            shutil.copy(input_file, output_file)
+            import shutil, os
+            # under --overwrite, output_file IS input_file: the board is already
+            # there, so skip the copy (shutil.copy would raise SameFileError).
+            if os.path.abspath(input_file) != os.path.abspath(output_file):
+                shutil.copy(input_file, output_file)
             if state.diff_pair_single_ended_nets:
                 print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
                       f"added); wrote board through to {output_file} for the "
