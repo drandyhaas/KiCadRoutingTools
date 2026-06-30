@@ -2385,20 +2385,49 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     # (Shared by the 2-terminal hybrid and each multipoint-leg hybrid. A full
     # remaining-cross-combo sweep is deliberately omitted -- it is nL^2 middle A*
     # runs on already-hard pairs; #3 covers the one useful cross case.)
+    #
+    # GATE (issue #244): front-load a terminal's own layer ONLY when that terminal
+    # actually carries an own-net via (a bare-pad target swap / hand via-in-pad) --
+    # the case the scheme was built for, where own-layer coupling saves a transition
+    # via (butterstick CK1 on B.Cu). For a plain SURFACE connector terminal with no
+    # such via (butterstick GIGABIT ETH_D on F.Cu), front-loading the own layer does
+    # NOT save a via and just keeps the coupled pair on the congested escape layer,
+    # which boxed out neighbours' reroutes (ETH_B/D1 failed only under --layer-costs,
+    # which the #243 stress -- run without layer-costs -- never exercised). Without a
+    # terminal via, fall back to the congestion-ordered single_order (pre-#243).
     nL = len(config.layers)
     s_lyr = src[4] if isinstance(src[4], int) and 0 <= src[4] < nL else None
     t_lyr = tgt[4] if isinstance(tgt[4], int) and 0 <= tgt[4] < nL else None
     single_order = sorted(
         range(nL),
         key=lambda i: (i not in spanned, layer_names[i] in ('F.Cu', 'B.Cu'), i))
+
+    _assoc = _launch_assoc_tol(config)
+
+    def _terminal_has_via(px, py, nx, ny):
+        """True if an own-net (P or N) via sits at this terminal -- a via-in-pad /
+        bare-pad target swap, where coupling on the terminal's own layer avoids an
+        extra transition via (the only case worth front-loading the own layer)."""
+        for v in (getattr(pcb_data, 'vias', None) or []):
+            if v.net_id not in (p_net_id, n_net_id):
+                continue
+            if (math.hypot(v.x - px, v.y - py) <= _assoc or
+                    math.hypot(v.x - nx, v.y - ny) <= _assoc):
+                return True
+        return False
+    src_has_via = _terminal_has_via(p_src_x, p_src_y, n_src_x, n_src_y)
+    tgt_has_via = _terminal_has_via(p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y)
     layer_pairs = []
 
     def _add_pair(a, b):
         if a is not None and b is not None and (a, b) not in layer_pairs:
             layer_pairs.append((a, b))
-    _add_pair(s_lyr, s_lyr)             # 1. source layer the whole way
-    _add_pair(t_lyr, t_lyr)             # 2. target layer the whole way
-    _add_pair(s_lyr, t_lyr)             # 3. source -> target (one coupled via)
+    if src_has_via:
+        _add_pair(s_lyr, s_lyr)         # 1. source layer the whole way
+    if tgt_has_via:
+        _add_pair(t_lyr, t_lyr)         # 2. target layer the whole way
+    if src_has_via or tgt_has_via:
+        _add_pair(s_lyr, t_lyr)         # 3. source -> target (one coupled via)
     for _L in single_order:             # 4. every remaining single layer
         _add_pair(_L, _L)
 
