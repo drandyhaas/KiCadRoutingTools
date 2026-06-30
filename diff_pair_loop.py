@@ -88,7 +88,7 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
             a_ov = _count_pn_overlaps([s for s in a_ns if s.net_id == pair.p_net_id],
                                       [s for s in a_ns if s.net_id == pair.n_net_id], config)
             if a_ov == 0:
-                print(f"  Standard coupled route clean at setback {sb:.2f}mm "
+                print(f"  Standard coupled route clean at setback ~{sb:.2f}mm "
                       f"(was {base_ov} P/N overlap(s)); kept standard, no hybrid")
                 return alt
     finally:
@@ -172,6 +172,13 @@ def route_diff_pairs(
     # where the board is fully congested.
     _pair_queue = list(diff_pair_ids_to_route)
     _qi = 0
+    # Local graze-rip ancestry (#246): {ripped canonical id -> set of ripper canonical
+    # ids}. Stops the immediate-reroute re-queue from ping-ponging (A rips B and
+    # re-queues B; B rips A and re-queues A; ...). The global DIFF_PAIR_RIP_GUARD is OFF
+    # by default, so diff_pair_rip_exclude only blocks a pair ripping ITSELF -- this
+    # guard, always on, blocks a net from graze-ripping a pair that already ripped it.
+    # Each ordered (ripper, ripped) pair is recorded at most once, so it terminates.
+    _graze_ancestry = {}
     while _qi < len(_pair_queue):
         pair_name, pair = _pair_queue[_qi]
         _qi += 1
@@ -307,9 +314,12 @@ def route_diff_pairs(
             graze_attempts += 1
             gnet = result['graze_net_id']
             canonical = get_canonical_net_id(gnet, diff_pair_by_net_id)
+            self_canon = pair.p_net_id  # this pair's canonical id (p_net_id)
             if (gnet not in routed_results
-                    or canonical in diff_pair_rip_exclude(state, pair.p_net_id, pair.n_net_id)):
-                break  # not ours to rip, or the cycle guard forbids it
+                    or canonical in diff_pair_rip_exclude(state, pair.p_net_id, pair.n_net_id)
+                    or canonical in _graze_ancestry.get(self_canon, ())):
+                break  # not ours to rip, the global guard forbids it, or it would
+                       # ping-pong (the grazed net already graze-ripped this pair)
             print(f"  Route would graze net {gnet}; ripping it to route {pair_name} "
                   f"first, then re-routing it (#246)")
             grazed_pair_info = diff_pair_by_net_id.get(gnet)  # (name, pair) -- before rip
@@ -322,6 +332,8 @@ def route_diff_pairs(
                 layer_map)
             graze_ripped_items.append((gnet, saved_result, ripped_ids, was_in_results,
                                        grazed_pair_info))
+            # Record so the ripped net can't graze-rip THIS pair back (ping-pong guard).
+            _graze_ancestry.setdefault(canonical, set()).add(self_canon)
             for rid in (ripped_ids or []):
                 record_pair_rip_ancestry(state, pair.p_net_id, pair.n_net_id, rid)
             obstacles, _ = build_diff_pair_obstacles(
@@ -1025,6 +1037,10 @@ def route_diff_pairs(
                         diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
                         track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
                         track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
+                        # Allow re-queuing if this pair is ripped later (matches the
+                        # other success paths; the inline copy had drifted).
+                        queued_net_ids.discard(pair.p_net_id)
+                        queued_net_ids.discard(pair.n_net_id)
                         invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
                         invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
                         continue

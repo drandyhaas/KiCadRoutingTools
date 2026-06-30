@@ -2370,7 +2370,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     Both terminals carry through-vias (or THT pads), so the centerline can start
     and end as close as possible to each terminal on whichever spanned layer is
     open. Each terminal is then attached to its middle near-end with a
-    point-to-point single-ended leg (_route_hybrid_legs), which routes around the
+    point-to-point single-ended leg (_route_hybrid_leg), which routes around the
     partner copper -- that is where polarity is resolved, at the pads. Returns a
     complete (fully-connected) route dict, or None if no clean route was found.
     """
@@ -2448,7 +2448,6 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     # which boxed out neighbours' reroutes (ETH_B/D1 failed only under --layer-costs,
     # which the #243 stress -- run without layer-costs -- never exercised). Without a
     # terminal via, fall back to the congestion-ordered single_order (pre-#243).
-    nL = len(config.layers)
     s_lyr = src[4] if isinstance(src[4], int) and 0 <= src[4] < nL else None
     t_lyr = tgt[4] if isinstance(tgt[4], int) and 0 <= tgt[4] < nL else None
     single_order = sorted(
