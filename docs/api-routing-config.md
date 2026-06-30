@@ -96,6 +96,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `fix_polarity` | `True` | Allow P/N pad swap when polarity is crossed |
 | `gnd_via_enabled` | `True` | Place GND return vias next to diff-pair signal vias |
 | `diff_pair_intra_match` | `False` | Meander the shorter of P/N to match lengths within the pair |
+| `ac_couple_match` | `False` | End-to-end length-match AC-coupled pairs split by series caps: concatenated P vs N path (#196) |
 | `diff_chamfer_extra` | `1.5` | Meander chamfer multiplier for pairs (avoids P/N crossings) |
 
 ### Length / time matching
