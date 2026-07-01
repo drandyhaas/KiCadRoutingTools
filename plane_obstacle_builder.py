@@ -107,6 +107,102 @@ def _point_in_pad_copper(pad: Pad, x: float, y: float, extra: float = 0.0) -> bo
             abs(ly) <= pad.size_y / 2 + extra)
 
 
+def _points_in_pad_copper_mask(pad: Pad, xs, ys, extra=0.0):
+    """Vectorized twin of _point_in_pad_copper: boolean mask over the point
+    arrays (xs, ys). `extra` may be a scalar or a per-point array (e.g. via
+    radius). Rotation-aware via the pad's residual rect_rotation."""
+    dx = xs - pad.global_x
+    dy = ys - pad.global_y
+    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
+    cos_r = math.cos(rot)
+    sin_r = math.sin(rot)
+    lx = dx * cos_r + dy * sin_r
+    ly = -dx * sin_r + dy * cos_r
+    return (np.abs(lx) <= pad.size_x / 2 + extra) & (np.abs(ly) <= pad.size_y / 2 + extra)
+
+
+class _NetConnGraph:
+    __slots__ = ("seg_adj", "via_at", "pad_at", "via_arrays", "seg_ends_by_layer")
+
+
+# Cache of _NetConnGraph keyed by (id(pcb_data), net_id). _smd_pad_reaches_layer
+# was rebuilding this whole same-net graph on EVERY call (794x / 22s on daisho);
+# it depends only on (net_id, copper), so build it once and reuse across every
+# pad of the net. Invalidated when the board's segment/via count or tolerance
+# changes (copper only grows during routing, so a count change is a real change).
+_NET_GRAPH_CACHE: Dict[Tuple, Tuple] = {}
+
+
+def _net_conn_graph(net_id: int, pcb_data: PCBData, inv_tol: float) -> "_NetConnGraph":
+    key = (id(pcb_data), net_id)
+    token = (len(pcb_data.segments), len(pcb_data.vias), inv_tol)
+    hit = _NET_GRAPH_CACHE.get(key)
+    if hit is not None and hit[0] == token:
+        return hit[1]
+
+    def pkey(x, y):
+        return (round(x * inv_tol), round(y * inv_tol))
+
+    if pcb_data.board_info and getattr(pcb_data.board_info, 'copper_layers', None):
+        all_cu = [l for l in pcb_data.board_info.copper_layers if l.endswith('.Cu')]
+    else:
+        all_cu = ['F.Cu', 'B.Cu']
+
+    # Segment adjacency + per-layer endpoint arrays (for vectorized pad seeding).
+    seg_adj: Dict[Tuple, set] = {}
+    seg_ends_tmp: Dict[str, Tuple[list, list, list]] = {}
+    for s in pcb_data.segments:
+        if s.net_id != net_id:
+            continue
+        k1 = (pkey(s.start_x, s.start_y), s.layer)
+        k2 = (pkey(s.end_x, s.end_y), s.layer)
+        seg_adj.setdefault(k1, set()).add(k2)
+        seg_adj.setdefault(k2, set()).add(k1)
+        xs, ys, ks = seg_ends_tmp.setdefault(s.layer, ([], [], []))
+        xs.append(s.start_x); ys.append(s.start_y); ks.append(k1[0])
+        xs.append(s.end_x);   ys.append(s.end_y);   ks.append(k2[0])
+
+    def via_layers(v) -> List[str]:
+        if not v.layers or ('F.Cu' in v.layers and 'B.Cu' in v.layers):
+            return all_cu
+        return v.layers
+
+    via_at: Dict[Tuple, set] = {}
+    vx, vy, vr, vkeys, vlayers = [], [], [], [], []
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
+            continue
+        k = pkey(v.x, v.y)
+        vl = via_layers(v)
+        via_at.setdefault(k, set()).update(vl)
+        vx.append(v.x); vy.append(v.y); vr.append(v.size / 2); vkeys.append(k); vlayers.append(vl)
+
+    pad_at: Dict[Tuple, set] = {}
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        k = pkey(p.global_x, p.global_y)
+        if p.drill > 0:
+            pad_at.setdefault(k, set()).update(all_cu)
+        else:
+            for pl in p.layers:
+                if pl == '*.Cu':
+                    pad_at.setdefault(k, set()).update(all_cu)
+                elif pl.endswith('.Cu') and not pl.startswith('*'):
+                    pad_at.setdefault(k, set()).add(pl)
+
+    g = _NetConnGraph()
+    g.seg_adj = seg_adj
+    g.via_at = via_at
+    g.pad_at = pad_at
+    g.via_arrays = (np.asarray(vx, dtype=float), np.asarray(vy, dtype=float),
+                    np.asarray(vr, dtype=float), vkeys, vlayers)
+    g.seg_ends_by_layer = {
+        L: (np.asarray(xs, dtype=float), np.asarray(ys, dtype=float), ks)
+        for L, (xs, ys, ks) in seg_ends_tmp.items()
+    }
+    _NET_GRAPH_CACHE[key] = (token, g)
+    return g
+
+
 def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
                             pcb_data: PCBData, tolerance: float = 0.01) -> bool:
     """Return True if the SMD `pad` already has an electrical path to
@@ -135,77 +231,41 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
         return True
 
     inv_tol = 1.0 / tolerance
+
     def pkey(x: float, y: float):
         return (round(x * inv_tol), round(y * inv_tol))
 
-    if pcb_data.board_info and getattr(pcb_data.board_info, 'copper_layers', None):
-        all_cu = [l for l in pcb_data.board_info.copper_layers if l.endswith('.Cu')]
-    else:
-        all_cu = ['F.Cu', 'B.Cu']
-
-    # Segment adjacency keyed by (pos_key, layer).
-    seg_adj: Dict[Tuple, set] = {}
-    for s in pcb_data.segments:
-        if s.net_id != net_id:
-            continue
-        k1 = (pkey(s.start_x, s.start_y), s.layer)
-        k2 = (pkey(s.end_x, s.end_y), s.layer)
-        seg_adj.setdefault(k1, set()).add(k2)
-        seg_adj.setdefault(k2, set()).add(k1)
-
-    def via_layers(v) -> List[str]:
-        """Copper layers a via connects. A through via is written with
-        (layers F.Cu B.Cu) in KiCad but spans every copper layer."""
-        if not v.layers or ('F.Cu' in v.layers and 'B.Cu' in v.layers):
-            return all_cu
-        return v.layers
-
-    # Via vertical jumps keyed by pos_key -> set of layers.
-    via_at: Dict[Tuple, set] = {}
-    for v in pcb_data.vias:
-        if v.net_id != net_id:
-            continue
-        k = pkey(v.x, v.y)
-        via_at.setdefault(k, set()).update(via_layers(v))
-
-    # Pads at each position - through-hole pads bridge all copper layers.
-    pad_at: Dict[Tuple, set] = {}
-    for p in pcb_data.pads_by_net.get(net_id, []):
-        k = pkey(p.global_x, p.global_y)
-        if p.drill > 0:
-            pad_at.setdefault(k, set()).update(all_cu)
-        else:
-            for pl in p.layers:
-                if pl == '*.Cu':
-                    pad_at.setdefault(k, set()).update(all_cu)
-                elif pl.endswith('.Cu') and not pl.startswith('*'):
-                    pad_at.setdefault(k, set()).add(pl)
+    # Same-net connectivity graph (built once per net + copper-state, cached).
+    graph = _net_conn_graph(net_id, pcb_data, inv_tol)
+    seg_adj = graph.seg_adj
+    via_at = graph.via_at
+    pad_at = graph.pad_at
 
     start = (pkey(pad.global_x, pad.global_y), pad_layer)
     visited = {start}
     queue = [start]
 
-    # Seed from same-net copper that lands inside this pad's copper:
+    # Seed from same-net copper that lands inside this pad's copper (vectorized):
     # - a via overlapping the pad connects the pad to all the via's layers
     # - a segment endpoint inside the pad (on the pad's layer) connects there
-    for v in pcb_data.vias:
-        if v.net_id != net_id:
-            continue
-        if _point_in_pad_copper(pad, v.x, v.y, extra=v.size / 2):
-            for vl in via_layers(v):
-                state = (pkey(v.x, v.y), vl)
+    vx, vy, vr, vkeys, vlayers = graph.via_arrays
+    if len(vx):
+        mask = _points_in_pad_copper_mask(pad, vx, vy, extra=vr)
+        for i in np.nonzero(mask)[0]:
+            for vl in vlayers[i]:
+                state = (vkeys[i], vl)
                 if state not in visited:
                     visited.add(state)
                     queue.append(state)
-    for s in pcb_data.segments:
-        if s.net_id != net_id or s.layer != pad_layer:
-            continue
-        for ex, ey in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
-            if _point_in_pad_copper(pad, ex, ey):
-                state = (pkey(ex, ey), pad_layer)
-                if state not in visited:
-                    visited.add(state)
-                    queue.append(state)
+    seg_ends = graph.seg_ends_by_layer.get(pad_layer)
+    if seg_ends is not None:
+        ex, ey, ekeys = seg_ends
+        mask = _points_in_pad_copper_mask(pad, ex, ey)
+        for i in np.nonzero(mask)[0]:
+            state = (ekeys[i], pad_layer)
+            if state not in visited:
+                visited.add(state)
+                queue.append(state)
 
     while queue:
         pos, layer = queue.pop(0)

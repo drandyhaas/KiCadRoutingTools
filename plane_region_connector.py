@@ -841,6 +841,26 @@ def _try_route_between_regions(
     return result, track_width, open_space_via
 
 
+# Cap on how many anchors of a region are fed into the connection A* as
+# source/target seeds. A giant plane region (e.g. daisho's GND Region 0 has
+# 320 anchors) otherwise pushes thousands of source/target cells into EVERY A*
+# attempt, across N track widths x N region pairs -- the dominant cost of
+# route_disconnected_planes on dense boards. Regions are internally connected,
+# so routing between the anchors nearest each region's connection point is
+# optimal; the full anchor set is retried as a fallback if the reduced route
+# fails, so no connection is lost.
+ANCHOR_SEED_CAP = 16
+
+
+def _nearest_anchors(anchors, point, k=ANCHOR_SEED_CAP):
+    """The <=k anchors nearest `point`. Returns `anchors` unchanged when there
+    are <= k of them (no behavior change for small regions) or `point` is None."""
+    if point is None or len(anchors) <= k:
+        return anchors
+    px, py = point
+    return sorted(anchors, key=lambda a: (a[0] - px) ** 2 + (a[1] - py) ** 2)[:k]
+
+
 def route_disconnected_regions(
     net_id: int,
     net_name: str,
@@ -951,25 +971,42 @@ def route_disconnected_regions(
         anchors_i = region_anchors[region_i]
         anchors_j = region_anchors[region_j]
 
+        # Seed the A* only from the anchors nearest each region's connection
+        # point (fix: giant regions otherwise feed thousands of seeds per attempt).
+        seed_i = _nearest_anchors(anchors_i, point_i)
+        seed_j = _nearest_anchors(anchors_j, point_j)
+        reduced = (len(seed_i) < len(anchors_i)) or (len(seed_j) < len(anchors_j))
+
         # Progress indicator
-        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors)...", end=" ", flush=True)
+        seed_note = f" (seed {len(seed_i)}x{len(seed_j)})" if reduced else ""
+        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors){seed_note}...", end=" ", flush=True)
+
+        def _connect(a_i, a_j):
+            return _try_route_between_regions(
+                a_i, a_j,
+                base_obstacles=base_obstacles,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                config=config,
+                bounds=zone_bounds,
+                net_vias=net_vias,
+                max_track_width=max_track_width,
+                min_track_width=min_track_width,
+                max_iterations=max_iterations,
+                coord=coord,
+                verbose=verbose,
+                router=plane_router
+            )
 
         # Try routing with multiple track widths using helper function
-        result, track_width, open_space_via = _try_route_between_regions(
-            anchors_i, anchors_j,
-            base_obstacles=base_obstacles,
-            plane_layer_idx=plane_layer_idx,
-            routing_layers=routing_layers,
-            config=config,
-            bounds=zone_bounds,
-            net_vias=net_vias,
-            max_track_width=max_track_width,
-            min_track_width=min_track_width,
-            max_iterations=max_iterations,
-            coord=coord,
-            verbose=verbose,
-            router=plane_router
-        )
+        result, track_width, open_space_via = _connect(seed_i, seed_j)
+
+        # Fallback: if the reduced-anchor route failed, retry with the full
+        # region anchor sets (the original, slower behavior) so we never miss a
+        # connection that the full set would have found.
+        if result is None and reduced:
+            print(f"{YELLOW}retry-full{RESET} ", end="", flush=True)
+            result, track_width, open_space_via = _connect(anchors_i, anchors_j)
 
         if result is None:
             print(f"{RED}FAILED{RESET}")
