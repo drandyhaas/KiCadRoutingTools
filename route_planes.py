@@ -237,6 +237,22 @@ def find_via_position(
                     if not obstacles.is_via_blocked(gx, gy):
                         open_cells.append((gx, gy))
 
+    # Thin candidate via sites to ~1 per via-radius bin (#263). A wide forced-via
+    # search (max_search_radius 10mm at 0.05 grid = ~125k cells) otherwise
+    # enumerates and seeds EVERY open cell as an A* source, and repeats it per
+    # via-size rung x per fine-clearance config -- the dominant cost on a boxed-in
+    # pad amid open space (e.g. daisho U1.W18). Candidate vias closer than a via
+    # radius are redundant (a via at either connects the same), so bin by
+    # via-radius and keep the NEAREST open cell per bin (open_cells is nearest-
+    # first). Cuts the doomed search ~an order of magnitude while preserving spatial
+    # coverage across the radius. Only kicks in on large searches so small/normal
+    # taps keep exact behavior. (config -- which carries via_size -- is passed by
+    # both call sites; the None-guard is just null-safety for the optional param.)
+    via_bin = 0
+    if config is not None and len(open_cells) > 4000:
+        via_bin = max(1, int(round(config.via_size / coord.grid_step / 2)))
+    seen_bins = set()
+
     for gx, gy in open_cells:
         dx, dy = gx - pad_gx, gy - pad_gy
 
@@ -261,6 +277,15 @@ def find_via_position(
                     break
             if in_zone:
                 continue
+
+        # Thin redundant near-duplicate via sites: keep the nearest PASSING cell
+        # per via-radius bin (see via_bin note above). Done here, after the skip
+        # checks, so a bin is never consumed by a cell that was itself skipped.
+        if via_bin:
+            bin_key = (gx // via_bin, gy // via_bin)
+            if bin_key in seen_bins:
+                continue
+            seen_bins.add(bin_key)
 
         dist_sq = dx * dx + dy * dy
         valid_positions.append((dist_sq, coord.to_float(gx, gy), gx, gy))

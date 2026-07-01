@@ -775,13 +775,29 @@ def _try_route_between_regions(
     open_space_via = None
     base_iterations = 0  # iterations used by narrowest successful route
 
+    # Route from the region with FEWER anchors as SOURCES. A multi-source A* with
+    # many sources and few targets floods a broad, weakly-guided frontier and often
+    # exhausts the whole budget WITHOUT finding a path, whereas few-sources ->
+    # many-targets beelines: its heuristic (distance to the NEAREST of many targets)
+    # is far more informative and the frontier stays focused. On daisho, routing the
+    # 299-anchor GND region as ~128 source cells toward a 1-anchor region exhausted
+    # 200k iterations and FAILED, while the reverse (few sources -> that big region
+    # as target) found the same connection in ~2k -- and edges list the giant region
+    # first, so the old fixed A->B order paid the 200k failure on ~every big-region
+    # edge before the reverse succeeded. Ordering cheap-direction-first is purely a
+    # search-efficiency choice: same obstacle map, same connectivity (#263).
+    if len(anchors_i) <= len(anchors_j):
+        lo_src, hi_tgt = anchors_i, anchors_j
+    else:
+        lo_src, hi_tgt = anchors_j, anchors_i
+
     # Step 1: Try minimum width first (both directions) with full budget
     result, base_iterations = _try_route(
-        anchors_i, anchors_j, 0, max_iterations, f"w={min_track_width:.2f}mm A->B")
+        lo_src, hi_tgt, 0, max_iterations, f"w={min_track_width:.2f}mm few->many")
 
     if result is None:
         result, base_iterations = _try_route(
-            anchors_j, anchors_i, 0, max_iterations, f"w={min_track_width:.2f}mm B->A")
+            hi_tgt, lo_src, 0, max_iterations, f"w={min_track_width:.2f}mm many->few")
 
     if result is None:
         # Can't route even at min width - try open-space fallback
@@ -813,7 +829,16 @@ def _try_route_between_regions(
     # Step 2: If we found a route at min width, try wider widths with bounded budget
     if result is not None and len(track_widths_narrow_first) > 1:
         narrow_result = result
-        iter_budget = max(base_iterations * 3, 1000)  # at least 1000
+        # Wider width is an OPTIONAL upgrade over the already-successful narrow
+        # route, so cap its budget at the standard max_iterations: a widening that
+        # can't fit the corridor then fails fast instead of exhausting up to 3x a
+        # large base. On daisho base_iterations reached ~200k, so the old 3x gave
+        # ~600k-iteration FAILING searches per edge (2-8s each, x every edge that
+        # routed narrow) -- a dominant slice of the multi-minute region-connect
+        # phase (#263). Never below base_iterations, so a legitimate widening
+        # through the same corridor (needs ~base) still succeeds; only the trace
+        # WIDTH is affected on a miss, never whether the regions connect.
+        iter_budget = min(max(base_iterations * 3, 1000), max_iterations)
 
         # Try wider widths (skip min_track_width which we already did)
         for try_width in track_widths_narrow_first[1:]:
@@ -821,13 +846,13 @@ def _try_route_between_regions(
             track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
 
             wider, _ = _try_route(
-                anchors_i, anchors_j, track_margin, iter_budget,
-                f"w={try_width:.2f}mm A->B")
+                lo_src, hi_tgt, track_margin, iter_budget,
+                f"w={try_width:.2f}mm few->many")
 
             if wider is None:
                 wider, _ = _try_route(
-                    anchors_j, anchors_i, track_margin, iter_budget,
-                    f"w={try_width:.2f}mm B->A")
+                    hi_tgt, lo_src, track_margin, iter_budget,
+                    f"w={try_width:.2f}mm many->few")
 
             if wider is not None:
                 result = wider
