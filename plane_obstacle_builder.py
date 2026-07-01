@@ -7,7 +7,7 @@ Provides functions to build obstacle maps for:
 """
 
 import math
-from typing import List, Dict, Tuple, Optional
+from typing import Dict, List, Optional, Tuple, cast
 
 import numpy as np
 

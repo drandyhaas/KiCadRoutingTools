@@ -44,6 +44,7 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+from typing import Optional
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -99,7 +100,7 @@ def read_version():
     return (SCRIPT_DIR / "VERSION").read_text().strip()
 
 
-def stage_plugins(stage_root: Path, binary_dir: Path | None = None):
+def stage_plugins(stage_root: Path, binary_dir: Optional[Path] = None):
     """Copy the repo working tree (minus ROOT_EXCLUDE / IGNORE_PATTERNS) into
     <stage_root>/plugins/.
 
@@ -142,7 +143,7 @@ def _download_asset(version: str, asset_name: str, dest: Path):
         shutil.copyfileobj(resp, f)
 
 
-def install_binaries(plugins_dir: Path, version: str, binary_dir: Path | None):
+def install_binaries(plugins_dir: Path, version: str, binary_dir: Optional[Path]):
     """Place ALL platform Rust binaries into plugins/rust_router/ under their
     platform-suffix names. The plugin's startup resolver picks the right one.
     """

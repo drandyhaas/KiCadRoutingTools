@@ -5,7 +5,7 @@ Builds GridObstacleMap objects from PCB data, adding obstacles for segments,
 vias, pads, BGA exclusion zones, and routed paths.
 """
 
-from typing import List, Optional, Tuple, Dict, Set, Union
+from typing import Dict, List, Mapping, Optional, Set, Tuple, Union
 from dataclasses import dataclass, field
 import numpy as np
 import math

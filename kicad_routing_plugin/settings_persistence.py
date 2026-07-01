@@ -3,6 +3,7 @@ KiCad Routing Tools - Dialog Settings Persistence
 
 Handles saving and restoring dialog settings between invocations.
 """
+from typing import Set
 
 
 def get_dialog_settings(dialog):

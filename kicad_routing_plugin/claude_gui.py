@@ -19,6 +19,7 @@ import threading
 import subprocess
 
 import wx
+from typing import Set
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)

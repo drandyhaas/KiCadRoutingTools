@@ -10,6 +10,7 @@ import sys
 import time
 import wx
 import threading
+from typing import List
 
 # Add parent directory to path
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))

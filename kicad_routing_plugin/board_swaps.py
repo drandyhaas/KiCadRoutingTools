@@ -15,6 +15,7 @@ This module deliberately avoids wx so it can be used headless.
 """
 
 from routing_utils import pos_key
+from typing import Type
 
 
 def _to_mm_key(pcbnew, point):
