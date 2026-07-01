@@ -1447,12 +1447,14 @@ def _write_output_and_reroute(
     if all_new_segments:
         from pcb_modification import cleanup_plane_taps_grazing
         _scope = {s['net_id'] for s in all_new_segments}
-        all_new_segments, _gz_rm, _gz_nudge = cleanup_plane_taps_grazing(
+        all_new_segments, _gz_rm, _gz_nudge, _gz_swept = cleanup_plane_taps_grazing(
             pcb_data, all_new_segments, _scope, clearance=clearance)
         if _gz_rm:
-            print(f"  Graze prune: removed {_gz_rm} foreign-pad-grazing tap segment(s)")
+            print(f"  Graze prune: removed {_gz_rm} grazing tap segment(s)")
         if _gz_nudge:
             print(f"  Graze nudge: re-bent grazing tap jog(s) on {_gz_nudge} net(s)")
+        if _gz_swept:
+            print(f"  Dead-end sweep: trimmed {_gz_swept} orphaned tap segment(s)")
 
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,

@@ -1263,15 +1263,29 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
 
 def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                                scope_net_ids=None, clearance: float = 0.1):
-    """Apply prune_grazing_segments + nudge_grazing_octolinear to a PLANE script's
-    write-list (issue #224).
+    """Apply prune_grazing_segments + nudge_grazing_octolinear + sweep_dead_ends to a
+    PLANE script's write-list (issue #224).
 
     route_planes / route_disconnected_planes carry their new copper as
     {'start','end','width','layer','net_id'} DICTS in `all_new_segments` (not the
-    route.py `results` list of Segment objects), so the two passes -- which operate
-    on pcb_data and the route.py results -- are driven here with an empty results
-    list and their Segment-level removals/additions are mirrored back into the dict
-    list by coordinate signature. Returns (all_new_segments, n_removed, n_nudged).
+    route.py `results` list of Segment objects), so the passes -- which operate on
+    pcb_data and the route.py results -- are driven here with an empty results list
+    and their Segment-level removals/additions are mirrored back into the dict list
+    by coordinate signature.
+
+    The plane scripts have no other cleanup of their own copper (route.py excludes
+    the plane nets), so this is their only chance to drop bad taps:
+      * grazing prune with ``check_foreign_segments`` -- a tap laid through the
+        obstacle-exempt endpoint region can sit sub-clearance to a neighbouring
+        signal TRACK, not just a pad/via (glasgow +3V3 tap grazing the Y2 track);
+      * dead-end sweep -- a superseded/failed reuse-tap (the fill-aware re-check
+        force-via path leaves the abandoned tap copper behind) is a dangling
+        appendix that never reaches the plane.
+    Both are connectivity-gated WITH the pour (check_net_connectivity sees the
+    zones), so a load-bearing tap that actually carries a pad to the plane is kept
+    and only genuinely redundant/dead copper goes.
+
+    Returns (all_new_segments, n_removed, n_nudged, n_swept).
     """
     def sig(sx, sy, ex, ey, layer):
         a, b = (round(sx, 3), round(sy, 3)), (round(ex, 3), round(ey, 3))
@@ -1285,8 +1299,9 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                if sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1], d['layer']) not in rm]
         return out, len(segs) - len(out)
 
-    # Drop redundant grazing taps.
-    _, _, removed = prune_grazing_segments([], pcb_data, scope_net_ids, clearance)
+    # Drop redundant grazing taps -- against a foreign pad/via OR a foreign track.
+    _, _, removed = prune_grazing_segments([], pcb_data, scope_net_ids, clearance,
+                                           check_foreign_segments=True)
     all_new_segments, n_removed = strip(all_new_segments, removed)
 
     # Re-bend the load-bearing ones around the pad.
@@ -1297,7 +1312,16 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
         all_new_segments.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
                                  'width': s.width, 'layer': s.layer, 'net_id': s.net_id})
 
-    return all_new_segments, n_removed, n_nudged
+    # Sweep dead-end appendices left by a superseded reuse-tap. sweep_dead_ends does
+    # not mutate pcb_data (unlike prune_grazing_segments), so strip the swept copper
+    # from pcb_data too, keeping it consistent for any later reader.
+    _, _, de_removed = sweep_dead_ends([], pcb_data, scope_net_ids)
+    all_new_segments, n_swept = strip(all_new_segments, de_removed)
+    if de_removed:
+        rm_ids = {id(s) for s in de_removed}
+        pcb_data.segments = [s for s in pcb_data.segments if id(s) not in rm_ids]
+
+    return all_new_segments, n_removed, n_nudged, n_swept
 
 
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:

@@ -641,12 +641,14 @@ def route_planes(
     if all_new_segments:
         from pcb_modification import cleanup_plane_taps_grazing
         _scope = {s['net_id'] for s in all_new_segments}
-        all_new_segments, _gz_rm, _gz_nudge = cleanup_plane_taps_grazing(
+        all_new_segments, _gz_rm, _gz_nudge, _gz_swept = cleanup_plane_taps_grazing(
             pcb_data, all_new_segments, _scope, clearance=clearance)
         if _gz_rm:
-            print(f"  Graze prune: removed {_gz_rm} foreign-pad-grazing repair segment(s)")
+            print(f"  Graze prune: removed {_gz_rm} grazing repair segment(s)")
         if _gz_nudge:
             print(f"  Graze nudge: re-bent grazing tap jog(s) on {_gz_nudge} net(s)")
+        if _gz_swept:
+            print(f"  Dead-end sweep: trimmed {_gz_swept} orphaned repair segment(s)")
 
     # Print summary
     print(f"\n{'='*60}")
