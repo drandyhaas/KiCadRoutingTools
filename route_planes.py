@@ -278,53 +278,78 @@ def find_via_position(
             print(f"    DEBUG: Searched {max_radius_grid} grid steps ({max_search_radius}mm) from pad center")
         return None
 
-    # Check routability for each position until we find one that works
-    route_failures = 0
+    # Routability check (#259): instead of running one A* per candidate via cell
+    # (K searches, K up to thousands, ~99% of them failing on dense boards), seed a
+    # SINGLE multi-source A* with ALL candidate cells as sources and route to the
+    # pad. The router explores from every candidate at once and returns the shortest
+    # via->pad connection; the winning path's source end IS the via position. A
+    # genuinely boxed-in pad is proven unreachable in one frontier exhaustion rather
+    # than K separate searches. Candidate cells are via-unblocked (via keep-out
+    # >= trace keep-out), so seeding them as source_target_cells is trace-safe --
+    # the same multi-source pattern route_plane_connection_wide already uses.
+    layer_idx = 0
+    pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
+
+    source_cells = []
+    src_set = set()
     skipped_count = 0
     for dist_sq, via_pos, gx, gy in valid_positions:
-        # Skip if too close to a position where routing already failed (within this call)
+        # Skip cells near a position where routing already failed (rip-up retries)
         if failed_route_positions and skip_radius_sq > 0:
-            too_close = False
-            for failed_gx, failed_gy in failed_route_positions:
-                fdx = gx - failed_gx
-                fdy = gy - failed_gy
-                if fdx * fdx + fdy * fdy <= skip_radius_sq:
-                    too_close = True
-                    break
-            if too_close:
+            if any((gx - fgx) ** 2 + (gy - fgy) ** 2 <= skip_radius_sq
+                   for fgx, fgy in failed_route_positions):
                 skipped_count += 1
                 continue
+        source_cells.append((gx, gy, layer_idx))
+        src_set.add((gx, gy))
 
-        # Try to route from this via position to the pad
-        # Use verbose for first few failures to help debug
-        route_verbose = verbose and route_failures < 3
-        route_result = route_via_to_pad(
-            via_pos, pad, pad_layer, net_id,
-            routing_obstacles, config, verbose=route_verbose,
-            router=router
+    if not source_cells:
+        if verbose:
+            print(f"[skipped {skipped_count}, no candidates left]", end=" ")
+        return None
+
+    for gx, gy, _ in source_cells:
+        routing_obstacles.add_source_target_cell(gx, gy, layer_idx)
+    routing_obstacles.add_source_target_cell(pad_gx, pad_gy, layer_idx)
+
+    if router is None:
+        router = GridRouter(
+            via_cost=config.via_cost_units(),
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
         )
-        if route_result is not None:
-            # Routing succeeded - use this position
-            if verbose and (route_failures > 0 or skipped_count > 0):
-                print(f"[tried {route_failures+1}, skipped {skipped_count}]", end=" ")
-            return via_pos
 
-        # Routing failed - add to failed set so nearby positions are skipped
-        if failed_route_positions is not None:
+    # One search, seeded from all candidates; generous budget since it replaces K.
+    ms_iters = max(10000, min(60000, len(source_cells) * 4))
+    path, iterations, _ = router.route_with_frontier(
+        routing_obstacles, source_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
+        False,  # collinear_vias
+        0,      # via_exclusion_radius
+        None,   # start_direction
+        None,   # end_direction
+        0       # direction_steps
+    )
+    routing_obstacles.clear_source_target_cells()
+
+    if path:
+        # The via is the path endpoint that is one of our candidate sources
+        # (the other endpoint is the pad target).
+        e0 = (path[0][0], path[0][1])
+        via_cell = e0 if e0 in src_set else (path[-1][0], path[-1][1])
+        if verbose and (skipped_count or len(source_cells) > 1):
+            print(f"[multi-source {len(source_cells)} cand, {iterations}it]", end=" ")
+        return coord.to_float(via_cell[0], via_cell[1])
+
+    # No candidate could reach the pad. Record them so a rip-up retry skips them.
+    if failed_route_positions is not None:
+        for gx, gy, _ in source_cells:
             failed_route_positions.add((gx, gy))
-        route_failures += 1
-
-    # Debug output on failure
     if verbose:
-        print(f"[tried {route_failures}, skipped {skipped_count}]", end=" ")
-        if not valid_positions:
-            print(f"\n    DEBUG: No valid via positions found (all blocked in obstacle map)")
-            print(f"    DEBUG: Searched {max_radius_grid} grid steps ({max_search_radius}mm) from pad center")
-        else:
-            print(f"\n    DEBUG: Found {len(valid_positions)} unblocked via positions, but routing failed for all")
-            print(f"    DEBUG: Closest unblocked position: ({valid_positions[0][1][0]:.2f}, {valid_positions[0][1][1]:.2f})")
-            print(f"    DEBUG: Tried to route on layer {pad_layer}")
-
+        print(f"\n    DEBUG: {len(source_cells)} unblocked via positions, none routed to the "
+              f"pad on {pad_layer} (multi-source, {iterations}it)", end=" ")
     return None  # No valid position with routable path
 
 
