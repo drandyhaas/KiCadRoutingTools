@@ -9,7 +9,7 @@ import math
 from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
-from routing_config import GridRouteConfig, GridCoord, DiffPairNet
+from routing_config import GridRouteConfig, GridCoord, DiffPairNet, REFERENCE_GRID_STEP
 from routing_utils import segment_length, build_layer_map, pos_key
 from connectivity import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints,
@@ -2744,129 +2744,175 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             cost_plus = ((_d2((p_src_x, p_src_y), off_plus[0]) > _d2((p_src_x, p_src_y), off_minus[0])) +
                          (_d2((p_tgt_x, p_tgt_y), off_plus[-1]) > _d2((p_tgt_x, p_tgt_y), off_minus[-1])))
             p_sign = 1 if cost_plus <= 1 else -1
-        n_sign = -p_sign
-        p_float = off_plus if p_sign == 1 else off_minus
-        n_float = off_minus if p_sign == 1 else off_plus
-        p_float, n_float = _process_via_positions(simplified, p_float, n_float, coord, config, p_sign, n_sign, spacing_mm)
-        p_segs, p_vias, _ = _float_path_to_geometry(
-            p_float, p_net_id, None, None, p_sign, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
-        n_segs, n_vias, _ = _float_path_to_geometry(
-            n_float, n_net_id, None, None, n_sign, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
-        mid_segs = p_segs + n_segs
-        if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
-            _rej(a_layer, b_layer, "coupled middle P/N tracks cross")
-            continue
-        _gz = _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config)
-        if _gz:
-            _rej(a_layer, b_layer, "coupled middle " + _graze_reason(_gz))
-            continue
-
-        # Attach each terminal to its middle near-end with point-to-point single-ended
-        # legs. The partner net's copper (its middle + already-committed legs + fanout
-        # stub + pads) is an obstacle, so a side-swap leg routes AROUND it -- polarity
-        # is fixed at the pads. The legs are SINGLE-ENDED, so route them on a single-
-        # ended-clearance map (leg_obstacles) when supplied -- the diff-pair map's
-        # coupled extra clearance over-blocks a leg's escape via (watchy USB_D).
-        #
-        # Try leg-attachment ORDER PLANS in sequence, first that routes all four legs
-        # wins (issue #244). Plan 0 is the historical net-by-net order (P fully, then
-        # N) -- kept FIRST so already-routable pairs attach identically (no DRC drift).
-        # The fallbacks free a convergent leg that the default order boxes out in a
-        # dense terminal field (butterstick D1's FPGA source): routing the OTHER net
-        # first, or both SRC legs before either TGT leg so a leg isn't blocked by its
-        # own pair's far-end leg committed too early.
-        total_iters = iters
+        # ---- Assemble BOTH polarities and keep the cleaner/cheaper legs (#248) --
+        # The coupled middle is geometrically identical for either polarity: the two
+        # offset ribbons occupy the same copper, only which one is labelled P vs N
+        # swaps. The LEGS differ, because each leg attaches its pad to THAT net's
+        # middle end. The heuristic side-choice above can pick the orientation whose
+        # legs CROSS at a terminal, jogging one leg into a sub-clearance graze of its
+        # OWN partner -- a #248 self-overlap the cross/graze gates don't catch. So
+        # always assemble both p_sign and -p_sign and select the better legs by
+        # (fewest intra-pair P/N overlaps, then fewest vias, then shortest copper).
         pair_vias = [v for v in (getattr(pcb_data, 'vias', None) or [])
                      if v.net_id in (p_net_id, n_net_id)]
         leg_obs = leg_obstacles if leg_obstacles is not None else obstacles
         board_segs = getattr(pcb_data, 'segments', None) or []
         pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
-        mid_segs_by_net = {p_net_id: p_segs, n_net_id: n_segs}
-        mid_vias_by_net = {p_net_id: p_vias, n_net_id: n_vias}
-        term_by = {
-            (p_net_id, 'src'): ((p_src_x, p_src_y, src[4]), p_float[0]),
-            (p_net_id, 'tgt'): ((p_tgt_x, p_tgt_y, tgt[4]), p_float[-1]),
-            (n_net_id, 'src'): ((n_src_x, n_src_y, src[4]), n_float[0]),
-            (n_net_id, 'tgt'): ((n_tgt_x, n_tgt_y, tgt[4]), n_float[-1]),
-        }
-        # Mutable per-net committed leg copper, reset per plan; a leg sees the PARTNER's
-        # committed legs as obstacles, never its own.
-        leg_state = {'s': {p_net_id: [], n_net_id: []}, 'v': {p_net_id: [], n_net_id: []}}
 
-        def _leg_partner_copper(net_id):
-            partner = n_net_id if net_id == p_net_id else p_net_id
-            ppads = pads_by_net.get(partner, [])
-            pseg = (mid_segs_by_net[partner] + leg_state['s'][partner]
-                    + [s for s in board_segs if s.net_id == partner]
-                    + [seg for pad in ppads for seg in _pad_obstacle_segments(pad, layer_names)])
-            pvia = ([v for v in pair_vias if v.net_id == partner]
-                    + mid_vias_by_net[partner] + leg_state['v'][partner])
-            return pseg, pvia, ppads
-        P, N = p_net_id, n_net_id
-        leg_plans = [
-            [(P, 'src'), (P, 'tgt'), (N, 'src'), (N, 'tgt')],   # 0: historical default
-            [(N, 'src'), (N, 'tgt'), (P, 'src'), (P, 'tgt')],   # 1: other net first
-            [(P, 'src'), (N, 'src'), (P, 'tgt'), (N, 'tgt')],   # 2: per-side (both src first)
-            [(N, 'src'), (P, 'src'), (N, 'tgt'), (P, 'tgt')],   # 3: per-side, swapped
-        ]
-        ok = False
-        leg_segs, leg_vias = [], []
-        for plan in leg_plans:
-            leg_state['s'] = {p_net_id: [], n_net_id: []}
-            leg_state['v'] = {p_net_id: [], n_net_id: []}
-            plan_iters = 0
-            good = True
-            for net_id, _side in plan:
-                term, mid_pt = term_by[(net_id, _side)]
-                pseg, pvia, ppads = _leg_partner_copper(net_id)
-                ls, lv, it = _route_hybrid_leg(
-                    pcb_data, net_id, config, leg_obs, layer_names, coord,
-                    mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads)
-                plan_iters += it
-                if ls is None:
-                    good = False
+        def _pn_overlap_count(all_segs):
+            # Intra-pair P/N segments closer than clearance (the #248/#215 self-graze).
+            ps = [s for s in all_segs if s.net_id == p_net_id]
+            ns = [s for s in all_segs if s.net_id == n_net_id]
+            return sum(1 for s in ps
+                       if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
+                                                   s.width, s.layer, ns) < config.clearance - 1e-6)
+
+        def _assemble(pol):
+            """Build the full hybrid (coupled middle + 4 legs) for polarity `pol`.
+            Returns (candidate_dict, None) on success or (None, reject_reason)."""
+            ps, ns = pol, -pol
+            # _process_via_positions mutates the float paths in place, so copy the
+            # shared off_plus/off_minus (else the second polarity sees corrupted input).
+            p_float = list(off_plus if ps == 1 else off_minus)
+            n_float = list(off_minus if ps == 1 else off_plus)
+            p_float, n_float = _process_via_positions(simplified, p_float, n_float, coord, config, ps, ns, spacing_mm)
+            p_segs, p_vias, _ = _float_path_to_geometry(
+                p_float, p_net_id, None, None, ps, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+            n_segs, n_vias, _ = _float_path_to_geometry(
+                n_float, n_net_id, None, None, ns, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+            mid_segs = p_segs + n_segs
+            if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
+                return None, "coupled middle P/N tracks cross"
+            _gz = _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config)
+            if _gz:
+                return None, "coupled middle " + _graze_reason(_gz)
+
+            # Attach each terminal to its middle near-end with point-to-point single-ended
+            # legs. The partner net's copper (its middle + already-committed legs + fanout
+            # stub + pads) is an obstacle, so a side-swap leg routes AROUND it -- polarity
+            # is fixed at the pads. The legs are SINGLE-ENDED, so route them on a single-
+            # ended-clearance map (leg_obstacles) when supplied -- the diff-pair map's
+            # coupled extra clearance over-blocks a leg's escape via (watchy USB_D).
+            #
+            # Try leg-attachment ORDER PLANS in sequence, first that routes all four legs
+            # wins (issue #244). Plan 0 is the historical net-by-net order (P fully, then
+            # N) -- kept FIRST so already-routable pairs attach identically (no DRC drift).
+            # The fallbacks free a convergent leg that the default order boxes out in a
+            # dense terminal field (butterstick D1's FPGA source): routing the OTHER net
+            # first, or both SRC legs before either TGT leg so a leg isn't blocked by its
+            # own pair's far-end leg committed too early.
+            mid_segs_by_net = {p_net_id: p_segs, n_net_id: n_segs}
+            mid_vias_by_net = {p_net_id: p_vias, n_net_id: n_vias}
+            term_by = {
+                (p_net_id, 'src'): ((p_src_x, p_src_y, src[4]), p_float[0]),
+                (p_net_id, 'tgt'): ((p_tgt_x, p_tgt_y, tgt[4]), p_float[-1]),
+                (n_net_id, 'src'): ((n_src_x, n_src_y, src[4]), n_float[0]),
+                (n_net_id, 'tgt'): ((n_tgt_x, n_tgt_y, tgt[4]), n_float[-1]),
+            }
+            # Mutable per-net committed leg copper, reset per plan; a leg sees the PARTNER's
+            # committed legs as obstacles, never its own.
+            leg_state = {'s': {p_net_id: [], n_net_id: []}, 'v': {p_net_id: [], n_net_id: []}}
+
+            def _leg_partner_copper(net_id):
+                partner = n_net_id if net_id == p_net_id else p_net_id
+                ppads = pads_by_net.get(partner, [])
+                pseg = (mid_segs_by_net[partner] + leg_state['s'][partner]
+                        + [s for s in board_segs if s.net_id == partner]
+                        + [seg for pad in ppads for seg in _pad_obstacle_segments(pad, layer_names)])
+                pvia = ([v for v in pair_vias if v.net_id == partner]
+                        + mid_vias_by_net[partner] + leg_state['v'][partner])
+                return pseg, pvia, ppads
+            P, N = p_net_id, n_net_id
+            leg_plans = [
+                [(P, 'src'), (P, 'tgt'), (N, 'src'), (N, 'tgt')],   # 0: historical default
+                [(N, 'src'), (N, 'tgt'), (P, 'src'), (P, 'tgt')],   # 1: other net first
+                [(P, 'src'), (N, 'src'), (P, 'tgt'), (N, 'tgt')],   # 2: per-side (both src first)
+                [(N, 'src'), (P, 'src'), (N, 'tgt'), (P, 'tgt')],   # 3: per-side, swapped
+            ]
+            ok = False
+            leg_iters = 0
+            leg_segs, leg_vias = [], []
+            for plan in leg_plans:
+                leg_state['s'] = {p_net_id: [], n_net_id: []}
+                leg_state['v'] = {p_net_id: [], n_net_id: []}
+                plan_iters = 0
+                good = True
+                for net_id, _side in plan:
+                    term, mid_pt = term_by[(net_id, _side)]
+                    pseg, pvia, ppads = _leg_partner_copper(net_id)
+                    ls, lv, it = _route_hybrid_leg(
+                        pcb_data, net_id, config, leg_obs, layer_names, coord,
+                        mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads)
+                    plan_iters += it
+                    if ls is None:
+                        good = False
+                        break
+                    leg_state['s'][net_id] += ls
+                    leg_state['v'][net_id] += lv
+                if good:
+                    ok = True
+                    leg_iters = plan_iters
+                    leg_segs = leg_state['s'][p_net_id] + leg_state['s'][n_net_id]
+                    leg_vias = leg_state['v'][p_net_id] + leg_state['v'][n_net_id]
                     break
-                leg_state['s'][net_id] += ls
-                leg_state['v'][net_id] += lv
-            if good:
-                ok = True
-                total_iters += plan_iters
-                leg_segs = leg_state['s'][p_net_id] + leg_state['s'][n_net_id]
-                leg_vias = leg_state['v'][p_net_id] + leg_state['v'][n_net_id]
-                break
-        if not ok:
-            _rej(a_layer, b_layer, "terminal legs could not attach to the coupled middle")
+            if not ok:
+                return None, "terminal legs could not attach to the coupled middle"
+            all_segs = mid_segs + leg_segs
+            all_vias = p_vias + n_vias + leg_vias
+            if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
+                return None, "assembled route P/N tracks cross"
+            # Airtight foreign-copper gate (#246): the assembled route (coupled-middle
+            # offsets + legs) must not graze/cross a foreign pad, via OR track, or the
+            # hybrid emits a DRC short unseen (D3_N offset x D2_N). Reject -> try next layer.
+            _gz2 = _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config)
+            if _gz2:
+                return None, "assembled route " + _graze_reason(_gz2)
+            # Connectivity gate: the hybrid validates crossings/grazes but never that
+            # the assembled route actually JOINS terminal-to-terminal -- a leg can fail
+            # to bridge to the middle (e.g. a layer-mismatch at a coincident cell) and
+            # still be committed, so the pair reports "routed" with one half open
+            # (#215 false-success, RX3_N). Re-verify with the copper-aware connectivity
+            # check (new copper + the pair's existing fanout stubs) and reject if either
+            # half isn't fully connected -- then this layer is retried / the pair fails
+            # honestly instead of counting as routed.
+            if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias,
+                                          terminal_pads=terminal_pads):
+                return None, "assembled route leaves a terminal unconnected"
+            length = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) for s in all_segs)
+            return {'p_sign': ps, 'all_segs': all_segs, 'all_vias': all_vias,
+                    'leg_segs': leg_segs, 'iters': iters + leg_iters,
+                    'overlaps': _pn_overlap_count(all_segs),
+                    'vias': len(all_vias), 'length': length}, None
+
+        cands = []
+        _reject_reason = None
+        for _pol in (p_sign, -p_sign):
+            _res, _why = _assemble(_pol)
+            if _res is not None:
+                cands.append(_res)
+            elif _reject_reason is None:
+                _reject_reason = _why
+        if not cands:
+            _rej(a_layer, b_layer, _reject_reason or "hybrid assembly failed")
             continue
-        all_segs = mid_segs + leg_segs
-        all_vias = p_vias + n_vias + leg_vias
-        if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
-            _rej(a_layer, b_layer, "assembled route P/N tracks cross")
-            continue
-        # Airtight foreign-copper gate (#246): the assembled route (coupled-middle
-        # offsets + legs) must not graze/cross a foreign pad, via OR track, or the
-        # hybrid emits a DRC short unseen (D3_N offset x D2_N). Reject -> try next layer.
-        _gz = _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config)
-        if _gz:
-            _rej(a_layer, b_layer, "assembled route " + _graze_reason(_gz))
-            continue
-        # Connectivity gate: the hybrid validates crossings/grazes but never that
-        # the assembled route actually JOINS terminal-to-terminal -- a leg can fail
-        # to bridge to the middle (e.g. a layer-mismatch at a coincident cell) and
-        # still be committed, so the pair reports "routed" with one half open
-        # (#215 false-success, RX3_N). Re-verify with the copper-aware connectivity
-        # check (new copper + the pair's existing fanout stubs) and reject if either
-        # half isn't fully connected -- then this layer is retried / the pair fails
-        # honestly instead of counting as routed.
-        if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias,
-                                      terminal_pads=terminal_pads):
-            _rej(a_layer, b_layer, "assembled route leaves a terminal unconnected")
-            continue
+        # Select the better legs: fewest intra-pair P/N overlaps first (a clean
+        # polarity always beats a self-grazing one -- flip-if-dirty), then lowest
+        # via-weighted copper length. A via is scored at the router's OWN cost knob
+        # (config.via_cost grid-steps at REFERENCE_GRID_STEP -> mm), so the length-vs-
+        # vias trade matches how the A* itself values a via (default 5mm) and honours
+        # a user's --via-cost. Rounded to 1um so float noise can't force a churny
+        # swap; min() keeps the FIRST on a tie (the heuristic polarity), so an
+        # already optimal pair is byte-identical to before this change.
+        via_mm = config.via_cost * REFERENCE_GRID_STEP
+        best = min(cands, key=lambda c: (c['overlaps'], round(c['length'] + c['vias'] * via_mm, 3)))
+        leg_segs = best['leg_segs']
         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
+        _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
         print(f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
-              f"{len(leg_segs)} leg seg(s) ({total_iters} iters)")
-        return {'new_segments': all_segs, 'new_vias': all_vias,
-                'iterations': total_iters, 'path_length': len(simplified)}
+              f"{len(leg_segs)} leg seg(s) ({best['iters']} iters){_pol_note}")
+        return {'new_segments': best['all_segs'], 'new_vias': best['all_vias'],
+                'iterations': best['iters'], 'path_length': len(simplified)}
     if _hyb_rej:
         from collections import Counter
         counts = Counter(_hyb_rej)
