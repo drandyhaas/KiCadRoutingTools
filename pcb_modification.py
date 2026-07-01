@@ -229,10 +229,34 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     if not candidates:
         return prunable, []
 
-    from check_connected import check_net_connectivity
+    from check_connected import check_net_connectivity, analyze_conn_excluding
     anchor = anchor_segments or []
 
+    # Every trial below is (anchor + prunable) minus some prunable segments, so
+    # build the expensive spatial union graph ONCE and re-evaluate each trial by
+    # dropping the excluded segments' edges instead of a full-net rebuild --
+    # O(net + trials) instead of O(net x trials), the same cached-graph fast
+    # path as prune_grazing_segments (#263; this dead-end sweep was ~60% of a
+    # daisho plane-repair run on its 18k-segment GND net). PRUNE_CONN_VERIFY=1
+    # checks every fast-path count against a real recompute.
+    universe = anchor + list(prunable)
+    graph = check_net_connectivity(net_id, universe, vias, pads, zones,
+                                   return_graph=True).get('graph')
+    seg_pos = {id(s): i for i, s in enumerate(universe)}
+    prunable_ids = [id(s) for s in prunable]
+    _verify = os.environ.get('PRUNE_CONN_VERIFY')
+
     def disconnected(segs):
+        if graph is not None:
+            keep = {id(s) for s in segs}
+            excl = {seg_pos[pid] for pid in prunable_ids if pid not in keep}
+            n = len(analyze_conn_excluding(graph, excl)['disconnected_pads'])
+            if _verify:
+                ref = len(check_net_connectivity(net_id, anchor + segs, vias, pads,
+                                                 zones)['disconnected_pads'])
+                assert n == ref, \
+                    f"safe-prune fast-path mismatch: net {net_id} ({n} vs {ref})"
+            return n
         return len(check_net_connectivity(net_id, anchor + segs, vias, pads, zones)['disconnected_pads'])
 
     base = disconnected(list(prunable))
