@@ -378,8 +378,15 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
         # Through-hole same-net pads are always plane-connected. An SMD same-net pad
         # is a valid target only if it is already escaped (has same-net copper on
         # it) -- a bare ball would itself be unconnected and tracing to it would
-        # just bond two floating pads.
-        if opad.drill > 0 or _pad_has_same_net_copper(opad, net_id, local):
+        # just bond two floating pads -- AND it lies on the tap's OWN layer: a
+        # same-layer trace cannot join an SMD pad on the opposite side without a via,
+        # so tracing to a cross-layer pad's (x,y) lands the tap on a floating island,
+        # not the plane (glasgow +3V3: an F.Cu U27.1 tap traced to B.Cu C69.1,
+        # leaving orphaned F.Cu copper that grazed a signal track). Mirrors the
+        # layer-reachability guard in _try_distant_pad_trace.
+        same_layer = (pad_layer in opad.layers
+                      or any(l.startswith('*') for l in opad.layers))
+        if opad.drill > 0 or (same_layer and _pad_has_same_net_copper(opad, net_id, local)):
             d = math.hypot(opad.global_x - px, opad.global_y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (opad.global_x, opad.global_y)))
