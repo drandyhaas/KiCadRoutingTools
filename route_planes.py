@@ -361,6 +361,63 @@ class RouteResult:
     success: bool
 
 
+def _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord):
+    """Convert an A* grid path (oriented via->pad) into trace segment dicts.
+
+    Shared by route_via_to_pad (single source) and route_multi_source_to_pad
+    (#259): both build the trace directly from the A* path, adding connecting
+    stubs from the exact via float position to the first grid point and from the
+    last grid point to the pad centre. `path` must run from the via/source end to
+    the pad end.
+    """
+    segments = []
+
+    # Add connecting segment from via to first path point
+    if path:
+        first_gx, first_gy, _ = path[0]
+        first_x, first_y = coord.to_float(first_gx, first_gy)
+        if abs(via_pos[0] - first_x) > 0.001 or abs(via_pos[1] - first_y) > 0.001:
+            segments.append({
+                'start': via_pos,
+                'end': (first_x, first_y),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    # Convert path points to segments
+    for i in range(len(path) - 1):
+        gx1, gy1, _ = path[i]
+        gx2, gy2, _ = path[i + 1]
+
+        x1, y1 = coord.to_float(gx1, gy1)
+        x2, y2 = coord.to_float(gx2, gy2)
+
+        if (x1, y1) != (x2, y2):
+            segments.append({
+                'start': (x1, y1),
+                'end': (x2, y2),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    # Add connecting segment from last path point to pad center
+    if path:
+        last_gx, last_gy, _ = path[-1]
+        last_x, last_y = coord.to_float(last_gx, last_gy)
+        if abs(pad.global_x - last_x) > 0.001 or abs(pad.global_y - last_y) > 0.001:
+            segments.append({
+                'start': (last_x, last_y),
+                'end': (pad.global_x, pad.global_y),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    return segments
+
+
 def route_via_to_pad(
     via_pos: Tuple[float, float],
     pad: Pad,
@@ -478,54 +535,117 @@ def route_via_to_pad(
     routing_obstacles.clear_source_target_cells()
 
     # Convert path to segments
-    segments = []
-
-    # Add connecting segment from via to first path point
-    if path:
-        first_gx, first_gy, _ = path[0]
-        first_x, first_y = coord.to_float(first_gx, first_gy)
-        if abs(via_pos[0] - first_x) > 0.001 or abs(via_pos[1] - first_y) > 0.001:
-            segments.append({
-                'start': via_pos,
-                'end': (first_x, first_y),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
-
-    # Convert path points to segments
-    for i in range(len(path) - 1):
-        gx1, gy1, _ = path[i]
-        gx2, gy2, _ = path[i + 1]
-
-        x1, y1 = coord.to_float(gx1, gy1)
-        x2, y2 = coord.to_float(gx2, gy2)
-
-        if (x1, y1) != (x2, y2):
-            segments.append({
-                'start': (x1, y1),
-                'end': (x2, y2),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
-
-    # Add connecting segment from last path point to pad center
-    if path:
-        last_gx, last_gy, _ = path[-1]
-        last_x, last_y = coord.to_float(last_gx, last_gy)
-        if abs(pad.global_x - last_x) > 0.001 or abs(pad.global_y - last_y) > 0.001:
-            segments.append({
-                'start': (last_x, last_y),
-                'end': (pad.global_x, pad.global_y),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
+    segments = _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord)
 
     if return_blocked_cells:
         return RouteResult(segments=segments, blocked_cells=[], success=True)
     return segments
+
+
+def route_multi_source_to_pad(
+    candidate_positions: List[Tuple[float, float]],
+    pad: Pad,
+    pad_layer: str,
+    net_id: int,
+    routing_obstacles: GridObstacleMap,
+    config: GridRouteConfig,
+    max_iterations: int = 10000,
+    verbose: bool = False,
+    return_blocked_cells: bool = False,
+    router: Optional[GridRouter] = None,
+):
+    """Route a trace from `pad` to ANY of `candidate_positions` in ONE A* (#259).
+
+    Replaces a per-candidate `route_via_to_pad` loop (one full A* per candidate,
+    ~99% of them failing on dense boards) with a single multi-source search: all
+    candidate cells are seeded as sources and the pad as the target, so the router
+    explores from every candidate at once and returns the shortest routable
+    candidate->pad connection. The trace is built **directly from the winning A*
+    path** -- NOT by re-routing from the winner single-source (a re-route without
+    the other candidates as sources could fail to reproduce a path that threaded
+    another candidate's overridden cell; see issue #259).
+
+    Candidate positions are existing same-net copper (vias / escaped pads) that may
+    be blocked in the routing map; like route_via_to_pad they are added as
+    source_target_cells to override blocking.
+
+    Returns a (result, winning_position) tuple:
+      - return_blocked_cells=False: (segments|None, pos|None)
+      - return_blocked_cells=True:  (RouteResult, pos|None)
+    `pos` is the winning candidate's original float position (for reused_via_pos).
+    """
+    coord = GridCoord(config.grid_step)
+    layer_idx = 0
+    pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
+
+    # Map candidate grid cells -> original float position, skipping the pad centre
+    # (no trace needed there) and duplicate cells.
+    cell_to_pos: Dict[Tuple[int, int], Tuple[float, float]] = {}
+    source_cells: List[Tuple[int, int, int]] = []
+    src_set: Set[Tuple[int, int]] = set()
+    for pos in candidate_positions:
+        if abs(pos[0] - pad.global_x) < 0.001 and abs(pos[1] - pad.global_y) < 0.001:
+            continue
+        gx, gy = coord.to_grid(pos[0], pos[1])
+        if (gx, gy) == (pad_gx, pad_gy) or (gx, gy) in src_set:
+            continue
+        src_set.add((gx, gy))
+        source_cells.append((gx, gy, layer_idx))
+        cell_to_pos[(gx, gy)] = pos
+
+    if not source_cells:
+        if return_blocked_cells:
+            return RouteResult(segments=None, blocked_cells=[], success=False), None
+        return None, None
+
+    for gx, gy, _ in source_cells:
+        routing_obstacles.add_source_target_cell(gx, gy, layer_idx)
+    routing_obstacles.add_source_target_cell(pad_gx, pad_gy, layer_idx)
+
+    if router is None:
+        router = GridRouter(
+            via_cost=config.via_cost_units(),
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
+
+    # One search seeded from all candidates; generous budget since it replaces K.
+    ms_iters = max(max_iterations, min(60000, len(source_cells) * 4))
+    path, iterations, blocked_cells = router.route_with_frontier(
+        routing_obstacles, source_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
+        False,  # collinear_vias
+        0,      # via_exclusion_radius
+        None,   # start_direction
+        None,   # end_direction
+        0       # direction_steps
+    )
+    routing_obstacles.clear_source_target_cells()
+
+    if path is None:
+        if verbose:
+            print(f"    DEBUG: multi-source A* ({len(source_cells)} cand) failed "
+                  f"after {iterations} iterations", end=" ")
+        if return_blocked_cells:
+            return RouteResult(segments=None, blocked_cells=blocked_cells, success=False), None
+        return None, None
+
+    # Orient the path so path[0] is the winning source (candidate) end and path[-1]
+    # is the pad; the other endpoint is the pad target.
+    e0 = (path[0][0], path[0][1])
+    if e0 not in src_set:
+        path = list(reversed(path))
+    win_cell = (path[0][0], path[0][1])
+    via_pos = cell_to_pos.get(win_cell, coord.to_float(win_cell[0], win_cell[1]))
+    if verbose and len(source_cells) > 1:
+        print(f"[multi-source {len(source_cells)} cand, {iterations}it]", end=" ")
+
+    segments = _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord)
+    if return_blocked_cells:
+        return RouteResult(segments=segments, blocked_cells=[], success=True), via_pos
+    return segments, via_pos
 
 
 def _block_route_as_obstacle(obstacles: GridObstacleMap, route_path: List[Tuple[float, float]],

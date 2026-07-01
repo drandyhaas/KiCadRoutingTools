@@ -286,7 +286,7 @@ class TapResult:
 
 
 def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
-                           route_via_to_pad_fn, radius: float):
+                           route_multi_fn, radius: float):
     """Last-resort connection: route a trace from `pad` to the nearest same-net
     via or same-net pad reachable on `pad_layer`, like a human routing a USB
     connector's GND pin to its adjacent shield pad. Used when no via can be
@@ -319,17 +319,17 @@ def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
             cands.append((d, (opad.global_x, opad.global_y)))
     if not cands:
         return None
-    cands.sort(key=lambda c: c[0])
-    best_frontier: List = []
-    for _d, pos in cands:
-        rr = route_via_to_pad_fn(pos, pad, pad_layer, net_id, routing_obs, config,
-                                 verbose=False, return_blocked_cells=True)
-        if rr.success and rr.segments:
-            return TapResult(success=True, via=None, segments=rr.segments,
-                             reused_via_pos=pos)
-        if rr.blocked_cells and not best_frontier:
-            best_frontier = rr.blocked_cells
-    return TapResult(success=False, blocked_cells=best_frontier)
+    # One multi-source A* over ALL candidates (issue #259) instead of one A* per
+    # candidate: the router routes the pad to whichever same-net target is
+    # shortest-routable, and a genuinely boxed-in pad is proven unreachable in a
+    # single frontier exhaustion (whose blocked cells drive the rip-up retry).
+    positions = [pos for _d, pos in cands]
+    rr, pos = route_multi_fn(positions, pad, pad_layer, net_id, routing_obs, config,
+                             verbose=False, return_blocked_cells=True)
+    if rr.success and rr.segments:
+        return TapResult(success=True, via=None, segments=rr.segments,
+                         reused_via_pos=pos)
+    return TapResult(success=False, blocked_cells=rr.blocked_cells or [])
 
 
 def _pad_has_same_net_copper(opad, net_id, local, tol: float = 0.2) -> bool:
@@ -349,7 +349,7 @@ def _pad_has_same_net_copper(opad, net_id, local, tol: float = 0.2) -> bool:
 
 
 def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, config,
-                                  route_via_to_pad_fn, radius: float):
+                                  route_multi_fn, radius: float):
     """Issue #180: before dropping a NEW via, connect the pad by a trace to the
     nearest EXISTING same-net copper within `radius`:
       - a same-net via (spans to the plane layer) or through-hole pad -- always
@@ -390,12 +390,16 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
             d = math.hypot(opad.global_x - px, opad.global_y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (opad.global_x, opad.global_y)))
-    cands.sort(key=lambda c: c[0])
-    for _d, pos in cands:
-        segs = route_via_to_pad_fn(pos, pad, pad_layer, net_id, routing_obs,
-                                   config, verbose=False)
-        if segs:  # non-empty trace: the pad now reaches the existing plane copper
-            return TapResult(success=True, via=None, segments=segs, reused_via_pos=pos)
+    if not cands:
+        return None
+    # One multi-source A* over all existing-copper candidates (issue #259): route
+    # the pad to whichever same-net copper is shortest-routable, building the trace
+    # directly from the winning path.
+    positions = [pos for _d, pos in cands]
+    segs, pos = route_multi_fn(positions, pad, pad_layer, net_id, routing_obs,
+                               config, verbose=False)
+    if segs:  # non-empty trace: the pad now reaches the existing plane copper
+        return TapResult(success=True, via=None, segments=segs, reused_via_pos=pos)
     return None
 
 
@@ -438,7 +442,8 @@ def try_tap_pad(
     result.via / result.segments to its output lists and to pcb_data.
     """
     # Imported lazily: route_planes imports this module at top level.
-    from route_planes import find_via_position, route_via_to_pad
+    from route_planes import (find_via_position, route_via_to_pad,
+                              route_multi_source_to_pad)
 
     if max_search_radius > 0:
         half_size = max_search_radius + _WINDOW_MARGIN
@@ -529,7 +534,7 @@ def try_tap_pad(
     if pad_layer and distant_trace_radius > 0 and not disable_reuse:
         r = _try_trace_to_plane_connected(
             pad, pad_layer, net_id, local, routing_obs, config,
-            route_via_to_pad, distant_trace_radius)
+            route_multi_source_to_pad, distant_trace_radius)
         if r is not None:
             return r
 
@@ -553,7 +558,7 @@ def try_tap_pad(
         # rip-up caller free the path.
         if distant_trace_radius > 0:
             r = _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs,
-                                       config, route_via_to_pad, distant_trace_radius)
+                                       config, route_multi_source_to_pad, distant_trace_radius)
             if r is not None:
                 return r
         # No via site anywhere in the search radius - via placement is blocked.
