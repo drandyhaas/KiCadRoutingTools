@@ -267,7 +267,8 @@ def get_safe_amplitude_at_point(
     extra_vias: List = None,
     is_first_bump: bool = True,
     paired_net_id: int = None,
-    clearance_index: 'ClearanceIndex' = None
+    clearance_index: 'ClearanceIndex' = None,
+    own_width: float = 0.0
 ) -> float:
     """
     Find the maximum safe amplitude for a meander bump at a specific point.
@@ -287,6 +288,11 @@ def get_safe_amplitude_at_point(
         extra_vias: Additional vias to check against (e.g., from other nets in same length-match pass)
         paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
         clearance_index: Pre-built spatial index for efficient collision detection (optional)
+        own_width: Actual width of the segment being meandered (mm). The meander arms
+            inherit this width, so it drives the own-width term of the keep-out. Pass
+            the segment's real width so a segment widened beyond its netclass (e.g. a
+            hand-placed wide trunk) is honored, matching obstacle_cache's max(net_w,
+            seg.width). 0 = fall back to the net's configured width only.
 
     Returns:
         Safe amplitude, or 0 if no safe amplitude found
@@ -295,11 +301,21 @@ def get_safe_amplitude_at_point(
     # The routing uses grid-snapped segments, but output merges them into longer
     # segments that may have slightly different coordinates (up to half a grid step)
     meander_clearance_margin = config.grid_step / 2
+    # This net may be routed wider than the base track_width (impedance-controlled
+    # --impedance layer widths, or a power net width). The meander arms carry the
+    # net's ACTUAL width, so size the keep-out from it (#175). max() keeps the
+    # common case (net_w == track_width) byte-identical; only wider nets grow their
+    # keep-out. own_width is the actual width of the meandered segment, so a segment
+    # widened beyond its netclass is honored too (mirrors obstacle_cache's
+    # max(net_w, seg.width)). We only bump the meandered net's OWN half-width; the
+    # neighbor half-width stays the generic track_width/2.
+    net_w = max(config.track_width, config.get_net_track_width(net_id, layer), own_width)
+    net_half = net_w / 2
     # Add corner margin for track width bloat at 45-degree chamfered corners
-    corner_margin = config.track_width / 2 * CORNER_BLOAT_FACTOR
-    required_clearance = config.track_width + config.clearance + meander_clearance_margin + corner_margin
-    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
-    paired_clearance = config.track_width + config.clearance
+    corner_margin = net_half * CORNER_BLOAT_FACTOR
+    required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
+    via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + corner_margin
+    paired_clearance = net_half + config.track_width / 2 + config.clearance
     chamfer = CHAMFER_SIZE
 
     # Binary search for safe amplitude
@@ -383,7 +399,7 @@ def get_safe_amplitude_at_point(
 
             # Check bump segments against nearby pads (on same layer)
             if not conflict_found:
-                pad_clearance = config.track_width / 2 + config.clearance + corner_margin
+                pad_clearance = net_half + config.clearance + corner_margin
                 nearby_pads = clearance_index.query_pads(
                     bump_min_x, bump_min_y, bump_max_x, bump_max_y, pad_clearance + 2.0
                 )
@@ -494,7 +510,7 @@ def get_safe_amplitude_at_point(
 
             # Check bump segments against pads (on same layer)
             if not conflict_found:
-                pad_clearance = config.track_width / 2 + config.clearance + corner_margin
+                pad_clearance = net_half + config.clearance + corner_margin
                 for bx1, by1, bx2, by2 in bump_segs:
                     if conflict_found:
                         break
@@ -714,7 +730,8 @@ def generate_trombone_meander(
             safe_amp = get_safe_amplitude_at_point(
                 check_cx, check_cy, ux, uy, px, py, direction, amplitude, min_amplitude,
                 segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
-                paired_net_id=paired_net_id, clearance_index=clearance_index
+                paired_net_id=paired_net_id, clearance_index=clearance_index,
+                own_width=segment.width
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
@@ -730,7 +747,8 @@ def generate_trombone_meander(
                 safe_amp_other = get_safe_amplitude_at_point(
                     other_check_cx, other_check_cy, ux, uy, px, py, other_dir, amplitude, min_amplitude,
                     segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
-                    paired_net_id=paired_net_id, clearance_index=clearance_index
+                    paired_net_id=paired_net_id, clearance_index=clearance_index,
+                    own_width=segment.width
                 )
                 if safe_amp_other >= min_amplitude:
                     # Mark the original direction as blocked if safe_amp was 0
@@ -1887,8 +1905,16 @@ def generate_centerline_meander(
     bump_width = 6 * chamfer  # wide entry (2) + wide top chamfers (4)
 
     # Account for full diff pair width in clearance
-    # The meander bump needs clearance for both P and N tracks
-    diff_pair_half_width = spacing_mm + config.track_width / 2
+    # The meander bump needs clearance for both P and N tracks. Use the pair's
+    # actual routed width (impedance/power), not the base track_width (#175).
+    # (Informational only; the real per-bump keep-out is computed in
+    # get_safe_amplitude_for_diff_pair.)
+    layer_names = config.layers if isinstance(getattr(config, 'layers', None), list) else []
+    layer_name = layer_names[layer] if isinstance(layer, int) and layer < len(layer_names) else str(layer)
+    pair_net_w = max(config.track_width,
+                     config.get_net_track_width(p_net_id, layer_name) if p_net_id is not None else 0.0,
+                     config.get_net_track_width(n_net_id, layer_name) if n_net_id is not None else 0.0)
+    diff_pair_half_width = spacing_mm + pair_net_w / 2
 
     # Build new path with meanders
     new_path = list(float_path[:start_idx])
@@ -2079,16 +2105,27 @@ def get_safe_amplitude_for_diff_pair(
 
     # Add margin for segment merging
     meander_clearance_margin = config.grid_step / 2
-    # Add corner margin for track width bloat at 45-degree chamfered corners
-    corner_margin = config.track_width / 2 * CORNER_BLOAT_FACTOR
-    required_clearance = config.track_width + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
-    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
-    chamfer = CHAMFER_SIZE
 
     # Get layer name for comparison
     # config.layers is a list of layer names
     layer_names = config.layers if hasattr(config, 'layers') and isinstance(config.layers, list) else []
     layer_name = layer_names[layer] if layer < len(layer_names) else str(layer)
+
+    # The pair may be routed wider than the base track_width (impedance control /
+    # power width). The meandered arms carry the pair's ACTUAL width, so drive the
+    # own-width term of the keep-out from it (#175). max() keeps the common case
+    # (net_w == track_width) byte-identical; only wider pairs grow their keep-out.
+    # spacing_mm already reflects the routed P/N offset. Neighbor half-width stays
+    # the generic track_width/2.
+    net_w = max(config.track_width,
+                config.get_net_track_width(p_net_id, layer_name),
+                config.get_net_track_width(n_net_id, layer_name))
+    net_half = net_w / 2
+    # Add corner margin for track width bloat at 45-degree chamfered corners
+    corner_margin = net_half * CORNER_BLOAT_FACTOR
+    required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
+    via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
+    chamfer = CHAMFER_SIZE
 
     # Combine all segments and vias
     all_segments = list(pcb_data.segments)
@@ -2165,7 +2202,7 @@ def get_safe_amplitude_for_diff_pair(
 
         # Check bump segments against pads (on same layer)
         if not conflict_found:
-            pad_clearance = config.track_width / 2 + config.clearance + corner_margin + diff_pair_extra
+            pad_clearance = net_half + config.clearance + corner_margin + diff_pair_extra
             for bx1, by1, bx2, by2 in bump_segs:
                 if conflict_found:
                     break
