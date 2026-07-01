@@ -40,11 +40,17 @@ def get_copper_layers_from_segments(segments: List[Segment], existing_segments: 
 
 
 def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
-                    all_segs, ignore_seg, tol: float) -> bool:
+                    seg_index, cell: float, ignore_seg, tol: float) -> bool:
     """A segment endpoint is anchored if it lands on a same-net via (vias span
     layers), on a same-net pad (on a shared layer), or in the middle of another
     same-net segment on the same layer (a T-junction). Anchored endpoints are
-    real connections, never dead ends."""
+    real connections, never dead ends.
+
+    ``seg_index`` is a grid {(layer, cell_x, cell_y): [segments]} (each segment
+    bucketed into the cells its bbox covers); the T-junction test scans only the
+    3x3 cells around (x, y) instead of every same-net segment -- the interaction
+    radius (a trace half-width + tol) is well under one cell, so no landing is
+    missed. Without it this was O(endpoints x segments), the plane sweep's cost."""
     # A pad/via anchors a segment endpoint only when the segment's copper actually
     # reaches the pad/via copper: dist < (pad|via)_half + seg_half. The old fixed
     # +0.05 slop anchored a near-miss -- a fine-track (0.0889mm) plane-repair stub
@@ -63,34 +69,40 @@ def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
             return True
     ig_ends = (((ignore_seg.start_x, ignore_seg.start_y),
                 (ignore_seg.end_x, ignore_seg.end_y)) if ignore_seg is not None else ())
-    for s in all_segs:
-        if s is ignore_seg or s.layer != layer:
-            continue
-        # Skip a segment that shares a vertex with ignore_seg: a dead-end stub that
-        # bends sharply lands its loose end near its OWN chain-neighbour, and that
-        # fold is not a real T-junction onto independent copper -- counting it kept
-        # a useless GND-grazing plane-repair stub un-swept (#209/#216 lpddr4 C30.2).
-        if any((abs(s.start_x - ax) < tol and abs(s.start_y - ay) < tol) or
-               (abs(s.end_x - ax) < tol and abs(s.end_y - ay) < tol)
-               for ax, ay in ig_ends):
-            continue
-        dx = s.end_x - s.start_x
-        dy = s.end_y - s.start_y
-        seg_len_sq = dx * dx + dy * dy
-        if seg_len_sq < 1e-9:
-            continue
-        t = ((x - s.start_x) * dx + (y - s.start_y) * dy) / seg_len_sq
-        # Strictly interior (endpoints are handled by the degree count) so a
-        # shared endpoint isn't double-counted as a T-junction.
-        if t <= 0.02 or t >= 0.98:
-            continue
-        cx = s.start_x + t * dx
-        cy = s.start_y + t * dy
-        # A landing anywhere within the trace's copper (half-width) is a real
-        # connection; use the wider of tol and the trace half-width so a stub
-        # landing inside a wide power trace is not mistaken for a dead end.
-        if math.hypot(x - cx, y - cy) < max(tol, getattr(s, 'width', 0.0) / 2 + 0.025):
-            return True
+    bx, by = int(x // cell), int(y // cell)
+    seen = set()
+    for gx in (bx - 1, bx, bx + 1):
+        for gy in (by - 1, by, by + 1):
+            for s in seg_index.get((layer, gx, gy), ()):
+                if s is ignore_seg or id(s) in seen:
+                    continue
+                seen.add(id(s))
+                # Skip a segment that shares a vertex with ignore_seg: a dead-end stub
+                # that bends sharply lands its loose end near its OWN chain-neighbour,
+                # and that fold is not a real T-junction onto independent copper --
+                # counting it kept a useless GND-grazing plane-repair stub un-swept
+                # (#209/#216 lpddr4 C30.2).
+                if any((abs(s.start_x - ax) < tol and abs(s.start_y - ay) < tol) or
+                       (abs(s.end_x - ax) < tol and abs(s.end_y - ay) < tol)
+                       for ax, ay in ig_ends):
+                    continue
+                dx = s.end_x - s.start_x
+                dy = s.end_y - s.start_y
+                seg_len_sq = dx * dx + dy * dy
+                if seg_len_sq < 1e-9:
+                    continue
+                t = ((x - s.start_x) * dx + (y - s.start_y) * dy) / seg_len_sq
+                # Strictly interior (endpoints are handled by the degree count) so a
+                # shared endpoint isn't double-counted as a T-junction.
+                if t <= 0.02 or t >= 0.98:
+                    continue
+                cx = s.start_x + t * dx
+                cy = s.start_y + t * dy
+                # A landing anywhere within the trace's copper (half-width) is a real
+                # connection; use the wider of tol and the trace half-width so a stub
+                # landing inside a wide power trace is not mistaken for a dead end.
+                if math.hypot(x - cx, y - cy) < max(tol, getattr(s, 'width', 0.0) / 2 + 0.025):
+                    return True
     return False
 
 
@@ -136,6 +148,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
     def key(x, y, layer):
         return (round(x, 3), round(y, 3), layer)
 
+    from collections import defaultdict
+    _CELL = 1.0
     kept = list(prunable)
     removed = []
     changed = True
@@ -143,11 +157,17 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
         changed = False
         all_segs = kept + anchor_segments
         degree = {}
+        seg_index = defaultdict(list)
         for s in all_segs:
             degree[key(s.start_x, s.start_y, s.layer)] = \
                 degree.get(key(s.start_x, s.start_y, s.layer), 0) + 1
             degree[key(s.end_x, s.end_y, s.layer)] = \
                 degree.get(key(s.end_x, s.end_y, s.layer), 0) + 1
+            lo_x = int(min(s.start_x, s.end_x) // _CELL); hi_x = int(max(s.start_x, s.end_x) // _CELL)
+            lo_y = int(min(s.start_y, s.end_y) // _CELL); hi_y = int(max(s.start_y, s.end_y) // _CELL)
+            for cx in range(lo_x, hi_x + 1):
+                for cy in range(lo_y, hi_y + 1):
+                    seg_index[(s.layer, cx, cy)].append(s)
 
         survivors = []
         for s in kept:
@@ -155,10 +175,10 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
             ek = key(s.end_x, s.end_y, s.layer)
             start_free = (degree[sk] == 1 and
                           not _point_anchored(s.start_x, s.start_y, s.layer,
-                                              via_pts, pad_pts, all_segs, s, tol))
+                                              via_pts, pad_pts, seg_index, _CELL, s, tol))
             end_free = (degree[ek] == 1 and
                         not _point_anchored(s.end_x, s.end_y, s.layer,
-                                            via_pts, pad_pts, all_segs, s, tol))
+                                            via_pts, pad_pts, seg_index, _CELL, s, tol))
             remove = False
             if start_free and end_free:
                 remove = True                      # isolated fragment
@@ -216,6 +236,7 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
 
     base = disconnected(list(prunable))
     kept = list(prunable)
+    kept_ids = {id(s) for s in kept}
     removed = []
     # Removing a dead end can expose its neighbour as a new dead end (a chain
     # unwinds one segment at a time), so iterate: re-derive candidates from what
@@ -223,21 +244,40 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     # strand a pad stays load-bearing no matter what other dead copper goes, so
     # cache those rejections and never re-test them (keeps it O(dead ends) and
     # guarantees termination).
+    #
+    # Fast path: try dropping the WHOLE round's candidate batch with one
+    # connectivity check. Dead-end removal is monotonic -- removing copper never
+    # reconnects a pad -- so if dropping every candidate strands no pad, then so
+    # does every subset, and the batch result is identical to validating one at a
+    # time. This turns the plane sweep on a big pour net (hundreds of tap dead
+    # ends x a full-net union-find each) from O(dead ends) checks into ~O(rounds).
+    # Only when the batch DOES strand a pad do we fall back to per-candidate to
+    # find the load-bearing one(s).
     rejected = set()
     while True:
-        progress = False
-        for c in candidates:
-            if id(c) in rejected or c not in kept:
-                continue
-            trial = [s for s in kept if s is not c]
-            if disconnected(trial) <= base:
-                kept = trial
-                removed.append(c)
-                progress = True
-            else:
-                rejected.add(id(c))
-        if not progress:
+        active = [c for c in candidates
+                  if id(c) not in rejected and id(c) in kept_ids]
+        if not active:
             break
+        aids = {id(c) for c in active}
+        trial_all = [s for s in kept if id(s) not in aids]
+        if disconnected(trial_all) <= base:
+            kept = trial_all
+            kept_ids = {id(s) for s in kept}
+            removed.extend(active)
+        else:
+            progress = False
+            for c in active:
+                trial = [s for s in kept if s is not c]
+                if disconnected(trial) <= base:
+                    kept = trial
+                    kept_ids.discard(id(c))
+                    removed.append(c)
+                    progress = True
+                else:
+                    rejected.add(id(c))
+            if not progress:
+                break
         _, candidates = prune_dead_end_segments(kept, anchor_segments=anchor_segments,
                                                 vias=vias, pads=pads, tol=tol,
                                                 keep_terminal_escapes=not aggressive)
@@ -983,11 +1023,22 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         for s in r.get('new_segments') or []:
             routed_seg_ids.add(id(s))
 
-    # Foreign-segment index by layer (only when segment grazing is requested).
-    segs_by_layer = defaultdict(list)
+    # Foreign-segment spatial index (only when segment grazing is requested): a
+    # uniform grid keyed by (layer, cell_x, cell_y), each segment bucketed into the
+    # cells its bounding box covers. Without it, grazes() scanned EVERY same-layer
+    # segment per query -- O(scope x layer), the dominant cost on dense boards
+    # (~3s of the graze pass on an 12k-segment board). The grid bounds each query to
+    # local density. Cell is a few clearances wide so a short track sits in ~1 cell;
+    # the query widens by one cell so a graze margin (< cell) can't fall through.
+    _CELL = 1.0
+    seg_grid = defaultdict(list)
     if check_foreign_segments:
-        for s in pcb_data.segments:
-            segs_by_layer[s.layer].append(s)
+        for o in pcb_data.segments:
+            olo_x = int(min(o.start_x, o.end_x) // _CELL); ohi_x = int(max(o.start_x, o.end_x) // _CELL)
+            olo_y = int(min(o.start_y, o.end_y) // _CELL); ohi_y = int(max(o.start_y, o.end_y) // _CELL)
+            for cx in range(olo_x, ohi_x + 1):
+                for cy in range(olo_y, ohi_y + 1):
+                    seg_grid[(o.layer, cx, cy)].append(o)
 
     def grazes(s):
         thr = clearance + s.width / 2.0 - 1e-4
@@ -999,17 +1050,23 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         if check_foreign_segments:
             slo_x, shi_x = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
             slo_y, shi_y = min(s.start_y, s.end_y), max(s.start_y, s.end_y)
-            for o in segs_by_layer.get(s.layer, ()):
-                if o.net_id == s.net_id:
-                    continue
-                margin = clearance + (s.width + o.width) / 2.0
-                if (max(o.start_x, o.end_x) < slo_x - margin or min(o.start_x, o.end_x) > shi_x + margin or
-                        max(o.start_y, o.end_y) < slo_y - margin or min(o.start_y, o.end_y) > shi_y + margin):
-                    continue  # bbox prefilter
-                d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
-                                      o.start_x, o.start_y, o.end_x, o.end_y)
-                if d - (s.width + o.width) / 2.0 < clearance - 1e-4:
-                    return True
+            cx0 = int(slo_x // _CELL) - 1; cx1 = int(shi_x // _CELL) + 1
+            cy0 = int(slo_y // _CELL) - 1; cy1 = int(shi_y // _CELL) + 1
+            seen = set()
+            for cx in range(cx0, cx1 + 1):
+                for cy in range(cy0, cy1 + 1):
+                    for o in seg_grid.get((s.layer, cx, cy), ()):
+                        if o.net_id == s.net_id or id(o) in seen:
+                            continue
+                        seen.add(id(o))
+                        margin = clearance + (s.width + o.width) / 2.0
+                        if (max(o.start_x, o.end_x) < slo_x - margin or min(o.start_x, o.end_x) > shi_x + margin or
+                                max(o.start_y, o.end_y) < slo_y - margin or min(o.start_y, o.end_y) > shi_y + margin):
+                            continue  # bbox prefilter
+                        d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
+                                              o.start_x, o.start_y, o.end_x, o.end_y)
+                        if d - (s.width + o.width) / 2.0 < clearance - 1e-4:
+                            return True
         return False
 
     zones_by_net = defaultdict(list)
@@ -1312,10 +1369,36 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
         all_new_segments.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
                                  'width': s.width, 'layer': s.layer, 'net_id': s.net_id})
 
-    # Sweep dead-end appendices left by a superseded reuse-tap. sweep_dead_ends does
-    # not mutate pcb_data (unlike prune_grazing_segments), so strip the swept copper
-    # from pcb_data too, keeping it consistent for any later reader.
-    _, _, de_removed = sweep_dead_ends([], pcb_data, scope_net_ids)
+    # Sweep dead-end appendices left by a superseded reuse-tap -- but ONLY this
+    # run's tap copper is a candidate: the rest of each plane net anchors it. A big
+    # pour has hundreds of pre-existing pad taps that look like geometric dead ends
+    # (they land on the fill), and validating each against the whole-net union-find
+    # is the sweep's dominant cost (~0.5s x hundreds). Restricting candidates to the
+    # copper we just added -- the only copper that can be a fresh orphan -- cuts that
+    # to the handful of new taps while the anchors keep every real connection intact.
+    from collections import defaultdict
+    new_sigs = {sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1], d['layer'])
+                for d in all_new_segments}
+    all_zones = getattr(pcb_data, 'zones', []) or []
+    net_segs = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            net_segs[s.net_id].append(s)
+    de_removed = []
+    for net_id, segs in net_segs.items():
+        prunable = [s for s in segs
+                    if sig(s.start_x, s.start_y, s.end_x, s.end_y, s.layer) in new_sigs]
+        if not prunable:
+            continue
+        p_ids = {id(s) for s in prunable}
+        anchor = [s for s in segs if id(s) not in p_ids]
+        _, removed = _safe_prune_net(
+            net_id, prunable,
+            [v for v in pcb_data.vias if v.net_id == net_id],
+            pcb_data.pads_by_net.get(net_id, []),
+            [z for z in all_zones if z.net_id == net_id],
+            anchor_segments=anchor, aggressive=True)
+        de_removed.extend(removed)
     all_new_segments, n_swept = strip(all_new_segments, de_removed)
     if de_removed:
         rm_ids = {id(s) for s in de_removed}
