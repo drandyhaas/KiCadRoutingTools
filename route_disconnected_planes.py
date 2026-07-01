@@ -31,7 +31,9 @@ from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generat
 from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
 from plane_region_connector import route_disconnected_regions, build_base_obstacles, add_route_to_obstacles
-from plane_pad_tap import find_unconnected_plane_pads, tap_pad_with_escalation
+import plane_pad_tap
+from plane_pad_tap import (find_unconnected_plane_pads, tap_pad_with_escalation,
+                           SharedViaMaps)
 from plane_blocker_detection import find_route_blocker_from_frontier, find_via_position_blocker
 from terminal_colors import GREEN, RED, RESET
 import routing_defaults as defaults
@@ -54,7 +56,7 @@ def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
-                        distant_trace_radius=0.0):
+                        distant_trace_radius=0.0, shared_via_maps=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -73,13 +75,25 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             return None
         bname = pcb_data.nets[blocker].name if blocker in pcb_data.nets else f"net_{blocker}"
         print(f"{RED}blocked by {bname} - ripping{RESET}...", end=" ", flush=True)
+        if shared_via_maps is not None:
+            # Remove the blocker's stamps from the shared via maps BEFORE its
+            # copper leaves pcb_data (the stamps are computed from it), then
+            # resync the copper counts after the rip (#263).
+            shared_via_maps.note_net_ripped(blocker)
         _rip_net_from_pcb(pcb_data, blocker)
+        if shared_via_maps is not None:
+            shared_via_maps.resync()
+            if plane_pad_tap._TAP_MAP_VERIFY:
+                # Rips are the #208-risk removal path: assert the incrementally
+                # updated maps match a fresh rebuild of the post-rip board.
+                shared_via_maps.verify_maps_full()
         if blocker not in ripped_net_ids:
             ripped_net_ids.append(blocker)
         result = tap_pad_with_escalation(
             pad, pad_layer, net_id, pcb_data, tap_config,
             max_search_radius=max_search_radius, via_size=via_size, via_drill=via_drill,
-            verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius)
+            verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius,
+            shared_via_maps=shared_via_maps)
         if result.success:
             return result
         failure = result
@@ -391,6 +405,8 @@ def route_planes(
                     layers=routing_layers,
                     hole_to_hole_clearance=hole_to_hole_clearance
                 )
+                # Cross-pad via-obstacle-map reuse for this net's repair pass (#263).
+                shared_maps = SharedViaMaps(pcb_data, net_id)
                 for pad, pad_layer in unconnected:
                     print(f"    Pad {pad.component_ref}.{pad.pad_number} ({pad_layer})...", end=" ", flush=True)
                     result = tap_pad_with_escalation(
@@ -400,7 +416,8 @@ def route_planes(
                         via_drill=via_drill,
                         verbose=verbose,
                         fine_for_all=True,  # last-resort repair: escalate every failed pad
-                        distant_trace_radius=distant_radius
+                        distant_trace_radius=distant_radius,
+                        shared_via_maps=shared_maps
                     )
                     if not result.success and rip_blocker_nets:
                         # Rip the signal net(s) blocking this pad's trace and retry
@@ -409,31 +426,38 @@ def route_planes(
                             pad, pad_layer, net_id, pcb_data, tap_config, config,
                             max_search_radius, via_size, via_drill, max_rip_nets,
                             plane_net_ids, result, ripped_net_ids, verbose,
-                            distant_trace_radius=distant_radius)
+                            distant_trace_radius=distant_radius,
+                            shared_via_maps=shared_maps)
                         if rr is not None:
                             result = rr
                     if result.success:
                         total_pads_repaired += 1
                         params_note = " [fine params]" if result.params_label == 'fine' else ""
+                        new_via_objs = []
+                        new_seg_objs = []
                         if result.via is not None:
                             all_new_vias.append(result.via)
                             total_vias += 1
-                            pcb_data.vias.append(Via(
+                            new_via_objs.append(Via(
                                 x=result.via['x'], y=result.via['y'],
                                 size=result.via['size'], drill=result.via['drill'],
                                 layers=['F.Cu', 'B.Cu'], net_id=net_id
                             ))
+                            pcb_data.vias.append(new_via_objs[0])
                             where = f"placed via at ({result.via['x']:.2f}, {result.via['y']:.2f})"
                         else:
                             where = (f"reused via at ({result.reused_via_pos[0]:.2f}, "
                                      f"{result.reused_via_pos[1]:.2f})")
                         for s in result.segments:
                             all_new_segments.append(s)
-                            pcb_data.segments.append(Segment(
+                            seg_obj = Segment(
                                 start_x=s['start'][0], start_y=s['start'][1],
                                 end_x=s['end'][0], end_y=s['end'][1],
                                 width=s['width'], layer=s['layer'], net_id=s['net_id']
-                            ))
+                            )
+                            new_seg_objs.append(seg_obj)
+                            pcb_data.segments.append(seg_obj)
+                        shared_maps.note_pass_copper(new_via_objs, new_seg_objs)
                         print(f"{GREEN}{where}, {len(result.segments)} trace segment(s){params_note}{RESET}")
                     else:
                         failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
@@ -575,6 +599,10 @@ def route_planes(
             tap_config = replace(config, layers=routing_layers,
                                  hole_to_hole_clearance=hole_to_hole_clearance,
                                  board_edge_clearance=0.0)
+            # Cross-pad via-map reuse for this net's forced-via sweep (#263). A
+            # fresh instance (not the repair pass's): region-connect copper was
+            # added since, and this pass's edge-relaxed config keys differ anyway.
+            shared_maps = SharedViaMaps(pcb_data, net_id)
             reported = False
             for (fx, fy, _flayer, fref) in res.get('disconnected_pads', []):
                 pp = pad_by_key.get((round(fx, 3), round(fy, 3), fref))
@@ -603,7 +631,8 @@ def route_planes(
                         replace(tap_config, via_size=vtry, via_drill=dtry),
                         max_search_radius=max_search_radius, via_size=vtry,
                         via_drill=dtry, verbose=verbose, fine_for_all=True,
-                        distant_trace_radius=0.0, disable_reuse=True)
+                        distant_trace_radius=0.0, disable_reuse=True,
+                        shared_via_maps=shared_maps)
                     if result.success and result.via is not None:
                         if (vtry, dtry) in _escalated_pairs:
                             warn_fab_escalation(f"last-resort plane via for net "
@@ -612,15 +641,20 @@ def route_planes(
                 if result.success and result.via is not None:
                     all_new_vias.append(result.via)
                     total_vias += 1
-                    pcb_data.vias.append(Via(
+                    new_via_obj = Via(
                         x=result.via['x'], y=result.via['y'], size=result.via['size'],
-                        drill=result.via['drill'], layers=['F.Cu', 'B.Cu'], net_id=net_id))
+                        drill=result.via['drill'], layers=['F.Cu', 'B.Cu'], net_id=net_id)
+                    pcb_data.vias.append(new_via_obj)
+                    new_seg_objs = []
                     for s in result.segments:
                         all_new_segments.append(s)
-                        pcb_data.segments.append(Segment(
+                        seg_obj = Segment(
                             start_x=s['start'][0], start_y=s['start'][1],
                             end_x=s['end'][0], end_y=s['end'][1],
-                            width=s['width'], layer=s['layer'], net_id=s['net_id']))
+                            width=s['width'], layer=s['layer'], net_id=s['net_id'])
+                        new_seg_objs.append(seg_obj)
+                        pcb_data.segments.append(seg_obj)
+                    shared_maps.note_pass_copper([new_via_obj], new_seg_objs)
                     if name in failed_repair_pads:
                         failed_repair_pads.remove(name)
                         total_pads_repaired += 1

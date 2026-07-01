@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 from dataclasses import dataclass, replace, field
 from typing import List, Dict, Optional, Tuple, Set
 
@@ -271,6 +272,196 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
     return local
 
 
+# --- Cross-pad via-obstacle-map reuse (issue #263) -----------------------------
+# In a plane-repair net-pass every tapped pad excludes the SAME plane net, so
+# build_via_obstacle_map yields an identical map for every pad at a given
+# parameter set (only other-net copper blocks vias, and the grid is absolute).
+# Rebuilding a ~15k-segment window map per pad (~0.29s x hundreds of taps on
+# daisho) dominated the repair pass; instead build the map ONCE on the whole
+# board per parameter set and reuse it across pads, applying copper changes
+# incrementally. Query results are identical: within the via search radius the
+# window map and the whole-board map block the same cells (the window pulls in
+# every item whose keep-out can reach the search area, and the window-edge band
+# sits beyond the search radius) -- asserted per tap under TAP_MAP_VERIFY=1.
+_TAP_MAP_VERIFY = os.environ.get('TAP_MAP_VERIFY') == '1'
+
+
+class SharedViaMaps:
+    """Whole-board via-placement obstacle maps shared across the pads of one
+    plane-net repair pass, keyed by the config fields the via map depends on.
+
+    Correctness invariants:
+    - Maps are refcounted (issue #208): every incremental add/remove must stamp
+      the exact cell multiset build_via_obstacle_map stamps for that copper.
+      Both notify paths delegate to obstacle_cache.precompute_via_placement_
+      obstacles, the builder's verified mirror (tests/test_plane_via_map_sync.py).
+    - Callers must notify every pcb_data copper change while an instance is
+      live: note_pass_copper after appending a tap's via/segments, and
+      note_net_ripped BEFORE a net's copper is removed (it reads the copper)
+      followed by resync() after. get() drops all cached maps if the copper
+      counts changed without a notify (correct, just slower).
+
+    A key's whole-board map (~0.7s build) is only built once the key has been
+    requested _REUSE_THRESHOLD times -- rarely-used fine-escalation configs
+    stay on the cheaper per-pad window build. _MAX_MAPS bounds memory (a
+    whole-board map at grid 0.05 is tens of MB); least-recently-used maps are
+    evicted and rebuilt on demand.
+    """
+
+    _REUSE_THRESHOLD = 3
+    _MAX_MAPS = 6
+
+    def __init__(self, pcb_data: PCBData, exclude_net_id: int):
+        self.pcb_data = pcb_data
+        self.exclude_net_id = exclude_net_id
+        # key -> [config, same_net_pad_clearance, map, last_use_tick]
+        self._maps: Dict[Tuple, list] = {}
+        self._use_counts: Dict[Tuple, int] = {}
+        self._tick = 0
+        self._seg_count = len(pcb_data.segments)
+        self._via_count = len(pcb_data.vias)
+
+    @staticmethod
+    def _key(config: GridRouteConfig, same_net_pad_clearance: float) -> Tuple:
+        return (config.grid_step, config.clearance, config.via_size,
+                config.via_drill, config.hole_to_hole_clearance,
+                config.board_edge_clearance, same_net_pad_clearance)
+
+    def get(self, config: GridRouteConfig, same_net_pad_clearance: float = -1.0):
+        """Whole-board via map for this config, or None when the caller should
+        build its own per-pad window map (key below the reuse threshold)."""
+        if (len(self.pcb_data.segments) != self._seg_count or
+                len(self.pcb_data.vias) != self._via_count):
+            # Copper changed without a notify -- cached maps are stale. Drop
+            # them all rather than risk querying a wrong map.
+            self._maps.clear()
+            self.resync()
+        self._tick += 1
+        key = self._key(config, same_net_pad_clearance)
+        entry = self._maps.get(key)
+        if entry is not None:
+            entry[3] = self._tick
+            return entry[2]
+        n = self._use_counts.get(key, 0) + 1
+        self._use_counts[key] = n
+        if n < self._REUSE_THRESHOLD:
+            return None
+        if len(self._maps) >= self._MAX_MAPS:
+            lru = min(self._maps, key=lambda k: self._maps[k][3])
+            del self._maps[lru]
+        m = build_via_obstacle_map(self.pcb_data, config, self.exclude_net_id,
+                                   verbose=False,
+                                   same_net_pad_clearance=same_net_pad_clearance)
+        self._maps[key] = [config, same_net_pad_clearance, m, self._tick]
+        return m
+
+    def resync(self):
+        """Record the current pcb_data copper counts as the notified state."""
+        self._seg_count = len(self.pcb_data.segments)
+        self._via_count = len(self.pcb_data.vias)
+
+    # TAP_MAP_VERIFY: number of note_pass_copper (add-side) updates that get the
+    # expensive full-map divergence check. The add path stamps the same
+    # single-via multiset every time, so a handful of checks covers it; rips
+    # (the #208-risk remove path) are ALWAYS checked via verify_maps_full().
+    _VERIFY_ADD_BUDGET = 5
+
+    def verify_maps_full(self):
+        """TAP_MAP_VERIFY=1: assert each cached map's blocked-status agrees
+        EVERYWHERE with a fresh whole-board rebuild from the current pcb_data.
+
+        The per-tap check in try_tap_pad only covers cells that tap queries; a
+        refcount desync from an incremental add/remove (issue #208 risk class)
+        could hide where no later tap happens to look. This sweeps the whole
+        board, so a count driven to zero early (wrongly unblocked) or a stale
+        leftover (wrongly blocked) is caught at the update that caused it."""
+        bb = self.pcb_data.board_info.board_bounds
+        if not bb:
+            return
+        for key, (config, snpc, m, _t) in self._maps.items():
+            fresh = build_via_obstacle_map(self.pcb_data, config,
+                                           self.exclude_net_id, verbose=False,
+                                           same_net_pad_clearance=snpc)
+            coord = GridCoord(config.grid_step)
+            cx, cy = coord.to_grid((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2)
+            r = int(max(bb[2] - bb[0], bb[3] - bb[1]) / config.grid_step / 2) + 50
+            a = m.open_via_cells_within(cx, cy, r)
+            b = fresh.open_via_cells_within(cx, cy, r)
+            assert a == b, (
+                f"TAP_MAP_VERIFY: shared via map diverged from a fresh rebuild "
+                f"after an incremental update (key={key}, {len(a)} vs {len(b)} "
+                f"open cells)")
+
+    def _stamp_cells(self, segments, vias, config) -> "np.ndarray":
+        """Via-map cell multiset build_via_obstacle_map stamps for these items,
+        via the #208-verified builder mirror. Items may span several nets."""
+        from obstacle_cache import precompute_via_placement_obstacles
+        import numpy as np
+
+        class _Shim:
+            pass
+
+        shim = _Shim()
+        shim.segments = [s for s in segments if s.net_id != self.exclude_net_id]
+        shim.vias = list(vias)
+        chunks = []
+        for nid in ({s.net_id for s in shim.segments} | {v.net_id for v in shim.vias}):
+            d = precompute_via_placement_obstacles(shim, nid, config, [])
+            if len(d.blocked_vias):
+                chunks.append(d.blocked_vias)
+        if not chunks:
+            return np.empty((0, 2), dtype=np.int32)
+        return np.concatenate(chunks)
+
+    def note_pass_copper(self, new_vias, new_segments=()):
+        """Stamp copper just appended to pcb_data into every cached map.
+
+        New vias block via placement regardless of net; segments only when on a
+        foreign net (the excluded plane net's own segments never enter the via
+        map, and in this pass new segments are always the plane net's)."""
+        for entry in self._maps.values():
+            cells = self._stamp_cells(new_segments, new_vias, entry[0])
+            if len(cells):
+                entry[2].add_blocked_vias_batch(cells)
+        self.resync()
+        if _TAP_MAP_VERIFY and self._VERIFY_ADD_BUDGET > 0:
+            self._VERIFY_ADD_BUDGET -= 1  # instance attr shadows the class default
+            self.verify_maps_full()
+
+    def note_net_ripped(self, rip_net_id: int):
+        """Remove a ripped net's stamps from every cached map. Must run BEFORE
+        the net's copper is removed from pcb_data (the stamps are computed from
+        it); call resync() after the removal."""
+        from obstacle_cache import precompute_via_placement_obstacles
+        for entry in self._maps.values():
+            d = precompute_via_placement_obstacles(self.pcb_data, rip_net_id,
+                                                   entry[0], [])
+            if len(d.blocked_vias):
+                entry[2].remove_blocked_vias_batch(d.blocked_vias)
+
+
+def _verify_shared_via_map(shared_obs, local, config, net_id,
+                           same_net_pad_clearance, pad, max_search_radius):
+    """TAP_MAP_VERIFY=1: assert the shared whole-board map answers this tap's
+    queries exactly like a freshly built per-pad window map (the pre-#263
+    behavior). find_via_position reads only is_via_blocked(pad centre) and
+    open_via_cells_within(centre, radius); the open list covers every other
+    cell it can look at, so list equality proves the tap sees identical maps
+    (the Rust query is a deterministic stable sort over a fixed scan order)."""
+    ref = build_via_obstacle_map(local, config, net_id, verbose=False,
+                                 same_net_pad_clearance=same_net_pad_clearance)
+    coord = GridCoord(config.grid_step)
+    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    assert shared_obs.is_via_blocked(gx, gy) == ref.is_via_blocked(gx, gy), \
+        f"TAP_MAP_VERIFY: pad-centre blocked mismatch at {pad.component_ref}.{pad.pad_number}"
+    radius = coord.to_grid_dist(max_search_radius)
+    a = shared_obs.open_via_cells_within(gx, gy, radius)
+    b = ref.open_via_cells_within(gx, gy, radius)
+    assert a == b, (
+        f"TAP_MAP_VERIFY: open-via-cell mismatch at {pad.component_ref}."
+        f"{pad.pad_number} (shared {len(a)} vs window {len(b)} cells)")
+
+
 @dataclass
 class TapResult:
     """Result of a single-pad tap attempt."""
@@ -420,6 +611,7 @@ def try_tap_pad(
     routing_clearance_cushion: bool = False,
     distant_trace_radius: float = 0.0,
     disable_reuse: bool = False,
+    shared_via_maps: Optional[SharedViaMaps] = None,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
 
@@ -479,9 +671,24 @@ def try_tap_pad(
             if _segment_overlaps_window(seg, *bbx):
                 local.segments.append(seg)
 
-    obstacles = build_via_obstacle_map(
-        local, config, net_id, verbose=False,
-        same_net_pad_clearance=same_net_pad_clearance)
+    # Cross-pad via-map reuse (#263): use the pass-shared whole-board map when
+    # available. Equivalent to the per-pad window map for every cell this tap
+    # can query (see SharedViaMaps); the window path is kept for callers with
+    # session-local extra copper (not in pcb_data, so not in the shared map)
+    # and for the tiny via-in-pad-only window (max_search_radius == 0), whose
+    # window-edge band sits close enough to the pad to matter.
+    obstacles = None
+    if (shared_via_maps is not None and max_search_radius > 0
+            and shared_via_maps.exclude_net_id == net_id
+            and not extra_vias and not extra_segments):
+        obstacles = shared_via_maps.get(config, same_net_pad_clearance)
+        if obstacles is not None and _TAP_MAP_VERIFY:
+            _verify_shared_via_map(obstacles, local, config, net_id,
+                                   same_net_pad_clearance, pad, max_search_radius)
+    if obstacles is None:
+        obstacles = build_via_obstacle_map(
+            local, config, net_id, verbose=False,
+            same_net_pad_clearance=same_net_pad_clearance)
     routing_obs = None
     # The routing-obstacle map is consulted ONLY to route a via->pad TRACE -- i.e.
     # when reusing nearby same-net copper (steps 1/1b, gated on not disable_reuse),
@@ -611,6 +818,7 @@ def tap_pad_with_escalation(
     fine_for_all: bool = False,
     distant_trace_radius: float = 0.0,
     disable_reuse: bool = False,
+    shared_via_maps: Optional[SharedViaMaps] = None,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -630,7 +838,8 @@ def tap_pad_with_escalation(
             pad, pad_layer, net_id, pcb_data, config, max_search_radius,
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
-            distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
+            distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
+            shared_via_maps=shared_via_maps)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -655,7 +864,8 @@ def tap_pad_with_escalation(
                 via_size, via_drill, same_net_pad_clearance,
                 pending_pads, extra_vias, extra_segments, verbose,
                 routing_clearance_cushion=True,
-                distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
+                distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
+                shared_via_maps=shared_via_maps)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
