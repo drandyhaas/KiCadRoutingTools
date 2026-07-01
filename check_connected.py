@@ -209,7 +209,8 @@ def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
-                           verbose: bool = False) -> Dict:
+                           verbose: bool = False,
+                           return_graph: bool = False) -> Dict:
     """Check connectivity for a single net.
 
     Args:
@@ -231,6 +232,20 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     if zones is None:
         zones = []
     uf = UnionFind()
+    # Record every union as an edge in parallel with uf (which still drives this
+    # call's result unchanged). A caller can then re-evaluate connectivity with
+    # some segments EXCLUDED -- without rebuilding the expensive spatial graph --
+    # by dropping edges that touch the excluded segments' endpoint points. Segment
+    # i's two endpoints are the first points created, so they are point ids 2i and
+    # 2i+1 (see the segment loop below). Only PAD roots decide connectivity, so an
+    # excluded segment's now-isolated points are harmless. Used by the cleanup
+    # loops (prune_grazing_segments et al.) that otherwise call this per candidate
+    # removal -- O(net_size x candidates) -> O(net_size + candidates) (#263).
+    edges = []
+
+    def _union(a, b):
+        uf.union(a, b)
+        edges.append((a, b))
 
     # Detect all copper layers from segments, vias, and pads
     copper_layer_set = set()
@@ -287,7 +302,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         point_info[end_id] = ('segment_end', seg_idx, seg.layer, seg.end_x, seg.end_y)
         point_id += 1
         # Connect segment's own endpoints
-        uf.union(start_id, end_id)
+        _union(start_id, end_id)
 
     # Add vias - they connect all layers at one location
     via_repr_id = {}        # via_idx -> a representative point id (layers all unioned)
@@ -310,7 +325,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_id += 1
         # Connect all via layers together
         for vid in via_ids[1:]:
-            uf.union(via_ids[0], vid)
+            _union(via_ids[0], vid)
         if via_ids:
             via_repr_id[via_idx] = via_ids[0]
             via_copper_layers[via_idx] = {l for l in via_layers if l.endswith('.Cu')}
@@ -346,7 +361,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_id += 1
         # Connect all layers of this pad together (through-hole pads act like vias)
         for pid in this_pad_ids[1:]:
-            uf.union(this_pad_ids[0], pid)
+            _union(this_pad_ids[0], pid)
         if this_pad_ids:
             pad_repr_id[pad_idx] = this_pad_ids[0]
             pad_copper_layers[pad_idx] = this_pad_layers
@@ -368,7 +383,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         # Connect all points inside this zone together
         if len(points_in_zone) > 1:
             for pid in points_in_zone[1:]:
-                uf.union(points_in_zone[0], pid)
+                _union(points_in_zone[0], pid)
 
     # Build spatial index for points (use 1mm grid cells)
     point_index = SpatialIndex(cell_size=1.0)
@@ -386,7 +401,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # Use max(size1, size2) / 4, but at least the minimum tolerance
             point_tolerance = max(max(size1, size2) / 4, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
-                uf.union(id1, id2)
+                _union(id1, id2)
 
     # Same-net pads whose copper physically overlaps are connected even when
     # their centres sit further apart than the tight point tolerance above —
@@ -418,7 +433,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 dx = pad.global_x - other.global_x
                 dy = pad.global_y - other.global_y
                 if dx * dx + dy * dy <= reach * reach:
-                    uf.union(pad_repr_id[idx], pad_repr_id[jdx])
+                    _union(pad_repr_id[idx], pad_repr_id[jdx])
 
     # A via dropped *inside* an SMD pad's copper connects that pad even when the
     # via centre is offset from the pad centre — e.g. a via-in-pad at the end of
@@ -440,7 +455,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 if not (via_copper_layers[via_idx] & pad_copper_layers[pad_idx]):
                     continue
                 if _point_in_pad(vx, vy, pad, margin=tolerance):
-                    uf.union(pad_repr_id[pad_idx], via_repr_id[via_idx])
+                    _union(pad_repr_id[pad_idx], via_repr_id[via_idx])
 
     # A track that *ends inside* a pad's copper outline connects that pad even
     # when the endpoint is offset from the pad centre by more than the tight
@@ -463,7 +478,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 for ex, ey, eid, _ in endpoint_index.query_nearby(
                         pad.global_x, pad.global_y, layer, reach):
                     if _point_in_pad(ex, ey, pad, margin=tolerance):
-                        uf.union(pad_repr_id[pad_idx], eid)
+                        _union(pad_repr_id[pad_idx], eid)
 
     # Build spatial index for segments
     seg_index = SegmentIndex(cell_size=1.0)
@@ -484,7 +499,12 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             seg_tolerance = max(seg.width / 2, tolerance)
             if point_on_segment(px, py, seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg_tolerance):
                 # Connect this point to the segment (via one of its endpoints)
-                uf.union(pid, seg_start_id)
+                _union(pid, seg_start_id)
+
+    # Optional reusable graph for exclusion re-evaluation (see _union note).
+    graph = ({'num_points': point_id, 'pad_ids': list(pad_ids),
+              'pad_locations': list(pad_locations), 'edges': edges}
+             if return_graph else None)
 
     # Check if all pads are in the same component
     if not pad_ids:
@@ -494,7 +514,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             'pad_components': {},
             'disconnected_pads': [],
             'message': 'No pads found for this net',
-            'debug_info': None
+            'debug_info': None,
+            'graph': graph,
         }
 
     pad_roots = [uf.find(pid) for pid in pad_ids]
@@ -560,8 +581,59 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         'pad_components': {loc: uf.find(pid) for pid, loc in zip(pad_ids, pad_locations)},
         'disconnected_pads': disconnected,
         'message': None,
-        'debug_info': debug_info
+        'debug_info': debug_info,
+        'graph': graph,
     }
+
+
+def analyze_conn_excluding(graph: Dict, excluded_seg_indices=()) -> Dict:
+    """Re-evaluate net connectivity from a prebuilt graph (check_net_connectivity
+    with return_graph=True) with some segments EXCLUDED, WITHOUT rebuilding the
+    expensive spatial graph (#263).
+
+    excluded_seg_indices index into the ORIGINAL segments list. Segment i's two
+    endpoint points are ids 2i, 2i+1; excluding it drops every edge that touches
+    them (its own start<->end union and any adjacency/T-junction/pad union to its
+    endpoints), leaving those points isolated -- harmless, since only PAD roots
+    decide connectivity. Returns {connected, num_components, disconnected_pads},
+    matching check_net_connectivity on the reduced segment set.
+
+    Caveat: this reuses the point set / copper-layer set built from the FULL
+    segment list, so it diverges from a true recompute only if excluding a
+    segment empties a copper layer (which would shrink a via/pad's layer span) --
+    never the case on a plane net with zones + many segments per layer. Callers
+    that need a hard guarantee should equivalence-check against a real recompute.
+    """
+    excl = set()
+    for i in excluded_seg_indices:
+        excl.add(2 * i)
+        excl.add(2 * i + 1)
+    uf = UnionFind()
+    for a, b in graph['edges']:
+        if a in excl or b in excl:
+            continue
+        uf.union(a, b)
+    pad_ids = graph['pad_ids']
+    pad_locations = graph['pad_locations']
+    if not pad_ids:
+        return {'connected': True, 'num_components': 0, 'disconnected_pads': []}
+    pad_roots = [uf.find(pid) for pid in pad_ids]
+    unique_roots = set(pad_roots)
+    root_counts = defaultdict(int)
+    for r in pad_roots:
+        root_counts[r] += 1
+    main_root = max(root_counts.keys(), key=lambda r: root_counts[r])
+    disconnected = []
+    seen_pads = set()
+    for pid, loc in zip(pad_ids, pad_locations):
+        if uf.find(pid) != main_root:
+            pad_key = (round(loc[0], 4), round(loc[1], 4), loc[3])
+            if pad_key not in seen_pads:
+                seen_pads.add(pad_key)
+                disconnected.append(loc)
+    return {'connected': len(unique_roots) == 1,
+            'num_components': len(unique_roots),
+            'disconnected_pads': disconnected}
 
 
 def find_gap_between_components(debug_info: Dict, tolerance: float) -> Optional[Dict]:

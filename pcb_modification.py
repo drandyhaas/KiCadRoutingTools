@@ -7,6 +7,7 @@ self-intersecting or redundant segments.
 from __future__ import annotations
 
 import math
+import os
 from typing import Dict, List, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via
@@ -1030,7 +1031,7 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
 
     Returns (segments_removed, nets_pruned, original_segments_to_remove)."""
     from collections import defaultdict
-    from check_connected import check_net_connectivity
+    from check_connected import check_net_connectivity, analyze_conn_excluding
     # Accurate (rect-edge, windowed) foreign-pad distance -- the same one the router's
     # terminal-neck uses, so "grazes" matches what DRC flags. The circle model in
     # _prune_net_cycles.grazes only ORDERS cycle-edge drops, but here grazing GATES
@@ -1114,16 +1115,37 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
         net_zones = zones_by_net.get(net_id, [])
-        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads, net_zones)
-        kept = list(net_segs)
+        # Build the connectivity graph ONCE, then test each candidate removal by
+        # dropping that segment's edges instead of rebuilding the (expensive)
+        # spatial graph per candidate -- O(net + G) instead of O(net x G) full-net
+        # checks, the dominant cost of this cleanup on big plane nets (#263). Falls
+        # back to per-candidate recompute if the graph is unavailable, and an
+        # env-gated assertion (PRUNE_CONN_VERIFY=1) checks the fast path against a
+        # real recompute on every trial during verification.
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
+                                        net_zones, return_graph=True)
+        graph = before.get('graph')
+        seg_pos = {id(s): i for i, s in enumerate(net_segs)}
+        _verify = os.environ.get('PRUNE_CONN_VERIFY')
         dropped = []
+        dropped_idx = set()
         # Shortest grazing segments first: an appendix tip / tap stub is the most
         # likely to be redundant, and dropping it can only help the longer ones.
         for s in sorted(grazing, key=lambda s: math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)):
-            trial = [x for x in kept if x is not s]
-            if worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)):
+            trial_excl = dropped_idx | {seg_pos[id(s)]}
+            if graph is not None:
+                after = analyze_conn_excluding(graph, trial_excl)
+                if _verify:
+                    trial = [x for i, x in enumerate(net_segs) if i not in trial_excl]
+                    ref = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)
+                    assert worse(before, after) == worse(before, ref), \
+                        f"prune-conn fast-path mismatch: net {net_id}, seg {seg_pos[id(s)]}"
+            else:
+                trial = [x for i, x in enumerate(net_segs) if i not in trial_excl]
+                after = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)
+            if worse(before, after):
                 continue
-            kept = trial
+            dropped_idx.add(seg_pos[id(s)])
             dropped.append(s)
         if not dropped:
             continue
