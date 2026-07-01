@@ -318,6 +318,16 @@ def get_safe_amplitude_at_point(
     paired_clearance = net_half + config.track_width / 2 + config.clearance
     chamfer = CHAMFER_SIZE
 
+    # Board-edge keep-out (meanders overran the board outline). The A* router avoids
+    # the edge via add_board_edge_obstacles, but this geometric meander pass never
+    # did, so bumps near the edge printed past it. A bump arm carries the net's
+    # width, so its centerline must stay edge_clearance + net_half inside the bounds
+    # (mirrors obstacle_map: edge_clearance + track_width/2). board_edge_clearance
+    # overrides config.clearance when set, matching add_board_edge_obstacles.
+    board_bounds = getattr(pcb_data.board_info, 'board_bounds', None) if pcb_data and pcb_data.board_info else None
+    edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
+    edge_margin = edge_clearance + net_half
+
     # Binary search for safe amplitude
     # Start with max_amplitude and reduce if there are conflicts
     test_amplitudes = [max_amplitude]
@@ -340,6 +350,16 @@ def get_safe_amplitude_at_point(
         bump_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
         bump_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
         bump_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+
+        # Reject amplitudes whose bump would print past the board edge (copper edge
+        # = centerline bbox expanded by net_half must stay edge_clearance inside).
+        if board_bounds is not None and (
+            bump_min_x < board_bounds[0] + edge_margin or
+            bump_max_x > board_bounds[2] - edge_margin or
+            bump_min_y < board_bounds[1] + edge_margin or
+            bump_max_y > board_bounds[3] - edge_margin
+        ):
+            continue  # try a smaller amplitude that stays inside the outline
 
         # Use spatial index if available, otherwise fall back to full iteration
         if clearance_index is not None:
@@ -2127,6 +2147,13 @@ def get_safe_amplitude_for_diff_pair(
     via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
     chamfer = CHAMFER_SIZE
 
+    # Board-edge keep-out: bumps are generated at the pair CENTERLINE, but the P/N
+    # copper extends spacing_mm + net_half beyond it, so that outer edge must stay
+    # edge_clearance inside the board outline (mirrors the single-ended path).
+    board_bounds = getattr(pcb_data.board_info, 'board_bounds', None) if pcb_data and pcb_data.board_info else None
+    edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
+    edge_margin = edge_clearance + diff_pair_extra + net_half
+
     # Combine all segments and vias
     all_segments = list(pcb_data.segments)
     if extra_segments:
@@ -2150,6 +2177,18 @@ def get_safe_amplitude_for_diff_pair(
         bump_segs = get_bump_segments(cx, cy, ux, uy, px, py, direction, test_amp, chamfer, is_first_bump)
 
         conflict_found = False
+
+        # Reject amplitudes whose P/N copper would print past the board edge.
+        if board_bounds is not None:
+            b_min_x = min(min(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+            b_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+            b_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+            b_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+            if (b_min_x < board_bounds[0] + edge_margin or
+                b_max_x > board_bounds[2] - edge_margin or
+                b_min_y < board_bounds[1] + edge_margin or
+                b_max_y > board_bounds[3] - edge_margin):
+                continue  # try a smaller amplitude that stays inside the outline
 
         # Check each bump segment
         for bx1, by1, bx2, by2 in bump_segs:

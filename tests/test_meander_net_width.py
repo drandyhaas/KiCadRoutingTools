@@ -14,6 +14,9 @@ Covers:
   * The common case (net_w == track_width) is byte-identical (no behavior change).
   * Diff-pair keep-out (get_safe_amplitude_for_diff_pair): an impedance-widened
     pair pulls its centerline meander back too.
+  * Board-edge keep-out: a meander bump near the board outline is clamped so its
+    copper stays edge_clearance inside the bounds (the meander pass used to ignore
+    the outline, unlike the A* router, so bumps printed off the edge).
 
 Run with:  python3 tests/test_meander_net_width.py
 """
@@ -64,9 +67,40 @@ _COMMON = dict(cx=5.0, cy=0.0, ux=1.0, uy=0.0, px=0.0, py=1.0, direction=1,
                max_amplitude=1.0, min_amplitude=0.1, layer="F.Cu")
 
 
+def _pcb_no_obstacles(bounds=None):
+    """Empty board (no copper) with optional board_bounds for edge tests."""
+    bi = BoardInfo(layers={}, board_bounds=bounds, copper_layers=["F.Cu", "B.Cu"])
+    return PCBData(board_info=bi, nets={}, footprints={}, vias=[],
+                   segments=[], pads_by_net={})
+
+
 def _fail(msg):
     print("FAIL  " + msg)
     sys.exit(1)
+
+
+def test_board_edge_keepout():
+    # No copper anywhere, but the board outline is close on the +y side: the meander
+    # must not print past it. Centerline at (5,0), bump goes +y; a 0.4mm-wide net's
+    # copper edge (centerline + net_half 0.2) must stay edge_clearance inside max_y.
+    # edge_clearance falls back to config.clearance (0.15). So the bump peak must be
+    # <= max_y - (0.15 + 0.2). With max_y=0.7 -> peak <= 0.35.
+    max_y = 0.7
+    limit = max_y - (0.15 + 0.4 / 2)   # clearance + net_half
+    near = get_safe_amplitude_at_point(pcb_data=_pcb_no_obstacles(bounds=(-5.0, -5.0, 15.0, max_y)),
+                                       net_id=MEANDER_NET, config=_cfg(power_w=0.4), **_COMMON)
+    if not (0 < near <= limit + 1e-9):
+        _fail(f"board-edge: amplitude {near} should be clamped to <={limit:.3f} (edge at y={max_y})")
+    # With no board_bounds the edge check is skipped -> full amplitude available.
+    unbounded = get_safe_amplitude_at_point(pcb_data=_pcb_no_obstacles(bounds=None),
+                                            net_id=MEANDER_NET, config=_cfg(power_w=0.4), **_COMMON)
+    if unbounded <= near:
+        _fail(f"board-edge: unbounded amp {unbounded} should exceed edge-limited {near}")
+    # A far edge must not constrain a modest bump at all.
+    far = get_safe_amplitude_at_point(pcb_data=_pcb_no_obstacles(bounds=(-5.0, -5.0, 15.0, 50.0)),
+                                      net_id=MEANDER_NET, config=_cfg(power_w=0.4), **_COMMON)
+    if abs(far - unbounded) > 1e-9:
+        _fail(f"board-edge: far edge should not clamp ({far} vs {unbounded})")
 
 
 def test_single_ended_widths():
@@ -175,4 +209,5 @@ if __name__ == "__main__":
     test_own_width_override()
     test_common_case_unchanged()
     test_diff_pair_widths()
+    test_board_edge_keepout()
     print("PASS  meander keep-out sized from actual net width (#175)")
