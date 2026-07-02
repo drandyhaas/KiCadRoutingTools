@@ -880,7 +880,7 @@ class BGAOptionsPanel(wx.Panel):
         cap_grid.Add(self.cap_max_passes, 0, wx.EXPAND)
 
         cap_grid.Add(wx.StaticText(self, label="Movable prefix(es):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.cap_prefix = wx.TextCtrl(self, value="C,R")
+        self.cap_prefix = wx.TextCtrl(self, value="C,R,FB")
         self.cap_prefix.SetToolTip("Comma-separated reference prefix(es) for movable "
                                    "passives near a BGA (--cap-prefix; default C,R = "
                                    "caps and resistors; RN-style arrays auto-excluded "
@@ -927,7 +927,7 @@ class BGAOptionsPanel(wx.Panel):
             'cap_max_displacement_cap': self.cap_max_displacement_cap.GetValue(),
             'cap_displacement_growth': self.cap_displacement_growth.GetValue(),
             'cap_max_passes': self.cap_max_passes.GetValue(),
-            'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R',
+            'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R,FB',
             'cap_allow_rotation': self.cap_allow_rotation.GetValue(),
         }
 
