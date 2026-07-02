@@ -2053,7 +2053,7 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
         self.differential_tab.chamfer_extra.SetValue(defaults.DIFF_PAIR_CHAMFER_EXTRA)
-        self.differential_tab.fix_polarity_check.SetValue(False)
+        self.differential_tab.polarity_swap_nets_text.SetValue("*")
         self.differential_tab.gnd_via_check.SetValue(False)
         self.differential_tab.intra_match_check.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)

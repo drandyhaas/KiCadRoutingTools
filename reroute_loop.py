@@ -545,6 +545,8 @@ def run_reroute_loop(
                 successful += 1
                 total_iterations += result['iterations']
                 rerouted_pairs.add(ripped_pair_name)
+                if result.get('polarity_swap_denied'):
+                    state.polarity_swap_denied_pairs.add(ripped_pair_name)
                 apply_polarity_swap(pcb_data, result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
                 record_diff_pair_success(
                     pcb_data, result, ripped_pair, ripped_pair_name, config,

@@ -93,7 +93,6 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `min_turning_radius` | `0.2` | Minimum turning radius for pose-based diff routing |
 | `max_setback_angle` | `45.0` | Max angle when searching setback positions |
 | `max_turn_angle` | `180.0` | Cumulative turn limit before reset (prevents U-turns) |
-| `fix_polarity` | `True` | Allow P/N pad swap when polarity is crossed |
 | `gnd_via_enabled` | `True` | Place GND return vias next to diff-pair signal vias |
 | `diff_pair_intra_match` | `False` | Meander the shorter of P/N to match lengths within the pair |
 | `ac_couple_match` | `False` | End-to-end length-match AC-coupled pairs split by series caps: concatenated P vs N path (#196) |
@@ -246,9 +245,14 @@ class DiffPairNet:
     n_net_id: Optional[int] = None
     p_net_name: Optional[str] = None
     n_net_name: Optional[str] = None
+    polarity_swap_allowed: bool = False  # may P/N pad nets be swapped (#279)?
 
     is_complete  # property: both net IDs present
 ```
+
+`polarity_swap_allowed` is stamped by `batch_route_diff_pairs` from its
+`polarity_swap_nets` glob patterns (CLI `--polarity-swap-nets`); the default
+denies swaps for every pair.
 
 Produced by
 [`net_queries.find_differential_pairs`](api-net-analysis.md#find_differential_pairs)

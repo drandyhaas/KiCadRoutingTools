@@ -421,9 +421,30 @@ If differential pairs are found:
 > few pairs, run `/identify-diff-pairs` for datasheet-based detection by pin function and
 > per-interface gap/impedance recommendations.
 
-Also note: `route_diff.py` resolves P/N polarity mismatches automatically, which can swap
-target pad net assignments. Swaps are reported in the output — when they happen, the
-schematic sync step below applies (see "Schematic Synchronization After Swaps").
+**Polarity-swap policy (#279).** `route_diff.py` can resolve a P/N polarity mismatch by
+swapping the target pads' net assignments — but a swap physically cross-connects one
+device's P pin to the other's N pin, and is only harmless when an endpoint can compensate.
+Swaps are **denied by default**; grant them per pair with `--polarity-swap-nets <patterns>`.
+Before emitting the route_diff command, classify each pair's electrical endpoints (walk
+through series AC caps/resistors to the real device):
+
+- **Allow** pairs with an FPGA/CPLD generic-I/O endpoint (pin functions are reassigned in
+  gateware — look for paired `IO_LxxP/N`-style pinfunctions on Xilinx/Lattice/Altera/Gowin
+  parts), and protocol-tolerant links (PCIe lanes, SerDes with polarity-invert, 1000BASE-T).
+- **Deny** USB `D+/D-`, MIPI, TMDS/HDMI/DP, CAN, RS-485/422, DDR `CK/DQS`, clock/analog
+  inputs to fixed-function parts, anything reaching a connector or unknown part, and any
+  pair whose nets carry an asymmetric attachment (e.g. a single-sided pull-up) — it stays
+  on its net and would land on the wrong physical wire. MCUs/SoCs do NOT count as
+  programmable (their diff functions are fixed silicon). **When in doubt, deny** — a
+  skipped pair beats a dead interface. `/identify-diff-pairs` reports a per-pair
+  `polarity_swappable` verdict from datasheet pin functions for the ambiguous cases.
+
+Pass the resulting allowlist, e.g. `--polarity-swap-nets '/fpga/IO_*'` (use `'*'` only when
+every pair classifies swappable). Applied swaps are listed in `polarity_swapped_pairs` —
+when they happen, the schematic sync step below applies (see "Schematic Synchronization
+After Swaps"). Pairs that *wanted* a swap but were denied are listed in
+`polarity_swap_denied_pairs` — surface these to the user (they either routed via the
+opposite-side flip or failed honestly and may need a manual pin swap in the schematic).
 
 **Far-apart terminal pads → single-ended follow-up (issue #121).** A "diff pair"
 sometimes has pads that aren't a coupled connection — e.g. a P and an N test point

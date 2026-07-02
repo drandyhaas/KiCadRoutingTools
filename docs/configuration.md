@@ -296,7 +296,7 @@ These options are only available in `route_diff.py`. All nets passed to route_di
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
-| `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
+| `--polarity-swap-nets` | (none = deny all) | Glob patterns naming pairs allowed to polarity-swap; `'*'` = all (#279) |
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--diff-chamfer-extra` | 1.5 | Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair |
@@ -478,7 +478,6 @@ class GridRouteConfig:
     diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
     min_turning_radius: float = 0.2      # mm for pose-based routing
     max_turn_angle: float = 180.0        # degrees, prevents U-turns
-    fix_polarity: bool = True            # swap target pads if polarity swap needed
     stub_layer_swap: bool = True         # enable stub layer switching optimization
     gnd_via_enabled: bool = True         # place GND vias near signal vias
     target_swap_crossing_penalty: float = 1000.0  # penalty for crossing assignments

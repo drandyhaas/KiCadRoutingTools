@@ -35,7 +35,7 @@ from length_matching import _ac_coupled_member_lengths  # noqa: E402
 
 BOARD = os.path.join(ROOT_DIR, "kicad_files", "cap_chain.kicad_pcb")
 GEOM = ["--layers", "F.Cu", "B.Cu", "--track-width", "0.15", "--diff-pair-gap", "0.25",
-        "--diff-pair-intra-match", "--no-fix-polarity"]
+        "--diff-pair-intra-match"]  # no --polarity-swap-nets: swaps denied (default)
 NETS = ["DPA_P", "DPA_N", "DPB_P", "DPB_N"]
 
 

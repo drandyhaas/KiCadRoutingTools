@@ -26,6 +26,11 @@ class DiffPairNet:
     n_net_id: Optional[int] = None
     p_net_name: Optional[str] = None
     n_net_name: Optional[str] = None
+    # Whether a P/N polarity pad swap may be applied to THIS pair (#279).
+    # Set by batch_route_diff_pairs from --polarity-swap-nets; a swap is only
+    # harmless when an endpoint can compensate (FPGA generic I/O, polarity-
+    # tolerant protocol), so the default is deny.
+    polarity_swap_allowed: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -68,7 +73,6 @@ class GridRouteConfig:
     # routed single-ended (P->P, N->N) instead (issue #121).
     diff_pair_uncouple_factor: float = 6.0  # multiples of pair spacing (track+gap)
     min_turning_radius: float = 0.2  # mm - minimum turning radius for pose-based routing
-    fix_polarity: bool = True  # Swap target pad nets if polarity swap needed
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
     verbose: bool = False  # Print detailed diagnostic output
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)

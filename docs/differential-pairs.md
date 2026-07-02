@@ -336,13 +336,14 @@ bare-pad endpoints can flip - stub directions are fixed by existing copper.
 Flipped attempts get a full-loop turn budget since they must wrap around
 their endpoint, and every candidate is validated for P/N track crossings.
 
-With polarity fixing **enabled** (the default on both the CLI and the plugin
-GUI), the pad-swap and connector-flip
+For a pair with swaps allowed (`--polarity-swap-nets`), the pad-swap and
+connector-flip
 candidates **compete by routed length** and the shortest clean route wins; if
 only one mechanism succeeds, it is used. (When no end can flip - e.g. both
 ends have stubs - the swap is committed directly without re-routing.)
 
-With `--no-fix-polarity` (or the GUI checkbox unticked), pad swaps never
+For a pair NOT matching `--polarity-swap-nets` (or with the flag absent
+entirely - the default), pad swaps never
 happen: only the flip resolution is tried, and if no flip produces a clean
 route the pair is **skipped** with a warning (no crossing tracks are ever
 written).
@@ -570,7 +571,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
-| `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
+| `--polarity-swap-nets` | (none = deny all) | Glob patterns naming the pairs ALLOWED to resolve a P/N mismatch by a pad-net swap (#279). `'*'` = all pairs; omit for no swaps ever |
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
@@ -665,7 +666,7 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
 
 ## Limitations
 
-1. **Polarity swap** - Enabled by default (CLI and plugin GUI); use `--no-fix-polarity` (or untick the GUI checkbox) to disable automatic target pad swapping. Note this is all-or-nothing today; issue #279 tracks a per-pair allowlist (only swap pairs an endpoint can compensate, e.g. FPGA generic I/O - never USB). With fixing disabled, a mismatched pair is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible
+1. **Polarity swap** - Off by default; allow it per pair with `--polarity-swap-nets <patterns>` (`'*'` = every pair; the GUI's "Polarity-swap allowed nets" field, default `*`). Only allow pairs an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - never USB/MIPI/TMDS (#279). For a denied pair, a mismatch is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible; denied-but-wanted swaps are listed in `polarity_swap_denied_pairs` in the JSON summary
 2. **Fixed spacing** - Spacing is constant along the route (no tapering)
 3. **Grid snapping** - Centerline endpoints snap to grid for the search; the
    terminal endpoints of the generated geometry are un-snapped back to the

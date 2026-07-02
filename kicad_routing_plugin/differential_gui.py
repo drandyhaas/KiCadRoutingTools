@@ -552,17 +552,23 @@ class DifferentialTab(wx.Panel):
         options_box = wx.StaticBox(self, label="Options")
         options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
 
-        # Default ON to match route_diff.py's CLI default (fix_polarity=True);
-        # issue #279 adds a per-pair allowlist on top of this global switch.
-        self.fix_polarity_check = wx.CheckBox(self, label="Fix polarity swaps")
-        self.fix_polarity_check.SetValue(True)
-        self.fix_polarity_check.SetToolTip(
-            "Allow swapping target pad net assignments to fix polarity (board only - "
-            "schematic must be updated to match); the swap competes with routing the "
-            "connectors out the opposite side and the shorter route wins. When "
-            "unchecked, pad swaps never happen - the opposite-side route is used, or "
-            "the pair is skipped if that's not possible")
-        options_sizer.Add(self.fix_polarity_check, 0, wx.ALL, 5)
+        # Per-pair polarity-swap allowlist (#279): glob patterns naming the
+        # pairs allowed to resolve a P/N mismatch by swapping pad nets.
+        # '*' = all pairs (the historical behavior), empty = no swaps ever.
+        polarity_row = wx.BoxSizer(wx.HORIZONTAL)
+        polarity_row.Add(wx.StaticText(self, label="Polarity-swap allowed nets:"),
+                         0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.polarity_swap_nets_text = wx.TextCtrl(self, value="*", size=(180, -1))
+        self.polarity_swap_nets_text.SetToolTip(
+            "Glob patterns (comma/space-separated) naming the diff pairs ALLOWED to "
+            "resolve a P/N polarity mismatch by swapping pad net assignments (board "
+            "only - schematic must be updated to match). A swap is only harmless when "
+            "an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - "
+            "never allow USB/MIPI/TMDS pairs. '*' allows every pair; EMPTY disables "
+            "swaps entirely (a mismatched pair is routed with the connectors out the "
+            "opposite side, or skipped if that's not possible).")
+        polarity_row.Add(self.polarity_swap_nets_text, 1, wx.ALIGN_CENTER_VERTICAL)
+        options_sizer.Add(polarity_row, 0, wx.EXPAND | wx.ALL, 5)
 
         self.gnd_via_check = wx.CheckBox(self, label="Add GND vias")
         self.gnd_via_check.SetValue(True)
@@ -911,7 +917,7 @@ class DifferentialTab(wx.Panel):
                 max_turn_angle=config.get('max_turn_angle', 180.0),
                 diff_chamfer_extra=config.get('diff_chamfer_extra', 1.5),
                 diff_pair_centerline_setback=config.get('diff_pair_centerline_setback'),
-                fix_polarity=config.get('fix_polarity', True),
+                polarity_swap_nets=config.get('polarity_swap_nets'),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
                 ac_couple_match=config.get('ac_couple_match', False),
@@ -1129,6 +1135,16 @@ class DifferentialTab(wx.Panel):
             pcb_via.SetLayerPair(top_layer, bot_layer)
         board.Add(pcb_via)
 
+    def get_polarity_swap_nets(self):
+        """Parse the polarity-swap allowlist field into a pattern list (#279).
+
+        Comma/space-separated globs; empty field -> None (no swaps ever),
+        matching route_diff.py's --polarity-swap-nets semantics.
+        """
+        text = self.polarity_swap_nets_text.GetValue()
+        patterns = [t for t in text.replace(',', ' ').split() if t]
+        return patterns or None
+
     def get_config(self):
         """Get the differential pair configuration."""
         setback = self.centerline_setback.GetValue()
@@ -1141,7 +1157,7 @@ class DifferentialTab(wx.Panel):
             'max_turn_angle': self.max_turn_angle.GetValue(),
             'diff_chamfer_extra': self.chamfer_extra.GetValue(),
             'diff_pair_centerline_setback': setback if setback > 0 else None,  # 0 = auto
-            'fix_polarity': self.fix_polarity_check.GetValue(),
+            'polarity_swap_nets': self.get_polarity_swap_nets(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
             'ac_couple_match': self.ac_couple_check.GetValue(),

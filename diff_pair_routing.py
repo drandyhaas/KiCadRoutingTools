@@ -3618,7 +3618,16 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # skip swap resolution, so the caller can compare it against the swap route.
     if (polarity_swap_needed or force_swap) and not force_no_swap:
         swap_end = 'source' if routing_backwards else 'target'
-        swap_allowed = config.fix_polarity and swap_end in swap_allowed_ends
+        # Per-pair policy gate (#279: only pairs an endpoint can compensate
+        # may swap - set from --polarity-swap-nets) AND per-end integrity gate
+        # (multi-point legs forbid swapping terminals that already carry a
+        # routed leg).
+        swap_allowed = (diff_pair.polarity_swap_allowed
+                        and swap_end in swap_allowed_ends)
+        # A swap was wanted but the per-pair POLICY forbids it: surface this
+        # on whatever result wins so the caller can report it (JSON_SUMMARY
+        # polarity_swap_denied_pairs).
+        policy_denied = polarity_swap_needed and not diff_pair.polarity_swap_allowed
 
         if force_swap:
             # This recursion IS the committed swap route.
@@ -3635,7 +3644,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             spent_iterations = total_iterations
             candidates = []
 
-            if config.fix_polarity:
+            if diff_pair.polarity_swap_allowed:
                 # No-swap candidate: the natural geometry, valid when its P/N
                 # (incl. bare-pad target stubs) do not actually cross.
                 no_swap = route_diff_pair_with_obstacles(
@@ -3697,6 +3706,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                         for name, r in candidates)
                     print(f"  Using {best_name} route ({lengths})")
                 best['iterations'] = spent_iterations
+                if policy_denied:
+                    best['polarity_swap_denied'] = True
                 return best
 
             print(f"  WARNING: Polarity mismatch cannot be resolved (pad swap "
@@ -3705,6 +3716,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             return {
                 'failed': True,
                 'polarity_skip': True,
+                'polarity_swap_denied': policy_denied,
                 'iterations': spent_iterations,
                 'blocked_cells_forward': [],
                 'blocked_cells_backward': [],
@@ -3959,7 +3971,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         # no-swap probe: its caller checks the crossing and falls back to a swap.)
         swap_end = 'source' if routing_backwards else 'target'
         swap_result = None
-        if (not force_swap and not force_no_swap and config.fix_polarity
+        if (not force_swap and not force_no_swap
+                and diff_pair.polarity_swap_allowed
                 and swap_end in swap_allowed_ends):
             print("  Retrying with a polarity pad swap to untangle the crossing...")
             swap_result = route_diff_pair_with_obstacles(
@@ -3986,6 +3999,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             'failed': True,
             'iterations': result.get('iterations', 0),
             'pn_crossing': True,
+            # The untangling swap retry never ran because the per-pair policy
+            # forbids swaps for this pair (#279) - report it as wanted-but-denied.
+            'polarity_swap_denied': (not force_swap and not force_no_swap
+                                     and not diff_pair.polarity_swap_allowed),
         }
         # If the swap retry was itself rejected for grazing a committed foreign net,
         # propagate that so the caller can rip the grazed net and route this pair

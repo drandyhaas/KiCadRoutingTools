@@ -14,9 +14,10 @@ This exercises, end to end:
 - synthesized escape directions for bare-pad endpoints
 - multi-point chain routing (legs passing "through" shared terminals on
   opposite sides, alternative chain orderings on failure)
-- per-leg polarity resolution: with fixing on, pad-swap and connector-flip
+- per-leg polarity resolution: with swaps allowed, pad-swap and connector-flip
   candidates compete by routed length (swaps only at chain-fresh terminals);
-  with --no-fix-polarity, flips only - pad swaps must never occur
+  without --polarity-swap-nets (the default), flips only - pad swaps must
+  never occur
 
 Electrically short legs (< ~5 connector setbacks) are NOT coupled: route_diff
 defers them to single-ended, so the lvds pairs route MIXED here (the long legs
@@ -36,7 +37,7 @@ Also covers the issue #56 regression on
 GND plane and stitching vias, one of which blocks the channel between R3 and
 IC4. The wrap-around-crossing failure mode must never produce a short. The
 short IC-pin legs now defer to single-ended (which sidesteps the forced
-crossing entirely), so both with and without polarity fixing the board routes
+crossing entirely), so both with and without swap permission the board routes
 to full connectivity, DRC-clean and crossing-free, after the single-ended
 follow-up. (Crossing rejection still guards any long, genuinely-coupled leg.)
 
@@ -75,22 +76,23 @@ CLEARANCE = "0.2"
 # The lvds pairs route MIXED: the long legs couple, the short IC-pin legs defer
 # to single-ended (< ~5 setbacks). A polarity pad swap only happens on a coupled
 # leg, so with the swap-candidate leg now deferred, no pad swap occurs on either
-# pair (polarity_swapped == [] everywhere). With --no-fix-polarity swaps must
-# never occur regardless.
+# pair (polarity_swapped == [] everywhere). Without --polarity-swap-nets
+# (the default) swaps must never occur regardless.
 SCENARIOS = [
-    ("DATA multi-point (fix-polarity on)",
-     [(["/DATA+", "/DATA-"], 1)], {"3 terminals, 2 legs": 1}, [], []),
-    ("CLK multi-point (fix-polarity on)",
-     [(["/CLK+", "/CLK-"], 1)], {"4 terminals, 3 legs": 1}, [], []),
-    ("DATA multi-point (--no-fix-polarity)",
+    ("DATA multi-point (swaps allowed)",
      [(["/DATA+", "/DATA-"], 1)], {"3 terminals, 2 legs": 1},
-     ["--no-fix-polarity"], []),
-    ("CLK multi-point (--no-fix-polarity)",
+     ["--polarity-swap-nets", "*"], []),
+    ("CLK multi-point (swaps allowed)",
      [(["/CLK+", "/CLK-"], 1)], {"4 terminals, 3 legs": 1},
-     ["--no-fix-polarity"], []),
+     ["--polarity-swap-nets", "*"], []),
+    ("DATA multi-point (swaps denied - default)",
+     [(["/DATA+", "/DATA-"], 1)], {"3 terminals, 2 legs": 1}, [], []),
+    ("CLK multi-point (swaps denied - default)",
+     [(["/CLK+", "/CLK-"], 1)], {"4 terminals, 3 legs": 1}, [], []),
     ("CLK then DATA (sequential runs)",
      [(["/CLK+", "/CLK-"], 1), (["/DATA+", "/DATA-"], 1)],
-     {"4 terminals, 3 legs": 1, "3 terminals, 2 legs": 1}, [], None),
+     {"4 terminals, 3 legs": 1, "3 terminals, 2 legs": 1},
+     ["--polarity-swap-nets", "*"], None),
 ]
 
 
@@ -233,7 +235,7 @@ def gnd_obstacle_scenario_fix_on(verbose):
     """Issue #56 board, polarity fixing ON: both pairs route around the
     blocking stitching via with zero crossings (short legs defer to single-ended;
     the single-ended follow-up completes them cleanly)."""
-    name = "GND-via obstacle (fix-polarity on: routes clean, no crossings)"
+    name = "GND-via obstacle (swaps allowed: routes clean, no crossings)"
     log = []
     outs = []
     try:
@@ -241,7 +243,7 @@ def gnd_obstacle_scenario_fix_on(verbose):
         fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
         os.close(fd)
         outs.append(out)
-        summary, txt = route(GND_BOARD, nets, out)
+        summary, txt = route(GND_BOARD, nets, out, ["--polarity-swap-nets", "*"])
         if verbose:
             print(txt)
         if summary is None:
@@ -266,12 +268,13 @@ def gnd_obstacle_scenario_fix_on(verbose):
 
 
 def gnd_obstacle_scenario_no_fix(verbose):
-    """Issue #56 board, --no-fix-polarity: the legs the blocking via would force
-    to cross are electrically short, so they defer to single-ended instead of
-    crossing. Even without polarity fixing the board therefore routes to full
-    connectivity, DRC-clean and crossing-free, after the single-ended follow-up
-    (no shorts). Crossing rejection still guards any long, genuinely-coupled leg."""
-    name = "GND-via obstacle (--no-fix-polarity: defers short legs, no shorts)"
+    """Issue #56 board, swaps denied (the no---polarity-swap-nets default): the
+    legs the blocking via would force to cross are electrically short, so they
+    defer to single-ended instead of crossing. Even without swap permission the
+    board therefore routes to full connectivity, DRC-clean and crossing-free,
+    after the single-ended follow-up (no shorts). Crossing rejection still
+    guards any long, genuinely-coupled leg."""
+    name = "GND-via obstacle (swaps denied: defers short legs, no shorts)"
     log = []
     outs = []
     try:
@@ -279,7 +282,7 @@ def gnd_obstacle_scenario_no_fix(verbose):
         fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff56_")
         os.close(fd)
         outs.append(out)
-        summary, txt = route(GND_BOARD, nets, out, ["--no-fix-polarity"])
+        summary, txt = route(GND_BOARD, nets, out)
         if verbose:
             print(txt)
         if summary is None:

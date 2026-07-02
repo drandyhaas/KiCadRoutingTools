@@ -155,7 +155,7 @@ def get_dialog_settings(dialog):
         'max_turn_angle': dialog.differential_tab.max_turn_angle.GetValue(),
         'chamfer_extra': dialog.differential_tab.chamfer_extra.GetValue(),
         'centerline_setback': dialog.differential_tab.centerline_setback.GetValue(),
-        'fix_polarity_check': dialog.differential_tab.fix_polarity_check.GetValue(),
+        'polarity_swap_nets_text': dialog.differential_tab.polarity_swap_nets_text.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
         'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
@@ -506,8 +506,13 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.chamfer_extra.SetValue(settings['chamfer_extra'])
     if 'centerline_setback' in settings:
         dialog.differential_tab.centerline_setback.SetValue(settings['centerline_setback'])
-    if 'fix_polarity_check' in settings:
-        dialog.differential_tab.fix_polarity_check.SetValue(settings['fix_polarity_check'])
+    if 'polarity_swap_nets_text' in settings:
+        dialog.differential_tab.polarity_swap_nets_text.SetValue(
+            settings['polarity_swap_nets_text'])
+    elif 'fix_polarity_check' in settings:
+        # Migrate the pre-#279 boolean: True -> allow all pairs, False -> none.
+        dialog.differential_tab.polarity_swap_nets_text.SetValue(
+            '*' if settings['fix_polarity_check'] else '')
     if 'gnd_via_check' in settings:
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:

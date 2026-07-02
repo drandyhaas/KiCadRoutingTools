@@ -143,6 +143,7 @@ def route_diff_pairs(
     reroute_queue = state.reroute_queue
     queued_net_ids = state.queued_net_ids
     polarity_swapped_pairs = state.polarity_swapped_pairs
+    polarity_swap_denied_pairs = state.polarity_swap_denied_pairs
     rip_and_retry_history = state.rip_and_retry_history
     ripup_success_pairs = state.ripup_success_pairs
     remaining_net_ids = state.remaining_net_ids
@@ -567,6 +568,8 @@ def route_diff_pairs(
             results.append(result)
             successful += 1
             total_iterations += result['iterations']
+            if result.get('polarity_swap_denied'):
+                polarity_swap_denied_pairs.add(pair_name)
 
             # Check if polarity was fixed
             apply_polarity_swap(pcb_data, result, pad_swaps, pair_name, polarity_swapped_pairs)
@@ -595,11 +598,15 @@ def route_diff_pairs(
         else:
             iterations = result['iterations'] if result else 0
             polarity_skip = bool(result and result.get('polarity_skip'))
+            if result and result.get('polarity_swap_denied'):
+                polarity_swap_denied_pairs.add(pair_name)
             if polarity_skip:
-                # Intentionally skipped: polarity mismatch with fixing disabled
-                # and no opposite-side connector option. Rip-up and layer swaps
+                # Intentionally skipped: polarity mismatch with swaps not
+                # allowed for this pair (--polarity-swap-nets, #279) and no
+                # opposite-side connector option. Rip-up and layer swaps
                 # cannot resolve polarity, so skip the rescue machinery.
-                print(f"  {RED}SKIPPED - polarity swap needed but polarity fixing is disabled{RESET}")
+                print(f"  {RED}SKIPPED - polarity swap needed but not allowed "
+                      f"for this pair (--polarity-swap-nets){RESET}")
             else:
                 print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             total_iterations += iterations

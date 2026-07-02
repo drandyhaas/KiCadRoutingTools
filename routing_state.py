@@ -82,6 +82,9 @@ class RoutingState:
 
     # Tracking sets
     polarity_swapped_pairs: Set[str] = field(default_factory=set)
+    # Pairs where a polarity swap was WANTED but the per-pair policy forbade
+    # it (#279, --polarity-swap-nets) - resolved by flip or failed honestly.
+    polarity_swap_denied_pairs: Set[str] = field(default_factory=set)
     rip_and_retry_history: Set[Tuple] = field(default_factory=set)
     ripup_success_pairs: Set[str] = field(default_factory=set)
     rerouted_pairs: Set[str] = field(default_factory=set)

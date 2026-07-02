@@ -47,7 +47,7 @@ from connectivity import (
 from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
-    expand_net_patterns
+    expand_net_patterns, matches_diff_pair_patterns
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -138,7 +138,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 min_turning_radius: float = defaults.DIFF_PAIR_MIN_TURNING_RADIUS,
                 debug_lines: bool = False,
                 verbose: bool = False,
-                fix_polarity: bool = True,
+                polarity_swap_nets: Optional[List[str]] = None,
                 max_rip_up_count: int = defaults.MAX_RIPUP,
                 max_setback_angle: float = defaults.DIFF_PAIR_MAX_SETBACK_ANGLE,
                 enable_layer_switch: bool = True,
@@ -189,7 +189,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_gap: Gap between P and N traces of differential pairs in mm (default: 0.101)
         diff_pair_centerline_setback: Distance in front of stubs to start centerline (default: 2x P-N spacing)
         min_turning_radius: Minimum turning radius for pose-based routing in mm (default: 0.2)
-        fix_polarity: Swap target pad net assignments if polarity swap is needed (default: True)
+        polarity_swap_nets: Glob patterns naming the pairs ALLOWED to resolve a
+            P/N mismatch by swapping pad net assignments (#279). None/empty =
+            no swaps ever (deny by default - a swap is only harmless when an
+            endpoint can compensate); ['*'] = allow all pairs.
         gnd_via_enabled: Add GND vias near diff pair signal vias (default: True)
         diff_chamfer_extra: Chamfer multiplier for diff pair meanders (default: 1.5)
         diff_pair_intra_match: Enable intra-pair P/N length matching (default: False)
@@ -289,7 +292,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
-        fix_polarity=fix_polarity,
         max_setback_angle=max_setback_angle,
         max_turn_angle=max_turn_angle,
         gnd_via_enabled=gnd_via_enabled,
@@ -338,6 +340,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_net_ids.add(pair.n_net_id)
 
     print(f"Found {len(diff_pairs)} differential pair(s)")
+
+    # Per-pair polarity-swap policy (#279): only pairs matching
+    # --polarity-swap-nets may have their P/N pad nets swapped. No patterns =
+    # no swaps (a swap is only harmless when an endpoint can compensate -
+    # FPGA generic I/O, polarity-tolerant protocol - so deny by default);
+    # '*' restores swap-everything.
+    if polarity_swap_nets:
+        for pair in diff_pairs.values():
+            pair.polarity_swap_allowed = any(
+                matches_diff_pair_patterns(nname, pair.base_name,
+                                           polarity_swap_nets)
+                for nname in (pair.p_net_name, pair.n_net_name) if nname)
+        n_allowed = sum(p.polarity_swap_allowed for p in diff_pairs.values())
+        print(f"  Polarity swaps allowed for {n_allowed}/{len(diff_pairs)} "
+              f"pair(s) (--polarity-swap-nets)")
+    else:
+        print("  Polarity swaps disabled (no --polarity-swap-nets; pass '*' "
+              "to allow all pairs)")
 
     # Build the net-id list from the diff pairs we found (both halves), so an
     # explicit base name ('/DVI_CK') or a one-sided glob ('*_P') still routes
@@ -927,6 +947,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"  Rerouted:      {len(rerouted_pairs)} (ripped nets re-routed)")
     if polarity_swapped_pairs:
         print(f"  Polarity swaps: {len(polarity_swapped_pairs)}")
+    if state.polarity_swap_denied_pairs:
+        print(f"  Polarity swaps denied: {len(state.polarity_swap_denied_pairs)} "
+              f"(mismatch found but pair not in --polarity-swap-nets): "
+              f"{', '.join(sorted(state.polarity_swap_denied_pairs))}")
     if target_swaps:
         swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
         print(f"  Target swaps:  {len(swap_pairs)}")
@@ -946,6 +970,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
+        'polarity_swap_denied_pairs': sorted(state.polarity_swap_denied_pairs),
         'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
         'skipped_bad_fanout': sorted(skipped_bad_fanout),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
@@ -1197,8 +1222,12 @@ Examples:
                         help="Distance in front of stubs to start centerline route in mm (default: 2x P-N spacing)")
     parser.add_argument("--min-turning-radius", type=float, default=0.2,
                         help="Minimum turning radius for pose-based routing in mm (default: 0.2)")
-    parser.add_argument("--no-fix-polarity", action="store_true",
-                        help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
+    parser.add_argument("--polarity-swap-nets", nargs="+", metavar="PATTERN",
+                        help="Glob patterns naming the diff pairs ALLOWED to resolve a P/N "
+                             "polarity mismatch by swapping pad net assignments (#279). "
+                             "Omit for no swaps ever (default - a swap is only harmless when "
+                             "an endpoint can compensate, e.g. FPGA generic I/O; never USB); "
+                             "pass '*' to allow all pairs. Same matcher as --nets.")
     parser.add_argument("--no-stub-layer-swap", action="store_true",
                         help="Disable stub layer switching optimization (enabled by default)")
     parser.add_argument("--no-crossing-layer-check", action="store_true",
@@ -1391,7 +1420,7 @@ Examples:
                 min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
                 verbose=args.verbose,
-                fix_polarity=not args.no_fix_polarity,
+                polarity_swap_nets=args.polarity_swap_nets,
                 max_rip_up_count=args.max_ripup,
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,

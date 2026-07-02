@@ -133,9 +133,13 @@ def main():
             short = base.split("/")[-1].replace("IO_Banks/", "")
             nets += [f"/IO_Banks/{short}_P", f"/IO_Banks/{short}_N"]
         routed = _tmp("glasgow_rd_")
+        # FPGA generic-I/O pairs are the polarity-swappable class (#279):
+        # the pin functions are reassigned in gateware, so allow swaps here
+        # as the planner would.
         out = _run(["route_diff.py", fan, routed, "--nets", *nets,
                     "--track-width", "0.12", "--diff-pair-gap", "0.101",
-                    "--clearance", "0.1", "--layers", *LAYERS, "--no-gnd-vias"],
+                    "--clearance", "0.1", "--layers", *LAYERS, "--no-gnd-vias",
+                    "--polarity-swap-nets", "*"],
                    verbose)
         ok = f"{npairs}/{npairs} routed" in out
         check(f"route_diff couples all {npairs} Z-pairs end-to-end", ok,
