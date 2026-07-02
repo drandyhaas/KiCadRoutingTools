@@ -552,8 +552,10 @@ class DifferentialTab(wx.Panel):
         options_box = wx.StaticBox(self, label="Options")
         options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
 
+        # Default ON to match route_diff.py's CLI default (fix_polarity=True);
+        # issue #279 adds a per-pair allowlist on top of this global switch.
         self.fix_polarity_check = wx.CheckBox(self, label="Fix polarity swaps")
-        self.fix_polarity_check.SetValue(False)
+        self.fix_polarity_check.SetValue(True)
         self.fix_polarity_check.SetToolTip(
             "Allow swapping target pad net assignments to fix polarity (board only - "
             "schematic must be updated to match); the swap competes with routing the "

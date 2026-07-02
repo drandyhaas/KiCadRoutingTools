@@ -336,12 +336,13 @@ bare-pad endpoints can flip - stub directions are fixed by existing copper.
 Flipped attempts get a full-loop turn budget since they must wrap around
 their endpoint, and every candidate is validated for P/N track crossings.
 
-With polarity fixing **enabled** (CLI default), the pad-swap and connector-flip
+With polarity fixing **enabled** (the default on both the CLI and the plugin
+GUI), the pad-swap and connector-flip
 candidates **compete by routed length** and the shortest clean route wins; if
 only one mechanism succeeds, it is used. (When no end can flip - e.g. both
 ends have stubs - the swap is committed directly without re-routing.)
 
-With `--no-fix-polarity` (the KiCad plugin GUI default), pad swaps never
+With `--no-fix-polarity` (or the GUI checkbox unticked), pad swaps never
 happen: only the flip resolution is tried, and if no flip produces a clean
 route the pair is **skipped** with a warning (no crossing tracks are ever
 written).
@@ -664,7 +665,7 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
 
 ## Limitations
 
-1. **Polarity swap** - Enabled by default on the CLI (disabled by default in the plugin GUI); use `--no-fix-polarity` to disable automatic target pad swapping. With fixing disabled, a mismatched pair is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible
+1. **Polarity swap** - Enabled by default (CLI and plugin GUI); use `--no-fix-polarity` (or untick the GUI checkbox) to disable automatic target pad swapping. Note this is all-or-nothing today; issue #279 tracks a per-pair allowlist (only swap pairs an endpoint can compensate, e.g. FPGA generic I/O - never USB). With fixing disabled, a mismatched pair is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible
 2. **Fixed spacing** - Spacing is constant along the route (no tapering)
 3. **Grid snapping** - Centerline endpoints snap to grid for the search; the
    terminal endpoints of the generated geometry are un-snapped back to the
