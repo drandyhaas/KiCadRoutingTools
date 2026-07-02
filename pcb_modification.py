@@ -373,6 +373,15 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     added = 0
     new_conns = []
 
+    # Board outline / cutouts (#281): a connector is drawn geometrically, not
+    # routed, so it must be gated against Edge.Cuts itself -- on sofle_pico a
+    # snap toward a reverse-mount LED pad's bbox corner ran straight across
+    # the LED's window cutout.
+    from check_drc import (board_edge_geometry, _point_on_board,
+                           _segment_to_rings_distance)
+    edge_rings, edge_outer, edge_cutouts = board_edge_geometry(
+        getattr(pcb_data, 'board_info', None))
+
     # Same-net copper grouped for fast lookup.
     segs_by_net_layer = {}
     for s in pcb_data.segments:
@@ -416,6 +425,22 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                     for pad in net_pads:
                         if not (lyr in pad.layers or any('*' in L for L in pad.layers)):
                             continue
+                        # A 'custom'-shaped pad's size is only a bounding box;
+                        # its corner can be off-copper (#281: an SK6803 LED
+                        # aperture). Prefer the coincident anchor pad (same
+                        # component+number, real rect/roundrect) when one
+                        # exists -- it is guaranteed copper.
+                        if getattr(pad, 'shape', None) == 'custom' and any(
+                                q is not pad
+                                and getattr(q, 'shape', None) != 'custom'
+                                and getattr(q, 'component_ref', None) ==
+                                    getattr(pad, 'component_ref', None)
+                                and getattr(q, 'pad_number', None) ==
+                                    getattr(pad, 'pad_number', None)
+                                and abs(q.global_x - pad.global_x) < 1e-6
+                                and abs(q.global_y - pad.global_y) < 1e-6
+                                for q in net_pads):
+                            continue
                         tp, g = _nearest_pad_point(px, py, pad)
                         if best is None or g < best[0]:
                             best = (g, tp)
@@ -441,6 +466,18 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                     # exists. The duplicate would seed a degenerate cycle.
                     if _duplicate_connector(px, py, tx, ty, segs):
                         continue
+
+                    # Board-edge check (#281): the connector's copper must stay
+                    # on the board and keep clearance from the outline and
+                    # every cutout, exactly as check_drc grades segments.
+                    if edge_rings:
+                        if not (_point_on_board(px, py, edge_outer, edge_cutouts)
+                                and _point_on_board(tx, ty, edge_outer,
+                                                    edge_cutouts)):
+                            continue
+                        if _segment_to_rings_distance(px, py, tx, ty, edge_rings) \
+                                < w / 2 + coord_clear - 1e-6:
+                            continue
 
                     # Clearance check: the connector must keep `clearance` from
                     # every OTHER net's copper.
@@ -1750,9 +1787,265 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments)
 
 
+def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
+                       clearance: float = 0.1, hole_to_hole: float = 0.20,
+                       max_shift: float = 0.025,
+                       allowed_via_ids=None) -> Tuple[int, int, List[Tuple]]:
+    """Sub-grid nudge for a VIA that grazes foreign copper or a drill (#280).
+
+    Two vias snapped to the routing grid can land a few µm inside clearance
+    (usb_sniffer: a GND plane-stitch via 7µm short of a signal via). Tracks
+    have the microshift pass; vias had nothing -- the microshift deliberately
+    never moves a via vertex. This pass moves the VIA ALONE (no segment is
+    touched) by the measured shortfall plus a hair, away from the worst
+    offender: the attached track ends stay buried deep inside the via body
+    (the move is far below the via radius), so KiCad's copper-overlap
+    connectivity is untouched, and check_net_connectivity joins a segment end
+    to a via within via_size/4 -- exactly the move cap.
+
+    Guardrails (why this is safe where the removed in-routing nudge_grazes was
+    not, #147/#70/#130):
+      * post-route and via-only -- nothing is ripped, re-routed, or dragged;
+      * the move is hard-capped at min(``max_shift``, via_size/4) (callers
+        pass grid_step/2): a via needing more is genuinely mis-placed and
+        stays visible in DRC;
+      * a candidate is committed only when the via clears EVERY foreign
+        object at its new spot (segment/via/pad body, drill hole-to-hole
+        incl. same-net, and the board edge) -- strictly fewer grazes, never a
+        new one;
+      * connectivity is re-checked per net and the move reverted if worse.
+
+    Only vias CREATED BY THIS RUN may move: the writers re-emit this run's
+    new vias but keep the input file's text for pre-existing ones, so moving
+    an input via would silently revert in the output. Candidates come from
+    ``results[*]['new_vias']`` (or ``allowed_via_ids``, a set of id(via), for
+    the plane wrapper whose results list is empty).
+
+    Returns (vias_moved, nets_changed, moves) with moves =
+    [(net_id, old_x, old_y, new_x, new_y)] so plane-script callers can mirror
+    the new position into their via write-list dicts.
+    """
+    from collections import defaultdict
+    from check_connected import check_net_connectivity
+    from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
+                                      _seg_foreign_via_dist)
+    from check_drc import (board_edge_geometry, _point_on_board,
+                           _point_to_rings_distance)
+    from geometry_utils import point_to_segment_distance
+
+    board_info = getattr(pcb_data, 'board_info', None)
+    copper_layers = list(getattr(board_info, 'copper_layers', None) or
+                         ['F.Cu', 'B.Cu'])
+    edge_rings, edge_outer, edge_cutouts = board_edge_geometry(board_info)
+    MARGIN = 0.002
+    WINDOW = 2.0     # local object window around a flagged via (mm)
+
+    def worse(before, after):
+        return ((before.get('connected') and not after.get('connected')) or
+                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or
+                (after.get('num_components') or 1) > (before.get('num_components') or 1))
+
+    # Every drill hole on the board (vias + through-hole pads, ANY net --
+    # hole-to-hole is a fab rule, not an electrical one).
+    import numpy as _np
+    hole_list = [(id(v), v.x, v.y, (getattr(v, 'drill', 0) or 0) / 2.0)
+                 for v in pcb_data.vias if (getattr(v, 'drill', 0) or 0) > 0]
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            if (p.drill or 0) > 0:
+                hole_list.append((id(p), p.global_x, p.global_y, p.drill / 2.0))
+    hole_idx = {hid: i for i, (hid, _, _, _) in enumerate(hole_list)}
+    hole_x = _np.asarray([h[1] for h in hole_list], dtype=float)
+    hole_y = _np.asarray([h[2] for h in hole_list], dtype=float)
+    hole_r = _np.asarray([h[3] for h in hole_list], dtype=float)
+
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        segs_by_net[s.net_id].append(s)
+    zones_by_net = defaultdict(list)
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        zones_by_net[z.net_id].append(z)
+
+    def copper_flagged(v):
+        """Cheap numpy prefilter: via body sub-clearance to any foreign copper."""
+        thr = clearance + v.size / 2.0 - 1e-4
+        if _seg_foreign_via_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
+                                 copper_layers[0]) < thr:
+            return True
+        for lyr in copper_layers:
+            if _seg_foreign_seg_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
+                                     lyr) < thr:
+                return True
+            if _seg_foreign_pad_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
+                                     lyr) < thr:
+                return True
+        return False
+
+    def hole_flagged(v):
+        vd = (getattr(v, 'drill', 0) or 0) / 2.0
+        if vd <= 0 or hole_x.size == 0:
+            return False
+        d = _np.hypot(hole_x - v.x, hole_y - v.y)
+        mask = d < vd + hole_r + hole_to_hole - 1e-4
+        i = hole_idx.get(id(v))
+        if i is not None:
+            mask[i] = False
+        return bool(mask.any())
+
+    def gather_near(v):
+        """Foreign copper + all holes within WINDOW of the via, evaluated exactly."""
+        near_segs, near_vias, near_pads, near_holes = [], [], [], []
+        x, y, me = v.x, v.y, id(v)
+        for s in pcb_data.segments:
+            if s.net_id == v.net_id:
+                continue
+            if (min(s.start_x, s.end_x) - WINDOW <= x <= max(s.start_x, s.end_x) + WINDOW
+                    and min(s.start_y, s.end_y) - WINDOW <= y <= max(s.start_y, s.end_y) + WINDOW):
+                near_segs.append(s)
+        for o in pcb_data.vias:
+            if id(o) == me or o.net_id == v.net_id:
+                continue
+            if abs(o.x - x) <= WINDOW and abs(o.y - y) <= WINDOW:
+                near_vias.append(o)
+        for pads in pcb_data.pads_by_net.values():
+            for p in pads:
+                if p.net_id == v.net_id or getattr(p, 'pad_type', '') == 'np_thru_hole':
+                    continue
+                if abs(p.global_x - x) <= WINDOW and abs(p.global_y - y) <= WINDOW:
+                    near_pads.append(p)
+        for hid, hx, hy, hr in hole_list:
+            if hid != me and abs(hx - x) <= WINDOW and abs(hy - y) <= WINDOW:
+                near_holes.append((hx, hy, hr))
+        return near_segs, near_vias, near_pads, near_holes
+
+    def worst_gap(x, y, v, near):
+        """(gap, ux, uy): most negative clearance surplus at (x, y) and the unit
+        direction AWAY from that offender. Positive gap = fully clear."""
+        near_segs, near_vias, near_pads, near_holes = near
+        r = v.size / 2.0
+        vd = (getattr(v, 'drill', 0) or 0) / 2.0
+        best = (float('inf'), 1.0, 0.0)
+
+        def consider(gap, ox, oy):
+            nonlocal best
+            if gap < best[0]:
+                d = math.hypot(x - ox, y - oy)
+                if d > 1e-9:
+                    best = (gap, (x - ox) / d, (y - oy) / d)
+                else:
+                    best = (gap, 1.0, 0.0)
+
+        for s in near_segs:
+            d, t = _pt_seg_dist_t(x, y, s)
+            consider(d - (r + s.width / 2.0 + clearance),
+                     s.start_x + t * (s.end_x - s.start_x),
+                     s.start_y + t * (s.end_y - s.start_y))
+        for o in near_vias:
+            d = math.hypot(x - o.x, y - o.y)
+            consider(d - (r + o.size / 2.0 + clearance), o.x, o.y)
+        for p in near_pads:
+            tp, g = _nearest_pad_point(x, y, p)
+            consider(g - (r + clearance), tp[0], tp[1])
+        if vd > 0:
+            for hx, hy, hr in near_holes:
+                d = math.hypot(x - hx, y - hy)
+                consider(d - (vd + hr + hole_to_hole), hx, hy)
+        # board edge: include in the gap so a candidate never trades a copper
+        # graze for an edge one (no direction needed -- it's a veto, not a target)
+        if edge_rings:
+            if not _point_on_board(x, y, edge_outer, edge_cutouts):
+                best = (min(best[0], -1.0), best[1], best[2])
+            else:
+                eg = _point_to_rings_distance(x, y, edge_rings) - (r + clearance)
+                if eg < best[0]:
+                    best = (eg, best[1], best[2])
+        return best
+
+    moved = 0
+    nets_changed_set = set()
+    moves = []
+
+    own_ids = set(allowed_via_ids or ())
+    for r in results:
+        for v in r.get('new_vias') or []:
+            own_ids.add(id(v))
+    scoped = [v for v in pcb_data.vias
+              if id(v) in own_ids
+              and (scope_net_ids is None or v.net_id in scope_net_ids)]
+    for v in scoped:
+        if not (copper_flagged(v) or hole_flagged(v)):
+            continue
+        near = gather_near(v)
+        gap, ux, uy = worst_gap(v.x, v.y, v, near)
+        if gap >= -1e-4:
+            continue    # prefilter false positive
+        shortfall = -gap
+        # The via moves ALONE: cap the move so the attached track ends stay
+        # connected on both models (KiCad copper overlap: move << via radius;
+        # check_net_connectivity joins within via_size/4).
+        cap = min(max_shift, v.size / 4.0)
+        if shortfall + MARGIN > cap:
+            continue    # genuinely mis-placed: leave it visible in DRC
+
+        net_segs = segs_by_net.get(v.net_id, [])
+        net_pads = pcb_data.pads_by_net.get(v.net_id, [])
+        net_vias = vias_by_net.get(v.net_id, [])
+        net_zones = zones_by_net.get(v.net_id, [])
+        before = check_net_connectivity(v.net_id, net_segs, net_vias, net_pads,
+                                        net_zones)
+
+        for ang in (0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0):
+            a = math.radians(ang)
+            ca = math.cos(a)
+            if ca <= 0.1:
+                continue
+            dx, dy = (ux * math.cos(a) - uy * math.sin(a),
+                      ux * math.sin(a) + uy * math.cos(a))
+            dist = (shortfall + MARGIN) / ca
+            if dist > cap:
+                continue
+            nx, ny = round(v.x + dx * dist, 4), round(v.y + dy * dist, 4)
+            if worst_gap(nx, ny, v, near)[0] < -1e-6:
+                continue
+
+            # apply, verify connectivity, revert on regression
+            old_x, old_y = v.x, v.y
+            v.x, v.y = nx, ny
+            after = check_net_connectivity(v.net_id, net_segs, net_vias, net_pads,
+                                           net_zones)
+            if worse(before, after):
+                v.x, v.y = old_x, old_y
+                continue
+            moved += 1
+            nets_changed_set.add(v.net_id)
+            moves.append((v.net_id, old_x, old_y, nx, ny))
+            # position changed: drop the numpy caches so later queries (and
+            # later passes) see the new geometry
+            pcb_data._foreign_seg_arr_cache = None
+            pcb_data._foreign_via_arr_cache = None
+            break
+
+    return moved, len(nets_changed_set), moves
+
+
+def _pt_seg_dist_t(x, y, s):
+    """(distance, t) from a point to segment s."""
+    dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-12:
+        return math.hypot(x - s.start_x, y - s.start_y), 0.0
+    t = max(0.0, min(1.0, ((x - s.start_x) * dx + (y - s.start_y) * dy) / L2))
+    return math.hypot(x - (s.start_x + t * dx), y - (s.start_y + t * dy)), t
+
+
 def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                                scope_net_ids=None, clearance: float = 0.1,
-                               max_shift: float = 0.025):
+                               max_shift: float = 0.025,
+                               all_new_vias: Optional[List[Dict]] = None,
+                               hole_to_hole: float = 0.20):
     """Apply prune_grazing_segments + nudge_grazing_octolinear + sweep_dead_ends to a
     PLANE script's write-list (issue #224).
 
@@ -1811,6 +2104,31 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
     for s in ms_added:
         all_new_segments.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
                                  'width': s.width, 'layer': s.layer, 'net_id': s.net_id})
+
+    # Sub-grid via nudge (#280): a grid-snapped stitch/tap via a few um inside
+    # clearance of a foreign via/track/hole moves by its shortfall. The via
+    # moves ALONE (capped at min(max_shift, via_size/4), so the tap segments
+    # still end inside its body); mirror the new position into the plane via
+    # write-list by old-coordinate signature.
+    def _pt(px, py):
+        return (round(px, 3), round(py, 3))
+    new_via_pts = {_pt(d['x'], d['y']) for d in (all_new_vias or [])
+                   if isinstance(d, dict)}
+    allowed = {id(v) for v in pcb_data.vias if _pt(v.x, v.y) in new_via_pts}
+    n_via_moved, _, via_moves = nudge_grazing_vias(
+        [], pcb_data, scope_net_ids, clearance,
+        hole_to_hole=hole_to_hole, max_shift=max_shift,
+        allowed_via_ids=allowed)
+    if via_moves:
+        n_nudged += n_via_moved
+        moved_pts = {(net, _pt(ox, oy)): (nx, ny)
+                     for net, ox, oy, nx, ny in via_moves}
+        for d in (all_new_vias or []):
+            if not isinstance(d, dict):
+                continue
+            hit = moved_pts.get((d.get('net_id'), _pt(d['x'], d['y'])))
+            if hit is not None:
+                d['x'], d['y'] = hit
 
     # Sweep dead-end appendices left by a superseded reuse-tap -- but ONLY this
     # run's tap copper is a candidate: the rest of each plane net anchors it. A big

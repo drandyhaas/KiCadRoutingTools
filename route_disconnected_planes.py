@@ -677,7 +677,8 @@ def route_planes(
         _scope = {s['net_id'] for s in all_new_segments}
         all_new_segments, _gz_rm, _gz_nudge, _gz_swept = cleanup_plane_taps_grazing(
             pcb_data, all_new_segments, _scope, clearance=clearance,
-            max_shift=config.grid_step / 2)
+            max_shift=config.grid_step / 2, all_new_vias=all_new_vias,
+            hole_to_hole=config.hole_to_hole_clearance)
         if _gz_rm:
             print(f"  Graze prune: removed {_gz_rm} grazing repair segment(s)")
         if _gz_nudge:

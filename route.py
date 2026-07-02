@@ -31,7 +31,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, prune_grazing_segments, nudge_grazing_octolinear, nudge_grazing_microshift, neck_wide_segments_grazing_pads
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, prune_grazing_segments, nudge_grazing_octolinear, nudge_grazing_microshift, nudge_grazing_vias, neck_wide_segments_grazing_pads
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -913,6 +913,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         max_shift=config.grid_step / 2)
     if _ms_segs:
         print(f"Graze micro-shift: moved copper by its clearance shortfall on {_ms_nets} net(s)")
+
+    # A grid-snapped VIA can land a few um inside clearance of a foreign via/
+    # track/hole; the microshift never moves vias, so nudge the via itself
+    # (with its attached segment endpoints) by the sub-grid shortfall (#280).
+    _vn_moved, _vn_nets, _ = nudge_grazing_vias(
+        results, pcb_data, sweep_scope_ids, clearance=config.clearance,
+        hole_to_hole=config.hole_to_hole_clearance,
+        max_shift=config.grid_step / 2)
+    if _vn_moved:
+        print(f"Via nudge: moved {_vn_moved} grazing via(s) on {_vn_nets} net(s) "
+              f"by their sub-grid clearance shortfall (#280)")
 
     _cy_segs, _cy_nets, cycle_input_segments = prune_redundant_cycles(
         results, pcb_data, sweep_scope_ids, clearance=config.clearance)

@@ -85,15 +85,52 @@ def run():
     r5 = []
     check("5 connector into another net's pour refused", snap_stub_gaps(r5, pcb5, {5}, Cfg()) == 0)
 
+    # 6. (#281) The connector would cross a board CUTOUT (reverse-mount LED
+    #    window) -> refused, even though no foreign copper is in the way.
+    trunk6 = _seg(0, 0, 10, 0, net=5)
+    stub6 = _seg(5, 2, 5, 0.12, net=5)
+    pcb6 = _pcb([trunk6, stub6])
+    pcb6.board_info = SimpleNamespace(
+        board_outline=[(-5, -5), (15, -5), (15, 10), (-5, 10)],
+        board_cutouts=[[(4.5, 0.03), (5.5, 0.03), (5.5, 0.09), (4.5, 0.09)]])
+    r6 = []
+    check("6 connector across a cutout refused (#281)",
+          snap_stub_gaps(r6, pcb6, {5}, Cfg()) == 0)
+    # ...and with the cutout elsewhere the same snap succeeds.
+    pcb6b = _pcb([_seg(0, 0, 10, 0, net=5), _seg(5, 2, 5, 0.12, net=5)])
+    pcb6b.board_info = SimpleNamespace(
+        board_outline=[(-5, -5), (15, -5), (15, 10), (-5, 10)],
+        board_cutouts=[[(8, 5), (9, 5), (9, 6), (8, 6)]])
+    r6b = []
+    check("6b connector clear of cutout snapped",
+          snap_stub_gaps(r6b, pcb6b, {5}, Cfg()) == 1)
+
+    # 7. (#281) A 'custom'-shaped pad's size is only a bounding box; when a
+    #    coincident non-custom anchor pad exists, the snap must target the
+    #    anchor's (smaller, real-copper) extent -- here the custom bbox corner
+    #    is within snap range but the anchor is not, so no connector.
+    custom = SimpleNamespace(global_x=5.0, global_y=-1.0, size_x=0.5, size_y=2.2,
+                             layers=['F.Cu'], rotation=0.0, shape='custom',
+                             component_ref='LED1', pad_number='1')
+    anchor = SimpleNamespace(global_x=5.0, global_y=-1.0, size_x=0.5, size_y=0.8,
+                             layers=['F.Cu'], rotation=0.0, shape='roundrect',
+                             component_ref='LED1', pad_number='1')
+    stub7 = _seg(5, 0.5, 5, 0.22, net=5)   # 0.12 above custom bbox top (0.1)
+    pcb7 = _pcb([stub7], pads_by_net={5: [custom, anchor]})
+    r7 = []
+    check("7 custom pad bbox not trusted when anchor exists",
+          snap_stub_gaps(r7, pcb7, {5}, Cfg()) == 0)
+
     print("=" * 60)
     if fails:
         for f in fails:
             print(f"  FAIL  {f}")
         print(f"\n{len(fails)} failure(s)")
         return 1
-    print("  PASS  snaps a clear small gap (trace + pad), refuses a too-big gap")
-    print("        a connector blocked by another net, and one into a pour (5 cases)")
-    print("\n5/5 checks passed")
+    print("  PASS  snaps a clear small gap (trace + pad), refuses a too-big gap,")
+    print("        a connector blocked by another net / a pour / a board cutout,")
+    print("        and doesn't trust a custom pad's bbox (8 cases)")
+    print("\n8/8 checks passed")
     return 0
 
 
