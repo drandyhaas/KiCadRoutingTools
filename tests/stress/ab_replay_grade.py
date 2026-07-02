@@ -264,10 +264,18 @@ def compare(old_json, new_json):
     if ov or nv:
         print(f"code: old = {format_version(ov)}   new = {format_version(nv)}")
     boards = sorted(set(old) | set(new))
-    print(f"{'board':14} {'drc o->n':>11} {'conn o->n':>11} {'compl% o->n':>13} "
+    # Connectivity is graded on TOTAL INCOMPLETE nets (unrouted + connectivity-issue
+    # nets), NOT the "conn" (connectivity-issue) count alone: a net that loses its
+    # copper entirely leaves the conn bucket for the unrouted bucket, so conn can
+    # DROP while the board got worse. incomplete = nets_incomplete (falls back to
+    # conn for pre-#-schema summaries that lack it).
+    def _incompl(r):
+        ni = r.get("nets_incomplete")
+        return ni if ni is not None else r.get("conn")
+    print(f"{'board':14} {'drc o->n':>11} {'incompl o->n':>13} {'compl% o->n':>13} "
           f"{'dpair o->n':>13} {'time(s) o->n':>16} {'peakMB o->n':>15}  note")
-    print("-" * 124)
-    drc_delta = conn_delta = dpair_delta = 0
+    print("-" * 128)
+    drc_delta = incompl_delta = dpair_delta = 0
     t_old = t_new = 0.0
     time_old, time_new = {}, {}   # per-tool wall-clock summed across boards (speedup view)
     pk_old, pk_new = {}, {}       # per-tool peak RSS = max across boards (memory view)
@@ -276,11 +284,13 @@ def compare(old_json, new_json):
         oc = o and o["chain_complete"]
         nc = n and n["chain_complete"]
         if not (oc and nc):
-            print(f"{b:14} {'-':>11} {'-':>11} {'-':>13} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
+            print(f"{b:14} {'-':>11} {'-':>13} {'-':>13} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
                   f"(old={'ok' if oc else 'broken'}, new={'ok' if nc else 'broken'}) -- excluded")
             continue
-        dd = n["drc"] - o["drc"]; cd = n["conn"] - o["conn"]
-        drc_delta += dd; conn_delta += cd
+        oi, ni = _incompl(o), _incompl(n)
+        dd = n["drc"] - o["drc"]
+        cd = (ni - oi) if (oi is not None and ni is not None) else 0  # incomplete-net delta
+        drc_delta += dd; incompl_delta += cd
         # coupled diff-pair count (fewer coupled = quality regression)
         ocp, ncp = o.get("diff_pairs_coupled"), n.get("diff_pairs_coupled")
         odt, ndt = o.get("diff_pairs_total"), n.get("diff_pairs_total")
@@ -303,13 +313,14 @@ def compare(old_json, new_json):
         if dd > 0 or cd > 0 or dpd < 0:    flag = "  <-- REGRESSION"
         elif dd < 0 or cd < 0 or dpd > 0:  flag = "  improved"
         speed = f"  ({to/tn:.2f}x)" if (to and tn) else ""
-        print(f"{b:14} {o['drc']:>4} -> {n['drc']:<4} {o['conn']:>4} -> {n['conn']:<4} "
+        print(f"{b:14} {o['drc']:>4} -> {n['drc']:<4} {_fmt(oi):>5} -> {_fmt(ni):<5} "
               f"{_fmt(op):>5} -> {_fmt(npc):<5} {dp_o:>5} -> {dp_n:<5} "
               f"{_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} {_fmt(po):>6} -> {_fmt(pn):<6}{flag}")
-    print("-" * 124)
-    verdict = "REGRESSION" if (drc_delta > 0 or conn_delta > 0 or dpair_delta < 0) else "no regression"
-    print(f"net delta: drc {drc_delta:+d}, conn {conn_delta:+d}, "
-          f"coupled diff-pairs {dpair_delta:+d}  ==>  {verdict}")
+    print("-" * 128)
+    verdict = "REGRESSION" if (drc_delta > 0 or incompl_delta > 0 or dpair_delta < 0) else "no regression"
+    print(f"net delta: drc {drc_delta:+d}, incomplete nets {incompl_delta:+d} "
+          f"(unrouted + connectivity-issue), coupled diff-pairs {dpair_delta:+d}"
+          f"  ==>  {verdict}")
     if t_old and t_new:
         print(f"total replay wall-clock: {t_old:.1f}s -> {t_new:.1f}s  ({t_old/t_new:.2f}x)")
         print("\nper-tool: wall-clock (summed) and peak RSS (max) over boards complete in both:")
@@ -323,7 +334,7 @@ def compare(old_json, new_json):
     else:
         print("(timing/peak not available in one/both summaries -- re-run waves with the "
               "current ab_replay_grade to capture per-step timing + peak memory)")
-    return drc_delta <= 0 and conn_delta <= 0 and dpair_delta >= 0
+    return drc_delta <= 0 and incompl_delta <= 0 and dpair_delta >= 0
 
 
 def main():

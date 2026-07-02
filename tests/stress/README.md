@@ -128,6 +128,12 @@ a `summary.json`. Run it once per code version ("wave"), then `--compare` the tw
 summaries for a per-board regression table (chains broken in either wave are
 excluded). DRC is graded at each board's routed clearance, not a guessed one.
 
+**Connectivity is graded on total incomplete nets** (`incompl` column =
+unrouted + connectivity-issue nets), *not* the raw connectivity-issue count: a
+net that loses its copper entirely leaves the connectivity-issue bucket for the
+unrouted bucket, so the issue count can *drop* while the board got worse. The
+per-board flag and the net verdict both key off this incomplete-net delta.
+
 ```bash
 # the engine change is uncommitted in the working tree:
 git stash push file1.py file2.py            # baseline = HEAD
