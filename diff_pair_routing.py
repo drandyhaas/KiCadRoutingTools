@@ -3029,8 +3029,26 @@ def _seg_to_seglist_min_edge(x1, y1, x2, y2, width, layer, other_segs):
 
 
 def _seg_seg_distance(ax, ay, bx, by, cx, cy, dx, dy):
-    """Minimum Euclidean distance between segments AB and CD (endpoint sampling --
-    exact for the non-crossing case that matters for a clearance check)."""
+    """Minimum Euclidean distance between segments AB and CD. Returns 0.0 when the
+    segments properly intersect; otherwise endpoint sampling, which is exact for
+    the non-crossing (grazing) case.
+
+    The intersection test is load-bearing: endpoint sampling alone reports the
+    nearest-ENDPOINT gap, so two CROSSING segments (an "X") read as a positive
+    distance (D2 x CLK crossed at 0 but sampled 0.3mm apart) -- which made the
+    foreign-copper graze check ``_connector_grazes_foreign_copper`` blind to
+    crossings while it caught near-miss grazes. A crossing is the tightest possible
+    violation (edge overlap), so it must return 0."""
+    # Proper segment intersection: AB straddles line CD and CD straddles line AB.
+    def _orient(ox, oy, px, py, qx, qy):
+        return (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
+    o1 = _orient(cx, cy, dx, dy, ax, ay)
+    o2 = _orient(cx, cy, dx, dy, bx, by)
+    o3 = _orient(ax, ay, bx, by, cx, cy)
+    o4 = _orient(ax, ay, bx, by, dx, dy)
+    if ((o1 > 0) != (o2 > 0)) and ((o3 > 0) != (o4 > 0)):
+        return 0.0
+
     def pt_seg(px, py, x1, y1, x2, y2):
         vx, vy = x2 - x1, y2 - y1
         l2 = vx * vx + vy * vy
