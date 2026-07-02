@@ -1418,8 +1418,341 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments)
 
 
+def _seg_worst_offender(pcb_data, net_id, s, clearance):
+    """The single worst foreign-copper offender below clearance of segment `s`:
+    returns (shortfall_mm, t, away_x, away_y) or None. t is the parameter of the
+    closest approach along `s`; (away_x, away_y) is the unit direction that
+    increases the distance. Distances are edge-to-centreline, sampled like the
+    _seg_foreign_*_dist trio (pads as their board-axis rect)."""
+    import numpy as np
+    from single_ended_routing import (_foreign_pad_arrays, _foreign_seg_arrays,
+                                      _foreign_via_arrays)
+    required = clearance + s.width / 2.0
+    x1, y1, x2, y2 = s.start_x, s.start_y, s.end_x, s.end_y
+    n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.005) + 1)
+    ts = np.linspace(0.0, 1.0, n + 1)
+    sx = x1 + (x2 - x1) * ts
+    sy = y1 + (y2 - y1) * ts
+    R = required + 0.2
+    best = None  # (edge_dist, t, qx, qy)
+
+    def consider(dist, i, qx, qy):
+        nonlocal best
+        if best is None or dist < best[0]:
+            best = (dist, float(ts[i]), float(qx), float(qy))
+
+    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, s.layer)
+    if cx.size:
+        near = ((cx + hx >= sx.min() - R) & (cx - hx <= sx.max() + R) &
+                (cy + hy >= sy.min() - R) & (cy - hy <= sy.max() + R) &
+                (nids != net_id))
+        if near.any():
+            fcx, fcy, fhx, fhy = cx[near], cy[near], hx[near], hy[near]
+            qx = fcx[None, :] + np.clip(sx[:, None] - fcx[None, :], -fhx[None, :], fhx[None, :])
+            qy = fcy[None, :] + np.clip(sy[:, None] - fcy[None, :], -fhy[None, :], fhy[None, :])
+            d = np.hypot(sx[:, None] - qx, sy[:, None] - qy)
+            i, j = np.unravel_index(int(np.argmin(d)), d.shape)
+            consider(float(d[i, j]), i, qx[i, j], qy[i, j])
+
+    fnid, fax, fay, fbx, fby, fhw = _foreign_seg_arrays(pcb_data, s.layer)
+    if fnid.size:
+        near = ((np.maximum(fax, fbx) + fhw >= sx.min() - R) &
+                (np.minimum(fax, fbx) - fhw <= sx.max() + R) &
+                (np.maximum(fay, fby) + fhw >= sy.min() - R) &
+                (np.minimum(fay, fby) - fhw <= sy.max() + R) & (fnid != net_id))
+        if near.any():
+            ax, ay, bx, by, hw = fax[near], fay[near], fbx[near], fby[near], fhw[near]
+            abx, aby = bx - ax, by - ay
+            L2 = np.where(abx * abx + aby * aby > 0, abx * abx + aby * aby, 1.0)
+            tt = np.clip(((sx[:, None] - ax[None, :]) * abx[None, :] +
+                          (sy[:, None] - ay[None, :]) * aby[None, :]) / L2[None, :], 0.0, 1.0)
+            qx = ax[None, :] + tt * abx[None, :]
+            qy = ay[None, :] + tt * aby[None, :]
+            d = np.hypot(sx[:, None] - qx, sy[:, None] - qy) - hw[None, :]
+            i, j = np.unravel_index(int(np.argmin(d)), d.shape)
+            consider(float(d[i, j]), i, qx[i, j], qy[i, j])
+
+    vnid, vx, vy, vr = _foreign_via_arrays(pcb_data)
+    if vx.size:
+        near = ((np.abs(vx - (sx.min() + sx.max()) / 2) <= R + (sx.max() - sx.min()) / 2 + vr) &
+                (np.abs(vy - (sy.min() + sy.max()) / 2) <= R + (sy.max() - sy.min()) / 2 + vr) &
+                (vnid != net_id))
+        if near.any():
+            fcx, fcy, fr = vx[near], vy[near], vr[near]
+            d = np.hypot(sx[:, None] - fcx[None, :], sy[:, None] - fcy[None, :]) - fr[None, :]
+            i, j = np.unravel_index(int(np.argmin(d)), d.shape)
+            consider(float(d[i, j]), i, fcx[j], fcy[j])
+
+    if best is None or best[0] >= required - 1e-4:
+        return None
+    dist, t, qx, qy = best
+    px, py = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+    norm = math.hypot(px - qx, py - qy)
+    if norm < 1e-6:
+        return None  # centreline inside the offender: an overlap, not a graze
+    return (required - dist, t, (px - qx) / norm, (py - qy) / norm)
+
+
+def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
+                             clearance: float = 0.1,
+                             max_shift: float = 0.025) -> Tuple[int, int, List[Segment], List[Segment]]:
+    """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
+
+    Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
+    FIXED -- useless when the closest approach IS an anchor (a terminal joint
+    vertex 8-16um inside the required clearance, e.g. ottercast C58.1) or when
+    the only fix is a tiny sideways bow mid-segment (butterstick CATG vs a
+    foreign via). Two moves, each by the measured shortfall plus a hair -- the
+    minimum copper displacement that restores clearance:
+
+      * VERTEX shift (closest approach at/near an endpoint): move that endpoint
+        -- and every same-net same-layer segment sharing the exact vertex --
+        directly away from the offender. Terminal joints have slack: their
+        endpoint sits inside an adjoining stub's copper body, so a tiny slide
+        keeps the copper-overlap join; the connectivity gate proves it. A
+        vertex carrying a via never moves (layer-stack alignment).
+      * BOW (closest approach mid-segment): split at the approach and offset a
+        short middle section perpendicular, away from the offender.
+
+    Every candidate is verified to clear ALL foreign copper (pad/track/via)
+    and the board edge at its own width, and to not worsen the net's
+    connectivity, before it replaces the original geometry -- the pass can only
+    remove a graze, never introduce one or disconnect a net. A graze that no
+    candidate clears is left for the DRC report.
+
+    ``max_shift`` HARD-caps how far any copper may move (callers pass half the
+    routing grid step): this pass is strictly a micrometre-scale touch-up, so a
+    graze needing more than that is genuinely mis-routed and must stay visible
+    in the DRC report rather than be papered over with a wild move.
+
+    Returns (segments_changed, nets_changed, original_segments_to_remove,
+    added_segments) -- same contract as nudge_grazing_octolinear."""
+    from collections import defaultdict
+    from check_connected import check_net_connectivity
+    from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
+                                      _seg_foreign_via_dist)
+
+    routed_seg_result = {}
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_result[id(s)] = r
+
+    from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
+    edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
+    board_bounds = pcb_data.board_info.board_bounds
+
+    def edge_clears(x1, y1, x2, y2, w):
+        required = clearance + w / 2.0 - 1e-4
+        if edge_rings:
+            if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
+               not _point_on_board(x2, y2, edge_outer, edge_cutouts):
+                return False
+            return _segment_to_rings_distance(x1, y1, x2, y2, edge_rings) >= required
+        if board_bounds:
+            min_x, min_y, max_x, max_y = board_bounds
+            return all(min(x - min_x, max_x - x, y - min_y, max_y - y) >= required
+                       for x, y in ((x1, y1), (x2, y2)))
+        return True
+
+    def clears(x1, y1, x2, y2, layer, net_id, w):
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
+        return d >= clearance + w / 2.0 - 1e-4 and edge_clears(x1, y1, x2, y2, w)
+
+    def vk(x, y):
+        return (round(x, 3), round(y, 3))
+
+    def worse(before, after):
+        return ((before.get('connected') and not after.get('connected')) or
+                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or
+                (after.get('num_components') or 1) > (before.get('num_components') or 1))
+
+    zones_by_net = defaultdict(list)
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        zones_by_net[z.net_id].append(z)
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            segs_by_net[s.net_id].append(s)
+
+    MARGIN = 0.004   # displacement beyond the exact shortfall
+    removed_ids = set()
+    original_to_remove = []
+    added_segments = []
+    added_ids = set()  # segments THIS pass created (a later round may replace one)
+    nets_changed = 0
+
+    def grazes(s):
+        # Cheap 0.02-sampled prefilter (incl. foreign TRACKS -- cynthion's
+        # offender is a track); the precise 0.005-sampled offender scan runs
+        # only on the handful that fail this.
+        thr = clearance + s.width / 2.0 - 1e-4
+        return min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                         s.end_x, s.end_y, s.layer),
+                   _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                         s.end_x, s.end_y, s.layer),
+                   _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                         s.end_x, s.end_y, s.layer)) < thr
+
+    MAX_ROUNDS = 3   # a fixed worst offender can expose the second-worst
+
+    for net_id, net_segs in segs_by_net.items():
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_vias = vias_by_net.get(net_id, [])
+        net_zones = zones_by_net.get(net_id, [])
+        via_keys = {vk(v.x, v.y) for v in net_vias}
+        before = None
+        net_changed = False
+
+        # Rounds re-scan the net's own moved copper (fixing the worst offender
+        # can expose the second-worst on the same segment); foreign copper is
+        # static during the pass.
+        for _round in range(MAX_ROUNDS):
+            grazing = [s for s in net_segs if grazes(s)]
+            offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, clearance))
+                         for s in grazing]
+            offenders = [(s, o) for s, o in offenders if o is not None]
+            if not offenders:
+                break
+            if before is None:
+                before = check_net_connectivity(net_id, net_segs, net_vias,
+                                                net_pads, net_zones)
+            round_changed = False
+
+            for s, (shortfall, t, awx, awy) in offenders:
+                if s not in net_segs:
+                    continue  # replaced while fixing an earlier graze
+                seg_len = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                required = clearance + s.width / 2.0
+                candidates = []  # (old_segs, new_segs)
+
+                def vertex_candidates(px, py):
+                    if vk(px, py) in via_keys:
+                        return  # never slide a via off its layer stack
+                    incident = [g for g in net_segs
+                                if vk(g.start_x, g.start_y) == vk(px, py)
+                                or vk(g.end_x, g.end_y) == vk(px, py)]
+                    if any(g.layer != s.layer for g in incident):
+                        return  # cross-layer joint without a recorded via: leave it
+                    for m in (1.0, 1.8, 3.0):
+                        d = (shortfall + MARGIN) * m
+                        if d > max_shift:
+                            continue
+                        nx, ny = round(px + awx * d, 4), round(py + awy * d, 4)
+                        new = [Segment(
+                            start_x=nx if vk(g.start_x, g.start_y) == vk(px, py) else g.start_x,
+                            start_y=ny if vk(g.start_x, g.start_y) == vk(px, py) else g.start_y,
+                            end_x=nx if vk(g.end_x, g.end_y) == vk(px, py) else g.end_x,
+                            end_y=ny if vk(g.end_x, g.end_y) == vk(px, py) else g.end_y,
+                            width=g.width, layer=g.layer, net_id=net_id)
+                            for g in incident]
+                        candidates.append((incident, new))
+
+                def bow_candidates():
+                    # Clamp the bow inside the segment: a graze near one end
+                    # (butterstick's t=0.15 next to its launch via) still gets
+                    # a bow when the near vertex can't move.
+                    if seg_len < 1e-6 or not (0.02 < t < 0.98):
+                        return
+                    half = min(max(required, 0.15),
+                               t * seg_len * 0.9, (1.0 - t) * seg_len * 0.9)
+                    if half < 0.02:
+                        return
+                    dxu = (s.end_x - s.start_x) / seg_len
+                    dyu = (s.end_y - s.start_y) / seg_len
+                    cxp = s.start_x + (s.end_x - s.start_x) * t
+                    cyp = s.start_y + (s.end_y - s.start_y) * t
+                    for m in (1.0, 1.8, 3.0):
+                        h = (shortfall + MARGIN) * m
+                        if h > max_shift:
+                            continue
+                        q1 = (round(cxp - dxu * half + awx * h, 4),
+                              round(cyp - dyu * half + awy * h, 4))
+                        q2 = (round(cxp + dxu * half + awx * h, 4),
+                              round(cyp + dyu * half + awy * h, 4))
+                        pts = [(s.start_x, s.start_y), q1, q2, (s.end_x, s.end_y)]
+                        new = [Segment(start_x=pts[i][0], start_y=pts[i][1],
+                                       end_x=pts[i + 1][0], end_y=pts[i + 1][1],
+                                       width=s.width, layer=s.layer, net_id=net_id)
+                               for i in range(3)
+                               if (pts[i][0], pts[i][1]) != (pts[i + 1][0], pts[i + 1][1])]
+                        candidates.append(([s], new))
+
+                # Preference: slide the endpoint nearest the approach, then a
+                # bow, then the far endpoint (a short segment may rotate a hair).
+                near_v = (s.start_x, s.start_y) if t <= 0.5 else (s.end_x, s.end_y)
+                far_v = (s.end_x, s.end_y) if t <= 0.5 else (s.start_x, s.start_y)
+                if t <= 0.3 or t >= 0.7:
+                    vertex_candidates(*near_v)
+                    bow_candidates()
+                else:
+                    bow_candidates()
+                    vertex_candidates(*near_v)
+                if seg_len <= 2 * required:
+                    vertex_candidates(*far_v)
+
+                for old, new in candidates:
+                    if not all(clears(g.start_x, g.start_y, g.end_x, g.end_y,
+                                      g.layer, net_id, g.width) for g in new):
+                        continue
+                    trial = [g for g in net_segs if g not in old] + new
+                    if worse(before, check_net_connectivity(net_id, trial, net_vias,
+                                                            net_pads, net_zones)):
+                        continue
+                    res = None
+                    for g in old:
+                        if id(g) in added_ids:
+                            # a segment this pass created in an earlier round:
+                            # drop it entirely (strip from its res list below,
+                            # never splice it into pcb_data)
+                            removed_ids.add(id(g))
+                            added_ids.discard(id(g))
+                            added_segments.remove(g)
+                        elif id(g) in routed_seg_result:
+                            removed_ids.add(id(g))
+                            res = res or routed_seg_result[id(g)]
+                        else:
+                            original_to_remove.append(g)
+                    if res is None:
+                        res = {'new_segments': [], 'new_vias': []}
+                        results.append(res)
+                    res['new_segments'] = list(res.get('new_segments') or []) + new
+                    added_segments.extend(new)
+                    added_ids.update(id(g) for g in new)
+                    net_segs = trial
+                    net_changed = True
+                    round_changed = True
+                    break
+
+            if not round_changed:
+                break
+        if net_changed:
+            nets_changed += 1
+
+    if removed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
+    if removed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_ids and id(s) not in orig_ids]
+    pcb_data.segments = list(pcb_data.segments) + added_segments
+    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+        pcb_data._foreign_seg_arr_cache = None
+
+    return (len(removed_ids) + len(original_to_remove) + len(added_segments),
+            nets_changed, original_to_remove, added_segments)
+
+
 def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
-                               scope_net_ids=None, clearance: float = 0.1):
+                               scope_net_ids=None, clearance: float = 0.1,
+                               max_shift: float = 0.025):
     """Apply prune_grazing_segments + nudge_grazing_octolinear + sweep_dead_ends to a
     PLANE script's write-list (issue #224).
 
@@ -1466,6 +1799,16 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
         [], pcb_data, scope_net_ids, clearance)
     all_new_segments, _ = strip(all_new_segments, nudge_removed)
     for s in nudge_added:
+        all_new_segments.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
+                                 'width': s.width, 'layer': s.layer, 'net_id': s.net_id})
+
+    # Micro-shift what the re-bend can't reach (#276): a graze whose closest
+    # approach IS an anchor vertex, or one needing only a tiny mid-segment bow.
+    _, n_shifted, ms_removed, ms_added = nudge_grazing_microshift(
+        [], pcb_data, scope_net_ids, clearance, max_shift=max_shift)
+    n_nudged += n_shifted
+    all_new_segments, _ = strip(all_new_segments, ms_removed)
+    for s in ms_added:
         all_new_segments.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
                                  'width': s.width, 'layer': s.layer, 'net_id': s.net_id})
 

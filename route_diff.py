@@ -858,7 +858,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # connected without it (connectivity-gated, so a load-bearing track is kept),
     # then break any redundant cycle and trim the dead-end spur left behind.
     # Scoped to the diff-pair nets so other copper is untouched.
-    from pcb_modification import prune_grazing_segments, prune_redundant_cycles, sweep_dead_ends
+    from pcb_modification import (prune_grazing_segments, prune_redundant_cycles,
+                                  sweep_dead_ends, nudge_grazing_microshift)
     # ONLY fully-routed pairs: a failed / single-ended-deferred pair's fanout stubs
     # have free ends by design (the single-ended follow-up connects them), so a
     # dead-end sweep there would strip copper the next pass needs.
@@ -874,6 +875,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if _gz:
         print(f"Diff-pair graze prune: removed {_gz} grazing segment(s) across {_gzn} net(s)")
         cleanup_input_strip += _gz_in
+    # Micro-shift residual grazes the prune couldn't drop (load-bearing terminal
+    # joints / mid-segment bows, #276) -- verified + connectivity-gated.
+    _ms, _msn, _ms_in, _ = nudge_grazing_microshift(
+        results, pcb_data, dp_scope, clearance=config.clearance,
+        max_shift=config.grid_step / 2)
+    if _ms:
+        print(f"Diff-pair graze micro-shift: moved copper by its clearance "
+              f"shortfall on {_msn} net(s)")
+        cleanup_input_strip += _ms_in
     _cy, _cyn, _cy_in = prune_redundant_cycles(
         results, pcb_data, dp_scope, clearance=config.clearance)
     if _cy:
