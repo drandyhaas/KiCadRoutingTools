@@ -23,6 +23,16 @@ RESULT="$ROOT/results${SFX}/$BOARD.json"
 mkdir -p "$RUNDIR"
 rm -f "$RUNDIR/.worker_done"
 
+# Provenance: record which checkout of the router produced this board's results,
+# so a run dir self-documents the code under test (git failures are non-fatal).
+{
+  echo "describe:  $(git -C "$REPO" describe --tags --always --dirty 2>/dev/null)"
+  echo "commit:    $(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
+  echo "branch:    $(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  echo "subject:   $(git -C "$REPO" log -1 --pretty=%s 2>/dev/null)"
+  echo "captured:  $(date -Iseconds 2>/dev/null || date)"
+} > "$RUNDIR/git_version.txt"
+
 # Record every board-mutating tool invocation to a replay manifest (issue #132).
 # The tools self-record when REDO_MANIFEST is set, so capture is reliable even if
 # the agent doesn't route a command through run_limited.sh. Start each run fresh.

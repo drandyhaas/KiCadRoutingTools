@@ -42,6 +42,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for _gitver when run as a script
+from _gitver import write_git_version, load_git_version, format_version
+
 REPO = Path(__file__).resolve().parent.parent.parent  # tests/stress/ -> repo root
 
 
@@ -203,6 +206,8 @@ def do_board(set_dir, out_dir, label, board):
 def run_wave(set_dir, out_dir, label, jobs):
     boards = sorted(d.name for d in set_dir.iterdir() if (d / "redo_commands.sh").exists())
     out_dir.mkdir(parents=True, exist_ok=True)
+    ver = write_git_version(out_dir, REPO, label=label)  # provenance: which code produced this wave
+    print(f"[{label}] code under test: {format_version(ver)}  (commit {ver.get('commit')})")
     print(f"[{label}] replaying {len(boards)} boards from {set_dir} -> {out_dir} ({jobs} parallel)")
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
@@ -255,6 +260,9 @@ def _fmt(v):
 def compare(old_json, new_json):
     old = {r["board"]: r for r in json.loads(Path(old_json).read_text())}
     new = {r["board"]: r for r in json.loads(Path(new_json).read_text())}
+    ov, nv = load_git_version(old_json), load_git_version(new_json)
+    if ov or nv:
+        print(f"code: old = {format_version(ov)}   new = {format_version(nv)}")
     boards = sorted(set(old) | set(new))
     print(f"{'board':14} {'drc o->n':>11} {'conn o->n':>11} {'compl% o->n':>13} "
           f"{'dpair o->n':>13} {'time(s) o->n':>16} {'peakMB o->n':>15}  note")

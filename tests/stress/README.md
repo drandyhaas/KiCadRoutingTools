@@ -140,6 +140,15 @@ python3 tests/stress/ab_replay_grade.py --compare ab/old/summary.json ab/new/sum
 The two waves must be sequential (they share the live repo's git state), but the
 boards within a wave run in parallel (`--jobs`, default 4).
 
+**Provenance — every output dir records its checkout.** Each wave dir gets a
+`git_version.txt` (+ `git_version.json`) naming the exact commit that produced it
+(`describe --tags --dirty`, full hash, branch, subject, capture time), so a wave
+is never ambiguous after the fact. `--compare` reads both waves' `git_version.json`
+and prints an `old = … new = …` header. `redo_stress_test.py` writes the same
+file into its `--workdir` (a single-board replay), and the live stress worker
+`run_board.sh` writes one into each board's run dir. A `-dirty` describe means the
+tree had uncommitted changes when the wave ran.
+
 **Grade at the routed clearance.** Each board is graded at the **minimum**
 `--clearance` across its manifest's routing steps — the copper was built to that
 tightest value, and a looser retry/fanout step's copper still satisfies it.

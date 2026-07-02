@@ -33,6 +33,12 @@ import shlex
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for _gitver when run as a script
+from _gitver import write_git_version, format_version
+
+REPO = Path(__file__).resolve().parent.parent.parent  # tests/stress/ -> repo root
 
 
 def _tree_rss_kb(pid):
@@ -300,6 +306,14 @@ def main():
 
     if args.workdir:
         os.makedirs(args.workdir, exist_ok=True)
+
+    # Provenance: record which checkout produced this replay's outputs. Prefer the
+    # workdir (where the boards land), else the timings-out dir, else cwd.
+    if not args.dry_run:
+        ver_dir = args.workdir or (os.path.dirname(args.timings_out) if args.timings_out else ".") or "."
+        ver = write_git_version(ver_dir, REPO)
+        print(f"Code under test: {format_version(ver)}  (commit {ver.get('commit')}) "
+              f"-> {os.path.join(ver_dir, 'git_version.txt')}")
 
     cmds = parse_manifest(args.manifest)
     if not cmds:
