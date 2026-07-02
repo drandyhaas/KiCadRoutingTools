@@ -23,11 +23,17 @@ fine-pitch taps), so the bare invocation above already grades at the true routed
 floor. Pass `--clearance <value>` only to override (e.g. to grade a hand-routed
 board with no routed-floor `.kicad_pro`).
 
-**Important caveat to include in the report:** `check_drc.py` does not check zone copper, minimum trace width, or netclass compliance. If the board has copper zones/planes, recommend the authoritative check:
+**Important caveat to include in the report:** `check_drc.py` does not check zone copper, minimum trace width, or netclass compliance. If the board has copper zones/planes, recommend the zone-aware check:
 
 ```bash
 kicad-cli pcb drc board.kicad_pcb --refill-zones
 ```
+
+The cross-check is one-directional (#260): kicad-cli can refute a borderline
+check_drc *near-miss* (a sub-clearance gap), but a kicad-cli "0" does NOT clear
+an *overlap/short* finding — KiCad 10 net-unifies touching copper on load, so
+overlapping foreign-net tracks/pads report nothing at any severity. For
+touching-copper overlaps, `check_drc.py` is the authoritative one.
 
 ## Step 2: Length/Time Match Verification
 
