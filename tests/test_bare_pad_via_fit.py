@@ -121,6 +121,39 @@ def main():
     fit5, _ = lso._bare_pad_pair_vias_fit(pcb5, [via_c], cfg)
     check("via on its own-net pad accepted (no self-reject)", fit5)
 
+    # 6) (#282) a new pad via whose drill overlaps the pair's OWN existing
+    #    fanout via (same net!) is rejected: hole-to-hole is net-independent.
+    #    butterstick CK1: new via 0.125mm from the ball via-in-pad, 0.2 drills.
+    via_d = _via(0.0, 0.0, P_NET, cfg)
+    own_fanout_via = Via(x=0.125, y=0.0, size=0.4, drill=0.2,
+                         layers=['F.Cu', 'B.Cu'], net_id=P_NET)
+    pcb6 = _pcb(vias=[via_d, own_fanout_via])
+    fit6, why6 = lso._bare_pad_pair_vias_fit(pcb6, [via_d], cfg)
+    check("same-net drill overlap rejected (hole-to-hole, #282)",
+          (not fit6) and 'hole-to-hole' in why6)
+
+    # 7) (#282) apply_bare_pad_target_via REUSES an existing same-net through
+    #    via whose barrel covers the pad centre instead of drilling a new hole:
+    #    returns via=None and anchors the stub at the existing via.
+    from stub_layer_switching import apply_bare_pad_target_via
+    ball_via = Via(x=0.125, y=0.0, size=0.4, drill=0.2,
+                   layers=['F.Cu', 'B.Cu'], net_id=P_NET)
+    pcb7 = _pcb(vias=[ball_via])
+    n_vias_before = len(pcb7.vias)
+    via7, stub7 = apply_bare_pad_target_via(
+        pcb7, P_NET, 0.0, 0.0, 'In1.Cu', 5.0, 0.0, cfg)
+    check("overlapping same-net via reused (no new hole, #282)",
+          via7 is None and len(pcb7.vias) == n_vias_before
+          and (stub7.start_x, stub7.start_y) == (ball_via.x, ball_via.y))
+
+    # 8) with no reusable via nearby, a new via IS created at the pad.
+    pcb8 = _pcb(vias=[Via(x=0.9, y=0.0, size=0.4, drill=0.2,
+                          layers=['F.Cu', 'B.Cu'], net_id=P_NET)])
+    via8, stub8 = apply_bare_pad_target_via(
+        pcb8, P_NET, 0.0, 0.0, 'In1.Cu', 5.0, 0.0, cfg)
+    check("no reusable via -> new via at the pad",
+          via8 is not None and (via8.x, via8.y) == (0.0, 0.0))
+
     passed = sum(1 for _, c in checks if c)
     print("=" * 60)
     print(f"{passed}/{len(checks)} checks passed")

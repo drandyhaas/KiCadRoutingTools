@@ -263,6 +263,14 @@ def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_
     the via carries the connection back up to the F.Cu pad. This is the bare-pad
     analogue of apply_stub_layer_switch (which can only MOVE existing stub copper).
 
+    If an existing SAME-NET through-via's barrel already covers the pad
+    centre (a fanout via-in-pad right against the bare pad, e.g. butterstick's
+    CK1 termination resistors 0.125mm from the BGA ball via, #282), that via
+    is REUSED as the stub anchor instead of drilling a new hole: a second
+    drill that close is a fab hole-to-hole violation (net-independent floor),
+    and the pad copper already overlaps the via barrel, so the electrical
+    chain pad -> via -> inner stub holds without new copper on F.Cu.
+
     Args:
         pad_x, pad_y: target pad position (mm)
         new_layer: destination layer for the synthesized stub (the pair's source layer)
@@ -271,26 +279,43 @@ def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_
         stub_len: stub length in mm
 
     Returns:
-        (via, stub_segment) - both already appended to pcb_data.
+        (via, stub_segment) - the stub is already appended to pcb_data; via is
+        the NEW via (also appended) or None when an existing via was reused.
     """
-    dx, dy = toward_x - pad_x, toward_y - pad_y
+    # Reuse an existing same-net through-via whose barrel covers the pad centre.
+    via = None
+    anchor_x, anchor_y = pad_x, pad_y
+    best = None
+    for ev in pcb_data.vias:
+        if ev.net_id != net_id:
+            continue
+        lys = ev.layers or []
+        if lys and not ('F.Cu' in lys and 'B.Cu' in lys):
+            continue  # not a through via: may not span new_layer
+        d = math.hypot(ev.x - pad_x, ev.y - pad_y)
+        if d <= (ev.size or 0) / 2.0 and (best is None or d < best[0]):
+            best = (d, ev)
+    if best is not None:
+        anchor_x, anchor_y = best[1].x, best[1].y
+    else:
+        via = Via(
+            x=pad_x, y=pad_y,
+            size=config.via_size, drill=config.via_drill,
+            layers=['F.Cu', 'B.Cu'],  # through-hole
+            net_id=net_id,
+        )
+        pcb_data.vias.append(via)
+
+    dx, dy = toward_x - anchor_x, toward_y - anchor_y
     norm = math.hypot(dx, dy)
     if norm < 1e-6:
         dx, dy = 0.0, 1.0
     else:
         dx, dy = dx / norm, dy / norm
-    end_x, end_y = pad_x + dx * stub_len, pad_y + dy * stub_len
-
-    via = Via(
-        x=pad_x, y=pad_y,
-        size=config.via_size, drill=config.via_drill,
-        layers=['F.Cu', 'B.Cu'],  # through-hole
-        net_id=net_id,
-    )
-    pcb_data.vias.append(via)
+    end_x, end_y = anchor_x + dx * stub_len, anchor_y + dy * stub_len
 
     stub = Segment(
-        start_x=pad_x, start_y=pad_y,
+        start_x=anchor_x, start_y=anchor_y,
         end_x=end_x, end_y=end_y,
         width=config.track_width,
         layer=new_layer,

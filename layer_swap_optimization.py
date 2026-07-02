@@ -62,26 +62,29 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
                 return False, "P/N pad vias collide (via-via)"
             if check_via_drill_overlap(v, w, h2h, margin)[0]:
                 return False, "P/N pad via drills collide (hole-to-hole)"
-        # vs existing foreign vias (their bodies and drills).
+        # vs existing vias: bodies only for FOREIGN nets (same-net copper may
+        # touch), but drills for EVERY net -- hole-to-hole is a fab rule, not
+        # an electrical one (#282: a new pad via 0.125mm from the pair's own
+        # fanout via-in-pad has physically overlapping drills).
         for ev in pcb_data.vias:
-            if id(ev) in new_ids or ev.net_id == v.net_id:
+            if id(ev) in new_ids:
                 continue
-            if check_via_via_overlap(v, ev, clearance, margin)[0]:
+            if ev.net_id != v.net_id and check_via_via_overlap(v, ev, clearance, margin)[0]:
                 return False, "pad via grazes a foreign via (via-via)"
             if check_via_drill_overlap(v, ev, h2h, margin)[0]:
-                return False, "pad via drill grazes a foreign via drill (hole-to-hole)"
+                return False, "pad via drill grazes a via drill (hole-to-hole)"
         # vs foreign AND partner pads. Exclude only the via's OWN-net pad (the one
         # it legitimately sits on); the PARTNER net's pad IS checked, since a P-pad
         # via grazing the adjacent N pad (a 0.5mm-pitch connector) is a real PAD-VIA
         # short - the /SYZYGY1.C2P_CLK_P via-vs-C2P_CLK_N(J4.36) case.
         for pad_net, pads in pads_by_net.items():
-            if pad_net == v.net_id:
-                continue
             for pad in pads:
-                if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
+                if pad_net != v.net_id and check_pad_via_overlap(
+                        pad, v, clearance, routing_layers, margin)[0]:
                     return False, "pad via grazes a foreign pad (pad-via)"
+                # drills: net-independent (same-net THT pad drill still conflicts)
                 if check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
-                    return False, "pad via drill grazes a foreign pad drill (hole-to-hole)"
+                    return False, "pad via drill grazes a pad drill (hole-to-hole)"
     return True, ""
 
 
@@ -773,15 +776,40 @@ def apply_diff_pair_layer_swaps(
                 via_n, stub_n = apply_bare_pad_target_via(
                     pcb_data, pair.n_net_id, n_tgt_x, n_tgt_y, fan_layer,
                     src_cx, src_cy, config)
+                # via_p/via_n are None when an existing same-net via-in-pad was
+                # reused (#282): no new hole, nothing to validate or undo for it.
+                new_pad_vias = [v for v in (via_p, via_n) if v is not None]
+                if len(new_pad_vias) < 2:
+                    print(f"    Bare-pad target swap: reused "
+                          f"{2 - len(new_pad_vias)} existing via(s) at the pad "
+                          f"(no new hole, #282)")
                 # Issue #241: the two pad vias can't fit at a tight connector pad
                 # pitch (0.5mm) - they collide with each other / graze neighbouring
                 # pads below clearance. Validate at check_drc's clearance and, if
                 # they don't fit, undo the swap so the pair routes to the bare pads
                 # instead (the right treatment for a dense connector fan-out).
                 fit, why = _bare_pad_pair_vias_fit(
-                    pcb_data, [via_p, via_n], config)
+                    pcb_data, new_pad_vias, config)
+                # The synthesized stubs are geometric copper: validate them
+                # against foreign pads AND routed tracks/vias on the fan layer
+                # (#282: a stub anchored at a reused ball via runs straight at
+                # the neighbouring BGA ball's pad). Same validators the solo
+                # switch path uses.
+                if fit:
+                    from stub_layer_switching import (stub_clear_of_foreign_pads,
+                                                      stub_clear_of_foreign_tracks)
+                    _partners = {pair.p_net_id, pair.n_net_id}
+                    for _stub, _snid in ((stub_p, pair.p_net_id),
+                                         (stub_n, pair.n_net_id)):
+                        ok_p, why_p = stub_clear_of_foreign_pads(
+                            [_stub], fan_layer, _snid, pcb_data, config, _partners)
+                        ok_t, why_t = (True, "") if not ok_p else                             stub_clear_of_foreign_tracks(
+                                [_stub], fan_layer, _snid, pcb_data, config, _partners)
+                        if not (ok_p and ok_t):
+                            fit, why = False, (why_p if not ok_p else why_t)
+                            break
                 if not fit:
-                    for _v in (via_p, via_n):
+                    for _v in new_pad_vias:
                         if _v in pcb_data.vias:
                             pcb_data.vias.remove(_v)
                     for _s in (stub_p, stub_n):
@@ -790,7 +818,7 @@ def apply_diff_pair_layer_swaps(
                     print(f"    Bare-pad target swap skipped for {pair_name}: {why} "
                           f"(pair routes to the bare pads instead)")
                     continue
-                all_swap_vias.extend([via_p, via_n])
+                all_swap_vias.extend(new_pad_vias)
                 all_swap_segments.extend([stub_p, stub_n])
 
                 # Register the new stubs (on fan_layer) so later swap validation sees them.
@@ -811,11 +839,14 @@ def apply_diff_pair_layer_swaps(
                 # pin the pair into a forced P/N crossing, yet the same pair
                 # routes cleanly to the bare pads with a plain via (issue #142).
                 if bare_pad_swaps is not None:
+                    # Only NEW vias are undo-removable; a reused fanout via
+                    # pre-exists this swap and must never be dropped (#282).
                     bare_pad_swaps[pair_name] = {
-                        'vias': [via_p, via_n],
+                        'vias': new_pad_vias,
                         'stubs': [stub_p, stub_n],
                     }
-                print(f"  Bare-pad target swap: {pair_name} ({tgt_layer} pad -> {fan_layer} stub), added 2 pad via(s)")
+                print(f"  Bare-pad target swap: {pair_name} ({tgt_layer} pad -> {fan_layer} stub), "
+                      f"added {len(new_pad_vias)} pad via(s)")
                 continue
 
             missing = []
