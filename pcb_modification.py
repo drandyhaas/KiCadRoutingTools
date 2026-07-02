@@ -1248,10 +1248,33 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer) < thr)
 
+    # A re-bent jog must also respect the board edge: the octolinear candidates
+    # only clear FOREIGN COPPER, so a bend could otherwise be pushed off-board /
+    # across an Edge.Cuts cutout that the original A* route legally skirted
+    # (lily58 Net-(LED10-DIN): a dogleg re-bent 1mm INTO a switch cutout, #256).
+    from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
+    edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
+    board_bounds = pcb_data.board_info.board_bounds
+
+    def edge_clears(x1, y1, x2, y2, w):
+        required = clearance + w / 2.0 - 1e-4
+        if edge_rings:
+            if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
+               not _point_on_board(x2, y2, edge_outer, edge_cutouts):
+                return False
+            return _segment_to_rings_distance(x1, y1, x2, y2, edge_rings) >= required
+        if board_bounds:
+            # Rectangular fallback: inside a rectangle the segment-to-boundary
+            # minimum is attained at an endpoint.
+            min_x, min_y, max_x, max_y = board_bounds
+            return all(min(x - min_x, max_x - x, y - min_y, max_y - y) >= required
+                       for x, y in ((x1, y1), (x2, y2)))
+        return True
+
     def clears(x1, y1, x2, y2, layer, net_id, w):
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
-        return d >= clearance + w / 2.0 - 1e-4
+        return d >= clearance + w / 2.0 - 1e-4 and edge_clears(x1, y1, x2, y2, w)
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
