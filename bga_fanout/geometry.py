@@ -10,6 +10,49 @@ from typing import List, Tuple, Optional, Dict
 
 from bga_fanout.types import BGAGrid, Channel
 
+# Reference prefixes place_fanout_clearance treats as movable passives (keep in
+# sync with its --cap-prefix default): an unlocked <=2-copper-pad part with one
+# of these prefixes will be nudged off fanout vias by the next pipeline step,
+# so the fanout may ignore its copper when placing vias. Everything else --
+# locked parts, connectors, test points, ICs -- never moves (#253/#254).
+MOVABLE_PASSIVE_PREFIXES = ('C', 'R', 'FB')
+
+
+def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
+    """Copper pads of foreign footprints that NO later pipeline step will move:
+    locked footprints, and any part place_fanout_clearance won't relocate
+    (i.e. not an unlocked 2-pad C*/R*/FB* passive). A through via placed by the
+    fanout must clear these on every copper layer; movable caps are deliberately
+    NOT included (cap-opt moves them off the vias afterwards)."""
+    out = []
+    for fp in pcb_data.footprints.values():
+        if fp.reference == exclude_ref:
+            continue
+        copper_pads = [p for p in fp.pads
+                       if any(str(l).endswith('.Cu') for l in p.layers)]
+        if not copper_pads:
+            continue
+        movable = (not getattr(fp, 'locked', False)
+                   and fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
+                   and len(copper_pads) <= 2)
+        if movable:
+            continue
+        out.extend(copper_pads)
+    return out
+
+
+def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
+                         pads) -> bool:
+    """True if a through via at (x, y) clears every pad in `pads` (bbox model)
+    by `clearance` edge-to-edge. Vias span all copper layers, so the pads'
+    own layers are irrelevant."""
+    for p in pads:
+        ddx = max(0.0, abs(x - p.global_x) - p.size_x / 2.0)
+        ddy = max(0.0, abs(y - p.global_y) - p.size_y / 2.0)
+        if math.hypot(ddx, ddy) < v_half + clearance - 1e-9:
+            return False
+    return True
+
 
 def clamp_via_to_pad(via_size: float, via_drill: float, pad,
                      floors) -> Tuple[float, float, str, int]:

@@ -60,6 +60,10 @@ def _run(**kw):
 def _run_text(body, clearance=0.1, vtype='pad-pad'):
     text = f'''(kicad_pcb
  (version 20221018)
+ (layers
+  (0 "F.Cu" signal)
+  (2 "B.Cu" signal)
+ )
  (net 0 "")
  (net 1 "/A")
  (net 2 "/B")
@@ -78,7 +82,10 @@ def _run_text(body, clearance=0.1, vtype='pad-pad'):
 def run():
     fails = []
 
+    total = [0]
+
     def check(name, cond):
+        total[0] += 1
         print(f"  {'PASS' if cond else 'FAIL'}  {name}")
         if not cond:
             fails.append(name)
@@ -147,6 +154,19 @@ def run():
     check("track grazing the NPTH hole -> 1 track-hole violation",
           len(_run_text(npth_track, vtype='track-hole')) == 1)
 
+    # A via overlapping a pad on a copper layer that carries NO segments must
+    # still be flagged: routing_layers used to be derived from segments, so a
+    # trackless layer's pad/via checks silently never ran (#253 -- a fanout
+    # via ring over a B.Cu test pad graded clean until B.Cu gained tracks).
+    layer_blind = '''(footprint "L:A" (layer "B.Cu") (at 10 10)
+   (property "Reference" "TP1")
+   (pad "1" smd circle (at 0 0) (size 0.5 0.5) (layers "B.Cu" "B.Mask") (net 1 "/A")))
+ (segment (start 5 5) (end 8 5) (width 0.2) (layer "F.Cu") (net 2) (uuid "s1"))
+ (via (at 10.25 10.25) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") (net 2) (uuid "v1"))'''
+    v = _run_text(layer_blind, vtype='pad-via')
+    check("via vs pad on a segment-less copper layer -> flagged (pad-via)",
+          len(v) == 1)
+
     # A no-net pad overlap is still reported, but flagged no_net (not a SHORT:
     # unconnected copper cannot electrically short a net -- issue #260).
     nonet = '''(footprint "L:A" (layer "F.Cu") (at 10 10)
@@ -163,7 +183,7 @@ def run():
     if fails:
         print(f"\n{len(fails)} failure(s)")
         return 1
-    print("\n11/11 checks passed")
+    print(f"\n{total[0]}/{total[0]} checks passed")
     return 0
 
 

@@ -47,6 +47,8 @@ from bga_fanout.geometry import (
     calculate_exit_point,
     calculate_jog_end,
     clamp_via_to_pad,
+    immovable_foreign_pads,
+    via_clears_pad_rects,
 )
 from bga_fanout.escape import (
     find_escape_channel,
@@ -641,6 +643,15 @@ def manage_vias(
 
     vias_to_add: List[Dict] = []
     vias_to_remove: List[Dict] = []
+    via_blocked_routes: List['FanoutRoute'] = []
+
+    # Pads no later step can move (locked parts, connectors, test points --
+    # #253): a via-in-pad must clear them on EVERY layer, because a through
+    # via's ring exists on all of them (a back-side connector pad under the
+    # ball field is invisible to the per-layer track checks). Movable caps are
+    # deliberately absent: place_fanout_clearance moves them off the vias.
+    exclude_ref = routes[0].pad.component_ref if routes else ''
+    immovable_pads = immovable_foreign_pads(pcb_data, exclude_ref)
 
     # Fab floors for the via-in-pad clamp (#202): floor is a board property
     # (2- vs 4-layer), so key off the board's total copper count. Pass the active
@@ -682,6 +693,16 @@ def manage_vias(
                     floor_pads += 1
                 if rung > 0:
                     escalated_count += 1
+                if not via_clears_pad_rects(pad_x, pad_y, v_size / 2.0,
+                                            clearance, immovable_pads):
+                    # No via can go here: an immovable foreign pad (locked
+                    # part / connector / test point) overlaps the through
+                    # via's ring on some layer (#253, ottercast J2 connector,
+                    # orangecrab TP20 test pad). Fail this escape honestly --
+                    # the main router can still route the net from the bare
+                    # ball on the pad's own layer.
+                    via_blocked_routes.append(route)
+                    continue
                 if not would_overlap_existing_via(pad_x, pad_y, v_size):
                     vias_to_add.append({
                         'x': pad_x,
@@ -704,8 +725,13 @@ def manage_vias(
               f"floor and still bulges past the pad edge")
     if vias_to_remove:
         print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
+    if via_blocked_routes:
+        names = sorted(r.pad.net_name or f"net{r.net_id}" for r in via_blocked_routes)
+        print(f"  WARNING: {len(via_blocked_routes)} escape(s) dropped: via-in-pad "
+              f"would hit an immovable foreign pad (locked part/connector/test "
+              f"point, #253): {', '.join(names)}")
 
-    return vias_to_add, vias_to_remove
+    return vias_to_add, vias_to_remove, via_blocked_routes
 
 
 def select_adjacent_channels(
@@ -1985,9 +2011,23 @@ def generate_bga_fanout(footprint: Footprint,
             print(f"    {layer}: {count} routes")
 
         # Via management: add vias where needed, remove unnecessary ones
-        vias_to_add, vias_to_remove = manage_vias(
+        vias_to_add, vias_to_remove, via_blocked_routes = manage_vias(
             routes, pcb_data, layers[0], via_size, via_drill, clearance
         )
+
+        # Routes whose required via-in-pad would hit an immovable foreign pad
+        # (#253) are dropped: without the via their inner-layer copper is
+        # disconnected decoration. Remove their tracks and report the nets as
+        # failed so the main router picks them up from the bare ball.
+        if via_blocked_routes:
+            blocked_net_ids = {r.net_id for r in via_blocked_routes}
+            blocked_routes = set(id(r) for r in via_blocked_routes)
+            tracks = [t for t in tracks if t.get('net_id') not in blocked_net_ids]
+            routes = [r for r in routes if id(r) not in blocked_routes]
+            for r in via_blocked_routes:
+                name = r.pad.net_name or f"net{r.net_id}"
+                if name not in failed_nets:
+                    failed_nets.append(name)
 
         return tracks, vias_to_add, vias_to_remove, list(failed_nets), routes
 

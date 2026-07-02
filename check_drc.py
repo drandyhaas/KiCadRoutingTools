@@ -1193,8 +1193,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if net_patterns and not quiet:
         print(f"Filtering to nets matching: {net_patterns}")
 
-    # Get routing layers for pad layer expansion
-    routing_layers = list(set(seg.layer for seg in pcb_data.segments if seg.layer.endswith('.Cu')))
+    # Copper layers for pad layer expansion and the per-layer pad/via passes.
+    # Use the BOARD's copper layers, not the layers segments happen to sit on:
+    # a via can overlap a pad on a layer that carries no tracks yet (e.g. a
+    # fanout via ring vs a B.Cu test pad before anything routes on B.Cu), and
+    # the segment-derived list silently skipped that layer's checks (#253).
+    routing_layers = [l for l in (pcb_data.board_info.copper_layers or [])
+                      if l.endswith('.Cu')]
+    if not routing_layers:
+        routing_layers = list(set(seg.layer for seg in pcb_data.segments
+                                  if seg.layer.endswith('.Cu')))
     if not routing_layers:
         routing_layers = ['F.Cu', 'B.Cu']  # Fallback
 

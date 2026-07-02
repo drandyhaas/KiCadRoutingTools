@@ -315,48 +315,42 @@ def generate_underpad_escape(footprint: Footprint,
         occ.block_segment(li, (s.start_x, s.start_y), (s.end_x, s.end_y),
                           s.width / 2 + track_width / 2 + clearance)
 
-    # LOCKED foreign components' pads in the region. Movable caps are ignored
-    # on purpose -- the next pipeline step (place_fanout_clearance) relocates
-    # them away from the fanout vias -- but a (locked yes) part will never
-    # move, so its copper must be a real obstacle here. On lpddr4_testbed a
-    # locked back-side cap (C7) sat under a ball: the via-in-pad's B.Cu ring
-    # landed 0.1mm INTO its pad and cap-opt correctly refused to move it (#254).
+    # IMMOVABLE foreign components' pads in the region (locked parts,
+    # connectors, test points -- anything place_fanout_clearance will not
+    # relocate; #253/#254). Movable caps are ignored on purpose: the next
+    # pipeline step moves them away from the fanout vias. On lpddr4_testbed a
+    # locked back-side cap (C7) sat under a ball and the via-in-pad's B.Cu
+    # ring landed 0.1mm INTO its pad; cap-opt correctly refused to move it.
+    from bga_fanout.geometry import immovable_foreign_pads, via_clears_pad_rects
+    # Pads slightly OUTSIDE the escape region still matter: a via placed just
+    # inside the boundary can reach copper up to pad-half + via + clearance
+    # beyond it (orangecrab TP20 sat past the region edge and was missed).
+    _pad_margin = 1.0
     locked_smd_pads = []   # copper SMD pads a THROUGH via must also clear
-    for fp in pcb_data.footprints.values():
-        if fp.reference == footprint.reference or not getattr(fp, 'locked', False):
+    for p in immovable_foreign_pads(pcb_data, footprint.reference):
+        if not (bounds[0] - _pad_margin <= p.global_x <= bounds[2] + _pad_margin and
+                bounds[1] - _pad_margin <= p.global_y <= bounds[3] + _pad_margin):
             continue
-        for p in fp.pads:
-            if not (bounds[0] <= p.global_x <= bounds[2] and
-                    bounds[1] <= p.global_y <= bounds[3]):
-                continue
-            p_half = max(p.size_x, p.size_y) / 2.0
-            p_keep = p_half + track_width / 2 + clearance + margin
-            if p.drill and p.drill > 0:
-                occ.block_all(p.global_x, p.global_y, p_keep)
-                continue
-            pad_layer_names = p.layers or []
-            has_cu = any(str(l).endswith('.Cu') for l in pad_layer_names)
-            if not has_cu:
-                continue  # paste/mask-only aperture
-            if '*.Cu' in pad_layer_names:
-                occ.block_all(p.global_x, p.global_y, p_keep)
-            else:
-                for lname in pad_layer_names:
-                    if lname in layer_set:
-                        occ.block_layer(layers.index(lname),
-                                        p.global_x, p.global_y, p_keep)
-            locked_smd_pads.append(p)
+        p_half = max(p.size_x, p.size_y) / 2.0
+        p_keep = p_half + track_width / 2 + clearance + margin
+        if p.drill and p.drill > 0:
+            occ.block_all(p.global_x, p.global_y, p_keep)
+            continue
+        pad_layer_names = p.layers or []
+        if '*.Cu' in pad_layer_names:
+            occ.block_all(p.global_x, p.global_y, p_keep)
+        else:
+            for lname in pad_layer_names:
+                if lname in layer_set:
+                    occ.block_layer(layers.index(lname),
+                                    p.global_x, p.global_y, p_keep)
+        locked_smd_pads.append(p)
 
     def via_site_ok(x, y, v_half):
         """A through via at (x, y) spans EVERY copper layer, so its ring must
-        clear each locked SMD pad by `clearance` even when the pad's layer is
-        not one of the two runs the layer-blocking test sees."""
-        for p in locked_smd_pads:
-            ddx = max(0.0, abs(x - p.global_x) - p.size_x / 2.0)
-            ddy = max(0.0, abs(y - p.global_y) - p.size_y / 2.0)
-            if math.hypot(ddx, ddy) < v_half + clearance - 1e-9:
-                return False
-        return True
+        clear each immovable SMD pad by `clearance` even when the pad's layer
+        is not one of the two runs the layer-blocking test sees."""
+        return via_clears_pad_rects(x, y, v_half, clearance, locked_smd_pads)
 
     # Geometry helpers ---------------------------------------------------------
     bx0, by0 = occ.cell(grid.min_x, grid.min_y)
@@ -418,12 +412,24 @@ def generate_underpad_escape(footprint: Footprint,
                         came[nxt] = cur
                         heapq.heappush(pq, (ng + heur(nx, ny), nxt))
             # The single via, only in the ball's own pad. A through via spans
-            # all layers, so the site must also clear locked foreign copper on
-            # layers the run-blocking test never looks at (via_ok, #254).
+            # all layers, so the site must also clear immovable foreign copper
+            # on layers the run-blocking test never looks at (via_ok, #253/
+            # #254). commit() emits the pad-CLAMPED size only at the exact pad
+            # centre cell (sx, sy); any other home cell gets the full via_size
+            # -- the gate must use the size that will actually be emitted.
+            _at_center = (cx, cy) == (sx, sy)
             if allow_via and (cx, cy) in home and \
-                    (via_ok is None or via_ok(*occ.xy(cx, cy))):
+                    (via_ok is None or via_ok(*occ.xy(cx, cy), _at_center)):
                 for L2 in route_layers:
                     if L2 == L:
+                        continue
+                    # An OFF-centre via sits inside the home exemption disk,
+                    # which hides real foreign obstacles (a neighbour ball's
+                    # via/track) from the blocking test -- require the
+                    # destination-layer cell to be genuinely clear there.
+                    # (The centre cell keeps the original semantics: its via
+                    # is clamped inside the pad copper.)
+                    if not _at_center and occ.blocked(L2, cx, cy):
                         continue
                     nxt = (cx, cy, L2)
                     ng = cg + via_cost
@@ -759,7 +765,8 @@ def generate_underpad_escape(footprint: Footprint,
         _via_ok = None
         if locked_smd_pads:
             _cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
-            _via_ok = lambda x, y, vh=_cs / 2.0: via_site_ok(x, y, vh)
+            _via_ok = (lambda x, y, at_center, cs=_cs, vs=via_size:
+                       via_site_ok(x, y, (cs if at_center else vs) / 2.0))
         path = astar(sx, sy, home_of(p), inner_layers, allow_via=True,
                      via_ok=_via_ok)
         if path is None and nl > 1:
