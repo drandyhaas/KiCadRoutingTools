@@ -21,7 +21,7 @@ from stub_layer_switching import (
     collect_stubs_by_layer,
     collect_stub_endpoints_by_layer, validate_swap, validate_single_swap,
     collect_single_ended_stubs_by_layer, revert_stub_layer_switch,
-    STUB_OVERLAP_Y_TOLERANCE
+    STUB_OVERLAP_Y_TOLERANCE, STUB_POSITION_TOLERANCE
 )
 from diff_pair_routing import get_diff_pair_endpoints
 from connectivity import get_net_endpoints, get_multipoint_net_pads
@@ -1351,6 +1351,52 @@ def apply_diff_pair_layer_swaps(
     return total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer
 
 
+def _net_connected_pad_locs(pcb_data: PCBData, net_id: int, tolerance: float) -> set:
+    """Pad (x, y) locations of net_id that already share a connected component with
+    another pad of the same net -- i.e. committed pad-to-pad copper.
+
+    Via/zone-aware: reuses check_net_connectivity's union-find (the same model
+    check_connected and the #263 cycle prune use), so a connection that bridges
+    pads through a VIA to another layer is caught, not just same-layer copper."""
+    from check_connected import check_net_connectivity
+    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    if not segs:
+        return set()
+    vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    zones = [z for z in (getattr(pcb_data, 'zones', None) or []) if getattr(z, 'net_id', None) == net_id]
+    res = check_net_connectivity(net_id, segs, vias, pads, zones, tolerance=tolerance)
+    by_root = {}
+    for loc, root in (res.get('pad_components') or {}).items():
+        by_root.setdefault(root, []).append((loc[0], loc[1]))
+    connected = set()
+    for locs in by_root.values():
+        if len(locs) >= 2:
+            connected.update(locs)
+    return connected
+
+
+def _stub_free_end_is_open(pcb_data: PCBData, stub, tolerance: float,
+                           connected_pads: set = None) -> bool:
+    """A stub is safe to relayer only if it is a DANGLING fanout stub, not part of
+    an already-routed connection.
+
+    If the stub launches from a pad that is ALREADY connected (via/zone-aware) to
+    another pad of its net, the stub is committed pad-to-pad copper (fpga_sdram
+    /CLK+: the 'source stub' was the whole coupled U1.B1<->J3 F.Cu run) -- relayering
+    it would move that copper and sever the connection. A genuine fanout stub off a
+    still-unconnected pad returns True. `connected_pads` is _net_connected_pad_locs
+    for the stub's net (computed by the caller and memoized across its stubs)."""
+    if stub is None or not stub.segments:
+        return False
+    if connected_pads is None:
+        connected_pads = _net_connected_pad_locs(pcb_data, stub.net_id, tolerance)
+    for px, py in connected_pads:
+        if abs(px - stub.pad_x) < tolerance and abs(py - stub.pad_y) < tolerance:
+            return False
+    return True
+
+
 def apply_single_ended_layer_swaps(
     pcb_data: PCBData,
     config: GridRouteConfig,
@@ -1427,6 +1473,16 @@ def apply_single_ended_layer_swaps(
     solo_switch_count = 0
     total_layer_swaps = 0
 
+    # Don't relayer a stub that is already committed pad-to-pad copper (would move
+    # routed copper and sever it -- fpga_sdram /CLK+ after the coupled pass). Memoize
+    # each net's already-connected pad locations across its source/target stubs.
+    _conn_memo = {}
+
+    def _conn_pads(nid):
+        if nid not in _conn_memo:
+            _conn_memo[nid] = _net_connected_pad_locs(pcb_data, nid, STUB_POSITION_TOLERANCE)
+        return _conn_memo[nid]
+
     # PHASE 1: Try swap pairs first
     # For swap pairs (Net1: src=A,tgt=B and Net2: src=B,tgt=A), we can:
     # Option 1: Both move to layer B (Net1 src A→B, Net2 tgt A→B)
@@ -1444,6 +1500,13 @@ def apply_single_ended_layer_swaps(
                 tgt1_stub = get_stub_info(pcb_data, net1_id, targets1[0][3], targets1[0][4], tgt1)
                 src2_stub = get_stub_info(pcb_data, net2_id, sources2[0][3], sources2[0][4], src2)
                 tgt2_stub = get_stub_info(pcb_data, net2_id, targets2[0][3], targets2[0][4], tgt2)
+                # Don't relayer an already-routed stub (its pad already connects to
+                # another pad -- committed copper).
+                cp1, cp2 = _conn_pads(net1_id), _conn_pads(net2_id)
+                src1_stub = src1_stub if _stub_free_end_is_open(pcb_data, src1_stub, STUB_POSITION_TOLERANCE, cp1) else None
+                tgt1_stub = tgt1_stub if _stub_free_end_is_open(pcb_data, tgt1_stub, STUB_POSITION_TOLERANCE, cp1) else None
+                src2_stub = src2_stub if _stub_free_end_is_open(pcb_data, src2_stub, STUB_POSITION_TOLERANCE, cp2) else None
+                tgt2_stub = tgt2_stub if _stub_free_end_is_open(pcb_data, tgt2_stub, STUB_POSITION_TOLERANCE, cp2) else None
 
                 # Try different combinations to find one that works
                 # Each net needs to end up with both endpoints on same layer
@@ -1494,8 +1557,10 @@ def apply_single_ended_layer_swaps(
         # Try source -> target layer switch first
         src_stub = get_stub_info(pcb_data, net_id, sources[0][3], sources[0][4], src_layer)
 
-        # Check can_swap_to_top_layer restriction
-        if src_stub and (can_swap_to_top_layer or tgt_layer != 'F.Cu'):
+        # Check can_swap_to_top_layer restriction. Don't relayer an already-routed
+        # stub whose free end lands on other copper (would move committed copper).
+        if (src_stub and _stub_free_end_is_open(pcb_data, src_stub, STUB_POSITION_TOLERANCE, _conn_pads(net_id))
+                and (can_swap_to_top_layer or tgt_layer != 'F.Cu')):
             valid, reason = validate_single_swap(
                 src_stub, tgt_layer, combined_stubs_by_layer, pcb_data, config
             )
@@ -1511,7 +1576,8 @@ def apply_single_ended_layer_swaps(
 
         # Try target -> source layer switch as fallback
         tgt_stub = get_stub_info(pcb_data, net_id, targets[0][3], targets[0][4], tgt_layer)
-        if tgt_stub and (can_swap_to_top_layer or src_layer != 'F.Cu'):
+        if (tgt_stub and _stub_free_end_is_open(pcb_data, tgt_stub, STUB_POSITION_TOLERANCE, _conn_pads(net_id))
+                and (can_swap_to_top_layer or src_layer != 'F.Cu')):
             valid, reason = validate_single_swap(
                 tgt_stub, src_layer, combined_stubs_by_layer, pcb_data, config
             )

@@ -1230,21 +1230,36 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     p_all = p_sources + p_targets
     n_all = n_sources + n_targets
 
-    def find_closest_pair(p_endpoints, n_endpoints):
-        """Find the P and N endpoints that are closest to each other on same layer."""
+    def find_closest_pair(p_endpoints, n_endpoints, ref=None):
+        """Find a same-layer P-N endpoint pair. The third return value is always
+        the pair's own P-N gap (used by matching_cost).
+
+        ref=None: pick the pair whose P and N sit tightest together (the source
+        cluster). ref=(gx, gy): pick the pair whose midpoint is NEAREST ref (the
+        source), P-N gap only breaking ties -- so a multi-point net picks its
+        target terminal CLOSEST to the source, not the terminal whose own +/- pads
+        happen to sit tightest (fpga_sdram /CLK: J3 at ~8mm on F.Cu, not U7 at
+        ~10mm on B.Cu whose pads are 0.5mm apart vs J3's 1.0mm). #261."""
         best_p, best_n = None, None
-        best_dist = float('inf')
+        best_gap = float('inf')
+        best_key = None
         for p in p_endpoints:
             p_gx, p_gy, p_layer = p[0], p[1], p[2]
             for n in n_endpoints:
                 n_gx, n_gy, n_layer = n[0], n[1], n[2]
                 if n_layer != p_layer:
                     continue
-                dist = abs(p_gx - n_gx) + abs(p_gy - n_gy)
-                if dist < best_dist:
-                    best_dist = dist
+                gap = abs(p_gx - n_gx) + abs(p_gy - n_gy)
+                if ref is None:
+                    key = (gap,)
+                else:
+                    mx, my = (p_gx + n_gx) / 2.0, (p_gy + n_gy) / 2.0
+                    key = (abs(mx - ref[0]) + abs(my - ref[1]), gap)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_gap = gap
                     best_p, best_n = p, n
-        return best_p, best_n, best_dist
+        return best_p, best_n, best_gap
 
     # Honor get_net_endpoints' source/target split so a multi-point cluster on
     # one end (e.g. a BGA diff-pair escape stub, returned as many clustered
@@ -1259,8 +1274,8 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     # both ways of matching P's sides to N's sides and keep the one whose two
     # P-N pairs are tighter (each P endpoint actually adjacent to its N) - the
     # wrong matching pairs opposite ends and comes back far apart.
-    def labeled_pair(p_grp, n_grp):
-        p, n, d = find_closest_pair(p_grp, n_grp)
+    def labeled_pair(p_grp, n_grp, ref=None):
+        p, n, d = find_closest_pair(p_grp, n_grp, ref)
         return (p, n, d) if p is not None and n is not None else None
 
     def matching_cost(src_pair, tgt_pair):
@@ -1268,8 +1283,22 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
             return None
         return src_pair[2] + tgt_pair[2]  # sum of the two P-N gaps; smaller = P/N agree
 
-    aligned = (labeled_pair(p_sources, n_sources), labeled_pair(p_targets, n_targets))
-    crossed = (labeled_pair(p_sources, n_targets), labeled_pair(p_targets, n_sources))
+    def _pair_center(pr):
+        return ((pr[0][0] + pr[1][0]) / 2.0, (pr[0][1] + pr[1][1]) / 2.0)
+
+    # Pick the source (tightest P-N cluster) first, then the target NEAREST that
+    # source -- ordering multi-point targets by distance, not by their own P-N gap
+    # (#261). The source group is a single cluster here, so ref only steers the
+    # multi-candidate target group; a 2-terminal pair (one candidate per side) is
+    # unaffected.
+    def _sided(p_src_grp, n_src_grp, p_tgt_grp, n_tgt_grp):
+        src = labeled_pair(p_src_grp, n_src_grp)
+        tgt = labeled_pair(p_tgt_grp, n_tgt_grp,
+                           ref=_pair_center(src) if src is not None else None)
+        return (src, tgt)
+
+    aligned = _sided(p_sources, n_sources, p_targets, n_targets)
+    crossed = _sided(p_sources, n_targets, p_targets, n_sources)
     cost_a, cost_c = matching_cost(*aligned), matching_cost(*crossed)
 
     chosen = None
@@ -2459,32 +2488,29 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         range(nL),
         key=lambda i: (i not in spanned, layer_names[i] in ('F.Cu', 'B.Cu'), i))
 
-    _assoc = _launch_assoc_tol(config)
-
-    def _terminal_has_via(px, py, nx, ny):
-        """True if an own-net (P or N) via sits at this terminal -- a via-in-pad /
-        bare-pad target swap, where coupling on the terminal's own layer avoids an
-        extra transition via (the only case worth front-loading the own layer)."""
-        for v in (getattr(pcb_data, 'vias', None) or []):
-            if v.net_id not in (p_net_id, n_net_id):
-                continue
-            if (math.hypot(v.x - px, v.y - py) <= _assoc or
-                    math.hypot(v.x - nx, v.y - ny) <= _assoc):
-                return True
-        return False
-    src_has_via = _terminal_has_via(p_src_x, p_src_y, n_src_x, n_src_y)
-    tgt_has_via = _terminal_has_via(p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y)
     layer_pairs = []
 
     def _add_pair(a, b):
         if a is not None and b is not None and (a, b) not in layer_pairs:
             layer_pairs.append((a, b))
-    if src_has_via:
-        _add_pair(s_lyr, s_lyr)         # 1. source layer the whole way
-    if tgt_has_via:
-        _add_pair(t_lyr, t_lyr)         # 2. target layer the whole way
-    if src_has_via or tgt_has_via:
-        _add_pair(s_lyr, t_lyr)         # 3. source -> target (one coupled via)
+
+    # #261: prefer a coupled middle that STARTS on the source terminal's own layer
+    # and ENDS on the target's own layer -- collapsing to a via-free single-layer
+    # middle when both terminals share a layer, else one coupled via mid-middle. The
+    # middle then joins the terminal stubs (or a stub's swap via) directly instead of
+    # dropping to an inner layer and paying a via down + back at each end.
+    #
+    # These candidates were previously gated behind a _terminal_has_via() check
+    # (front-load the own layer ONLY when the terminal carries a detectable via).
+    # That gate misfired: it looks for a via within ~0.4mm of the launch point (the
+    # stub free-end), but a solo stub layer swap drops its via at the PAD ~1mm
+    # inboard, so a source swapped to B.Cu was missed and fell through to the
+    # inner-first fallback (fpga_sdram /CLK -> a gratuitous In1.Cu detour with two
+    # via sets instead of staying on B.Cu). Drive the order off the ENDPOINT LAYER
+    # unconditionally; the congestion-ordered single_order still backs it up.
+    _add_pair(s_lyr, s_lyr)             # 1. source layer the whole way
+    _add_pair(t_lyr, t_lyr)             # 2. target layer the whole way
+    _add_pair(s_lyr, t_lyr)             # 3. source -> target (one coupled via)
     for _L in single_order:             # 4. every remaining single layer
         _add_pair(_L, _L)
 
