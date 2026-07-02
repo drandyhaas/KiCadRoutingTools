@@ -133,49 +133,6 @@ def is_check_cmd(argv):
     return any(os.path.basename(a).startswith("check_") for a in argv)
 
 
-def tool_of(argv):
-    """Basename of the .py script a command runs ('' if none)."""
-    return next((os.path.basename(a) for a in argv if a.endswith(".py")), "")
-
-
-def cap_opt_injection_index(cmds, keep):
-    """Index of the command after which to auto-run place_fanout_clearance.
-
-    Cap-opt is part of the intended pipeline after a BGA fanout, but chains
-    recorded before it existed (or where the agent skipped it) leave caps
-    grazing/shorting fanout vias all the way to the final board (#267:
-    orangecrab's 16 PAD-VIA). Returns the index of the LAST kept bga_fanout
-    command -- mirroring the agent-recorded pattern (cap-opt once, after the
-    BGA fanout phase, before qfn fanouts) -- or None when the kept chain
-    already runs place_fanout_clearance anywhere (trust the recorded
-    placement), has no bga_fanout, or the bga_fanout writes no board
-    (--help). qfn-only chains get no injection: cap-opt keys on BGAs and
-    would no-op."""
-    kept = [k for k in range(len(cmds)) if keep is None or k in keep]
-    if any(tool_of(cmds[k][1]) == "place_fanout_clearance.py" for k in kept):
-        return None
-    bgas = [k for k in kept
-            if tool_of(cmds[k][1]) == "bga_fanout.py" and board_io(cmds[k][1])[1]]
-    return bgas[-1] if bgas else None
-
-
-def build_cap_opt_argv(fanout_argv):
-    """place_fanout_clearance argv for a just-run fanout command: same python
-    prefix, IN-PLACE on the fanout's output (downstream commands read that
-    filename, and cap-opt writes nothing when no cap moves -- a distinct
-    output path would then not exist), reusing the fanout's --clearance when
-    it had one."""
-    script_i = next(j for j, a in enumerate(fanout_argv) if a.endswith(".py"))
-    out = [a for a in fanout_argv if a.endswith(".kicad_pcb")][-1]
-    argv = list(fanout_argv[:script_i]) + [
-        str(REPO / "place_fanout_clearance.py"), out, out]
-    for j, a in enumerate(fanout_argv):
-        if a == "--clearance" and j + 1 < len(fanout_argv):
-            argv += ["--clearance", fanout_argv[j + 1]]
-            break
-    return argv
-
-
 def board_io(argv):
     """Return (input_basenames, output_basename) for a command's .kicad_pcb args.
 
@@ -325,13 +282,6 @@ def main():
                          "dropped writes). Use --verbatim to reproduce the literal "
                          "sequence, or if a pruned replay fails on a failed-retry "
                          "ordering (see compute_prune_keep()).")
-    ap.add_argument("--no-auto-cap-opt", action="store_true",
-                    help="Do not auto-insert a place_fanout_clearance step after the "
-                         "last bga_fanout when the manifest lacks one (#267). By "
-                         "default the replay injects it (in-place on that fanout's "
-                         "output, at the fanout's --clearance) so chains recorded "
-                         "without cap-opt still get caps moved off fanout vias; pass "
-                         "this for a literal replay of the recorded commands.")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan, run nothing")
     ap.add_argument("--continue-on-error", action="store_true",
                     help="Keep going if a command fails (default: replicate the agent's "
@@ -386,14 +336,6 @@ def main():
             tool = next((os.path.basename(a) for a in cmds[i][1] if a.endswith(".py")), "?")
             print(f"    drop [{i+1}] {tool} -> {out}")
 
-    inject_after = None
-    if not args.no_auto_cap_opt:
-        inject_after = cap_opt_injection_index(cmds, prune_keep)
-        if inject_after is not None:
-            print(f"Auto cap-opt: will run place_fanout_clearance after command "
-                  f"[{inject_after + 1}] (chain has bga_fanout but no recorded "
-                  f"cap-opt, #267; --no-auto-cap-opt disables)")
-
     # Seed input-only relative boards (e.g. <board>_input.kicad_pcb) into the dest
     # so the first command finds them -- without this the chain breaks (issue: a
     # relative seed file the original run dir had but no recorded command produces).
@@ -427,10 +369,6 @@ def main():
         label = " ".join(shlex.quote(a) for a in argv)
         print(f"[{i}/{len(cmds)}] {label}", flush=True)
         if args.dry_run:
-            if (i - 1) == inject_after:
-                cargv = build_cap_opt_argv(argv)
-                print(f"[{i}b/{len(cmds)}] auto cap-opt: "
-                      f"{' '.join(map(shlex.quote, cargv))}")
             continue
         if cwd and not os.path.isdir(cwd):
             os.makedirs(cwd, exist_ok=True)
@@ -455,32 +393,6 @@ def main():
             if real and not args.continue_on_error:
                 print(f"\nStopping at command {i}; rerun with --continue-on-error to push through.")
                 return 2
-
-        # Auto cap-opt after the last bga_fanout (see cap_opt_injection_index).
-        # Runs only when the fanout itself succeeded; in-place, so the chain's
-        # file names are untouched and the dependency DAG is unaffected.
-        if (i - 1) == inject_after and rc == 0 and not timed_out:
-            cargv = build_cap_opt_argv(argv)
-            print(f"[{i}b/{len(cmds)}] auto cap-opt: "
-                  f"{' '.join(map(shlex.quote, cargv))}", flush=True)
-            cmd_t0 = time.time()
-            rc2, peak_kb2, to2 = run_with_peak_rss(cargv, cwd, timeout=timeout)
-            dt2 = time.time() - cmd_t0
-            timings.append({"index": i, "injected": "cap_opt",
-                            "seconds": round(dt2, 3), "returncode": rc2,
-                            "peak_rss_mb": round(peak_kb2 / 1024, 1),
-                            "timed_out": to2, "argv": cargv})
-            suffix2 = f"  exit {rc2}" if rc2 != 0 else ""
-            if to2:
-                suffix2 = f"  TIMED OUT after {timeout:.0f}s (killed)"
-            print(f"    -> {dt2:.2f}s" + suffix2)
-            if rc2 != 0 or to2:
-                failures += 1
-                print("    (auto cap-opt failed)")
-                if not args.continue_on_error:
-                    print(f"\nStopping at auto cap-opt after command {i}; rerun "
-                          f"with --continue-on-error to push through.")
-                    return 2
 
     total = time.time() - t0
     if prune_keep is not None:
