@@ -89,6 +89,49 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
    `boards_set1/`, `results_set1/`; set 2 → `boards_unrouted_set2/`, `runs_set2/`,
    `boards_set2/`, `results_set2/`)
 
+## Building a board set (source → validate → prep)
+
+How the `boards_setN/` (routed reference) and `boards_unrouted_setN/` (stripped
+input) corpora are created from open-hardware GitHub repos. All tooling lives in
+`tests/stress/`; board files live under `~/Documents/kicad_stress_test/` (NOT the repo).
+
+**Pipeline:**
+1. **Source + validate candidates.** Find `.kicad_pcb` files in open-hardware repos
+   (enumerate a repo's tree: `gh api "repos/OWNER/REPO/git/trees/BRANCH?recursive=1"
+   --jq '.tree[].path | select(endswith(".kicad_pcb"))'`; plus `gh search repos`).
+   `curl -sL --fail RAWURL -o <slug>.kicad_pcb`, then gate each with
+   **`validate_candidate.py <file>`** → one JSON line: parses in `kicad_parser`,
+   loads in **pcbnew** (so prep will work), reports copper layers / footprints /
+   routable_nets / a difficulty **tier** (easy/medium/hard). Keep only `pass:true`
+   (2–8 layers, ≥10 footprints, ≥20 routable nets, pcbnew-loadable). Common
+   rejects: KiCad v4/v5 format (parses to 0 footprints), git-LFS pointer files
+   (tiny), Eagle/Altium repos (no `.kicad_pcb`), blank templates.
+2. **Curate** a balanced mix (easy/medium/hard) with variety (distinct
+   designers/chip families), no duplicates with existing sets. Avoid 8-layer /
+   600+-footprint monsters (too slow to route). **Verify each has a board outline**
+   (`board_bounds` non-None) — some boards define no Edge.Cuts and are unroutable;
+   swap them out.
+3. **Manifest.** Each set has `manifest_setN.json` (list of `{repo, path, file,
+   raw_url, github_url, layers_est, footprints, tier, packages, short_name, note}`).
+   `fetch_setN.py` re-downloads all sources from it into `sources/github_setN/`.
+4. **Prep** (needs KiCad's bundled python): `bash prep_setN.sh` runs
+   `prep_set2.py <src> <routed_dst> <stripped_dst>` once per board (pcbnew segfaults
+   if you batch several in one process). It normalizes the routed board →
+   `boards_setN/<name>.kicad_pcb`, strips tracks/vias/zones + rebuilds Edge.Cuts →
+   `boards_unrouted_setN/<name>.kicad_pcb`, and copies the sibling `.kicad_pro`.
+   Every board needs a `.kicad_pro` (netclass); download it alongside the `.pcb`
+   or generate a default.
+5. **`assemble_corpus.py`** wires steps 2–4 together from a `curation.json`
+   (`{name, set, slug, src, repo, raw_url, ...}`): copies sources into
+   `sources/github_setN/`, best-effort fetches each sibling `.kicad_pro`, writes
+   `manifest_setN.json`, and regenerates `prep_setN.sh` with its MAP. Idempotent
+   (set4's base is only its original non-`short_name` entry).
+
+**Validate the finished set** before routing: every unrouted board must be fully
+stripped (0 segments/vias), have `board_bounds`, ≥10 footprints, ≥20 routable nets,
+and a `.kicad_pro`. The `swig ... memory leak` lines from pcbnew during prep are
+harmless.
+
 ## Rules
 
 1. Invoke all tools as `python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/<tool>.py ...`
