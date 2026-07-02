@@ -1272,8 +1272,12 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         return True
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
+        # Foreign VIAS must be checked too: grazes() fires on via proximity, so
+        # omitting them here let a re-bend that fixed a pad graze land within
+        # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
-                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
+                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
         return d >= clearance + w / 2.0 - 1e-4 and edge_clears(x1, y1, x2, y2, w)
 
     def vk(x, y):

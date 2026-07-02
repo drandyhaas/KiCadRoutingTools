@@ -213,6 +213,7 @@ class _Repair:
 
         courtyards = extract_courtyard_bboxes(pcb_file)
         locked = set(extract_locked_refs(pcb_file)) | extra_locked
+        self.locked_refs = locked
 
         # --- avoidance: the REAL fanout vias (after fanout) ---
         # Each (x, y, net, keepout) where keepout = via_radius + clearance; a
@@ -591,6 +592,32 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                   if st.via_penalty(c, c.x, c.y, c.rot, st.cap_vias[r]) > EPS]
     print(f"Caps initially overlapping a foreign via: {len(violators0)}"
           + (f" ({', '.join(sorted(violators0))})" if violators0 else ""))
+
+    # LOCKED parts are excluded from moving by design, but a foreign via inside
+    # a locked pad's keep-out is then unfixable here -- surface it instead of
+    # silently reporting a clean pass (#254: locked back-side cap under a BGA
+    # via-in-pad). The fanout avoids locked copper for NEW vias; this warning
+    # catches boards fanned before that fix or vias from other sources.
+    locked_hits = []
+    for ref in sorted(st.locked_refs):
+        fp = pcb_data.footprints.get(ref)
+        if fp is None:
+            continue
+        for p in fp.pads:
+            if not any(str(l).endswith('.Cu') for l in p.layers):
+                continue
+            rect = (p.global_x - p.size_x / 2, p.global_y - p.size_y / 2,
+                    p.global_x + p.size_x / 2, p.global_y + p.size_y / 2)
+            for vx, vy, vnet, keepout in st.vias:
+                if vnet == p.net_id:
+                    continue
+                if _point_to_rect_dist(vx, vy, rect) < keepout - EPS:
+                    locked_hits.append((ref, p.pad_number, vx, vy))
+    if locked_hits:
+        print(f"WARNING: {len(locked_hits)} foreign via(s) inside LOCKED parts' pad "
+              f"clearance (cannot move a locked part):")
+        for ref, pnum, vx, vy in locked_hits[:10]:
+            print(f"    {ref}.{pnum} <-> via at ({vx:.2f},{vy:.2f})")
 
     if on_move is not None:
         on_move(st)  # seed frame

@@ -147,6 +147,9 @@ class Footprint:
     value: str = ""  # Component value (e.g., "MCF5213", "100nF", "10K")
     dnp: bool = False  # Do-not-populate / no-pop. A no-pop series part is an open
                        # circuit, so its pads do NOT bridge two nets into one signal.
+    locked: bool = False  # Footprint (locked yes) flag: the user pinned this part,
+                          # so placement passes must not move it and routing/fanout
+                          # cannot assume a later step will move it out of the way.
 
 
 @dataclass
@@ -1226,6 +1229,16 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         attr_match = re.search(r'\(attr\b([^)]*)\)', fp_text)
         is_dnp = bool(attr_match and re.search(r'\bdnp\b', attr_match.group(1)))
 
+        # Footprint-level (locked yes): appears in the block header, before the
+        # first nested element. Limit the search there so a locked PAD or
+        # graphic inside the footprint doesn't read as a locked footprint.
+        _hdr_end = len(fp_text)
+        for _tok in ('(property', '(pad', '(fp_'):
+            _i = fp_text.find(_tok)
+            if _i != -1:
+                _hdr_end = min(_hdr_end, _i)
+        is_locked = bool(re.search(r'\(locked\s+yes\)', fp_text[:_hdr_end]))
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1234,7 +1247,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             rotation=fp_rotation,
             layer=fp_layer,
             value=value,
-            dnp=is_dnp
+            dnp=is_dnp,
+            locked=is_locked
         )
 
         # Extract pads
@@ -1984,6 +1998,12 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         except Exception:
             fp_dnp = False
 
+        # Locked flag — parity with the text parser's footprint (locked yes).
+        try:
+            fp_locked = bool(fp.IsLocked())
+        except Exception:
+            fp_locked = False
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1992,7 +2012,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             rotation=fp_rotation,
             layer=fp_layer,
             value=fp_value,
-            dnp=fp_dnp
+            dnp=fp_dnp,
+            locked=fp_locked
         )
 
         # Extract pads

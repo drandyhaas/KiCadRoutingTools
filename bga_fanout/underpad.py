@@ -315,6 +315,49 @@ def generate_underpad_escape(footprint: Footprint,
         occ.block_segment(li, (s.start_x, s.start_y), (s.end_x, s.end_y),
                           s.width / 2 + track_width / 2 + clearance)
 
+    # LOCKED foreign components' pads in the region. Movable caps are ignored
+    # on purpose -- the next pipeline step (place_fanout_clearance) relocates
+    # them away from the fanout vias -- but a (locked yes) part will never
+    # move, so its copper must be a real obstacle here. On lpddr4_testbed a
+    # locked back-side cap (C7) sat under a ball: the via-in-pad's B.Cu ring
+    # landed 0.1mm INTO its pad and cap-opt correctly refused to move it (#254).
+    locked_smd_pads = []   # copper SMD pads a THROUGH via must also clear
+    for fp in pcb_data.footprints.values():
+        if fp.reference == footprint.reference or not getattr(fp, 'locked', False):
+            continue
+        for p in fp.pads:
+            if not (bounds[0] <= p.global_x <= bounds[2] and
+                    bounds[1] <= p.global_y <= bounds[3]):
+                continue
+            p_half = max(p.size_x, p.size_y) / 2.0
+            p_keep = p_half + track_width / 2 + clearance + margin
+            if p.drill and p.drill > 0:
+                occ.block_all(p.global_x, p.global_y, p_keep)
+                continue
+            pad_layer_names = p.layers or []
+            has_cu = any(str(l).endswith('.Cu') for l in pad_layer_names)
+            if not has_cu:
+                continue  # paste/mask-only aperture
+            if '*.Cu' in pad_layer_names:
+                occ.block_all(p.global_x, p.global_y, p_keep)
+            else:
+                for lname in pad_layer_names:
+                    if lname in layer_set:
+                        occ.block_layer(layers.index(lname),
+                                        p.global_x, p.global_y, p_keep)
+            locked_smd_pads.append(p)
+
+    def via_site_ok(x, y, v_half):
+        """A through via at (x, y) spans EVERY copper layer, so its ring must
+        clear each locked SMD pad by `clearance` even when the pad's layer is
+        not one of the two runs the layer-blocking test sees."""
+        for p in locked_smd_pads:
+            ddx = max(0.0, abs(x - p.global_x) - p.size_x / 2.0)
+            ddy = max(0.0, abs(y - p.global_y) - p.size_y / 2.0)
+            if math.hypot(ddx, ddy) < v_half + clearance - 1e-9:
+                return False
+        return True
+
     # Geometry helpers ---------------------------------------------------------
     bx0, by0 = occ.cell(grid.min_x, grid.min_y)
     bx1, by1 = occ.cell(grid.max_x, grid.max_y)
@@ -329,7 +372,7 @@ def generate_underpad_escape(footprint: Footprint,
         return min(p.global_x - grid.min_x, grid.max_x - p.global_x,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
-    def astar(sx, sy, home, route_layers, allow_via):
+    def astar(sx, sy, home, route_layers, allow_via, via_ok=None):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -374,8 +417,11 @@ def generate_underpad_escape(footprint: Footprint,
                         g[nxt] = ng
                         came[nxt] = cur
                         heapq.heappush(pq, (ng + heur(nx, ny), nxt))
-            # The single via, only in the ball's own pad.
-            if allow_via and (cx, cy) in home:
+            # The single via, only in the ball's own pad. A through via spans
+            # all layers, so the site must also clear locked foreign copper on
+            # layers the run-blocking test never looks at (via_ok, #254).
+            if allow_via and (cx, cy) in home and \
+                    (via_ok is None or via_ok(*occ.xy(cx, cy))):
                 for L2 in route_layers:
                     if L2 == L:
                         continue
@@ -523,6 +569,11 @@ def generate_underpad_escape(footprint: Footprint,
             if De <= Lc + 0.01:
                 continue
             for L, use_via in candidates:
+                if use_via and locked_smd_pads and not all(
+                        via_site_ok(q.global_x, q.global_y,
+                                    clamp_via_to_pad(via_size, via_drill, q, floors)[0] / 2.0)
+                        for q in (pp, nn)):
+                    continue  # a through via-in-pad would hit locked copper
                 segs = []
                 ok = True
                 for pad, side in ((pp, 1.0), (nn, -1.0)):
@@ -601,6 +652,11 @@ def generate_underpad_escape(footprint: Footprint,
                 return (mx + along * ex + off * px, my + along * ey + off * py)
 
             for L, use_via in candidates:
+                if use_via and locked_smd_pads and not all(
+                        via_site_ok(q.global_x, q.global_y,
+                                    clamp_via_to_pad(via_size, via_drill, q, floors)[0] / 2.0)
+                        for q in (pp, nn)):
+                    continue  # a through via-in-pad would hit locked copper
                 for tside in (1.0, -1.0):         # which gap the trail bulges through
                     lside = -tside
                     lead_segs = [((lead.global_x, lead.global_y), pt(De - run, lside * half_sp)),
@@ -700,9 +756,15 @@ def generate_underpad_escape(footprint: Footprint,
     inner_pads.sort(key=depth, reverse=True)
     for p in inner_pads:
         sx, sy = occ.cell(p.global_x, p.global_y)
-        path = astar(sx, sy, home_of(p), inner_layers, allow_via=True)
+        _via_ok = None
+        if locked_smd_pads:
+            _cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
+            _via_ok = lambda x, y, vh=_cs / 2.0: via_site_ok(x, y, vh)
+        path = astar(sx, sy, home_of(p), inner_layers, allow_via=True,
+                     via_ok=_via_ok)
         if path is None and nl > 1:
-            path = astar(sx, sy, home_of(p), set(range(nl)), allow_via=True)
+            path = astar(sx, sy, home_of(p), set(range(nl)), allow_via=True,
+                         via_ok=_via_ok)
         if path is None:
             failed.append(p.net_name)
             continue
