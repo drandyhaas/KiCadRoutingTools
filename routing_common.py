@@ -411,10 +411,18 @@ def sync_pcb_data_segments(
                          if s.net_id not in routed_net_ids_set or id(s) in original_segment_ids]
     seg_count_after_remove = len(pcb_data.segments)
 
-    # Add current (possibly meandered) segments
+    # Add current (possibly meandered) segments. Never add an OBJECT that is
+    # already present: if a stale/aliased id survived the removal filter (id()
+    # of a garbage-collected original recycled onto a new segment), appending
+    # it again would put the same object in the list twice -- duplicate graph
+    # nodes then defeat the cleanup passes' connectivity gates (#195).
+    present = set(id(s) for s in pcb_data.segments)
     total_added = 0
     for net_id, result in routed_results.items():
         for seg in result.get('new_segments', []):
+            if id(seg) in present:
+                continue
+            present.add(id(seg))
             pcb_data.segments.append(seg)
             total_added += 1
     print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")

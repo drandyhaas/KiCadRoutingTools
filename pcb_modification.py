@@ -1119,9 +1119,17 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     vias_by_net = defaultdict(list)
     for v in pcb_data.vias:
         vias_by_net[v.net_id].append(v)
+    # Dedupe by object identity: a segment referenced TWICE in pcb_data.segments
+    # would become two graph nodes, and excluding one copy leaves its twin
+    # carrying the connection -- every removal then looks safe while the
+    # id-based application deletes both entries and guts the net (#195).
     segs_by_net = defaultdict(list)
+    _seen_ids = set()
     for s in pcb_data.segments:
         if scope_net_ids is None or s.net_id in scope_net_ids:
+            if id(s) in _seen_ids:
+                continue
+            _seen_ids.add(id(s))
             segs_by_net[s.net_id].append(s)
 
     def worse(before, after):

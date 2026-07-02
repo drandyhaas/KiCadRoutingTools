@@ -568,7 +568,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Save original (pre-routing) segment signatures to preserve stubs during sync
     # We use object identity since segments are mutable and could be duplicated
-    original_segment_ids = set(id(s) for s in pcb_data.segments)
+    # Keep the objects alive alongside the id set: recycled ids of GC'd
+    # originals otherwise alias NEW segments during sync (see route_diff, #195).
+    _original_segments_keepalive = list(pcb_data.segments)
+    original_segment_ids = set(id(s) for s in _original_segments_keepalive)
 
     # Notify visualization callback that routing is starting
     if visualize:

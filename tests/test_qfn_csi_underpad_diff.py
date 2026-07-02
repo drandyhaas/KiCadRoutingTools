@@ -109,15 +109,20 @@ def main():
         # 3) Fully connected (guards the floating-pad and in-pad-landing fixes).
         rc, txt = _run(["check_connected.py", routed], args.verbose)
         if "ALL NETS FULLY CONNECTED" not in txt:
+            detail = "\n".join(
+                f"      {ln}" for ln in txt.strip().splitlines()
+                if re.search(r"net \d|Disconnected|Segments:|\(net", ln))[:2000]
             fails.append("check_connected did NOT report all nets connected "
-                         "(floating QFN pad or false J1 disconnect?)")
+                         "(floating QFN pad or false J1 disconnect?)\n" + detail)
 
         # 4) DRC-clean at the routed clearance.
         rc, txt = _run(["check_drc.py", routed, "-c", CLEARANCE], args.verbose)
         if "NO DRC VIOLATIONS FOUND" not in txt:
             m = re.search(r"FOUND (\d+) DRC VIOLATIONS", txt)
+            detail = "\n".join(f"      {ln}" for ln in txt.splitlines()
+                               if "violations (" in ln)
             fails.append(f"check_drc found {m.group(1) if m else '?'} violation(s) "
-                         f"at clearance {CLEARANCE}")
+                         f"at clearance {CLEARANCE}\n" + detail)
     finally:
         for f in (fanned, routed):
             try:

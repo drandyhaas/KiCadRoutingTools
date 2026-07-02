@@ -576,8 +576,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         mem_after_base = get_process_memory_mb()
         print(format_memory_stats("After base obstacle map", mem_after_base, mem_after_base - mem_start))
 
-    # Save original (pre-routing) segment signatures to preserve stubs during sync
-    original_segment_ids = set(id(s) for s in pcb_data.segments)
+    # Save original (pre-routing) segment signatures to preserve stubs during sync.
+    # Keep the OBJECTS alive too: a bare id() set is only valid while the objects
+    # live -- when routing replaces originals and they are garbage-collected,
+    # CPython recycles their ids for NEW Segment objects, which sync then wrongly
+    # treats as "original" (keeping them AND re-adding them from the results, so
+    # the same object sits in pcb_data.segments twice -- the duplicate graph
+    # nodes then let the graze prune approve removals that gut the net, #195).
+    _original_segments_keepalive = list(pcb_data.segments)
+    original_segment_ids = set(id(s) for s in _original_segments_keepalive)
 
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
     # Extra clearance = spacing from centerline to P/N track center
