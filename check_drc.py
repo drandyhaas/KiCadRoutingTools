@@ -499,8 +499,13 @@ def point_to_pad_distance(px: float, py: float, pad: Pad) -> float:
 def _pad_perimeter_points(pad: Pad, n_per_side: int = 8) -> List[Tuple[float, float]]:
     """Sample points around a pad's copper perimeter in global coordinates.
     For custom-polygon pads, walk the real polygon edges; otherwise walk the
-    (rotated) bounding rectangle. Used to measure pad-pad and pad-edge gaps by
-    cross-sampling one pad's perimeter against the other shape's distance fn."""
+    (rotated) rounded-rect outline that matches point_to_pad_distance --
+    circle/oval/roundrect corners are arcs, NOT the sharp bounding-box corners.
+    Sampling the bbox made two non-touching circle pads read as overlapping
+    (the corner sample sits sqrt(2)*r - r outside the real copper; issue #260,
+    same phantom class as the #232 custom-pad bboxes). Used to measure pad-pad
+    and pad-edge gaps by cross-sampling one pad's perimeter against the other
+    shape's distance fn."""
     pad_polys = getattr(pad, 'polygons', None)
     if pad_polys:
         pts = []
@@ -516,19 +521,47 @@ def _pad_perimeter_points(pad: Pad, n_per_side: int = 8) -> List[Tuple[float, fl
 
     hx, hy = pad.size_x / 2, pad.size_y / 2
     cx, cy = pad.global_x, pad.global_y
-    corners = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+    if pad.shape in ('circle', 'oval'):
+        r = min(hx, hy)
+    elif pad.shape == 'roundrect':
+        r = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        r = 0.0
+    r = min(r, hx, hy)
+    ix, iy = hx - r, hy - r  # half-extents of the straight (un-rounded) sections
     local = []
-    for i in range(4):
-        x1, y1 = corners[i]
-        x2, y2 = corners[(i + 1) % 4]
+    edges = [((-ix, -hy), (ix, -hy)), ((hx, -iy), (hx, iy)),
+             ((ix, hy), (-ix, hy)), ((-hx, iy), (-hx, -iy))]
+    for (x1, y1), (x2, y2) in edges:
+        if x1 == x2 and y1 == y2:
+            continue  # fully-round side (circle/stadium): no straight section
         for k in range(n_per_side):
             t = k / n_per_side
             local.append((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
+    if r > 0.0:
+        # Quarter arcs joining the edges, centered on the inner-rect corners.
+        for acx, acy, a0 in ((ix, -iy, -90.0), (ix, iy, 0.0),
+                             (-ix, iy, 90.0), (-ix, -iy, 180.0)):
+            for k in range(n_per_side):
+                a = math.radians(a0 + 90.0 * k / n_per_side)
+                local.append((acx + r * math.cos(a), acy + r * math.sin(a)))
     if pad.rect_rotation:
         rad = math.radians(pad.rect_rotation)
         c, s = math.cos(rad), math.sin(rad)
         return [(cx + lx * c - ly * s, cy + lx * s + ly * c) for lx, ly in local]
     return [(cx + lx, cy + ly) for lx, ly in local]
+
+
+def _pad_has_no_copper(pad: Pad) -> bool:
+    """True for pads with no copper to clearance-check: NPTH mechanical holes
+    (KiCad lists *.Cu on them for hole keep-out, but an np_thru_hole pad carries
+    no ring -- its 'size' is just the mask opening) and pads declaring no copper
+    layer at all. Their drill still matters and is covered by the hole checks
+    (copper-to-hole, drill-to-drill); flagging their phantom 'copper' against
+    neighbouring pads made KiCad-clean boards fail (issue #260)."""
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return True
+    return not any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers)
 
 
 def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
@@ -1381,6 +1414,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             for pad, pad_net in spatial_idx.get_nearby_pads(x, y, seg.layer):
                 if pad_net == seg_net:
                     continue  # Same net
+                if _pad_has_no_copper(pad):
+                    continue  # NPTH hole: covered by the copper-to-hole check
 
                 pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
                 if not seg_net_matches and not pad_net_matches:
@@ -1418,6 +1453,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             for pad, pad_net in spatial_idx.get_nearby_pads(via.x, via.y, layer):
                 if pad_net == via_net:
                     continue  # Same net
+                if _pad_has_no_copper(pad):
+                    continue  # NPTH hole: covered by the drill-to-drill check
 
                 pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
                 if not via_net_matches and not pad_net_matches:
@@ -1452,6 +1489,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     for pad_net, pads in pads_by_net.items():
         net1_matches = matching_net_ids is None or pad_net in matching_net_ids
         for pad1 in pads:
+            if _pad_has_no_copper(pad1):
+                continue  # NPTH hole: no copper to short/graze
             for layer in _expand_cu(pad1.layers, routing_layers):
                 if not layer.endswith('.Cu'):
                     continue
@@ -1460,6 +1499,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         continue
                     if pad2_net == pad_net:
                         continue  # Same net -- allowed to touch
+                    if _pad_has_no_copper(pad2):
+                        continue  # NPTH hole: no copper to short/graze
                     # Skip pads of the SAME footprint: a component's own adjacent
                     # pins are fixed library geometry (a fine-pitch part can have
                     # pad gaps below the routing clearance), never something a
@@ -1487,6 +1528,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             'type': 'pad-pad',
                             'net1': n1s,
                             'net2': n2s,
+                            # A pad with no net cannot electrically short a net;
+                            # keep the clearance violation but not the SHORT tag.
+                            'no_net': pad_net == 0 or pad2_net == 0,
                             'layer': layer,
                             'overlap_mm': overlap,
                             'pad_ref': f"{pad1.component_ref}.{pad1.pad_number}",
@@ -1611,7 +1655,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     holes = []  # (x, y, drill, net_id, ref) -- NPTH (no-copper) pad holes only
     for pad_net, pads in pads_by_net.items():
         for pad in pads:
-            if pad.drill > 0 and not any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers):
+            if pad.drill > 0 and _pad_has_no_copper(pad):
                 holes.append((pad.global_x, pad.global_y, pad.drill, pad_net,
                               f"{pad.component_ref}.{pad.pad_number}"))
     segs = list(pcb_data.segments)
@@ -1729,7 +1773,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if matching_pad_nets is not None and pad_net not in matching_pad_nets:
                     continue
                 for pad in pads:
-                    if not any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers):
+                    if _pad_has_no_copper(pad):
                         continue  # No copper on this pad (pure NPTH)
                     has_violation, overlap, edge = check_pad_board_edge(
                         pad, edge_rings, edge_outer, edge_cutouts,
@@ -1880,7 +1924,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'pad-pad':
-                        short = " [SHORT]" if v['overlap_mm'] >= clearance else ""
+                        short = (" [SHORT]" if v['overlap_mm'] >= clearance
+                                 and not v.get('no_net') else "")
                         print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Pad:{v['net2']} ({v['pad_ref2']}){short}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad1: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
@@ -2001,6 +2046,7 @@ if __name__ == "__main__":
     # to the route_disconnected_planes fine-tap grading confusion.)
     if args.clearance is None:
         args.clearance = 0.2
+        found = False
         try:
             import os, json
             from fix_kicad_drc_settings import find_project, project_copper_clearance
@@ -2010,12 +2056,13 @@ if __name__ == "__main__":
                     pc = project_copper_clearance(json.load(f))
                 if pc:
                     args.clearance = pc
+                    found = True
                     if not args.quiet:
                         print(f"Grading at clearance {pc:.4g} mm "
                               f"(from {os.path.basename(pro)} Default net class)")
         except Exception as e:
             print(f"  (could not read project clearance, using 0.2 mm: {e})")
-        if args.clearance == 0.2 and not args.quiet:
+        if not found and not args.quiet:
             print("Grading at clearance 0.2 mm (no project clearance found; "
                   "pass -c to override)")
 

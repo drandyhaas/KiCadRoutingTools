@@ -747,8 +747,12 @@ def block_via_cells_near_drills(obstacles: GridObstacleMap,
 
 def _pad_has_copper(pad) -> bool:
     """True if the pad has copper on any layer (so its track clearance is enforced
-    by the copper-pad obstacle). NPTH mounting holes have only *.Mask/*.Paste and
-    return False -- they need the separate drill track keep-out (issue #233)."""
+    by the copper-pad obstacle). NPTH mounting holes return False -- they need the
+    separate drill track keep-out (issue #233). Most list only *.Mask/*.Paste, but
+    some libraries write *.Cu on an np_thru_hole pad (hole keep-out), so trust the
+    pad type first: an NPTH pad never carries a copper ring (issue #260)."""
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return False
     return any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers)
 
 

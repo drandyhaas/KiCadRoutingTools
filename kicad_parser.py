@@ -65,6 +65,9 @@ class Pad:
     pinfunction: str = ""
     drill: float = 0.0  # Drill size for through-hole pads (0 for SMD)
     pintype: str = ""
+    pad_type: str = ""  # KiCad pad kind: 'smd', 'thru_hole', 'np_thru_hole',
+    # 'connect'. NPTH pads have NO copper (their size is just a mask opening /
+    # keep-out), so copper-vs-copper DRC must skip them; only the hole matters.
     roundrect_rratio: float = 0.0  # Corner radius ratio for roundrect pads
     rect_rotation: float = 0.0  # Residual rect tilt in global frame for non-
     # orthogonal pads (deg, in (-90,90]). 0 for axis-aligned pads (the common
@@ -1371,6 +1374,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 rotation=total_rotation,
                 pinfunction=pinfunction,
                 pintype=pintype,
+                pad_type=pad_type,
                 drill=drill_size,
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
@@ -2087,6 +2091,18 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             except Exception:
                 pintype = ""
 
+            # Pad kind at text-parser parity ('smd'/'thru_hole'/'np_thru_hole'/
+            # 'connect') so DRC can skip the copper-less NPTH pads.
+            try:
+                pad_type = {
+                    pcbnew.PAD_ATTRIB_SMD: 'smd',
+                    pcbnew.PAD_ATTRIB_PTH: 'thru_hole',
+                    pcbnew.PAD_ATTRIB_NPTH: 'np_thru_hole',
+                    pcbnew.PAD_ATTRIB_CONN: 'connect',
+                }.get(pad.GetAttribute(), "")
+            except Exception:
+                pad_type = ""
+
             # Drill. Oval/slot drills have distinct x/y; take max(x, y) to match
             # the text parser (issue #106) - using only .x under-reports a rotated
             # slot's hole and risks hole-to-hole DRC.
@@ -2127,6 +2143,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 rotation=total_rotation,
                 pinfunction=pinfunction,
                 pintype=pintype,
+                pad_type=pad_type,
                 drill=drill,
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,

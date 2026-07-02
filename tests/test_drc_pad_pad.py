@@ -57,6 +57,24 @@ def _run(**kw):
         os.unlink(path)
 
 
+def _run_text(body, clearance=0.1, vtype='pad-pad'):
+    text = f'''(kicad_pcb
+ (version 20221018)
+ (net 0 "")
+ (net 1 "/A")
+ (net 2 "/B")
+ {body}
+)'''
+    with tempfile.NamedTemporaryFile('w', suffix='.kicad_pcb', delete=False) as f:
+        f.write(text)
+        path = f.name
+    try:
+        v = run_drc(path, clearance=clearance, quiet=True)
+        return [x for x in v if x['type'] == vtype]
+    finally:
+        os.unlink(path)
+
+
 def run():
     fails = []
 
@@ -90,11 +108,62 @@ def run():
     check("same-footprint sub-clearance pins -> 0 violations (pre-existing noise)",
           len(_run(pad2_x=10.65, same_footprint=True)) == 0)
 
+    # Two circle pads offset DIAGONALLY with a legal true (edge-to-edge) gap.
+    # The old perimeter sampler walked the bounding box, whose corner sits
+    # sqrt(2)*r - r outside the copper, so this pair read as a SHORT even
+    # though the circles clear each other (issue #260: nitrokey_pro J2 NPTH
+    # vs plug pads, 0.186mm real gap flagged as 4 phantom shorts).
+    diag = '''(footprint "L:A" (layer "F.Cu") (at 10 10)
+   (property "Reference" "U1")
+   (pad "1" smd circle (at 0 0) (size 1.1 1.1) (layers "F.Cu") (net 1 "/A")))
+ (footprint "L:B" (layer "F.Cu") (at 11.27 10.95)
+   (property "Reference" "U2")
+   (pad "1" smd circle (at 0 0) (size 1.7 1.7) (layers "F.Cu") (net 2 "/B")))'''
+    check("diagonal circle pads with legal true gap -> 0 violations (bbox phantom)",
+          len(_run_text(diag)) == 0)
+
+    # ... but genuinely overlapping circles on the same diagonal still flag.
+    diag_touch = diag.replace("(at 11.27 10.95)", "(at 10.9 10.7)")
+    check("diagonal circle pads truly overlapping -> 1 violation",
+          len(_run_text(diag_touch)) == 1)
+
+    # An NPTH mounting hole has NO copper even when its (layers ...) lists
+    # *.Cu -- it must not produce pad-pad copper violations (issue #260).
+    npth = '''(footprint "L:A" (layer "F.Cu") (at 10 10)
+   (property "Reference" "J1")
+   (pad "" np_thru_hole circle (at 0 0) (size 1.1 1.1) (drill 1.1) (layers "*.Cu" "*.Mask")))
+ (footprint "L:B" (layer "F.Cu") (at 10.9 10)
+   (property "Reference" "U2")
+   (pad "1" smd circle (at 0 0) (size 1.7 1.7) (layers "F.Cu") (net 2 "/B")))'''
+    check("NPTH hole overlapping a pad -> 0 pad-pad violations (no copper)",
+          len(_run_text(npth)) == 0)
+
+    # The same NPTH hole IS still guarded against tracks: copper-to-hole picks
+    # it up even though its layer list claims *.Cu (previously missed).
+    npth_track = '''(footprint "L:A" (layer "F.Cu") (at 10 10)
+   (property "Reference" "J1")
+   (pad "" np_thru_hole circle (at 0 0) (size 1.1 1.1) (drill 1.1) (layers "*.Cu" "*.Mask")))
+ (segment (start 8 10.6) (end 12 10.6) (width 0.2) (layer "F.Cu") (net 2) (uuid "0"))'''
+    check("track grazing the NPTH hole -> 1 track-hole violation",
+          len(_run_text(npth_track, vtype='track-hole')) == 1)
+
+    # A no-net pad overlap is still reported, but flagged no_net (not a SHORT:
+    # unconnected copper cannot electrically short a net -- issue #260).
+    nonet = '''(footprint "L:A" (layer "F.Cu") (at 10 10)
+   (property "Reference" "U1")
+   (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 0 "")))
+ (footprint "L:B" (layer "F.Cu") (at 10.3 10)
+   (property "Reference" "U2")
+   (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "/B")))'''
+    nonet_v = _run_text(nonet)
+    check("no-net pad overlap -> 1 violation carrying no_net=True",
+          len(nonet_v) == 1 and nonet_v[0].get('no_net') is True)
+
     print("=" * 60)
     if fails:
         print(f"\n{len(fails)} failure(s)")
         return 1
-    print("\n6/6 checks passed")
+    print("\n11/11 checks passed")
     return 0
 
 

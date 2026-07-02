@@ -153,6 +153,9 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pad.shape` - 'circle', 'oval', 'rect', etc.
 - `pad.layers` - List of layer names
 - `pad.drill` - Drill diameter (0 for SMD, >0 for through-hole)
+- `pad.pad_type` - 'smd', 'thru_hole', 'np_thru_hole', 'connect'. NPTH pads have
+  NO copper even when `layers` lists `*.Cu` (size = mask opening only): skip them
+  in copper-clearance logic, only their drill hole matters
 - `pad.component_ref` - Parent component reference
 - `pad.pinfunction`, `pad.pintype` - Pin metadata
 
