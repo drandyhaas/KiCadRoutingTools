@@ -77,11 +77,20 @@ def run(verbose=False):
         ok_fav, L_fav, vias_fav = route(pair, FAVOR_IN1, verbose)
         in1_def = L_def.get(FAVORED_LAYER, 0.0)
         in1_fav = L_fav.get(FAVORED_LAYER, 0.0)
-        # Both must route, and favoring In1.Cu must pull substantially more of the
-        # coupled route onto In1.Cu than the default (which uses ~none). Reaching an
-        # inner layer requires vias, so the favored route must place at least one.
-        passed = (ok_def and ok_fav and in1_def < 5.0 and in1_fav > in1_def + 20.0
-                  and vias_fav >= 2)
+        total_fav = sum(L_fav.values()) or 1.0
+        # A pair honours --layer-costs if, under FAVOR_IN1, it routes PREDOMINANTLY
+        # on the favoured layer (reaching an inner layer needs a via, so >=2).
+        #
+        # The old check ALSO demanded the DEFAULT route avoid In1.Cu (in1_def < 5),
+        # to prove a shift. But self-graze avoidance (#269) can legitimately put a
+        # pair on In1.Cu BY DEFAULT -- its natural clean route -- when the B.Cu
+        # coupled middle would pinch its own P/N below clearance; choosing the clean
+        # route is the correct response and overrides the (soft) layer-costs
+        # preference (a HARD skip is a negative layer cost). So a pair already on the
+        # favoured layer by default still passes. Pairs whose default is off In1.Cu
+        # (lvds_rx1_10/12) still exercise the actual cost-driven B.Cu->In1.Cu shift,
+        # so the suite still fails if --layer-costs stop flowing to the router.
+        passed = (ok_def and ok_fav and in1_fav > total_fav * 0.5 and vias_fav >= 2)
         results.append((pair, passed))
         status = "PASS" if passed else "FAIL"
         print(f"\n[{status}] {pair}: routed(default)={ok_def} routed(favor In1)={ok_fav}")

@@ -2484,14 +2484,24 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     # terminal via, fall back to the congestion-ordered single_order (pre-#243).
     s_lyr = src[4] if isinstance(src[4], int) and 0 <= src[4] < nL else None
     t_lyr = tgt[4] if isinstance(tgt[4], int) and 0 <= tgt[4] < nL else None
-    single_order = sorted(
+    # A FORBIDDEN layer (negative --layer-cost) must never carry track: the Rust A*
+    # already skips it, but the coupled-middle layer fall-through below is Python, so
+    # exclude forbidden layers here too (#277) -- both ends of a candidate must be
+    # routable for the middle to run there.
+    _layer_cost = config.get_layer_costs()
+
+    def _forbidden(i):
+        return i is not None and 0 <= i < len(_layer_cost) and _layer_cost[i] < 0
+    single_order = [i for i in sorted(
         range(nL),
         key=lambda i: (i not in spanned, layer_names[i] in ('F.Cu', 'B.Cu'), i))
+        if not _forbidden(i)]
 
     layer_pairs = []
 
     def _add_pair(a, b):
-        if a is not None and b is not None and (a, b) not in layer_pairs:
+        if (a is not None and b is not None and not _forbidden(a) and not _forbidden(b)
+                and (a, b) not in layer_pairs):
             layer_pairs.append((a, b))
 
     # #261: prefer a coupled middle that STARTS on the source terminal's own layer
@@ -2644,6 +2654,11 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         if getattr(config, 'debug_lines', False):
             print(f"    hybrid {_combo_nm(a, b)}: rejected -- {reason}")
 
+    # #269: least-self-grazing (best, msg, result) kept across layers, so a layer
+    # whose coupled middle pinches its own P/N below clearance is skipped in favour
+    # of a cleaner (usually inner) layer, but a pair that self-grazes on EVERY layer
+    # still couples on its least-bad layer instead of dropping to single-ended.
+    _selfgraze_fallback = None
     for a_layer, b_layer in layer_pairs:
         # Couple as close to each terminal as this candidate's launch layer allows.
         _sl = _closest_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
@@ -2909,6 +2924,12 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             return {'p_sign': ps, 'all_segs': all_segs, 'all_vias': all_vias,
                     'leg_segs': leg_segs, 'iters': iters + leg_iters,
                     'overlaps': _pn_overlap_count(all_segs),
+                    # #269: self-graze count of the coupled MIDDLE only (the parallel
+                    # ribbon), used to reject a layer whose middle pinches its own P/N
+                    # below clearance. Excludes the terminal legs -- a leg touching a
+                    # pad at a tightly-coupled (gap==clearance) terminal grazes by
+                    # design and must not force a layer change (lvds impedance pairs).
+                    'mid_selfgraze': _pn_overlap_count(mid_segs),
                     'vias': len(all_vias), 'length': length}, None
 
         cands = []
@@ -2936,10 +2957,25 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
         _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
-        print(f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
-              f"{len(leg_segs)} leg seg(s) ({best['iters']} iters){_pol_note}")
-        return {'new_segments': best['all_segs'], 'new_vias': best['all_vias'],
-                'iterations': best['iters'], 'path_length': len(simplified)}
+        _result = {'new_segments': best['all_segs'], 'new_vias': best['all_vias'],
+                   'iterations': best['iters'], 'path_length': len(simplified)}
+        _msg = (f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
+                f"{len(leg_segs)} leg seg(s) ({best['iters']} iters){_pol_note}")
+        # #269: reject a coupled middle that self-grazes (its own P/N pinch below
+        # clearance at a tight bend) and fall through to the next (inner) layer,
+        # which usually has room to couple cleanly -- fpga_sdram USB_D pinched 8x on
+        # the congested F.Cu surface but couples clean on In1.Cu. Keep the
+        # least-self-grazing candidate so an all-layers-self-graze pair still couples.
+        if best['mid_selfgraze'] == 0:
+            print(_msg)
+            return _result
+        if _selfgraze_fallback is None or best['mid_selfgraze'] < _selfgraze_fallback[0]:
+            _selfgraze_fallback = (best['mid_selfgraze'], _msg, _result)
+        _rej(a_layer, b_layer, f"coupled middle self-grazes (P/N overlap x{best['mid_selfgraze']})")
+        continue
+    if _selfgraze_fallback is not None:
+        print(_selfgraze_fallback[1] + "  [least self-graze; no clean layer]")
+        return _selfgraze_fallback[2]
     if _hyb_rej:
         from collections import Counter
         counts = Counter(_hyb_rej)

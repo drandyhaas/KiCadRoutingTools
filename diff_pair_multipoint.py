@@ -868,7 +868,18 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             forced_dir_next = None
             continue
 
-        endpoints = (_make_endpoint(term_a, config), _make_endpoint(term_b, config))
+        # #277: the standard coupled route must ALWAYS launch from a terminal's
+        # fanout STUB FREE END (on the stub's actual layer), not the pad -- exactly
+        # like the hybrid path already does (hyb_eps). The stub end is clear of the
+        # pad/part congestion, and after a layer swap it is on the swapped layer, so
+        # launching from the pad makes the leg double back to the pad on the wrong
+        # layer (redundant copper + a dangling swapped stub end; lumenpnp USB_D
+        # swapped to B.Cu but the middle returned to the F.Cu pad). Fall back to the
+        # pad only when a terminal has no stub (a bare pad).
+        def _leg_endpoint(term):
+            stub_ep = _terminal_stub_endpoint(pcb_data, term, config)
+            return stub_ep if stub_ep is not None else _make_endpoint(term, config)
+        endpoints = (_leg_endpoint(term_a), _leg_endpoint(term_b))
 
         # Pad swaps are only safe at chain-fresh terminals: the target terminal
         # is always fresh, the source only on the first leg (a swap at a shared

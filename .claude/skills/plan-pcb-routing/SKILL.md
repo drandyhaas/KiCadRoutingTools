@@ -313,6 +313,20 @@ Use the printed flags as-is:
   computes it from the stackup and clamps it to the floor). `route_diff.py` then
   auto-updates the Default net class to those tight values (only-loosen, via
   `fix_kicad_drc_settings.py`), so the `.kicad_pro` stops advertising the wide gap.
+- **Diff-pair sizing default + shrink-to-succeed.** Default `route_diff.py` to
+  **`--track-width 0.1` and `--diff-pair-gap 0.1`** (the fab floor) — a thin, tight
+  bundle routes on congested boards where a fat pair is dropped. If the interface
+  is impedance-controlled, ALSO pass `--impedance <ohms>`: the router derives the
+  width from the stackup and clamps it to the floor, so the target impedance is
+  **maintained** while the geometry stays as small as it can. **When a pair fails
+  or falls back** — `route_diff.py`'s `JSON_SUMMARY` lists it in `failed_diff_pairs`
+  or `single_ended_diff_pairs`, or DRC shows an intra-pair / via-via graze — re-run
+  the failing pairs with **smaller track width, smaller gap, AND smaller vias**
+  (`--via-size`/`--via-drill` toward the fab via floor). A tighter track+gap fits a
+  narrower channel, and smaller vias fit a tight pad pitch (measured: lumenpnp
+  USB_D's two 0.5 mm vias collide by 0.1 mm at the connector pitch — a smaller via
+  clears it). Step **toward, never below**, the fab floors, and keep `--impedance`
+  so the ohms target is held as the geometry shrinks.
 - **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
   inter-ball channel is too narrow to fit a track at the net-class clearance on
   more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls
@@ -364,7 +378,10 @@ Use the printed flags as-is:
 - **Non-Default classes:** route those nets separately with that class's
   `--clearance`/`--track-width` (clearance is the one per-class DRC value, so keep
   each class's nets at their own clearance rather than forcing one global value).
-- **Diff pairs:** `--track-width`/`--diff-pair-gap` from the Default class for `route_diff.py`.
+- **Diff pairs:** default `--track-width 0.1 --diff-pair-gap 0.1` for `route_diff.py`
+  (NOT the wide net-class values), plus `--impedance` when the interface is
+  impedance-controlled; shrink track/gap/via further toward the fab floor for any
+  pair that fails or grazes (see "Diff-pair sizing default + shrink-to-succeed").
 
 **Verification (DRC/connectivity) grades at the manufacturing floor**, not the
 inflated net-class clearance — that is the same rule the human original passes, so

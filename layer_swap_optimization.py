@@ -85,6 +85,43 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
     return True, ""
 
 
+def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
+    """A layer swap drops a through-via on EACH of the pair's two source (or target)
+    pads. At a tight pad pitch (e.g. a 0.5mm connector -- lumenpnp USB_D) two
+    full-size via bodies/drills collide (VIA-VIA / hole-to-hole) or graze a foreign
+    via/pad, and nothing on the solo-switch path validated them (only the bare-pad
+    TARGET swap did, via #241). The swap itself is fine (the pair genuinely needs
+    that layer), so SHRINK the new vias toward the fab via floor until they fit;
+    only if even the floor via still overlaps does the caller revert the swap.
+
+    Returns True if the vias fit (possibly after shrinking, mutating size/drill in
+    place so the writer emits the shrunk via); False if they can't be made to fit
+    without going below the fab floor (originals restored). #277."""
+    if not new_vias:
+        return True
+    if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
+        return True
+    from fab_tiers import fab_floor_for_param
+    copper = sum(1 for l in config.layers if l.endswith('.Cu'))
+    via_floor = fab_floor_for_param('via_diameter', copper) or 0.25
+    drill_floor = fab_floor_for_param('via_drill', copper) or 0.15
+    orig = [(v.size, v.drill) for v in new_vias]
+    ANNULAR = 0.1  # keep body - drill >= this (2x ring) as we shrink
+    size = config.via_size
+    while size > via_floor + 1e-9:
+        size = max(round(size - 0.05, 3), via_floor)
+        drill = max(min(config.via_drill, round(size - ANNULAR, 3)), drill_floor)
+        if drill >= size:              # floor drill wider than the shrunk body: stop
+            break
+        for v in new_vias:
+            v.size, v.drill = size, drill
+        if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
+            return True
+    for v, (s, d) in zip(new_vias, orig):
+        v.size, v.drill = s, d
+    return False
+
+
 def _find_blocking_single_ended_nets(
     stub_p, stub_n, dest_layer: str, pcb_data: PCBData, diff_pair_net_ids: Set[int]
 ) -> List[int]:
@@ -463,8 +500,15 @@ def apply_diff_pair_layer_swaps(
             # Apply solo source switch
             vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
             vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
-            all_segment_modifications.extend(mods1 + mods2)
             all_vias = vias1 + vias2
+            # #277: the two pad vias can collide at a tight pad pitch. Shrink them to
+            # the fab via floor to fit; if even the floor via overlaps, revert the
+            # swap (the pair routes to the pads instead) rather than emit a via short.
+            if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                revert_stub_layer_switch(pcb_data, mods1 + mods2, all_vias)
+                print(f"    Solo source switch skipped for {pair_name}: pad vias overlap, can't shrink to fab floor")
+                continue
+            all_segment_modifications.extend(mods1 + mods2)
             all_swap_vias.extend(all_vias)
 
             # Update all_stubs_by_layer to reflect the layer change
@@ -802,8 +846,14 @@ def apply_diff_pair_layer_swaps(
             # Apply solo target switch
             vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
             vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
-            all_segment_modifications.extend(mods1 + mods2)
             all_vias = vias1 + vias2
+            # #277: shrink the pad vias to fit a tight pad pitch; revert if even the
+            # fab-floor via still overlaps (via short otherwise).
+            if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                revert_stub_layer_switch(pcb_data, mods1 + mods2, all_vias)
+                print(f"    Solo target switch skipped for {pair_name}: pad vias overlap, can't shrink to fab floor")
+                continue
+            all_segment_modifications.extend(mods1 + mods2)
             all_swap_vias.extend(all_vias)
 
             # Update all_stubs_by_layer to reflect the layer change
