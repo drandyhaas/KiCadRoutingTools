@@ -135,7 +135,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config)
 
     # Add hole-to-hole clearance blocking for existing drills
-    add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set)
+    add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set,
+                             extra_clearance)
 
     return obstacles
 
@@ -798,7 +799,8 @@ def block_track_cells_near_drills(obstacles: GridObstacleMap, drill_holes,
 
 
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
-                              config: GridRouteConfig, nets_to_route_set: set):
+                              config: GridRouteConfig, nets_to_route_set: set,
+                              extra_clearance: float = 0.0):
     """Keep routed copper off existing drill holes -- vias, PTH pad barrels, and
     NPTH mounting holes alike (excluding the net(s) being routed, which must still
     reach their own through-holes).
@@ -840,7 +842,10 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # copper-to-NPTH-hole floor is the JLC "NPTH to Track" fab value, never below
     # the routing clearance.
     if npth_holes:
-        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        # extra_clearance covers geometry offset from the routed centerline
+        # (diff-pair P/N tracks ride +-(gap+width)/2 off it), matching how every
+        # other obstacle in that base map is inflated (issue #268).
+        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE) + extra_clearance
         block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
                                       npth_clr, config.grid_step,
                                       list(range(len(config.layers))))
@@ -1795,7 +1800,8 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config)
 
     # Add hole-to-hole clearance blocking for existing drills
-    add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set)
+    add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set,
+                             extra_clearance)
 
     vis_data = VisualizationData(
         blocked_cells=blocked_cells,

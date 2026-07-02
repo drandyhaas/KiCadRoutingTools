@@ -21,7 +21,8 @@ from geometry_utils import UnionFind
 from bresenham_utils import walk_line
 from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
                           add_rule_area_keepout_obstacles,
-                          _batch_cells_one_layer, _batch_vias)
+                          _batch_cells_one_layer, _batch_vias,
+                          block_track_cells_near_drills, _pad_has_copper)
 from plane_obstacle_builder import (
     _precompute_circle_offsets,
     _batch_block_circles_via, _batch_block_circles_cell
@@ -31,6 +32,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
+from single_ended_routing import _track_margin_for_width
 import routing_defaults as defaults
 
 
@@ -842,8 +844,13 @@ def _try_route_between_regions(
 
         # Try wider widths (skip min_track_width which we already did)
         for try_width in track_widths_narrow_first[1:]:
-            extra_margin_mm = (try_width - min_track_width) / 2
-            track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
+            # Same +1 quantization guard as route.py's _track_margin_for_width
+            # (issue #268): the obstacle stamp blocks cell CENTERS strictly inside
+            # the keep-out radius, so the outermost blocked cell sits up to ~one
+            # cell inside it; a bare ceil margin measured from that shell lets a
+            # widened trunk land tens of um inside the NPTH/copper floor.
+            track_margin = _track_margin_for_width(
+                try_width, min_track_width, config.grid_step)
 
             wider, _ = _try_route(
                 lo_src, hi_tgt, track_margin, iter_budget,
@@ -1219,15 +1226,21 @@ def build_base_obstacles(
             False
         )
 
-    # Block via placement near holes for hole-to-hole clearance
-    hole_clearance_grid = max(1, coord.to_grid_dist_safe(hole_to_hole_clearance + config.via_drill))
-
-    # Block via placement near ALL vias (including same-net) for hole-to-hole clearance
+    # Block via placement near ALL vias (including same-net) for hole-to-hole
+    # clearance, using each EXISTING via's actual drill: required centre distance
+    # is existing_drill/2 + new_drill/2 + h2h, not the equal-drill shortcut
+    # h2h + config.via_drill, which let a 0.15-drill repair via land 0.354mm from
+    # a 0.3-drill stitching via (needs 0.425 -- issue #274).
     # Via reuse is handled separately by snapping routes to existing vias
-    all_via_centers = [(coord.to_grid(via.x, via.y)) for via in pcb_data.vias]
-    if all_via_centers:
-        hole_circle_offsets = _precompute_circle_offsets(hole_clearance_grid * hole_clearance_grid)
-        _batch_block_circles_via(obstacles, all_via_centers, hole_circle_offsets)
+    via_centers_by_radius: Dict[int, List[Tuple[int, int]]] = {}
+    for via in pcb_data.vias:
+        vdrill = via.drill if via.drill and via.drill > 0 else config.via_drill
+        r = max(1, coord.to_grid_dist_safe(
+            hole_to_hole_clearance + vdrill / 2 + config.via_drill / 2))
+        via_centers_by_radius.setdefault(r, []).append(coord.to_grid(via.x, via.y))
+    for radius, centers in via_centers_by_radius.items():
+        hole_circle_offsets = _precompute_circle_offsets(radius * radius)
+        _batch_block_circles_via(obstacles, centers, hole_circle_offsets)
 
     # Block via placement near ALL through-hole pad holes (including same-net)
     # Via reuse at pads is handled separately by snapping routes to pad positions
@@ -1235,7 +1248,9 @@ def build_base_obstacles(
     pad_centers_by_radius: Dict[int, List[Tuple[int, int]]] = {}
     for pad_net_id, pads in pcb_data.pads_by_net.items():
         for pad in pads:
-            if '*.Cu' in pad.layers and pad.drill > 0:  # Through-hole pad with drill
+            # Any drilled pad: PTH barrels AND NPTH mounting holes (which often
+            # list only *.Mask) -- the drill goes through every layer (#268).
+            if pad.drill > 0:
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                 pad_hole_clearance_grid = max(1, coord.to_grid_dist_safe(hole_to_hole_clearance + pad.drill / 2 + config.via_drill / 2))
                 if pad_hole_clearance_grid not in pad_centers_by_radius:
@@ -1263,10 +1278,19 @@ def build_base_obstacles(
     # Block pads from non-plane nets on their respective layers
     # (plane net pads are excluded here - they're anchors; other plane nets' pads
     # will be blocked per-net in route_disconnected_regions)
+    npth_holes = []  # (x, y, drill) of no-copper holes -> NPTH track keep-out
     for pad_net_id, pads in pcb_data.pads_by_net.items():
         if pad_net_id in exclude_net_ids:
             continue
         for pad in pads:
+            # NPTH mounting holes have NO copper (even when the library lists
+            # *.Cu): the pad-rect block below would only enforce the routing
+            # clearance, but copper must stay the NPTH-to-track fab floor from
+            # the DRILL (issue #268) -- handled by the drill keep-out after
+            # this loop instead.
+            if pad.drill > 0 and not _pad_has_copper(pad):
+                npth_holes.append((pad.global_x, pad.global_y, pad.drill))
+                continue
             # Determine which layers this pad is on
             pad_layers_on = []
             if '*.Cu' in pad.layers:
@@ -1312,6 +1336,16 @@ def build_base_obstacles(
                 via_rect_cells = np.column_stack([via_gx_grid.ravel(), via_gy_grid.ravel()])
                 via_rect_cells = filter_cells_in_pad_rect(via_rect_cells, coord.grid_step, pad, via_expansion_mm)
                 obstacles.add_blocked_vias_batch(via_rect_cells)
+
+    # Track keep-out around NPTH (no-copper) drills on every layer at exactly
+    # the NPTH-to-track fab floor (issues #268/#233). No cushion: the floor is
+    # the hard fab requirement and cell centers at >= the radius stay free, so
+    # this blocks the minimum area that avoids real copper-to-hole violations.
+    if npth_holes:
+        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        block_track_cells_near_drills(obstacles, npth_holes, track_width,
+                                      npth_clr, config.grid_step,
+                                      list(range(num_layers)))
 
     # Block areas outside the board outline (supports non-rectangular boards)
     add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)
