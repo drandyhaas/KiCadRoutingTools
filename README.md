@@ -1085,9 +1085,6 @@ Features:
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
 - No design rules by region/area support
-- Greedy rip-up routing is sensitive to obstacle perturbation: a ~1% change in
-  blocked cells can swing completion noticeably on dense boards (a finer
-  `--grid-step` is the usual remedy)
 
 ## License
 
