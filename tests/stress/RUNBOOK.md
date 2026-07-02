@@ -407,6 +407,13 @@ grade stricter or you manufacture phantom grazes.
   recorded `# cwd=` can't overwrite the original run. `--skip-checks` drops the
   `check_*` steps (grade the final yourself); `--verbatim` replays superseded
   retries too (default prunes to the file-dependency chain).
+  - **Auto cap-opt (#267):** when the kept chain has a `bga_fanout` but no
+    recorded `place_fanout_clearance`, the replay injects one after the LAST
+    bga_fanout (in-place on its output, at that fanout's `--clearance`) — old
+    manifests recorded without the placement optimizer otherwise carry
+    cap-on-fanout-via PAD-VIA grazes to the final board (orangecrab: 16 → 0).
+    Both sides of an A/B get the same injection, so comparisons stay fair;
+    pass `--no-auto-cap-opt` for a literal replay of the recorded commands.
 
 - **Whole set, graded (full chain):** `python3 tests/stress/ab_replay_grade.py
   --set ~/Documents/kicad_stress_test/runs_set1 --out <wavedir> --label new
@@ -418,7 +425,10 @@ grade stricter or you manufacture phantom grazes.
   - **Baseline already exists:** `runs_setN/summary.json` is a graded wave from the
     last stress run (same schema), so to A/B current HEAD vs the last run you only
     run ONE new wave and `--compare` it against `runs_setN/summary.json` — no need
-    to check out old code.
+    to check out old code. Caveat: the recorded baseline predates auto cap-opt
+    injection, so on boards whose manifest lacked cap-opt that comparison mixes
+    the engine delta with the injected step — replay the baseline commit too (or
+    use `--no-auto-cap-opt`) when you need a pure engine A/B.
 
 - **Whole corpus, diff-pair stages only:** `python3 tests/stress/redo_diff_stage.py
   [boards...] [--jobs 4 --stagger 8] [--out-dir ~/Documents/diff2]`. Auto-detects
