@@ -216,11 +216,17 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
         if debug:
             print(f"          ({seg.start_x:.2f},{seg.start_y:.2f})->({seg.end_x:.2f},{seg.end_y:.2f}) {old_layer} -> {new_layer}")
 
-        # Record modification for file writing
+        # Record modification for file writing. Carry the net NAME too: KiCad 10
+        # files reference nets by name only, and matching by coordinates alone is
+        # ambiguous when two nets' fanout stubs share identical-geometry segments
+        # (stacked escape channels) -- the wrong net's segment got relabeled and
+        # left one segment on the wrong layer mid-run (issue #264).
+        net = pcb_data.nets.get(seg.net_id)
         segment_mods.append({
             'start': (seg.start_x, seg.start_y),
             'end': (seg.end_x, seg.end_y),
             'net_id': seg.net_id,
+            'net_name': net.name if net else '',
             'old_layer': old_layer,
             'new_layer': new_layer
         })

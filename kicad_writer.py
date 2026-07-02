@@ -528,26 +528,23 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
     def coord_key(x, y):
         return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS))
 
-    mod_lookup = {}
-    # Secondary lookup by coordinates only (for fallback when net_id doesn't match due to swaps)
+    # Per-net lookups: KiCad 9 segments carry a numeric net id, KiCad 10 segments
+    # carry the net NAME, so index mods under both. Values are LISTS in append
+    # order so chained swaps resolve to the final layer (last mod wins per net).
+    mod_lookup_by_id = {}
+    mod_lookup_by_name = {}
+    # Coordinate-only fallback (net changed between mod recording and writing,
+    # e.g. target swaps reassigned the stub's net).
     mod_lookup_by_coords = {}
     for mod in segment_mods:
         start_key = coord_key(mod['start'][0], mod['start'][1])
         end_key = coord_key(mod['end'][0], mod['end'][1])
-        key = (start_key, end_key, mod['net_id'])
         # Also store reverse order since segment endpoints can be swapped
-        key_rev = (end_key, start_key, mod['net_id'])
-        mod_lookup[key] = mod
-        mod_lookup[key_rev] = mod
-        # Coordinate-only lookup (list to handle multiple mods at same coords)
-        coord_only_key = (start_key, end_key)
-        coord_only_key_rev = (end_key, start_key)
-        if coord_only_key not in mod_lookup_by_coords:
-            mod_lookup_by_coords[coord_only_key] = []
-        mod_lookup_by_coords[coord_only_key].append(mod)
-        if coord_only_key_rev not in mod_lookup_by_coords:
-            mod_lookup_by_coords[coord_only_key_rev] = []
-        mod_lookup_by_coords[coord_only_key_rev].append(mod)
+        for ckey in ((start_key, end_key), (end_key, start_key)):
+            mod_lookup_by_id.setdefault(ckey + (mod['net_id'],), []).append(mod)
+            if mod.get('net_name'):
+                mod_lookup_by_name.setdefault(ckey + (mod['net_name'],), []).append(mod)
+            mod_lookup_by_coords.setdefault(ckey, []).append(mod)
 
     count = 0
 
@@ -558,7 +555,7 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
         r'\(width\s+[\d.]+\)\s*\n?\s*'
         r'\(layer\s+")([^"]+)("\)\s*\n?\s*'
-        r'\(net\s+(?:(\d+)|"[^"]*")\))',
+        r'\(net\s+(?:(\d+)|"([^"]*)")\))',
         re.MULTILINE
     )
 
@@ -570,26 +567,33 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         end_x = float(match.group(4))
         end_y = float(match.group(5))
         layer = match.group(6)
-        net_id = int(match.group(8)) if match.group(8) else 0
+        net_id = int(match.group(8)) if match.group(8) else None
+        net_name = match.group(9)  # KiCad 10: (net "name")
 
         start_key = coord_key(start_x, start_y)
         end_key = coord_key(end_x, end_y)
-        key = (start_key, end_key, net_id)
         coord_only_key = (start_key, end_key)
 
-        mod = None
-        # First try exact match by (coords, net_id)
-        if key in mod_lookup:
-            mod = mod_lookup[key]
-        # Fallback: try coordinate-only match
-        # This handles cases where net_id changed due to target swaps
-        # Only use fallback if the segment's current layer is one of the expected old_layers
-        elif coord_only_key in mod_lookup_by_coords:
-            mods_at_coords = mod_lookup_by_coords[coord_only_key]
-            # Check if current layer matches any old_layer in the chain
-            if any(m.get('old_layer') == layer for m in mods_at_coords):
-                # Use the last mod (final target layer for chained swaps)
-                mod = mods_at_coords[-1]
+        # First try an exact per-net match (numeric id for KiCad 9 files, net
+        # name for KiCad 10 files). Take the LAST mod so chained swaps land on
+        # the final layer. Matching by net matters: two nets can carry
+        # identical-geometry stub segments (stacked fanout escapes), and the
+        # coordinate-only fallback then applies one net's mod to the other's
+        # segment, leaving copper on the wrong layer mid-run (issue #264).
+        mods = None
+        if net_id is not None:
+            mods = mod_lookup_by_id.get(coord_only_key + (net_id,))
+        if mods is None and net_name is not None:
+            mods = mod_lookup_by_name.get(coord_only_key + (net_name,))
+        mod = mods[-1] if mods else None
+        # Fallback: coordinate match with the net left unmatched (the net was
+        # reassigned between recording and writing, e.g. by target swaps). Only
+        # accept mods whose old_layer equals THIS segment's current layer, so a
+        # twin segment of another net (different layer) never steals the mod.
+        if mod is None and coord_only_key in mod_lookup_by_coords:
+            cands = [m for m in mod_lookup_by_coords[coord_only_key]
+                     if m.get('old_layer') == layer]
+            mod = cands[-1] if cands else None
 
         if mod:
             new_layer = mod['new_layer']
