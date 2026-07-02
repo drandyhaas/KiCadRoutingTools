@@ -492,6 +492,18 @@ def generate_qfn_fanout(footprint: Footprint,
     else:
         foreign_pads = []
 
+    # EXISTING copper of the part's OWN nets, checked geometrically per stub:
+    # the obstacle map excludes ALL fanned nets (so a stub may touch its own
+    # net's copper), but that also hid a NEIGHBOURING chip's already-fanned
+    # stubs on a DIFFERENT fanned net -- two facing QFNs fanned back-to-back
+    # left foreign-net stub crossings in the gap between them (issue #257,
+    # usb_sniffer /T_USB_CLK x /T_USB_NXT). Only copper present BEFORE this
+    # fanout is in pcb_data, so this never blocks the part's own new stubs.
+    from geometry_utils import segment_to_segment_distance, point_to_segment_distance
+    _fanned_set = set(_fanned_net_ids)
+    _fanned_existing_segs = [s for s in pcb_data.segments if s.net_id in _fanned_set]
+    _fanned_existing_vias = [v for v in pcb_data.vias if v.net_id in _fanned_set]
+
     def _seg_grazes(p1, p2, net_id):
         # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
         if _obs_layer_idx is not None and not check_line_clearance(
@@ -504,6 +516,21 @@ def generate_qfn_fanout(footprint: Footprint,
             if pad.drill <= 0 and layer not in (pad.layers or []):
                 continue
             if _seg_hits_pad(p1[0], p1[1], p2[0], p2[1], pad, margin=margin):
+                return True
+        # Existing copper of the part's other fanned nets (issue #257).
+        for s in _fanned_existing_segs:
+            if s.net_id == net_id or s.layer != layer:
+                continue
+            if segment_to_segment_distance(
+                    p1[0], p1[1], p2[0], p2[1],
+                    s.start_x, s.start_y, s.end_x, s.end_y) \
+                    < s.width / 2 + track_width / 2 + clearance - 1e-6:
+                return True
+        for v in _fanned_existing_vias:
+            if v.net_id == net_id:
+                continue
+            if point_to_segment_distance(v.x, v.y, p1[0], p1[1], p2[0], p2[1]) \
+                    < v.size / 2 + track_width / 2 + clearance - 1e-6:
                 return True
         return False
 
