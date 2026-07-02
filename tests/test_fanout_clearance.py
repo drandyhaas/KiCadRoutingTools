@@ -134,12 +134,13 @@ def test_via_clear_fallback_rescues_stuck_caps():
                                   via_clear_fallback=False, **common)
     on = repair_fanout_clearance(parse_kicad_pcb(BOARD), BOARD,
                                  via_clear_fallback=True, **common)
-    # With the descent frozen, nothing clears without the fallback...
+    # With the descent frozen, caps stay stuck without the fallback (the only
+    # zero-budget candidate is the grid-snapped seed, which may clear the odd
+    # hairline track graze but no via)...
     assert off['unresolved'], "fixture should leave caps stuck without fallback"
-    assert off['resolved'] == []
-    # ...and the fallback resolves them (never makes things worse).
+    # ...and the fallback resolves strictly more of them.
     assert set(on['unresolved']) < set(off['unresolved'])
-    assert on['resolved']
+    assert set(on['resolved']) > set(off['resolved'])
 
 
 def test_via_clear_fallback_respects_hard_clearances():
@@ -179,6 +180,58 @@ def test_foreign_pad_other_side_smd_ignored():
     st.cap_foreign_pads[CAP] = [(pcx - 0.25, pcy - 0.25, pcx + 0.25, pcy + 0.25,
                                  FOREIGN, None)]
     assert st.pad_penalty(CAP, cap, cap.x, cap.y, cap.rot) > 1e-6
+
+
+def test_seed_track_graze_is_resolved():
+    """#278: a cap whose pad ALREADY grazes a foreign-net escape track at its
+    seed placement (the under-pad fanout routes through movable caps' zones on
+    purpose) is a violation to fix, not a baseline to preserve - the repair
+    must move the cap clear."""
+    pcb = parse_kicad_pcb(BOARD)
+    st = _new_repair(pcb)
+    cap = st.caps[CAP]
+    # Foreign-net track on the cap's side, running 50um inside pad 1's
+    # clearance zone (like ulx3s C19 vs GN3): a real PAD-SEGMENT graze.
+    pad = next(p for p in cap.pad_rects() if p[4] == GND)
+    graze_y = pad[1] - (0.1 / 2 + CLEAR) + 0.050   # track edge 50um short
+    seg = (pad[0] - 1.0, graze_y, pad[2] + 1.0, graze_y,
+           FOREIGN, 0.1 / 2 + CLEAR, cap.side)
+    pcb.segments = []          # isolate: this graze is the only copper issue
+    pcb.vias = []
+    st = _new_repair(pcb)
+    st.cap_segs[CAP] = [seg]
+    st.base_seg[CAP] = st.seg_penalty(CAP, st.caps[CAP],
+                                      st.caps[CAP].x, st.caps[CAP].y,
+                                      st.caps[CAP].rot)
+    assert st.base_seg[CAP] > 1e-6, "fixture should start with a seed graze"
+    assert st.graze_penalty(CAP, st.caps[CAP], st.caps[CAP].x,
+                            st.caps[CAP].y, st.caps[CAP].rot) > 1e-6
+    # A move away from the track (track sits at y < pad min-y) clears the
+    # penalty and costs less.
+    c = st.caps[CAP]
+    away = st.seg_penalty(CAP, c, c.x, c.y + 0.5, c.rot)
+    assert away <= 1e-6, "moving off the track should zero the penalty"
+    assert (st.cost(CAP, c, c.x, c.y + 0.5, c.rot)
+            < st.cost(CAP, c, c.x, c.y, c.rot)), \
+        "objective must prefer the graze-free position"
+
+
+def test_seg_to_rect_dist_exact():
+    """The exact rect-vs-segment distance replaces the centre+half-diagonal
+    model: an elongated pad no longer manufactures phantom grazes for a track
+    that is actually clear, and a real graze is measured at its true depth."""
+    from placement.fanout_clearance import _seg_to_rect_dist
+    rect = (0.0, 0.0, 2.0, 0.5)   # elongated pad rect
+    # Track along y=0.8: true gap 0.3 (half-diag model would call this ~0.73
+    # from centre vs req including 1.03 half-diagonal - a phantom graze).
+    assert abs(_seg_to_rect_dist(-1.0, 0.8, 3.0, 0.8, rect) - 0.3) < 1e-9
+    # Segment crossing the rect -> 0.
+    assert _seg_to_rect_dist(1.0, -1.0, 1.0, 1.0, rect) == 0.0
+    # Endpoint inside -> 0.
+    assert _seg_to_rect_dist(1.0, 0.25, 5.0, 5.0, rect) == 0.0
+    # Diagonal approach to a corner.
+    d = _seg_to_rect_dist(3.0, 1.5, 4.0, 1.5, rect)
+    assert abs(d - ((1.0 ** 2 + 1.0 ** 2) ** 0.5)) < 1e-9
 
 
 def test_mover_pad_short_is_hard_blocked():
@@ -227,5 +280,8 @@ if __name__ == '__main__':
     test_foreign_pad_other_side_smd_ignored()
     test_via_clear_fallback_rescues_stuck_caps()
     test_via_clear_fallback_respects_hard_clearances()
+    test_seed_track_graze_is_resolved()
+    test_seg_to_rect_dist_exact()
+    test_mover_pad_short_is_hard_blocked()
     test_mover_pad_short_is_hard_blocked()
     print("ALL PASS")

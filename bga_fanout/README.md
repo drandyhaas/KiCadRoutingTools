@@ -135,6 +135,13 @@ computes this automatically.
     For 0.8 mm pitch, `--via-size 0.35 --track-width 0.12 --clearance 0.1` works well.
   - Works for top- **and** bottom-side (B.Cu) BGAs - the via-less edge escape
     runs on the BGA's own layer.
+  - **Movable passives' pads are soft keep-outs** (#278): escapes prefer to
+    detour around foreign C/R/FB pads in the region (a wide cap between two
+    escape legs can't be moved anywhere by the cap-placement step) and only
+    graze one when boxed in - `place_fanout_clearance.py` then moves the cap.
+    Keep-out disks are stamped against the pad/via's true coordinate, so a
+    clear grid cell genuinely guarantees the clearance (no more few-µm
+    VIA-SEGMENT quantization grazes).
 
 ```bash
 # Dense BGA that the channel router can't fully escape (diff pairs escaped coupled)

@@ -57,6 +57,16 @@ class _Occ:
         self.nx = int((self.x1 - self.x0) / res) + 2
         self.ny = int((self.y1 - self.y0) / res) + 2
         self.grid = [bytearray(self.nx * self.ny) for _ in range(self.nl)]
+        # Soft keep-outs (movable passives' pads, #278): running here is legal
+        # but leaves a PAD-SEGMENT graze the cap-placement step may be unable
+        # to move away from (an 0805 doesn't fit between two escape legs), so
+        # routes prefer to avoid these cells and only pay when boxed in.
+        # soft_owner records the pad's net per cell (-1 once two nets share a
+        # cell): a route crossing its OWN cap's pad is no graze and pays
+        # nothing.
+        self.soft = [bytearray(self.nx * self.ny) for _ in range(self.nl)]
+        self.soft_owner = {}
+        self.has_soft = False
 
     def cell(self, x, y):
         return (int((x - self.x0) / self.res), int((y - self.y0) / self.res))
@@ -67,26 +77,34 @@ class _Occ:
     def inside(self, ix, iy):
         return 0 <= ix < self.nx and 0 <= iy < self.ny
 
-    def _disk(self, cx, cy, r):
-        rc = int(r / self.res) + 1
+    def _disk(self, x, y, r):
+        """Cells whose lattice point lies within r of the REAL point (x, y).
+
+        Membership is tested against the true coordinate, not the truncated
+        cell index: a via at y=70.999999 truncates a full cell low, shifting
+        its keepout disk by up to res and letting a route one cell past the
+        shifted disk graze the real via by up to res (issue #278).
+        """
+        fx = (x - self.x0) / self.res
+        fy = (y - self.y0) / self.res
+        cx, cy = int(fx), int(fy)
+        rc = int(r / self.res) + 2
         thr = (r / self.res) ** 2
         for dx in range(-rc, rc + 1):
             for dy in range(-rc, rc + 1):
-                if dx * dx + dy * dy <= thr:
-                    a, b = cx + dx, cy + dy
+                a, b = cx + dx, cy + dy
+                if (a - fx) ** 2 + (b - fy) ** 2 <= thr:
                     if 0 <= a < self.nx and 0 <= b < self.ny:
                         yield a, b
 
     def block_layer(self, li, x, y, r):
-        cx, cy = self.cell(x, y)
         g = self.grid[li]
         ny = self.ny
-        for a, b in self._disk(cx, cy, r):
+        for a, b in self._disk(x, y, r):
             g[a * ny + b] = 1
 
     def block_all(self, x, y, r):
-        cx, cy = self.cell(x, y)
-        for a, b in self._disk(cx, cy, r):
+        for a, b in self._disk(x, y, r):
             for li in range(self.nl):
                 self.grid[li][a * self.ny + b] = 1
 
@@ -99,6 +117,46 @@ class _Occ:
 
     def blocked(self, li, ix, iy):
         return self.grid[li][ix * self.ny + iy]
+
+    def mark_soft_layer(self, li, x, y, r, net_id):
+        g = self.soft[li]
+        ny = self.ny
+        for a, b in self._disk(x, y, r):
+            idx = a * ny + b
+            g[idx] = 1
+            key = (li, idx)
+            owner = self.soft_owner.get(key)
+            if owner is None:
+                self.soft_owner[key] = net_id
+            elif owner != net_id:
+                self.soft_owner[key] = -1
+        self.has_soft = True
+
+    def soft_foreign(self, li, ix, iy, net_id):
+        """True if (ix, iy) on layer li lies in a soft keep-out owned by a
+        DIFFERENT net (crossing one's own cap pad is not a graze)."""
+        idx = ix * self.ny + iy
+        if not self.soft[li][idx]:
+            return False
+        return self.soft_owner.get((li, idx)) != net_id
+
+    def seg_soft_hits(self, li, p, q, net_id, exempt=None):
+        """Number of sampled cells on the centerline p->q that lie in a
+        foreign-net soft keep-out on layer li (0 = the run leaves every
+        movable passive's pad fully clear). Same sampling as seg_clear."""
+        (x0, y0), (x1, y1) = p, q
+        n = int(max(abs(x1 - x0), abs(y1 - y0)) / (self.res * 0.5)) + 1
+        hits = 0
+        for i in range(n + 1):
+            t = i / n
+            ix, iy = self.cell(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+            if not self.inside(ix, iy):
+                continue
+            if exempt is not None and (ix, iy) in exempt:
+                continue
+            if self.soft_foreign(li, ix, iy, net_id):
+                hits += 1
+        return hits
 
     def seg_clear(self, li, p, q, exempt=None):
         """True if the track centerline p->q is clear on layer li.
@@ -352,6 +410,39 @@ def generate_underpad_escape(footprint: Footprint,
         is not one of the two runs the layer-blocking test sees."""
         return via_clears_pad_rects(x, y, v_half, clearance, locked_smd_pads)
 
+    # MOVABLE passives' pads (unlocked 2-pad C/R/FB) become SOFT keep-outs
+    # (#278). place_fanout_clearance moves these parts off fanout copper
+    # afterwards, so they must not hard-block escapes -- but a wide cap between
+    # two escape legs cannot be moved anywhere (ulx3s C19: 1.4mm pad vs a
+    # 1.6mm comb gap), so routes should graze them only when boxed in.
+    from bga_fanout.geometry import MOVABLE_PASSIVE_PREFIXES
+    for fp in pcb_data.footprints.values():
+        if fp.reference == footprint.reference:
+            continue
+        copper_pads = [p for p in fp.pads
+                       if any(str(l).endswith('.Cu') for l in p.layers)]
+        if not copper_pads:
+            continue
+        if (getattr(fp, 'locked', False)
+                or not fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
+                or len(copper_pads) > 2):
+            continue  # immovable: already a HARD obstacle above
+        for p in copper_pads:
+            if not (bounds[0] - _pad_margin <= p.global_x <= bounds[2] + _pad_margin
+                    and bounds[1] - _pad_margin <= p.global_y <= bounds[3] + _pad_margin):
+                continue
+            p_keep = max(p.size_x, p.size_y) / 2.0 + track_width / 2 + clearance
+            if p.drill and p.drill > 0:
+                for li in range(len(layers)):
+                    occ.mark_soft_layer(li, p.global_x, p.global_y, p_keep,
+                                        p.net_id)
+            else:
+                for lname in (p.layers or []):
+                    if lname in layer_set:
+                        occ.mark_soft_layer(layers.index(lname),
+                                            p.global_x, p.global_y, p_keep,
+                                            p.net_id)
+
     # Geometry helpers ---------------------------------------------------------
     bx0, by0 = occ.cell(grid.min_x, grid.min_y)
     bx1, by1 = occ.cell(grid.max_x, grid.max_y)
@@ -366,7 +457,7 @@ def generate_underpad_escape(footprint: Footprint,
         return min(p.global_x - grid.min_x, grid.max_x - p.global_x,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
-    def astar(sx, sy, home, route_layers, allow_via, via_ok=None):
+    def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -405,6 +496,14 @@ def generate_underpad_escape(footprint: Footprint,
                            (occ.blocked(L, cx, cy + dy) and (cx, cy + dy) not in home):
                             continue
                     step = 1.0 if (dx == 0 or dy == 0) else 1.6   # discourage zig-zag
+                    # Soft keep-out (#278): stepping through a movable
+                    # passive's pad zone is legal but leaves a graze the
+                    # cap-placement step may be unable to clear -- pay a
+                    # steep per-cell premium so routes detour when any
+                    # detour exists, and only graze when boxed in.
+                    if occ.has_soft and (nx, ny) not in home and \
+                            occ.soft_foreign(L, nx, ny, net_id):
+                        step += 4.0
                     nxt = (nx, ny, L)
                     ng = cg + step
                     if ng < g.get(nxt, 1e18):
@@ -456,12 +555,12 @@ def generate_underpad_escape(footprint: Footprint,
     n_fcu = 0
 
     def home_of(p):
-        sx, sy = occ.cell(p.global_x, p.global_y)
         # Exempt the ball's OWN pad+via keepout so the track can break out of its
         # own pad (the keepout ring is wider than the pad and would otherwise
         # trap a route). max(pad,via)_keep < pitch, so it never reaches a
-        # neighbouring pad.
-        return set(occ._disk(sx, sy, max(pad_keep, via_keep)))
+        # neighbouring pad. Same real-coordinate disk the blocking stamped, so
+        # the exemption covers it exactly.
+        return set(occ._disk(p.global_x, p.global_y, max(pad_keep, via_keep)))
 
     def commit(p, path):
         """Emit tracks + the via-in-pad for a found path and mark occupancy."""
@@ -569,7 +668,11 @@ def generate_underpad_escape(footprint: Footprint,
         # Two escape directions perpendicular to the axis; nearer boundary first.
         cand_e = sorted([(-ay, ax), (ay, -ax)], key=lambda e: boundary_dist(mx, my, e))
         homes = home_of(pp) | home_of(nn)
-        for e in cand_e:
+        # Two passes (#278): first demand corridors whose runs stay clear of
+        # every foreign movable-cap pad (soft keep-out); only if no such
+        # corridor exists anywhere accept a grazing one.
+        for strict in ((True, False) if occ.has_soft else (False,)):
+          for e in cand_e:
             ex, ey = e
             De = boundary_dist(mx, my, e)
             if De <= Lc + 0.01:
@@ -590,6 +693,11 @@ def generate_underpad_escape(footprint: Footprint,
                           my + De * ey + side * half_sp * ay)
                     if not (occ.seg_clear(L, p0, pc, exempt=homes)
                             and occ.seg_clear(L, pc, pe, exempt=homes)):
+                        ok = False
+                        break
+                    if strict and (
+                            occ.seg_soft_hits(L, p0, pc, pad.net_id, exempt=homes)
+                            or occ.seg_soft_hits(L, pc, pe, pad.net_id, exempt=homes)):
                         ok = False
                         break
                     segs.append((pad, p0, pc, pe))
@@ -639,7 +747,9 @@ def generate_underpad_escape(footprint: Footprint,
         ax, ay = ax / al, ay / al
         half_axis = al / 2.0
         run = max(0.3, 2.0 * half_sp)            # length of the clean parallel tail
-        for sgn in (1.0, -1.0):                  # escape direction along the axis
+        # Same soft keep-out preference as try_coupled (#278): soft-free first.
+        for strict in ((True, False) if occ.has_soft else (False,)):
+          for sgn in (1.0, -1.0):                # escape direction along the axis
             ex, ey = sgn * ax, sgn * ay
             De = boundary_dist(mx, my, (ex, ey))
             if De <= half_axis + run + 0.05:
@@ -674,6 +784,12 @@ def generate_underpad_escape(footprint: Footprint,
                     if not (all(occ.seg_clear(L, a, b, exempt=lh) for a, b in lead_segs)
                             and all(occ.seg_clear(L, a, b, exempt=th) for a, b in trail_segs)):
                         continue
+                    if strict and (
+                            any(occ.seg_soft_hits(L, a, b, lead.net_id, exempt=lh)
+                                for a, b in lead_segs)
+                            or any(occ.seg_soft_hits(L, a, b, trail.net_id, exempt=th)
+                                   for a, b in trail_segs)):
+                        continue
                     for segs, pad in ((lead_segs, lead), (trail_segs, trail)):
                         for a, b in segs:
                             if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6:
@@ -704,7 +820,8 @@ def generate_underpad_escape(footprint: Footprint,
                 inner_pads.append(p)
                 continue
             sx, sy = occ.cell(p.global_x, p.global_y)
-            path = astar(sx, sy, home_of(p), {top_idx}, allow_via=False)
+            path = astar(sx, sy, home_of(p), {top_idx}, allow_via=False,
+                         net_id=p.net_id)
             if path is not None:
                 commit(p, path)
                 n_fcu += 1
@@ -768,10 +885,10 @@ def generate_underpad_escape(footprint: Footprint,
             _via_ok = (lambda x, y, at_center, cs=_cs, vs=via_size:
                        via_site_ok(x, y, (cs if at_center else vs) / 2.0))
         path = astar(sx, sy, home_of(p), inner_layers, allow_via=True,
-                     via_ok=_via_ok)
+                     via_ok=_via_ok, net_id=p.net_id)
         if path is None and nl > 1:
             path = astar(sx, sy, home_of(p), set(range(nl)), allow_via=True,
-                         via_ok=_via_ok)
+                         via_ok=_via_ok, net_id=p.net_id)
         if path is None:
             failed.append(p.net_name)
             continue

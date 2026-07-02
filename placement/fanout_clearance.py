@@ -13,10 +13,13 @@ dropping vias straight down. That gives two complementary goals:
   * AVOID  - a cap pad must clear, by `clearance`, every real fanout via of a
              DIFFERENT net (these are the #130 violations), plus any foreign
              escape track on the cap's own copper side (escapes can land on the
-             bottom), plus any foreign-net COMPONENT pad (#235: a move may never
-             slide a cap pad onto a neighbour's pad -> a PAD-PAD short).
-             Same-net vias/pads are fine - a cap pad may sit right on one
-             (via-in-pad / same-net copper sharing).
+             bottom; the under-pad fanout deliberately routes through movable
+             caps' zones expecting THIS step to move them, #278), plus any
+             foreign-net COMPONENT pad (#235/#275: a move may never slide a cap
+             pad onto a neighbour's pad -> a PAD-PAD short). All three are
+             violations to FIX when present at the seed, not just to avoid
+             introducing. Same-net vias/pads are fine - a cap pad may sit right
+             on one (via-in-pad / same-net copper sharing).
   * ATTRACT - pull each cap pad toward the nearest BGA ball of its OWN net, so
              that a later GND/power via dropped at the ball also lands on the
              cap pad (one shared via connects ball + cap + plane).
@@ -43,10 +46,11 @@ from placement.utility import compute_footprint_bbox_local, snap_to_grid
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 EPS = 1e-6
 
-# Objective weights. foreign-via clearance dominates everything, then pulling
-# pads onto same-net balls, then a mild displacement regularizer (so caps that
-# are already fine and far from a same-net ball stay put). Cap-cap /
-# locked-part overlap is a HARD constraint (see hard_blocked), not weighted.
+# Objective weights. Foreign-copper clearance (via + track + pad grazes, see
+# graze_penalty) dominates everything, then pulling pads onto same-net balls,
+# then a mild displacement regularizer (so caps that are already fine and far
+# from a same-net ball stay put). Cap-cap / locked-part overlap is a HARD
+# constraint (see hard_blocked), not weighted.
 VIA_WEIGHT = 50.0
 ATTRACT_WEIGHT = 1.0
 DISPLACEMENT_WEIGHT = 0.3
@@ -105,6 +109,42 @@ def _point_to_seg_dist(px, py, x1, y1, x2, y2):
         return math.hypot(px - x1, py - y1)
     t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
     return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _segs_cross(ax, ay, bx, by, cx, cy, dx, dy):
+    """True if segments AB and CD properly intersect. Collinear overlaps are
+    left to the endpoint-distance fallback (an endpoint then lies ON the other
+    segment, giving distance 0 anyway)."""
+    def orient(px, py, qx, qy, rx, ry):
+        v = (qx - px) * (ry - py) - (qy - py) * (rx - px)
+        return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+    o1 = orient(ax, ay, bx, by, cx, cy)
+    o2 = orient(ax, ay, bx, by, dx, dy)
+    o3 = orient(cx, cy, dx, dy, ax, ay)
+    o4 = orient(cx, cy, dx, dy, bx, by)
+    return o1 != o2 and o3 != o4
+
+
+def _seg_to_rect_dist(x1, y1, x2, y2, rect):
+    """Exact distance from a segment to an axis-aligned rect (0 if touching
+    or crossing). The centre+half-diagonal model this replaces overestimates
+    the keep-out of elongated pads, which both missed real grazes and
+    manufactured phantom ones (#278)."""
+    rx0, ry0, rx1, ry1 = rect
+    if (rx0 <= x1 <= rx1 and ry0 <= y1 <= ry1) or \
+       (rx0 <= x2 <= rx1 and ry0 <= y2 <= ry1):
+        return 0.0
+    best = float('inf')
+    for ex1, ey1, ex2, ey2 in ((rx0, ry0, rx1, ry0), (rx1, ry0, rx1, ry1),
+                               (rx1, ry1, rx0, ry1), (rx0, ry1, rx0, ry0)):
+        if _segs_cross(x1, y1, x2, y2, ex1, ey1, ex2, ey2):
+            return 0.0
+        best = min(best,
+                   _point_to_seg_dist(x1, y1, ex1, ey1, ex2, ey2),
+                   _point_to_seg_dist(x2, y2, ex1, ey1, ex2, ey2),
+                   _point_to_seg_dist(ex1, ey1, x1, y1, x2, y2),
+                   _point_to_seg_dist(ex2, ey2, x1, y1, x2, y2))
+    return best
 
 
 class _Cap:
@@ -473,21 +513,24 @@ class _Repair:
         return pen
 
     def seg_penalty(self, ref, cap, x, y, rot):
-        """Sum of foreign-net, same-side track penetration for a placement
-        (pad modelled as its centre inflated by the pad half-diagonal). Uses
-        the per-cap pruned, already-same-side track list."""
+        """Sum of foreign-net, same-side track clearance shortfalls for a
+        placement, measured exactly (pad rect vs track centerline, #278).
+        halfw already includes the clearance, so a positive shortfall is a
+        real PAD-SEGMENT DRC violation. Uses the per-cap pruned,
+        already-same-side track list."""
         pen = 0.0
         segs = self.cap_segs[ref]
         for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-            cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
-            half_diag = math.hypot((bx1 - bx0) / 2.0, (by1 - by0) / 2.0)
             for x1, y1, x2, y2, snet, halfw, side in segs:
                 if snet == net:
                     continue
-                req = halfw + half_diag
-                d = _point_to_seg_dist(cx, cy, x1, y1, x2, y2)
-                if d < req - EPS:
-                    pen += (req - d)
+                # cheap reject: the segment's bbox can't reach the pad rect
+                if (min(x1, x2) > bx1 + halfw or max(x1, x2) < bx0 - halfw or
+                        min(y1, y2) > by1 + halfw or max(y1, y2) < by0 - halfw):
+                    continue
+                d = _seg_to_rect_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1))
+                if d < halfw - EPS:
+                    pen += (halfw - d)
         return pen
 
     def pad_penalty(self, ref, cap, x, y, rot):
@@ -522,11 +565,9 @@ class _Repair:
             total += min(nearest, self.capture_radius)
         return total
 
-    def hard_blocked(self, ref, cap, x, y, rot):
-        """True if a placement leaves the board or introduces/worsens a
-        same-side courtyard overlap (with a locked part OR another movable
-        cap) beyond its baseline. Caps may never overlap each other's
-        footprints, so any new cap-cap overlap is rejected outright."""
+    def _blocked_geom(self, ref, cap, x, y, rot):
+        """The cheap, purely geometric hard constraints: board edge and
+        introduced/worsened same-side courtyard or mover-pad overlaps."""
         rect = cap.rect(x, y, rot)
         if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                 or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
@@ -552,20 +593,53 @@ class _Repair:
                                    self.clearance) > \
                     self.base_cap_pad.get(pair, 0.0) + EPS:
                 return True
+        return False
+
+    def hard_blocked(self, ref, cap, x, y, rot, seg_pen=None, pad_pen=None):
+        """True if a placement leaves the board or introduces/worsens a
+        same-side courtyard overlap (with a locked part OR another movable
+        cap) beyond its baseline, or worsens a foreign track/pad graze past
+        its seed baseline. Caps may never overlap each other's footprints,
+        so any new cap-cap overlap is rejected outright.
+
+        seg_pen/pad_pen may be passed pre-computed (cost() shares them with
+        the objective so the hot candidate loop evaluates each once)."""
+        if self._blocked_geom(ref, cap, x, y, rot):
+            return True
         # no new overlap with a foreign-net track on the cap's side
-        if self.seg_penalty(ref, cap, x, y, rot) > self.base_seg.get(ref, 0.0) + EPS:
+        if seg_pen is None:
+            seg_pen = self.seg_penalty(ref, cap, x, y, rot)
+        if seg_pen > self.base_seg.get(ref, 0.0) + EPS:
             return True
         # no new overlap with a foreign-net component pad (#235): rejects the
         # cap-onto-neighbour-pad short the via/attraction objective could chase.
-        if self.pad_penalty(ref, cap, x, y, rot) > self.base_pad.get(ref, 0.0) + EPS:
+        if pad_pen is None:
+            pad_pen = self.pad_penalty(ref, cap, x, y, rot)
+        if pad_pen > self.base_pad.get(ref, 0.0) + EPS:
             return True
         return False
 
+    def graze_penalty(self, ref, cap, x, y, rot):
+        """Total foreign-copper clearance shortfall for a placement: via
+        (#130) + same-side track (#278 PAD-SEGMENT) + component pad (#275
+        PAD-PAD). Anything positive is a shipped DRC violation, so all three
+        are violations to FIX, not just baselines to preserve."""
+        return (self.via_penalty(cap, x, y, rot, self.cap_vias[ref])
+                + self.seg_penalty(ref, cap, x, y, rot)
+                + self.pad_penalty(ref, cap, x, y, rot))
+
     def cost(self, ref, cap, x, y, rot):
-        if self.hard_blocked(ref, cap, x, y, rot):
+        if self._blocked_geom(ref, cap, x, y, rot):
+            return float('inf')
+        seg_pen = self.seg_penalty(ref, cap, x, y, rot)
+        pad_pen = self.pad_penalty(ref, cap, x, y, rot)
+        if (seg_pen > self.base_seg.get(ref, 0.0) + EPS
+                or pad_pen > self.base_pad.get(ref, 0.0) + EPS):
             return float('inf')
         disp = math.hypot(x - cap.seed_x, y - cap.seed_y)
-        return (VIA_WEIGHT * self.via_penalty(cap, x, y, rot, self.cap_vias[ref])
+        graze = (self.via_penalty(cap, x, y, rot, self.cap_vias[ref])
+                 + seg_pen + pad_pen)
+        return (VIA_WEIGHT * graze
                 + ATTRACT_WEIGHT * self.attraction(cap, x, y, rot)
                 + DISPLACEMENT_WEIGHT * disp)
 
@@ -588,17 +662,19 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             via_clear_fallback: bool = True,
                             verbose: bool = False,
                             on_move=None) -> Dict:
-    """Nudge near-BGA decoupling caps off foreign-net fanout vias and toward
-    same-net balls. Run AFTER bga_fanout.py.
+    """Nudge near-BGA decoupling caps off foreign-net fanout copper (vias
+    #130, escape tracks #278, component pads #275) and toward same-net balls.
+    Run AFTER bga_fanout.py.
 
     Returns a dict with 'placements' (list of {reference,new_x,new_y,
     new_rotation} for moved caps), 'resolved', 'unresolved' (refs still
-    overlapping a foreign via), and 'bga_refs'.
+    grazing foreign copper), and 'bga_refs'.
 
     via_clear_fallback (#213): when True (default), any cap the normal cost
-    descent leaves grazing a foreign via is jumped to the nearest position that
-    fully clears it (still respecting every hard clearance). It is deliberately
-    NOT exposed on the CLI / GUI -- flip this argument in code to disable.
+    descent leaves grazing foreign copper is jumped to the nearest position
+    that fully clears it (still respecting every hard clearance). It is
+    deliberately NOT exposed on the CLI / GUI -- flip this argument in code to
+    disable.
 
     on_move, if given, is a callback invoked with the internal _Repair state
     once at the seed placement and again after every accepted cap move. It is
@@ -629,10 +705,12 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
         return {'placements': [], 'resolved': [], 'unresolved': [],
                 'bga_refs': st.bga_refs}
 
-    # Initial violators
+    # Initial violators: any foreign-copper clearance shortfall (via #130,
+    # track #278, pad #275) is a shipped DRC violation to fix.
     violators0 = [r for r, c in st.caps.items()
-                  if st.via_penalty(c, c.x, c.y, c.rot, st.cap_vias[r]) > EPS]
-    print(f"Caps initially overlapping a foreign via: {len(violators0)}"
+                  if st.graze_penalty(r, c, c.x, c.y, c.rot) > EPS]
+    print(f"Caps initially grazing foreign copper (via/track/pad): "
+          f"{len(violators0)}"
           + (f" ({', '.join(sorted(violators0))})" if violators0 else ""))
 
     # LOCKED parts are excluded from moving by design, but a foreign via inside
@@ -667,9 +745,9 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     budget = {r: max_displacement for r in st.caps}
     rotate = {r: False for r in st.caps}
     # process worst violators first
-    order = sorted(st.caps, key=lambda r: st.via_penalty(
-        st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot,
-        st.cap_vias[r]), reverse=True)
+    order = sorted(st.caps, key=lambda r: st.graze_penalty(
+        r, st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot),
+        reverse=True)
 
     for pass_num in range(1, max_passes + 1):
         moves = 0
@@ -695,13 +773,12 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                           f"({cap.x:.3f},{cap.y:.3f}) rot {cap.rot:g} "
                           f"cost {best[0]:.3f}")
 
-        residual = {r: st.via_penalty(st.caps[r], st.caps[r].x,
-                                      st.caps[r].y, st.caps[r].rot,
-                                      st.cap_vias[r])
+        residual = {r: st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                        st.caps[r].y, st.caps[r].rot)
                     for r in st.caps}
         still = [r for r, p in residual.items() if p > EPS]
         if not still:
-            print(f"All vias cleared after {pass_num} pass(es).")
+            print(f"All foreign-copper grazes cleared after {pass_num} pass(es).")
             break
         if moves == 0:
             # stuck: escalate budget / rotations for the remaining violators
@@ -715,8 +792,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                                     max_displacement_cap)
                     grown = True
             if not grown:
-                print(f"Stuck with {len(still)} cap(s) still overlapping a via "
-                      f"(at the displacement cap): {', '.join(sorted(still))}")
+                print(f"Stuck with {len(still)} cap(s) still grazing foreign "
+                      f"copper (at the displacement cap): {', '.join(sorted(still))}")
                 break
             if verbose:
                 print(f"  escalating budget/rotation for {len(still)} cap(s)")
@@ -733,8 +810,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     # is left as-is and reported unresolved (needs a via re-drop, not a move).
     if via_clear_fallback:
         stuck = [r for r in st.caps
-                 if st.via_penalty(st.caps[r], st.caps[r].x, st.caps[r].y,
-                                   st.caps[r].rot, st.cap_vias[r]) > EPS]
+                 if st.graze_penalty(r, st.caps[r], st.caps[r].x, st.caps[r].y,
+                                     st.caps[r].rot) > EPS]
         rots_all = ROTATIONS if allow_rotations else None
         for ref in stuck:
             cap = st.caps[ref]
@@ -743,7 +820,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             for cx, cy in _candidate_positions(cap, max_displacement_cap,
                                                step, grid_step):
                 for rot in rots:
-                    if st.via_penalty(cap, cx, cy, rot, st.cap_vias[ref]) > EPS:
+                    if st.graze_penalty(ref, cap, cx, cy, rot) > EPS:
                         continue
                     c = st.cost(ref, cap, cx, cy, rot)  # inf if hard-blocked
                     if c == float('inf'):
@@ -754,8 +831,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                 cap.x, cap.y, cap.rot = best[1], best[2], best[3]
                 disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
                 if verbose:
-                    print(f"  fallback: {ref} relocated to clear via at "
-                          f"disp {disp:.2f}mm -> ({cap.x:.3f},{cap.y:.3f}) "
+                    print(f"  fallback: {ref} relocated to clear foreign copper "
+                          f"at disp {disp:.2f}mm -> ({cap.x:.3f},{cap.y:.3f}) "
                           f"rot {cap.rot:g}")
 
     placements = []
@@ -767,13 +844,11 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             placements.append({'reference': ref, 'new_x': cap.x,
                                'new_y': cap.y, 'new_rotation': cap.rot})
         if (ref in violators0
-                and st.via_penalty(cap, cap.x, cap.y, cap.rot,
-                                   st.cap_vias[ref]) <= EPS):
+                and st.graze_penalty(ref, cap, cap.x, cap.y, cap.rot) <= EPS):
             resolved.append(ref)
     unresolved = [r for r in st.caps
-                  if st.via_penalty(st.caps[r], st.caps[r].x,
-                                    st.caps[r].y, st.caps[r].rot,
-                                    st.cap_vias[r]) > EPS]
+                  if st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                      st.caps[r].y, st.caps[r].rot) > EPS]
 
     print(f"Moved {len(placements)} cap(s); resolved {len(resolved)}/"
           f"{len(violators0)} initial violations; "

@@ -54,8 +54,10 @@ resistors/caps/jumpers.
 ## place_fanout_clearance.py — decoupling-cap clearance repair (issue #130)
 
 Run **after** `bga_fanout.py`. Nudges decoupling caps near a BGA so their
-pads clear every foreign-net fanout via (and any foreign track on the cap's
-own copper side), and pulls each pad toward the nearest **same-net** ball — so
+pads clear every foreign-net fanout via, every foreign track on the cap's
+own copper side, and every foreign component pad (#130/#278/#275 — a graze
+already present at the seed placement is a violation to fix, not a baseline
+to preserve), and pulls each pad toward the nearest **same-net** ball — so
 a power/GND via dropped at that ball later also lands on the cap pad (one
 shared via connects ball + cap + plane). Caps move as little as possible
 (90° rotations allowed), never overlap each other or a locked part, and a cap
