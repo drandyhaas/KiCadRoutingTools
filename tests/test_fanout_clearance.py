@@ -181,6 +181,42 @@ def test_foreign_pad_other_side_smd_ignored():
     assert st.pad_penalty(CAP, cap, cap.x, cap.y, cap.rot) > 1e-6
 
 
+def test_mover_pad_short_is_hard_blocked():
+    """#275 (fpga_sdram C11/FB1): a move that lands a cap pad on ANOTHER
+    MOVER's different-net pad must be hard-blocked even when the courtyard
+    baseline would tolerate the overlap (pre-existing tight seed placements).
+    The courtyard/seg/static-pad baselines are inflated so ONLY the new
+    mover-vs-mover pad guard can reject the pose."""
+    pcb = parse_kicad_pcb(BOARD)
+    st = _new_repair(pcb)
+    for ref, cap in st.caps.items():
+        for oref in st.cap_caps[ref]:
+            other = st.caps[oref]
+            for (ox0, oy0, ox1, oy1, onet) in other.pad_rects():
+                for (px0, py0, px1, py1, pnet) in cap.pad_rects():
+                    if pnet == onet:
+                        continue
+                    # pose that puts this pad's centre on the other mover's pad
+                    x = cap.x + (ox0 + ox1) / 2.0 - (px0 + px1) / 2.0
+                    y = cap.y + (oy0 + oy1) / 2.0 - (py0 + py1) / 2.0
+                    # neutralize every other hard constraint for this pose
+                    st.base_cap[frozenset((ref, oref))] = float('inf')
+                    for i, _r in st.cap_static[ref]:
+                        st.base_static[(ref, i)] = float('inf')
+                    st.base_seg[ref] = float('inf')
+                    st.base_pad[ref] = float('inf')
+                    assert st.hard_blocked(ref, cap, x, y, cap.rot), \
+                        f"{ref} pad allowed onto {oref} pad (different nets)"
+                    # sanity: the guard is baseline-relative, not absolute --
+                    # tolerating the same encroachment when present at seed
+                    st.base_cap_pad[frozenset((ref, oref))] = float('inf')
+                    assert not st.hard_blocked(ref, cap, x, y, cap.rot), \
+                        f"{ref}/{oref}: guard not baseline-relative"
+                    return
+    raise AssertionError("fixture has no same-side mover pair with "
+                         "different-net pads")
+
+
 if __name__ == '__main__':
     test_cap_rect_uses_absolute_rotation()
     test_foreign_via_is_cleared()
@@ -191,4 +227,5 @@ if __name__ == '__main__':
     test_foreign_pad_other_side_smd_ignored()
     test_via_clear_fallback_rescues_stuck_caps()
     test_via_clear_fallback_respects_hard_clearances()
+    test_mover_pad_short_is_hard_blocked()
     print("ALL PASS")

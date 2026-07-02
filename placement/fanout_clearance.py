@@ -82,6 +82,21 @@ def _point_to_rect_dist(px, py, rect):
     return math.hypot(dx, dy)
 
 
+def _pad_pair_shortfall(pads_a, pads_b, clearance):
+    """Sum of different-net pad clearance shortfalls between two movable parts'
+    pad rects (#275) -- the mover-vs-mover analogue of pad_penalty. Same-net
+    pad pairs are fine (shared rail copper may touch)."""
+    pen = 0.0
+    for (ax0, ay0, ax1, ay1, anet) in pads_a:
+        for (bx0, by0, bx1, by1, bnet) in pads_b:
+            if anet == bnet:
+                continue
+            gap = _rect_gap((ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1))
+            if gap < clearance - EPS:
+                pen += (clearance - gap)
+    return pen
+
+
 def _point_to_seg_dist(px, py, x1, y1, x2, y2):
     """Distance from a point to a line segment."""
     dx, dy = x2 - x1, y2 - y1
@@ -412,6 +427,21 @@ class _Repair:
         self.base_pad: Dict[str, float] = {
             ref: self.pad_penalty(ref, cap, cap.x, cap.y, cap.rot)
             for ref, cap in self.caps.items()}
+        # Baseline mover-vs-mover pad encroachment at the seed (#275). The
+        # cap-cap COURTYARD baseline above tolerates pre-existing overlaps,
+        # but overlap depth is a poor proxy for pad geometry: two 45-degree
+        # parts (fpga_sdram C11/FB1) kept courtyard overlap <= baseline while
+        # their different-net pads slid into contact -- a PAD-PAD short that
+        # #235's foreign_pads never sees because both parts are movers. Guard
+        # at pad level, relative to the seed, over the same pruned pairs.
+        self.base_cap_pad: Dict[frozenset, float] = {}
+        for ref, cap in self.caps.items():
+            seed_pads = cap.pad_rects()
+            for oref in self.cap_caps[ref]:
+                key = frozenset((ref, oref))
+                if key not in self.base_cap_pad:
+                    self.base_cap_pad[key] = _pad_pair_shortfall(
+                        seed_pads, self.caps[oref].pad_rects(), self.clearance)
 
     @staticmethod
     def _near_any(rect, bboxes, margin):
@@ -506,9 +536,21 @@ class _Repair:
             base = self.base_static.get((ref, idx), 0.0)
             if self._overlap(rect, r) > base + EPS:
                 return True
+        cand_pads = None
         for other_ref in self.cap_caps[ref]:
-            base = self.base_cap.get(frozenset((ref, other_ref)), 0.0)
-            if self._overlap(rect, self.caps[other_ref].rect()) > base + EPS:
+            pair = frozenset((ref, other_ref))
+            if self._overlap(rect, self.caps[other_ref].rect()) > \
+                    self.base_cap.get(pair, 0.0) + EPS:
+                return True
+            # no new/worse different-net pad encroachment against another
+            # MOVER at its current pose (#275); each accepted move preserves
+            # the pairwise seed baseline, so the invariant holds inductively
+            # as both parts move.
+            if cand_pads is None:
+                cand_pads = cap.pad_rects(x, y, rot)
+            if _pad_pair_shortfall(cand_pads, self.caps[other_ref].pad_rects(),
+                                   self.clearance) > \
+                    self.base_cap_pad.get(pair, 0.0) + EPS:
                 return True
         # no new overlap with a foreign-net track on the cap's side
         if self.seg_penalty(ref, cap, x, y, rot) > self.base_seg.get(ref, 0.0) + EPS:
