@@ -570,7 +570,7 @@ def generate_underpad_escape(footprint: Footprint,
         # the exemption covers it exactly.
         return set(occ._disk(p.global_x, p.global_y, max(pad_keep, via_keep)))
 
-    def snap_exit_end(pts, li, exempt=None):
+    def snap_exit_end(pts, li, exempt=None, net_id_for_snap=0):
         """Move an escape's outer free end onto the routing grid (issue #302).
 
         The occupancy lattice has an arbitrary origin, so A* exit points land
@@ -609,9 +609,17 @@ def generate_underpad_escape(footprint: Footprint,
         # rest), so a lateral re-aim rarely clears -- but the sub-grid-step
         # jog lives just past the boundary where only the fanned-out exits
         # run, comfortably spaced.
-        if occ.seg_clear(li, (bx, by), (gx, gy), exempt=exempt):
+        def _ok(p, q):
+            # same clearance contract as every A* move: the occupancy grid is
+            # inflated by obstacle half-size + track/2 + clearance. Also refuse
+            # movable-cap soft keep-outs (#278) -- a jog must not create a new
+            # graze for cap-opt to clean up.
+            return (occ.seg_clear(li, p, q, exempt=exempt) and
+                    not (occ.has_soft and occ.seg_soft_hits(li, p, q, net_id_for_snap,
+                                                            exempt=exempt)))
+        if _ok((bx, by), (gx, gy)):
             pts.append((gx, gy))
-        elif occ.seg_clear(li, (ax, ay), (gx, gy), exempt=exempt):
+        elif _ok((ax, ay), (gx, gy)):
             pts[-1] = (gx, gy)
 
     def commit(p, path):
@@ -641,7 +649,7 @@ def generate_underpad_escape(footprint: Footprint,
             if ri == 0 and pts:
                 pts[0] = (p.global_x, p.global_y)  # start exactly at the pad
             if ri == len(runs) - 1:
-                snap_exit_end(pts, li, exempt=home)
+                snap_exit_end(pts, li, exempt=home, net_id_for_snap=net_id)
             runs_pts.append(pts)
         for ri, (li, cells) in enumerate(runs):
             for (ix, iy) in cells:
