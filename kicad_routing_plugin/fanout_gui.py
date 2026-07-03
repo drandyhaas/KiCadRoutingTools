@@ -1246,6 +1246,9 @@ class FanoutTab(wx.Panel):
                 no_inner_top_layer=config['no_inner_top_layer'],
                 escape_method=config.get('escape_method', 'auto'),
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
+                # Shared Basic-tab per-layer costs (issue #288), same values the
+                # route/diff tabs use; None when the control is empty/invalid.
+                layer_costs=shared.get('layer_costs') or None,
             )
 
             self._apply_fanout_results(

@@ -1363,12 +1363,22 @@ class RoutingDialog(wx.Dialog):
         from .fanout_gui import FanoutTab
 
         def get_shared_params():
+            # Per-layer cost multipliers from the shared Basic-tab control, so
+            # the BGA fanout honors them like route/diff do (issue #288):
+            # negative = no escape copper on that layer (soon-to-be-plane),
+            # weights fill cheaper layers first. Empty/invalid -> [].
+            lc_text = self.layer_costs_ctrl.GetValue().strip()
+            try:
+                layer_costs = [float(c) for c in lc_text.split()] if lc_text else []
+            except ValueError:
+                layer_costs = []
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
                 'layers': self._get_selected_layers(),
+                'layer_costs': layer_costs,
                 'diff_pair_gap': self.differential_tab.diff_pair_gap.GetValue(),
                 # Escape stub ends are snapped to this grid so the router gets
                 # on-grid terminals (issue #149); use the Basic tab's grid step.
