@@ -276,6 +276,71 @@ _PTS_ARC_RE = (r'\((?:gr_)?arc\s+\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+'
                r'\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)')
 
 
+def _custom_pad_primitive_points(pad_text: str):
+    """Per-primitive (points, half_stroke) tuples from a custom pad's
+    (primitives ...) block, in the pad's local frame. Arcs (gr_poly pts arcs
+    AND standalone gr_arc) are linearized; gr_circle yields its axis extremes.
+    Used by the board-frame extent below."""
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return []
+    prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
+    out = []
+    for m2 in re.finditer(r'\(gr_(poly|circle|rect|line|arc)\b', prim):
+        block = prim[m2.start():find_matching_paren(prim, m2.start()) - 1]
+        wm = re.search(r'\(width\s+(-?[\d.]+)\)', block)
+        hw = (float(wm.group(1)) / 2.0) if wm else 0.0
+        pts = []
+        for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block):
+            pts.append((float(m.group(1)), float(m.group(2))))
+        for m in re.finditer(_PTS_ARC_RE, block):
+            s = (float(m.group(1)), float(m.group(2)))
+            mid = (float(m.group(3)), float(m.group(4)))
+            e = (float(m.group(5)), float(m.group(6)))
+            for p1, p2 in _arc_to_segments(s, mid, e):
+                pts.append(p1); pts.append(p2)
+        cm = re.search(r'\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+        if cm and m2.group(1) == 'circle':
+            cx, cy, ex, ey = map(float, cm.groups())
+            r = math.hypot(ex - cx, ey - cy)
+            pts += [(cx - r, cy), (cx + r, cy), (cx, cy - r), (cx, cy + r)]
+        elif m2.group(1) in ('rect', 'line'):
+            sm = re.search(r'\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+            if sm:
+                x1, y1, x2, y2 = map(float, sm.groups())
+                pts += [(x1, y1), (x2, y2)] if m2.group(1) == 'line' else \
+                       [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        if pts:
+            out.append((pts, hw))
+    return out
+
+
+def _custom_pad_board_extent(pad_text: str, abs_rotation_deg: float,
+                             anchor_x: float, anchor_y: float) -> Tuple[float, float]:
+    """Board-frame half-extents (|x|, |y|) of a custom pad's copper about its
+    anchor: primitive points (per-primitive stroke half-width) plus the anchor
+    rect's corners, all rotated by the pad's ABSOLUTE angle (KiCad negate
+    convention). Matches build_pcb_data_from_board's symmetric bounding box, so
+    a 27deg/45deg custom pad models the same axis-aligned copper on both paths
+    (sofle_pico D26/LED*, eurorack_pmod U1). Returns (0, 0) with no primitives.
+    """
+    prims = _custom_pad_primitive_points(pad_text)
+    if not prims:
+        return 0.0, 0.0
+    rad = math.radians(-abs_rotation_deg)
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+    ext_x = ext_y = 0.0
+    hx, hy = anchor_x / 2.0, anchor_y / 2.0
+    prims = prims + [([(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)], 0.0)]
+    for pts, hw in prims:
+        for vx, vy in pts:
+            bx = vx * cos_r - vy * sin_r
+            by = vx * sin_r + vy * cos_r
+            ext_x = max(ext_x, abs(bx) + hw)
+            ext_y = max(ext_y, abs(by) + hw)
+    return ext_x, ext_y
+
+
 def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
     """Half-extent (|x|, |y|) of a custom pad's real copper in the pad's local
     frame, from its (primitives ...) block. A custom pad's (size ...) is only the
@@ -516,6 +581,20 @@ def _resolve_pad_rect(size_x: float, size_y: float,
     return size_x, size_y, rect_rotation
 
 
+def _unescape_kicad_string(s: str) -> str:
+    """Undo KiCad s-expression string escapes (backslash and quote).
+
+    The file stores net names like ROT_RDY\\ROT_GPIO0 with the backslash
+    escaped; pcbnew returns the unescaped name, so keeping the raw text made
+    every such net name diff between the two parsers. Applied to DISPLAY
+    names only -- name_to_id lookups key on the raw file text, which every
+    in-file reference shares.
+    """
+    if '\\' not in s:
+        return s
+    return s.replace('\\\\', '\\').replace('\\"', '"')
+
+
 def find_matching_paren(content: str, open_idx: int) -> int:
     """Return the index just past the ``)`` matching the ``(`` at ``open_idx``.
 
@@ -727,6 +806,17 @@ def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
         # CW direction, sweep is negative
         sweep = end_ccw - 2 * math.pi
 
+    # Adaptive resolution: cap the chord sag at ~5um so a large-radius,
+    # wide-sweep arc (nebula_watch's ~350deg, r~20mm watch outline) doesn't
+    # under-reach its true extremes -- 16 fixed segments left the board
+    # outline 57um short of the real bounding box. Small arcs keep the old
+    # cost; the count is capped to stay bounded on huge radii.
+    if radius > 0:
+        max_step = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - 0.005 / radius)))
+        if max_step > 0:
+            num_segments = max(num_segments,
+                               min(512, int(math.ceil(abs(sweep) / max_step))))
+
     # Generate points along the arc, using exact start/end to preserve chaining
     points = [start]
     for i in range(1, num_segments):
@@ -858,6 +948,10 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
     line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(line_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+        # Skip degenerate zero-length lines (matches the pcbnew extraction):
+        # zynq_ad9364 has dot-lines on Edge.Cuts that only duplicate vertices.
+        if abs(x2 - x1) < 0.001 and abs(y2 - y1) < 0.001:
+            continue
         segments.append(((x1, y1), (x2, y2)))
 
     # gr_arc - approximate as polyline
@@ -1308,7 +1402,8 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
             net_name = m.group(1)
             if net_name in name_to_id:
                 continue  # Already seen
-            nets[synthetic_id] = Net(net_id=synthetic_id, name=net_name)
+            nets[synthetic_id] = Net(net_id=synthetic_id,
+                                     name=_unescape_kicad_string(net_name))
             name_to_id[net_name] = synthetic_id
             synthetic_id += 1
     else:
@@ -1317,7 +1412,9 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
         for m in re.finditer(net_pattern, content):
             net_id = int(m.group(1))
             net_name = m.group(2)
-            nets[net_id] = Net(net_id=net_id, name=net_name)
+            # Display name unescaped (pcbnew parity); raw name keeps resolving
+            # in-file references.
+            nets[net_id] = Net(net_id=net_id, name=_unescape_kicad_string(net_name))
             name_to_id[net_name] = net_id
 
     return nets, name_to_id
@@ -1455,12 +1552,21 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # covers the full local extent -- conservative (may over-block the
             # empty side of an asymmetric pad) but DRC-safe; modelling only the
             # anchor lets tracks graze copper that reaches past it.
+            custom_resolved = False
             if pad_shape == 'custom':
-                ext_x, ext_y = _custom_pad_local_extent(pad_text)
-                if ext_x > 0:
-                    size_x = max(size_x, 2.0 * ext_x)
-                if ext_y > 0:
-                    size_y = max(size_y, 2.0 * ext_y)
+                # pad_rotation: the file's (at ...) angle is the pad's ABSOLUTE
+                # board angle (same convention as _custom_pad_global_polygons /
+                # _resolve_pad_rect).
+                ext_bx, ext_by = _custom_pad_board_extent(
+                    pad_text, pad_rotation, size_x, size_y)
+                if ext_bx > 0 or ext_by > 0:
+                    # Board-frame symmetric box about the anchor, matching the
+                    # pcbnew builder's convention exactly (rect_rotation 0) --
+                    # a rotated custom pad otherwise modelled a different
+                    # rectangle on the two paths.
+                    size_x, size_y = 2.0 * ext_bx, 2.0 * ext_by
+                    rect_rotation = 0.0
+                    custom_resolved = True
 
             # Resolve the pad rectangle into board space. size_x/size_y are in
             # the pad's own frame; its absolute board orientation is
@@ -1471,7 +1577,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # common orthogonal cases bake the rotation into the dimensions so
             # all downstream axis-aligned geometry stays exact; genuine diagonal
             # pads keep a residual rect_rotation the obstacle/DRC geometry applies.
-            size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
+            if not custom_resolved:
+                size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
             # Extract layers - use findall to get all quoted layer names
             layers_section = re.search(r'\(layers\s+([^)]+)\)', pad_text)
@@ -1483,13 +1590,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             net_match = re.search(r'\(net\s+(\d+)\s+"([^"]*)"\)', pad_text)
             if net_match:
                 net_id = int(net_match.group(1))
-                net_name = net_match.group(2)
+                net_name = _unescape_kicad_string(net_match.group(2))
             else:
                 # KiCad 10: (net "name") with no numeric ID
                 net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', pad_text)
                 if net_match_v10 and name_to_id:
-                    net_name = net_match_v10.group(1)
-                    net_id = name_to_id.get(net_name, 0)
+                    net_id = name_to_id.get(net_match_v10.group(1), 0)
+                    net_name = _unescape_kicad_string(net_match_v10.group(1))
                 else:
                     net_id = 0
                     net_name = ""
@@ -1505,11 +1612,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # Extract drill size for through-hole pads. Oval/slot drills are
             # (drill oval w h); take max(w, h) so the pad keeps drill>0 (TH)
             # semantics instead of being misread as SMD (issue #106).
-            oval_match = re.search(r'\(drill\s+oval\s+([\d.]+)\s+([\d.]+)', pad_text)
+            oval_match = re.search(r'\(drill\s+oval\s+([\d.]+)(?:\s+([\d.]+))?', pad_text)
             drill_w = drill_h = 0.0
             if oval_match:
+                # (drill oval w) with a single value is legal and means w x w
+                # (dilemma J102) -- requiring two numbers parsed it as drill 0.
                 drill_w = float(oval_match.group(1))
-                drill_h = float(oval_match.group(2))
+                drill_h = float(oval_match.group(2)) if oval_match.group(2) else drill_w
                 drill_size = max(drill_w, drill_h)
             else:
                 drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
@@ -1585,7 +1694,8 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
 
     # Try KiCad 9 format first: (net <id>)
     # Strict field ordering: at → size → drill → layers → (free?) → net → uuid
-    via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # (via blind ...) / (via micro ...): the type token precedes (at ...)
+    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
         free_value = m.group(7)  # "yes", "no", or None
@@ -1609,7 +1719,7 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
         # name-style via when any numeric one existed (issue #79).
         # Use flexible matching between layers and net to handle new v10 fields
         # (tenting, covering, plugging, capping, filling) that appear after layers.
-        via_pattern_v10 = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        via_pattern_v10 = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
         for m in re.finditer(via_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             via = Via(
@@ -1753,23 +1863,29 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     for zone_content in _iter_zone_blocks(content):
         # Extract net id - try KiCad 9 format first, then KiCad 10
         net_match = re.search(r'\(net\s+(\d+)\)', zone_content)
+        net_match_v10 = None
         if net_match:
             net_id = int(net_match.group(1))
-        elif name_to_id:
-            # KiCad 10: (net "name") - first net reference in zone
-            net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', zone_content)
-            if not net_match_v10:
-                continue
-            net_name_v10 = net_match_v10.group(1)
-            net_id = name_to_id.get(net_name_v10, 0)
         else:
-            continue
+            # KiCad 10: (net "name") - first net reference in zone
+            if name_to_id:
+                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', zone_content)
+            if net_match_v10:
+                net_name_v10 = net_match_v10.group(1)
+                net_id = name_to_id.get(net_name_v10, 0)
+            elif '(keepout' in zone_content:
+                continue  # rule area, not copper (the builder skips them too)
+            else:
+                # No net clause at all: a NO-NET copper pour (net 0). It still
+                # pours real copper (nitrokey/vfo_ctrl decorative fills), and
+                # pcbnew keeps it -- dropping it under-modelled the board.
+                net_id = 0
 
         # Extract net name
         net_name_match = re.search(r'\(net_name\s+"([^"]*)"\)', zone_content)
         if net_name_match:
             net_name = net_name_match.group(1)
-        elif net_match is None and name_to_id:
+        elif net_match_v10 is not None:
             # KiCad 10: net name was already captured above
             net_name = net_name_v10
         else:
@@ -1976,11 +2092,34 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         return pcbnew.ToMM(val)
 
     # --- Build layer mappings ---
-    id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
+    # copper_id_to_name: COPPER ONLY -- the copper-layer enumeration and the
+    # pad '*.Cu' wildcard collapse iterate this; mixing non-copper tokens in
+    # broke both. id_to_name (below) adds the non-copper tokens for
+    # get_layer_name.
+    copper_id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
     for i in range(1, 31):
         layer_id = getattr(pcbnew, f'In{i}_Cu', None)
         if layer_id is not None:
-            id_to_name[layer_id] = f'In{i}.Cu'
+            copper_id_to_name[layer_id] = f'In{i}.Cu'
+    id_to_name = dict(copper_id_to_name)
+
+    # Non-copper layers: the .kicad_pcb s-expression always uses the CANONICAL
+    # short tokens (F.SilkS, B.Mask, Dwgs.User, ...) even when the user renamed
+    # the layer and even though pcbnew's display names are the modern long
+    # forms (F.Silkscreen) or the user names ("Bottom Solder, Bot Mask") -- a
+    # silk/mask zone's layer diffed against the file parse for exactly that.
+    for attr, token in (('F_SilkS', 'F.SilkS'), ('B_SilkS', 'B.SilkS'),
+                        ('F_Mask', 'F.Mask'), ('B_Mask', 'B.Mask'),
+                        ('F_Paste', 'F.Paste'), ('B_Paste', 'B.Paste'),
+                        ('F_Adhes', 'F.Adhes'), ('B_Adhes', 'B.Adhes'),
+                        ('F_Fab', 'F.Fab'), ('B_Fab', 'B.Fab'),
+                        ('F_CrtYd', 'F.CrtYd'), ('B_CrtYd', 'B.CrtYd'),
+                        ('Dwgs_User', 'Dwgs.User'), ('Cmts_User', 'Cmts.User'),
+                        ('Eco1_User', 'Eco1.User'), ('Eco2_User', 'Eco2.User'),
+                        ('Edge_Cuts', 'Edge.Cuts'), ('Margin', 'Margin')):
+        layer_id = getattr(pcbnew, attr, None)
+        if layer_id is not None:
+            id_to_name[layer_id] = token
 
     def get_layer_name(layer_id):
         if layer_id in id_to_name:
@@ -2011,8 +2150,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         layers = []
 
         # Check copper layers - use *.Cu wildcard if pad is on ALL copper layers
-        copper_on = [lname for lid, lname in id_to_name.items() if layer_set.Contains(lid)]
-        if len(copper_on) == len(id_to_name):
+        copper_on = [lname for lid, lname in copper_id_to_name.items() if layer_set.Contains(lid)]
+        if len(copper_on) == len(copper_id_to_name):
             layers.append('*.Cu')
         elif copper_on:
             layers.extend(copper_on)
@@ -2043,6 +2182,30 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             if has_b_paste:
                 layers.append('B.Paste')
 
+        # Silk layers - TH connector pads often list F.SilkS (a silk aperture
+        # ring); dropping them made every such pad diff against the file parse.
+        f_silk_id = getattr(pcbnew, 'F_SilkS', None)
+        b_silk_id = getattr(pcbnew, 'B_SilkS', None)
+        has_f_silk = f_silk_id is not None and layer_set.Contains(f_silk_id)
+        has_b_silk = b_silk_id is not None and layer_set.Contains(b_silk_id)
+        if has_f_silk and has_b_silk:
+            layers.append('*.SilkS')
+        else:
+            if has_f_silk:
+                layers.append('F.SilkS')
+            if has_b_silk:
+                layers.append('B.SilkS')
+
+        # Remaining documentation layers a pad can legally list (Dwgs.User etc.)
+        for attr, lname in (('Dwgs_User', 'Dwgs.User'), ('Cmts_User', 'Cmts.User'),
+                            ('Eco1_User', 'Eco1.User'), ('Eco2_User', 'Eco2.User'),
+                            ('F_Adhes', 'F.Adhes'), ('B_Adhes', 'B.Adhes'),
+                            ('F_Fab', 'F.Fab'), ('B_Fab', 'B.Fab'),
+                            ('F_CrtYd', 'F.CrtYd'), ('B_CrtYd', 'B.CrtYd')):
+            lid = getattr(pcbnew, attr, None)
+            if lid is not None and layer_set.Contains(lid):
+                layers.append(lname)
+
         return layers
 
     # --- Extract board info ---
@@ -2052,7 +2215,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     for lid, lname in id_to_name.items():
         if enabled.Contains(lid):
             layers_dict[lid] = lname
-            copper_layers.append(lname)
+            if lid in copper_id_to_name:
+                copper_layers.append(lname)
 
     # Board bounds from Edge.Cuts drawings. We use each drawing's bounding
     # box rather than GetStart()/GetEnd() because the latter only describes
@@ -2529,10 +2693,14 @@ def _extract_board_contours_from_pcbnew(board, to_mm):
                 if shape_type == getattr(pcbnew, 'SHAPE_T_SEGMENT', getattr(pcbnew, 'S_SEGMENT', -1)):
                     start = drawing.GetStart()
                     end = drawing.GetEnd()
-                    segments.append((
-                        (to_mm(start.x), to_mm(start.y)),
-                        (to_mm(end.x), to_mm(end.y))
-                    ))
+                    x1, y1 = to_mm(start.x), to_mm(start.y)
+                    x2, y2 = to_mm(end.x), to_mm(end.y)
+                    # Degenerate zero-length lines (zynq_ad9364 has a (0,0)-(0,0)
+                    # dot and two point-lines on Edge.Cuts) duplicate contour
+                    # endpoints and break the chain into no closed outline at all.
+                    if abs(x2 - x1) < 0.001 and abs(y2 - y1) < 0.001:
+                        continue
+                    segments.append(((x1, y1), (x2, y2)))
                 elif shape_type == getattr(pcbnew, 'SHAPE_T_RECT', getattr(pcbnew, 'S_RECT', -1)):
                     start = drawing.GetStart()
                     end = drawing.GetEnd()
@@ -2781,7 +2949,30 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                         tuple(sorted(p.layers)))
             b_pads = sorted(bf.pads, key=_pad_key)
             f_pads = sorted(ff.pads, key=_pad_key)
-            for bp, fp in zip(b_pads, f_pads):
+            # Sub-micron board/file coordinate differences can straddle the
+            # rounding above (e.g. -11.7875 -> -11.787 vs -11.788) and scramble
+            # the zip pairing into cascade mismatches (crkbd EXSW). Re-pair by
+            # nearest same-number pad within a small tolerance first; anything
+            # left over keeps the sorted order.
+            unmatched_f = list(f_pads)
+            pairs = []
+            leftovers_b = []
+            for bp in b_pads:
+                best = None
+                best_d = 0.02  # mm; well above float noise, below any pitch
+                for fp2 in unmatched_f:
+                    if fp2.pad_number != bp.pad_number:
+                        continue
+                    d = max(abs(fp2.global_x - bp.global_x), abs(fp2.global_y - bp.global_y))
+                    if d < best_d:
+                        best, best_d = fp2, d
+                if best is not None:
+                    unmatched_f.remove(best)
+                    pairs.append((bp, best))
+                else:
+                    leftovers_b.append(bp)
+            pairs.extend(zip(leftovers_b, unmatched_f))
+            for bp, fp in pairs:
                 if not close(bp.global_x, fp.global_x) or not close(bp.global_y, fp.global_y):
                     diffs.append(f"Footprint {ref} pad pairing mismatch (position): "
                                  f"board {bp.pad_number}@({bp.global_x:.3f},{bp.global_y:.3f}) "

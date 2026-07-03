@@ -78,7 +78,38 @@ BOARD = '''(kicad_pcb (version 20260206) (generator test)
   (pad "" np_thru_hole circle (at 0 0) (size 0.38 0.38) (drill 0.38) (layers "*.Cu" "*.Mask"))
  )
  (fp_line (start 5 5) (end 9 5) (stroke (width 0.1) (type solid)) (layer "User.1"))
+ (gr_line (start 12 12) (end 12 12) (stroke (width 0.1) (type solid)) (layer "Edge.Cuts"))
+ (footprint "test:slot1d" (layer "F.Cu") (at 25 25)
+  (property "Reference" "J9" (at 0 -2) (layer "F.SilkS"))
+  (pad "" np_thru_hole oval (at 0 0) (size 1.5 1.5) (drill oval 1.5) (layers "*.Cu" "*.Mask"))
+ )
+ (footprint "test:rot45" (layer "F.Cu") (at 25 5)
+  (property "Reference" "U2" (at 0 -2) (layer "F.SilkS"))
+  (pad "1" smd custom (at 0 0 45) (size 0.4 0.4)
+   (layers "F.Cu")
+   (net "SIG")
+   (options (clearance outline) (anchor rect))
+   (primitives
+    (gr_poly (pts (xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25)) (width 0) (fill yes))
+   )
+  )
+ )
  (segment (start 1 1) (end 2 1) (width 0.2) (layer "F.Cu") (net "") (uuid "seg-nonet-1"))
+ (segment (start 2 2) (end 3 2) (width 0.2) (layer "F.Cu") (net "N\\ESC") (uuid "seg-esc-1"))
+ (via blind (at 6 6) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net "SIG") (uuid "via-blind-1"))
+ (zone
+  (layer "F.Cu")
+  (uuid "zz-nonet")
+  (hatch edge 0.5)
+  (polygon (pts (xy 7 7) (xy 9 7) (xy 9 9) (xy 7 9)))
+ )
+ (zone
+  (layer "F.Cu")
+  (uuid "zz-keepout")
+  (hatch edge 0.5)
+  (keepout (tracks not_allowed) (vias not_allowed))
+  (polygon (pts (xy 11 7) (xy 13 7) (xy 13 9) (xy 11 9)))
+ )
  (zone
   (layers "F.Cu" "B.Cu")
   (uuid "zz")
@@ -134,13 +165,47 @@ def run():
               all(len(pcb.footprints[r].pads) == 1 for r in noref))
 
         # 5. multi-layer zone -> one Zone per copper layer
-        gnd_zones = [(z.layer) for z in pcb.zones]
+        gnd_zones = [z.layer for z in pcb.zones if z.uuid == 'zz']
         check("zone on both copper layers", sorted(gnd_zones) == ['B.Cu', 'F.Cu'])
 
         # 6. (net "") copper maps to net 0
         seg = [s for s in pcb.segments if abs(s.start_x - 1) < 1e-6 and abs(s.start_y - 1) < 1e-6]
         check("(net \"\") segment parsed", len(seg) == 1)
         check("(net \"\") maps to net 0", seg and seg[0].net_id == 0)
+
+        # 7. blind/micro vias parse (the type token precedes (at ...))
+        bl = [v for v in pcb.vias if abs(v.x - 6) < 1e-6 and abs(v.y - 6) < 1e-6]
+        check("(via blind ...) parsed", len(bl) == 1)
+
+        # 8. (drill oval w) single-dimension slot = w x w round
+        j9 = pcb.footprints['J9'].pads[0]
+        check("(drill oval 1.5) parses as 1.5", abs(j9.drill - 1.5) < 1e-9)
+
+        # 9. net-name escapes are undone for display (pcbnew parity)
+        esc = [n for n in pcb.nets.values() if 'ESC' in n.name]
+        check("net name unescaped", esc and esc[0].name == 'N\\ESC'.replace('\\\\', '\\'))
+
+        # 10. no-net copper zone kept (net 0), keepout rule area skipped
+        z_nonet = [z for z in pcb.zones if z.uuid == 'zz-nonet']
+        z_keep = [z for z in pcb.zones if z.uuid == 'zz-keepout']
+        check("no-net copper zone kept as net 0",
+              len(z_nonet) == 1 and z_nonet[0].net_id == 0)
+        check("keepout rule area not a copper zone", not z_keep)
+
+        # 11. degenerate zero-length Edge.Cuts line ignored (bounds unaffected)
+        bb = pcb.board_info.board_bounds
+        check("degenerate edge dot-line ignored",
+              abs(bb[0]) < 1e-6 and abs(bb[2] - 30) < 1e-6)
+
+        # 12. 45deg rotated custom pad: board-frame symmetric box, rect_rotation 0
+        #     (local 1.0x0.5 rect rotated 45 -> board extent 2*(0.75/sqrt(2)) each axis)
+        u2 = pcb.footprints['U2'].pads[0]
+        import math as _m
+        exp = 2 * (0.75 / _m.sqrt(2))
+        check("rotated custom pad size is board-frame",
+              abs(u2.size_x - exp) < 0.01 and abs(u2.size_y - exp) < 0.01)
+        check("rotated custom pad rect_rotation is 0",
+              abs(getattr(u2, 'rect_rotation', 0.0)) < 1e-9)
     finally:
         os.unlink(path)
 
