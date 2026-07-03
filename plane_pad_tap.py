@@ -745,7 +745,21 @@ def try_tap_pad(
         if r is not None:
             return r
 
-    # 2. Place a new via near the pad
+    # 2. Place a new via near the pad. When the net has zone outline(s), the
+    # via must land INSIDE one of them (issue #287, neptune): on a Voronoi-
+    # shared plane layer a via in the gap between cells touches no fill --
+    # DRC-clean but electrically floating -- while the tap reports success.
+    # Nets without zones (pure trace/via repair) are unconstrained as before.
+    zone_filter = None
+    _net_zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', None) or [])
+                       if z.net_id == net_id and getattr(z, 'polygon', None)
+                       and len(z.polygon) >= 3]
+    if _net_zone_polys:
+        from check_connected import point_in_polygon
+
+        def zone_filter(x, y):
+            return any(point_in_polygon(x, y, poly) for poly in _net_zone_polys)
+
     failed_positions: Set[Tuple[int, int]] = set()
     via_pos = find_via_position(
         pad, obstacles, coord, max_search_radius,
@@ -756,6 +770,7 @@ def try_tap_pad(
         verbose=verbose,
         failed_route_positions=failed_positions,
         pending_pads=pending_pads,
+        position_filter=zone_filter,
     )
     if via_pos is None:
         # No via site anywhere in the search radius. Before giving up, try

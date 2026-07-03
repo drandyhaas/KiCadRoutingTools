@@ -133,7 +133,8 @@ def find_via_position(
     verbose: bool = False,
     failed_route_positions: Optional[Set[Tuple[int, int]]] = None,
     pending_pads: Optional[List[Dict]] = None,
-    router: Optional[GridRouter] = None
+    router: Optional[GridRouter] = None,
+    position_filter=None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the closest valid position for a via near a pad.
@@ -157,6 +158,10 @@ def find_via_position(
         pending_pads: Optional list of pad_info dicts for pads that still need vias.
             Via positions too close to these pads' boundaries will be skipped to ensure
             routes can still reach them.
+        position_filter: Optional (x, y) -> bool predicate; positions failing it are
+            skipped. Used to keep a plane-tap via INSIDE its net's zone polygon on a
+            Voronoi-shared layer (issue #287) -- a via in the inter-cell gap reaches
+            no fill and leaves the pad floating while reporting success.
 
     Returns:
         (x, y) position for via, or None if no valid position found
@@ -165,7 +170,8 @@ def find_via_position(
 
     # Try pad center first - if not blocked, use it (no routing needed)
     if not obstacles.is_via_blocked(pad_gx, pad_gy):
-        return (pad.global_x, pad.global_y)
+        if position_filter is None or position_filter(pad.global_x, pad.global_y):
+            return (pad.global_x, pad.global_y)
 
     # Then try other positions WITHIN the pad's own copper (still via-in-pad, no
     # trace needed): the exact centre can be blocked by nearby other-net copper
@@ -188,6 +194,8 @@ def find_via_position(
                 bx, by = coord.to_float(gx, gy)
                 if _rotated and not point_in_pad_rect(bx, by, pad):
                     continue  # outside the (rotated) pad copper
+                if position_filter is not None and not position_filter(bx, by):
+                    continue  # e.g. outside the net's Voronoi cell (issue #287)
                 if not obstacles.is_via_blocked(gx, gy):
                     return (bx, by)
 
@@ -255,6 +263,13 @@ def find_via_position(
 
     for gx, gy in open_cells:
         dx, dy = gx - pad_gx, gy - pad_gy
+
+        # Outside the caller's allowed region (e.g. the net's own Voronoi
+        # cell/zone polygon, issue #287) - not a usable plane tap.
+        if position_filter is not None:
+            fx, fy = coord.to_float(gx, gy)
+            if not position_filter(fx, fy):
+                continue
 
         # Skip if too close to a previously failed route position
         if failed_route_positions and skip_radius_sq > 0:

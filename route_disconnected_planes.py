@@ -319,6 +319,32 @@ def route_planes(
             routing_layers = ['F.Cu', 'B.Cu']  # Fallback
     print(f"Routing layers: {', '.join(routing_layers)}")
 
+    # Issue #293 guard: snapshot every multi-pad SIGNAL net's connectivity so a
+    # regression this repair pass causes (rip cascades, tap side effects) is
+    # caught and reported loudly at the end instead of shipping silently. The
+    # per-net union-find over the whole board costs well under a second.
+    from check_connected import check_net_connectivity as _cnc293
+    _zones_by_net_293: Dict[int, list] = {}
+    for _z in (getattr(pcb_data, 'zones', None) or []):
+        _zones_by_net_293.setdefault(_z.net_id, []).append(_z)
+    _segs_293: Dict[int, list] = {}
+    for _s in pcb_data.segments:
+        _segs_293.setdefault(_s.net_id, []).append(_s)
+    _vias_293: Dict[int, list] = {}
+    for _v in pcb_data.vias:
+        _vias_293.setdefault(_v.net_id, []).append(_v)
+    _plane_net_ids = set(net_ids)
+    _pre_connected_293 = set()
+    for _nid, _pads in pcb_data.pads_by_net.items():
+        if _nid in _plane_net_ids or len(_pads) < 2:
+            continue
+        if not (_segs_293.get(_nid) or _vias_293.get(_nid) or _zones_by_net_293.get(_nid)):
+            continue  # unrouted before us; not ours to regress
+        _r = _cnc293(_nid, _segs_293.get(_nid, []), _vias_293.get(_nid, []),
+                     _pads, _zones_by_net_293.get(_nid, []))
+        if _r.get('connected'):
+            _pre_connected_293.add(_nid)
+
     all_new_segments: List[Dict] = []
     all_new_vias: List[Dict] = []
     all_debug_lines: List[str] = []
@@ -639,21 +665,46 @@ def route_planes(
                                                 f"{net_id} ({vtry}/{dtry}mm)")
                         break
                 if result.success and result.via is not None:
-                    all_new_vias.append(result.via)
-                    total_vias += 1
                     new_via_obj = Via(
                         x=result.via['x'], y=result.via['y'], size=result.via['size'],
                         drill=result.via['drill'], layers=['F.Cu', 'B.Cu'], net_id=net_id)
                     pcb_data.vias.append(new_via_obj)
                     new_seg_objs = []
                     for s in result.segments:
-                        all_new_segments.append(s)
                         seg_obj = Segment(
                             start_x=s['start'][0], start_y=s['start'][1],
                             end_x=s['end'][0], end_y=s['end'][1],
                             width=s['width'], layer=s['layer'], net_id=s['net_id'])
                         new_seg_objs.append(seg_obj)
                         pcb_data.segments.append(seg_obj)
+                    # VERIFY the forced via actually joins this pad to the plane
+                    # (issue #287, neptune): a "successful" via can land in the
+                    # gap between Voronoi cells -- DRC-clean, touching no fill --
+                    # so re-run the fill-aware union-find for the pad before
+                    # claiming success, and UNDO the via if it is still floating.
+                    _v_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+                    _v_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+                    _v_res = check_net_connectivity(net_id, _v_segs, _v_vias, net_pads,
+                                                    zones_by_net.get(net_id, []))
+                    _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
+                                pad.component_ref)
+                    _still = {(round(x, 3), round(y, 3), ref)
+                              for (x, y, _l, ref) in (_v_res.get('disconnected_pads') or [])}
+                    if _pad_key in _still:
+                        pcb_data.vias.remove(new_via_obj)
+                        for seg_obj in new_seg_objs:
+                            pcb_data.segments.remove(seg_obj)
+                        if name not in failed_repair_pads:
+                            failed_repair_pads.append(name)
+                            total_pads_repaired = max(0, total_pads_repaired - 1)
+                        print(f"{RED}STILL FLOATING (forced via at "
+                              f"({result.via['x']:.2f}, {result.via['y']:.2f}) reaches "
+                              f"no plane copper - removed){RESET}")
+                        continue
+                    all_new_vias.append(result.via)
+                    total_vias += 1
+                    for s in result.segments:
+                        all_new_segments.append(s)
                     shared_maps.note_pass_copper([new_via_obj], new_seg_objs)
                     if name in failed_repair_pads:
                         failed_repair_pads.remove(name)
@@ -685,6 +736,36 @@ def route_planes(
             print(f"  Graze nudge: re-bent grazing tap jog(s) on {_gz_nudge} net(s)")
         if _gz_swept:
             print(f"  Dead-end sweep: trimmed {_gz_swept} orphaned repair segment(s)")
+
+    # Issue #293: re-verify the signal nets that were connected when we started.
+    # Ripped nets are excluded (they are honestly reported + stripped for a
+    # reconnect pass); anything ELSE this pass broke is a repair bug -- surface
+    # it loudly so the pipeline reconnects it instead of shipping it silently.
+    _regressed_293 = []
+    if _pre_connected_293:
+        _segs_now: Dict[int, list] = {}
+        for _s in pcb_data.segments:
+            _segs_now.setdefault(_s.net_id, []).append(_s)
+        _vias_now: Dict[int, list] = {}
+        for _v in pcb_data.vias:
+            _vias_now.setdefault(_v.net_id, []).append(_v)
+        for _nid in sorted(_pre_connected_293):
+            if _nid in (ripped_net_ids or []):
+                continue
+            _pads = pcb_data.pads_by_net.get(_nid, [])
+            _r = _cnc293(_nid, _segs_now.get(_nid, []), _vias_now.get(_nid, []),
+                         _pads, _zones_by_net_293.get(_nid, []))
+            if not _r.get('connected'):
+                _net = pcb_data.nets.get(_nid)
+                _regressed_293.append(
+                    (_net.name if _net else f"net_{_nid}",
+                     len(_r.get('disconnected_pads') or [])))
+        if _regressed_293:
+            print(f"\n{RED}WARNING: this repair pass DISCONNECTED "
+                  f"{len(_regressed_293)} previously-connected signal net(s) "
+                  f"(issue #293) - re-route them before shipping:{RESET}")
+            for _nm, _ndisc in _regressed_293:
+                print(f"  {RED}{_nm}: {_ndisc} pad(s) now disconnected{RESET}")
 
     # Print summary
     print(f"\n{'='*60}")
