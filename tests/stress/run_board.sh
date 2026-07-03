@@ -74,11 +74,13 @@ Rules that matter most:
   the board is recorded as a FAILURE. Do not stop until the results JSON is written.
 - GRADE YOUR ACTUAL FINAL BOARD: the drc.final_violations (and connectivity) you
   report MUST come from running check_drc.py + check_connected.py on the EXACT
-  .kicad_pcb you write as the final output, AFTER the last board-mutating step
-  (including any 'fix'/rip-up/reconnect retry). Never report a grade taken from an
-  earlier step. KEEP THE BEST: if a late fix step INCREASES DRC vs the prior board,
-  discard it and keep the prior, cleaner board as your final — never ship a final
-  with more DRC than an earlier step already achieved.
+  .kicad_pcb produced by your LAST board-mutating step (including any 'fix'/rip-up/
+  reconnect retry). Never report a grade taken from an earlier step. This is a
+  stress test of the FULL CHAIN: we want the honest final result and to SEE the DRC
+  errors — do NOT revert to, cherry-pick, or ship a cleaner earlier board to lower
+  the count. If a step INCREASES DRC (e.g. a route.py --rip-existing-nets fix, #284),
+  that is a valuable finding: keep it as your final, report the true (higher) number,
+  and record the regressing step + command in the issues list.
 
 When fully done:
   1. Write the results JSON to $RESULT (full RUNBOOK schema).
