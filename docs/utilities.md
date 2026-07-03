@@ -500,6 +500,16 @@ Options:
   --grid-step         Routing grid step in mm (default: 0.1). Escape stub ends
                       are snapped to this grid so the router gets on-grid
                       terminals; MATCH the --grid-step you pass to route.py
+  --escape-method     auto (default), channel, or underpad. "channel" is the
+                      45-stub + channel router; "underpad" vias each ball in
+                      its pad and routes under the pad field (dense arrays);
+                      "auto" runs channel and, if it drops any ball, retries
+                      with underpad and keeps whichever escapes more
+  --layer-costs       One value per --layers entry, matching route.py semantics:
+                      negative = forbidden (no escape copper there, e.g. a
+                      soon-to-be-plane inner layer), otherwise a weight in
+                      [1.0, 1000] - cheaper layers are filled first and costly
+                      layers keep only overflow escapes
 ```
 
 Escape stub ends are snapped to the `--grid-step` grid, and the decorative

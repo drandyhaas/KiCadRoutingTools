@@ -1540,8 +1540,9 @@ def generate_bga_fanout(footprint: Footprint,
                         via_drill: float = 0.3,
                         check_for_previous: bool = False,
                         no_inner_top_layer: bool = False,
-                        escape_method: str = 'channel',
-                        grid_step: float = 0.0) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        escape_method: str = 'auto',
+                        grid_step: float = 0.0,
+                        layer_costs: Optional[List[float]] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -1566,7 +1567,9 @@ def generate_bga_fanout(footprint: Footprint,
         via_drill: Drill size for vias (default 0.2mm)
         check_for_previous: If True, skip pads that already have fanout tracks
         no_inner_top_layer: If True, inner pads cannot use F.Cu (top layer)
-        escape_method: 'channel' (default) is the 45-stub + channel router (with
+        escape_method: 'auto' (default) runs the channel router and, if it drops
+            any ball, retries with the under-pad grid escape and keeps whichever
+            escapes more (issue #288). 'channel' is the 45-stub + channel router (with
             differential-pair support). 'underpad' is the dense-array grid escape
             (issue #122): every signal ball drops a via in its pad and routes
             straight UNDER the pad field on an inner layer, jogging into a
@@ -1601,9 +1604,53 @@ def generate_bga_fanout(footprint: Footprint,
             force_escape_direction=force_escape_direction, rebalance_escape=rebalance_escape,
             via_size=via_size, via_drill=via_drill, check_for_previous=check_for_previous,
             no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
-            grid_step=grid_step)
+            grid_step=grid_step, layer_costs=layer_costs)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
+
+    # --layer-costs (issue #288): same semantics as route.py -- a NEGATIVE cost
+    # forbids the layer (no escape copper placed there; e.g. a soon-to-be-plane
+    # inner layer), a positive cost >= 1.0 is a preference weight. The channel
+    # engine tries layers in list order, so its non-top layers are re-sorted
+    # cheapest-first (the top layer stays first: edge escapes are hardwired to
+    # it). The under-pad engine keeps the user's physical order (its via spans
+    # use layers[0]/layers[-1]) and applies only the forbidden-layer exclusion.
+    underpad_layers = layers
+    balance_layers = layers
+    if layer_costs:
+        if len(layer_costs) != len(layers):
+            raise ValueError(f"--layer-costs needs one value per layer "
+                             f"({len(layers)} layers, got {len(layer_costs)})")
+        for lname, cost in zip(layers, layer_costs):
+            if cost >= 0 and (cost < 1.0 or cost > 1000):
+                raise ValueError(f"Layer cost for {lname} must be negative "
+                                 f"(forbidden) or between 1.0 and 1000, got {cost}")
+        if layer_costs[0] < 0:
+            raise ValueError(f"The top escape layer ({layers[0]}) cannot be "
+                             f"forbidden - edge escapes are placed on it")
+        keep = [(l, c) for l, c in zip(layers, layer_costs) if c >= 0]
+        dropped_layers = [l for l, c in zip(layers, layer_costs) if c < 0]
+        if dropped_layers:
+            print(f"  Layer costs: excluding forbidden layer(s) "
+                  f"{', '.join(dropped_layers)} from the fanout")
+        underpad_layers = [l for l, _ in keep]
+        # The even-distribution rebalance would spread escapes right back onto
+        # the costly layers the greedy assignment just avoided, so it only
+        # balances across the cheapest tier; costlier layers keep only the
+        # overflow routes the greedy pass could not fit elsewhere.
+        min_cost = min(c for _, c in keep)
+        balance_layers = [l for l, c in keep if c <= min_cost + 1e-9]
+        if keep[0][0] not in balance_layers:
+            # rebalance treats its first entry as the top layer (edge escapes)
+            balance_layers = [keep[0][0]] + balance_layers
+        if escape_method == 'underpad':
+            layers = underpad_layers
+        else:
+            layers = [keep[0][0]] + [l for l, _ in
+                                     sorted(keep[1:], key=lambda lc: lc[1])]
+            if layers != underpad_layers:
+                print(f"  Layer costs: channel escape layer preference: "
+                      f"{' > '.join(layers)}")
 
     # Fab-floor clamp (issue #223): an escape stub thinner than the board's
     # minimum manufacturable track width is un-routable at the stated fab class
@@ -1992,9 +2039,11 @@ def generate_bga_fanout(footprint: Footprint,
             print(f"  Validated: No collisions")
             collisions_remaining = 0
 
-        # Post-resolution layer rebalancing for even distribution
-        if collisions_remaining == 0 and len(layers) > 1:
-            rebalanced_count = rebalance_layers(routes, tracks, existing_tracks, layers, min_spacing)
+        # Post-resolution layer rebalancing for even distribution. With
+        # --layer-costs this only balances across the cheapest tier so costly
+        # (soon-to-be-plane) layers keep only the greedy pass's overflow (#288).
+        if collisions_remaining == 0 and len(balance_layers) > 1:
+            rebalanced_count = rebalance_layers(routes, tracks, existing_tracks, balance_layers, min_spacing)
             if rebalanced_count > 0:
                 print(f"  Rebalanced {rebalanced_count} routes for even layer distribution")
 
@@ -2153,6 +2202,35 @@ def generate_bga_fanout(footprint: Footprint,
               f"would short a foreign track (issue #123); retry with smaller "
               f"--via-size / --track-width / --clearance")
 
+    # Under-pad auto-fallback (issue #288). On dense/locked-neighbour arrays the
+    # channel engine deterministically drops balls the under-pad grid escape
+    # handles (ecp5_mini HyperRAM 11/14 -> 14/14, icepi_zero ECP5 120/124 ->
+    # 124/124). When the channel pass dropped any ball, re-run with underpad and
+    # keep whichever escapes more; ties keep the channel result (surface
+    # routing, no via-in-pad).
+    if failed_nets and escape_method == 'auto':
+        print(f"\n  Channel escape dropped {len(failed_nets)} ball(s) "
+              f"({', '.join(failed_nets)}) - retrying with the under-pad grid "
+              f"escape (issue #288)...")
+        up_tracks, up_vias, up_vias_rm, up_failed = generate_bga_fanout(
+            footprint, pcb_data, net_filter=net_filter,
+            diff_pair_patterns=diff_pair_patterns, layers=underpad_layers,
+            track_width=track_width, clearance=clearance,
+            diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
+            primary_escape=primary_escape,
+            force_escape_direction=force_escape_direction,
+            rebalance_escape=rebalance_escape,
+            via_size=via_size, via_drill=via_drill,
+            check_for_previous=check_for_previous,
+            no_inner_top_layer=no_inner_top_layer, escape_method='underpad',
+            grid_step=grid_step)
+        if len(up_failed) < len(failed_nets):
+            print(f"  Under-pad escape wins: {len(failed_nets)} -> "
+                  f"{len(up_failed)} dropped ball(s); using it")
+            return up_tracks, up_vias, up_vias_rm, up_failed
+        print(f"  Under-pad escape did not improve ({len(up_failed)} dropped) - "
+              f"keeping the channel result")
+
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
@@ -2202,17 +2280,26 @@ def main():
     parser.add_argument('--no-inner-top-layer', action='store_true',
                         help='Prevent inner pads from using F.Cu (top layer). '
                              'Use when there is not enough clearance on top layer for inner routes.')
-    parser.add_argument('--escape-method', choices=['channel', 'underpad'], default='channel',
-                        help='Fanout engine (default: channel). "channel" = 45-stub + '
+    parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad'], default='auto',
+                        help='Fanout engine (default: auto). "channel" = 45-stub + '
                              'channel router with diff-pair support. "underpad" = dense-array '
                              'grid escape (issue #122): each signal vias in its pad and routes '
                              'under the pad field on inner layers, escaping fully-populated '
                              'arrays (e.g. ulx3s 22x22) the channel router cannot. Use a small '
-                             'via/track for dense pitches (e.g. via 0.35, track 0.12 at 0.8mm).')
+                             'via/track for dense pitches (e.g. via 0.35, track 0.12 at 0.8mm). '
+                             '"auto" = channel first, and if it drops any ball, retry with '
+                             'underpad and keep whichever escapes more (issue #288).')
     parser.add_argument('--grid-step', type=float, default=0.1,
                         help='Routing grid step in mm (default: 0.1). Escape stub ends are '
                              'snapped to this grid so the router gets on-grid terminals (issue '
                              '#149); MATCH the --grid-step you pass to route.py.')
+    parser.add_argument('--layer-costs', type=float, nargs='+', default=None,
+                        help='Per-layer cost, one value per --layers entry, matching '
+                             'route.py semantics (issue #288): negative = forbidden (no '
+                             'escape copper on that layer, e.g. a soon-to-be-plane inner '
+                             'layer), otherwise a weight in [1.0, 1000] - the channel '
+                             'engine fills cheaper layers first. Pass the same values '
+                             'you give route.py --layer-costs.')
 
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
@@ -2272,7 +2359,8 @@ def main():
         check_for_previous=args.check_for_previous,
         no_inner_top_layer=args.no_inner_top_layer,
         escape_method=args.escape_method,
-        grid_step=args.grid_step
+        grid_step=args.grid_step,
+        layer_costs=args.layer_costs
     )
 
     if tracks:

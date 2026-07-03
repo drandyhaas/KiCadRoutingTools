@@ -917,7 +917,9 @@ class BGAOptionsPanel(wx.Panel):
             'rebalance_escape': self.rebalance_escape.GetValue(),
             'check_for_previous': self.check_previous.GetValue(),
             'no_inner_top_layer': self.no_inner_top.GetValue(),
-            'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'channel',
+            # Unchecked = 'auto': channel first, under-pad retry when the
+            # channel engine drops balls (issue #288) - same as the CLI default.
+            'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'auto',
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -1242,7 +1244,7 @@ class FanoutTab(wx.Panel):
                 via_drill=via_drill,
                 check_for_previous=config['check_for_previous'],
                 no_inner_top_layer=config['no_inner_top_layer'],
-                escape_method=config.get('escape_method', 'channel'),
+                escape_method=config.get('escape_method', 'auto'),
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
             )
 

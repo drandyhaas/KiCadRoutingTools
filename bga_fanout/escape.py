@@ -266,6 +266,34 @@ def get_alternate_channels_for_pad(pad_x: float, pad_y: float,
         return candidates[:1]
 
 
+def edge_pair_escape_dir(p_pad_x: float, p_pad_y: float,
+                         n_pad_x: float, n_pad_y: float,
+                         edge_dir_p: str, edge_dir_n: str,
+                         grid: BGAGrid) -> str:
+    """Escape direction for a diff pair with BOTH pads on the outer ring.
+
+    The escape must be PERPENDICULAR to the pair axis: a same-row pair escaping
+    'left'/'right' (along the row) collapses both converge legs onto the row
+    line -- the inner leg runs straight through its partner's pad and the outer
+    leg doubles back over itself (kuchen U1 T15/T16 DVI_D2 short, #288). That
+    happened because is_edge_pad reports a CORNER pad by its column direction
+    ('right') even when the pair lies along the bottom row; prefer whichever
+    leg's edge direction is perpendicular to the axis, falling back to the
+    nearer perpendicular edge when both legs are corners.
+    """
+    pads_horizontal = abs(p_pad_x - n_pad_x) > abs(p_pad_y - n_pad_y)
+    good = ('up', 'down') if pads_horizontal else ('left', 'right')
+    if edge_dir_p in good:
+        return edge_dir_p
+    if edge_dir_n in good:
+        return edge_dir_n
+    center_x = (p_pad_x + n_pad_x) / 2
+    center_y = (p_pad_y + n_pad_y) / 2
+    if pads_horizontal:
+        return 'up' if (center_y - grid.min_y) <= (grid.max_y - center_y) else 'down'
+    return 'left' if (center_x - grid.min_x) <= (grid.max_x - center_x) else 'right'
+
+
 def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
                           n_pad_x: float, n_pad_y: float,
                           grid: BGAGrid,
@@ -291,8 +319,9 @@ def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
     is_edge_n, edge_dir_n = is_edge_pad(n_pad_x, n_pad_y, grid)
 
     if is_edge_p and is_edge_n:
-        # Both pads on edge - use the common edge direction
-        return None, edge_dir_p
+        # Both pads on edge - escape perpendicular to the pair axis (#288)
+        return None, edge_pair_escape_dir(p_pad_x, p_pad_y, n_pad_x, n_pad_y,
+                                          edge_dir_p, edge_dir_n, grid)
 
     # Check for "half-edge" pair: one pad on edge, one inner
     if is_edge_p or is_edge_n:
@@ -410,8 +439,12 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
         is_edge_n, edge_dir_n = is_edge_pad(n_pad.global_x, n_pad.global_y, grid)
 
         if is_edge_p and is_edge_n:
-            # Both on edge - fixed assignment on edge_layer
-            edge_dir = edge_dir_p
+            # Both on edge - fixed assignment on edge_layer, escaping
+            # perpendicular to the pair axis (#288: a corner pad's edge_dir
+            # can point ALONG the row/column the pair lies on).
+            edge_dir = edge_pair_escape_dir(
+                p_pad.global_x, p_pad.global_y, n_pad.global_x, n_pad.global_y,
+                edge_dir_p, edge_dir_n, grid)
             assignments[pair_id] = (None, edge_dir)
             # Track occupancy - edge pairs exit at their center position
             if edge_dir in ['left', 'right']:

@@ -153,7 +153,11 @@ def main():
            '--nets', '*', '!GND', '!+3V3', '!+1V2',
            '--diff-pairs', '*_P', '*_N',
            '--track-width', str(TRACK_W), '--clearance', '0.1',
-           '--via-size', '0.45', '--via-drill', '0.2', '--diff-pair-gap', str(GAP)]
+           '--via-size', '0.45', '--via-drill', '0.2', '--diff-pair-gap', str(GAP),
+           # This test grades the CHANNEL engine's stub quality (grid snap,
+           # layer spread, coupling); the default 'auto' would switch this
+           # board to the under-pad engine (channel drops 7 balls, #288).
+           '--escape-method', 'channel']
     res = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     summary = next((l for l in res.stdout.splitlines() if 'JSON_SUMMARY' in l), '')
     if res.returncode != 0 or not os.path.exists(out):
