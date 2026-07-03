@@ -13,14 +13,39 @@ from bga_fanout.types import BGAGrid, Channel
 from bga_fanout.constants import EDGE_PAD_TOLERANCE
 
 
+# Coordinate-noise tolerance for grid clustering. Rotated (±90°) footprints
+# pick up ~1e-6mm FP noise in global_x/global_y from the rotation transform,
+# splitting each real ball row/column into several near-duplicate positions;
+# the dominant-pitch histogram then sees the noise gaps as the pitch and
+# reports 0.00mm (issue #283, zynq_ad9364). Any real BGA pitch is >=0.2mm,
+# so 1µm cleanly separates noise from geometry.
+_COORD_TOL = 1e-3
+
+
+def _cluster_positions(values, tol: float = _COORD_TOL) -> List[float]:
+    """Collapse sorted coordinate values into cluster means, merging values
+    closer than `tol` (FP noise on rotated footprints)."""
+    ordered = sorted(values)
+    clusters = []
+    group = [ordered[0]]
+    for v in ordered[1:]:
+        if v - group[-1] <= tol:
+            group.append(v)
+        else:
+            clusters.append(sum(group) / len(group))
+            group = [v]
+    clusters.append(sum(group) / len(group))
+    return clusters
+
+
 def analyze_bga_grid(footprint: Footprint) -> Optional[BGAGrid]:
     """Analyze a footprint to extract BGA grid parameters."""
     pads = footprint.pads
     if len(pads) < 4:
         return None
 
-    x_positions = sorted(set(p.global_x for p in pads))
-    y_positions = sorted(set(p.global_y for p in pads))
+    x_positions = _cluster_positions(p.global_x for p in pads)
+    y_positions = _cluster_positions(p.global_y for p in pads)
 
     if len(x_positions) < 2 or len(y_positions) < 2:
         return None
@@ -39,6 +64,10 @@ def analyze_bga_grid(footprint: Footprint) -> Optional[BGAGrid]:
             return None
         dominant = max(counts.keys(), key=lambda k: counts[k])
         if counts[dominant] < len(diffs) * 0.5:
+            return None
+        if dominant <= _COORD_TOL:
+            # A zero pitch means the positions were noise-split, not a grid
+            # (issue #283); it would divide-by-zero downstream.
             return None
         return dominant
 

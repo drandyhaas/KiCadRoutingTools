@@ -295,6 +295,13 @@ def generate_underpad_escape(footprint: Footprint,
     # fast.
     if res is None:
         res = min(grid.pitch_x, grid.pitch_y) / 32.0
+    if res <= 0:
+        # Backstop for a corrupt grid analysis (issue #283): a zero pitch would
+        # divide-by-zero building the occupancy grid. Fail the escape cleanly.
+        print(f"  ERROR: underpad escape aborted - grid resolution {res} is not "
+              f"positive (pitch {grid.pitch_x:.4f} x {grid.pitch_y:.4f}mm "
+              f"mis-detected?)")
+        return [], [], [p.net_name for p in signal_pads]
     pad = max(exit_margin + 0.5, 1.0)
     bounds = (grid.min_x - pad, grid.min_y - pad, grid.max_x + pad, grid.max_y + pad)
     occ = _Occ(bounds, res, layers)
