@@ -284,12 +284,16 @@ def run_phase3_tap_routing(
                 if retry_result is not None:
                     completed_result = retry_result
 
-            # Print red final failure message if still have failures after all rip-up attempts
+            # Flag pads still unconnected after this net's rip-up attempts. This
+            # is a MID-RUN state, not a verdict: a later retry/fallback can still
+            # connect the pad, and the end-of-run summary re-checks every net
+            # authoritatively (issue #292: usb_pd printed FAILED here for a net
+            # the JSON_SUMMARY correctly reported connected).
             final_failed_pads = completed_result.get('failed_pads_info', [])
             if final_failed_pads:
                 net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
                 for pad in final_failed_pads:
-                    print(f"  {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                    print(f"  {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
             # Extract only the NEW tap segments (after the length-matched main route)
             tap_segments = completed_result['new_segments'][len(lm_segments):]
@@ -868,7 +872,7 @@ def _reroute_phase3_ripped_nets(
                     if final_failed_pads:
                         net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
                         for pad in final_failed_pads:
-                            print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                            print(f"    {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
                     # Remove from pending_multipoint_nets since Phase 3 is now complete
                     if ripped_net_id in state.pending_multipoint_nets:

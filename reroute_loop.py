@@ -167,7 +167,7 @@ def run_reroute_loop(
                         if final_failed_pads:
                             net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
                             for pad in final_failed_pads:
-                                print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                                print(f"    {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
                         # Remove from pending_multipoint_nets since Phase 3 is now complete
                         if ripped_net_id in state.pending_multipoint_nets:
@@ -384,7 +384,7 @@ def run_reroute_loop(
                                         if final_failed_pads:
                                             net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
                                             for pad in final_failed_pads:
-                                                print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                                                print(f"    {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
                                         # Remove from pending_multipoint_nets since Phase 3 is now complete
                                         if ripped_net_id in state.pending_multipoint_nets:

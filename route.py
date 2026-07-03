@@ -827,6 +827,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _s.setdefault(_seg.net_id, []).append(_seg)
             for _via in _r.get('new_vias') or []:
                 _v.setdefault(_via.net_id, []).append(_via)
+        # Stub layer-swap vias are written to the output but live only in
+        # all_swap_vias (not in any result's new_vias, and the per-net snapshot
+        # predates them). Without them every layer-swapped stub looks severed
+        # from its pad and the net reports a phantom disconnection (issue #292:
+        # nebula_watch's 14 layer swaps == its 14 "failed" multi-point nets).
+        for _via in all_swap_vias:
+            _v.setdefault(_via.net_id, []).append(_via)
         return _s, _v
 
     def _seg_sig_209(s):
@@ -1044,6 +1051,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _segs_by_net.setdefault(_s.net_id, []).append(_s)
         for _v in _r0.get('new_vias', []):
             _vias_by_net.setdefault(_v.net_id, []).append(_v)
+    # Include the stub layer-swap vias the writer adds to the output (issue
+    # #292): they are not in any result's new_vias, and the original-copper
+    # snapshot predates them, so without this every layer-swapped net's pad
+    # looks disconnected and ships as a phantom "failed multi-point" entry.
+    for _v in all_swap_vias:
+        _vias_by_net.setdefault(_v.net_id, []).append(_v)
     _zones_by_net: Dict[int, list] = {}
     for _z in getattr(pcb_data, 'zones', []) or []:
         _zones_by_net.setdefault(_z.net_id, []).append(_z)

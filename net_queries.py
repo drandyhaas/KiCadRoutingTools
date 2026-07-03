@@ -230,6 +230,17 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
     seen = set()
     excluded = set()
 
+    def _did_you_mean(name: str) -> str:
+        """Suggest real nets a mistyped literal probably meant - hierarchical
+        names carry a leading slash ('/GND'), which users routinely drop, and
+        a silently no-op exclusion defeats the coverage invariant (issue #292:
+        core1106_cam routed its plane nets as traces because '!GND' matched
+        nothing while the board's net is '/GND')."""
+        want = name.lstrip('/')
+        close = sorted(n for n in known_net_names
+                       if n.lstrip('/') == want or n.rsplit('/', 1)[-1] == want)
+        return f" (did you mean {', '.join(repr(c) for c in close[:3])}?)" if close else ""
+
     for raw_pattern in patterns:
         # Classify the pattern: exclusion ("!FOO"), escaped literal ("\!FOO"), or
         # plain include. A "!FOO" that verbatim names a real net is a literal
@@ -251,6 +262,9 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                 matches = [name for name in all_net_names if fnmatch.fnmatch(name, exclude_pattern)]
                 if matches:
                     print(f"Exclusion pattern '!{exclude_pattern}' matched {len(matches)} nets")
+                else:
+                    print(f"WARNING: Exclusion pattern '!{exclude_pattern}' matched no nets"
+                          f"{_did_you_mean(exclude_pattern)}")
                 for name in matches:
                     excluded.add(name)
                     if name in seen:
@@ -263,6 +277,9 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                     result.remove(exclude_pattern)
                     seen.remove(exclude_pattern)
                     print(f"Excluded net '{exclude_pattern}'")
+                elif exclude_pattern not in known_net_names:
+                    print(f"WARNING: Exclusion '!{exclude_pattern}' names no net on this "
+                          f"board - it excludes nothing{_did_you_mean(exclude_pattern)}")
         elif '*' in pattern or '?' in pattern:
             # It's a wildcard pattern - find all matching nets
             matches = sorted([name for name in all_net_names
@@ -281,6 +298,9 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
             if pattern not in seen and pattern not in excluded:
                 result.append(pattern)
                 seen.add(pattern)
+                if pattern not in known_net_names:
+                    print(f"WARNING: Net '{pattern}' does not exist on this board"
+                          f"{_did_you_mean(pattern)}")
 
     return result
 
