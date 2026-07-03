@@ -44,6 +44,13 @@ PROMPT="Stress-test the KiCadRoutingTools autorouter on ONE board: **$BOARD** (s
 FIRST read $REPO/tests/stress/RUNBOOK.md and obey EVERY rule exactly. Do NOT ask
 anything (you are non-interactive) — use the skill's inline heuristics and your judgment.
 
+You ARE the one and only worker for THIS board. Any run_board.sh or 'claude -p'
+process you notice for '$BOARD' (or touching $RUNDIR) is YOUR OWN launcher and
+yourself — NOT a competing/duplicate worker. Do NOT check whether the board is
+'already being routed', do NOT wait for or defer to 'another worker', and do NOT
+skip routing to avoid 'collisions'. Start routing immediately and produce the
+results JSON yourself; if you don't, the board is recorded as a failure.
+
 Paths for THIS board:
 - Input board: $ROOT/boards_unrouted${SFX}/$BOARD.kicad_pcb
 - Working dir (use it; it exists): $RUNDIR/  — ALL logs/intermediates here
