@@ -432,6 +432,27 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
             if cur is None or cur > target + EPS:
                 changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
                 default_cls[field] = target
+    # NON-Default classes too (#295 follow-up): the original design's classes
+    # (e.g. kuchen's HDMI/USB at 0.125mm) survive into the routed board's
+    # project, and KiCad enforces THEIR clearance on their nets -- copper we
+    # legitimately routed at the (smaller) run clearance then storms with
+    # netclass-clearance violations the moment the user opens the board. The
+    # router does not read per-class clearances from the project, so after
+    # routing the class floors must be clamped down to what was actually
+    # routed (only-lower, same guarantee as everything else here). Via sizes /
+    # diff-pair geometry are draw defaults, clamped for planner consistency.
+    for cls in classes:
+        if cls is default_cls or not isinstance(cls, dict):
+            continue
+        cname = cls.get("name", "?")
+        for field, target in nc_map.items():
+            if target is None:
+                continue
+            target = round(float(target), 6)
+            cur = cls.get(field)
+            if cur is not None and cur > target + EPS:
+                changes.append(f"net_class[{cname}].{field}: {cur} -> {target} mm")
+                cls[field] = target
 
     def loosen_severity(cat, level):
         cur = sev.get(cat, "error")  # KiCad's default severity is "error"
