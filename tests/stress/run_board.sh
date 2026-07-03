@@ -66,7 +66,12 @@ Rules that matter most:
   (e.g. --layers F.Cu In1.Cu In2.Cu B.Cu) so deep balls escape.
 - GND (+ main power rail on 4+ layers) as planes; exclude plane nets from routing.
 - Keep fine (sub-Default) clearance LOCAL to fine-pitch escapes, never board-wide.
-- Run commands in the FOREGROUND. Hard 3-hour/command cap; ~3.5-hour board budget.
+- Run EVERY command in the FOREGROUND and BLOCK until it returns — even if a
+  single route step takes an hour (hard 3-hour/command cap, ~3.5-hour board
+  budget). NEVER background a command (no trailing '&', no run_in_background, no
+  'I'll wait for the background task to finish'): this is a headless run with NO
+  notifications and NO scheduled wakeups, so if you background a step and pause,
+  the board is recorded as a FAILURE. Do not stop until the results JSON is written.
 
 When fully done:
   1. Write the results JSON to $RESULT (full RUNBOOK schema).
