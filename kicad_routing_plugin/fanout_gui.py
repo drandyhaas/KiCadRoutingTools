@@ -1313,6 +1313,7 @@ class FanoutTab(wx.Panel):
                 via_size=via_size,
                 via_drill=via_drill,
                 allow_via_in_pad=allow_via_in_pad,
+                board_edge_clearance=shared.get('board_edge_clearance', 0.0),
             )
 
             self._apply_fanout_results(

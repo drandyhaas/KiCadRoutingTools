@@ -53,9 +53,24 @@ def check_endpoint_spacing(stubs: List[FanoutStub], min_spacing: float) -> List[
     return collisions
 
 
+def _board_edge_model(pcb_data, clearance, board_edge_clearance):
+    """Edge.Cuts keep-out for fanout copper (issue #288, picodvi's 0.04mm
+    board-edge graze -- qfn_fanout had no edge model at all). Returns
+    (edge_clear, rings, outer, cutouts); rings is empty when the board has no
+    usable outline AND no bounds (then no edge test is possible)."""
+    from check_drc import board_edge_geometry
+    edge_clear = board_edge_clearance if board_edge_clearance > 0 else clearance
+    rings, outer, cutouts = board_edge_geometry(pcb_data.board_info)
+    if not rings and pcb_data.board_info.board_bounds:
+        bx0, by0, bx1, by1 = pcb_data.board_info.board_bounds
+        outer = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
+        rings, cutouts = [outer], []
+    return edge_clear, rings, outer, cutouts
+
+
 def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                          track_width, clearance, via_size, via_drill, grid_step,
-                         allow_via_in_pad=False):
+                         allow_via_in_pad=False, board_edge_clearance=0.0):
     """Via-drop escape (issue #164): instead of a surface 45-degree fan, run a
     short stub from each pad to a through-via just past the pad edge and let
     signal routing pick the net up on an inner/back layer. This escapes a
@@ -123,7 +138,17 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                if need_cc > pitch else 0.0)
     step = max(stagger, grid_step, 0.05)        # offset increment along the escape axis
 
+    _edge_clear, _edge_rings, _edge_outer, _edge_cutouts = _board_edge_model(
+        pcb_data, clearance, board_edge_clearance)
+    from check_drc import _point_to_rings_distance as _pt_rings_dist
+    from check_drc import _point_on_board as _pt_on_board
+
     def via_clears(vx, vy, net_id, placed):
+        if _edge_rings:
+            if not _pt_on_board(vx, vy, _edge_outer, _edge_cutouts):
+                return False
+            if _pt_rings_dist(vx, vy, _edge_rings) < via_size / 2 + _edge_clear - 1e-6:
+                return False
         for fx, fy, fs, fn in foreign_vias:
             if fn == net_id:
                 continue
@@ -301,7 +326,8 @@ def generate_qfn_fanout(footprint: Footprint,
                         escape_method: str = "stub",
                         via_size: float = 0.45,
                         via_drill: float = 0.25,
-                        allow_via_in_pad: bool = False) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        allow_via_in_pad: bool = False,
+                        board_edge_clearance: float = 0.0) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -408,7 +434,8 @@ def generate_qfn_fanout(footprint: Footprint,
               f"{', allow via-in-pad' if allow_via_in_pad else ''}")
         return _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                                     track_width, clearance, via_size, via_drill, grid_step,
-                                    allow_via_in_pad=allow_via_in_pad)
+                                    allow_via_in_pad=allow_via_in_pad,
+                                    board_edge_clearance=board_edge_clearance)
 
     # Build stubs
     stubs: List[FanoutStub] = []
@@ -504,7 +531,27 @@ def generate_qfn_fanout(footprint: Footprint,
     _fanned_existing_segs = [s for s in pcb_data.segments if s.net_id in _fanned_set]
     _fanned_existing_vias = [v for v in pcb_data.vias if v.net_id in _fanned_set]
 
+    # Board-edge keep-out (issue #288): folded into _seg_grazes so an
+    # edge-violating straight escape is dropped and an edge-violating 45 fan is
+    # shortened by the existing recovery loop below, same as a foreign-pad graze.
+    _edge_clear, _edge_rings, _edge_outer, _edge_cutouts = _board_edge_model(
+        pcb_data, clearance, board_edge_clearance)
+    from check_drc import _segment_to_rings_distance as _seg_rings_dist
+    from check_drc import _point_on_board as _pt_on_board
+
+    def _seg_hits_edge(p1, p2):
+        if not _edge_rings:
+            return False
+        for (x, y) in (p1, p2):
+            if not _pt_on_board(x, y, _edge_outer, _edge_cutouts):
+                return True
+        return _seg_rings_dist(p1[0], p1[1], p2[0], p2[1], _edge_rings) \
+            < track_width / 2 + _edge_clear - 1e-6
+
     def _seg_grazes(p1, p2, net_id):
+        # Board edge first (issue #288) - independent of net.
+        if _seg_hits_edge(p1, p2):
+            return True
         # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
         if _obs_layer_idx is not None and not check_line_clearance(
                 _obstacles, p1[0], p1[1], p2[0], p2[1], _obs_layer_idx, _obs_cfg):
@@ -673,6 +720,12 @@ def main():
                         help='Underpad escape via outer diameter (mm, default 0.45)')
     parser.add_argument('--via-drill', type=float, default=0.25,
                         help='Underpad escape via drill diameter (mm, default 0.25)')
+    parser.add_argument('--board-edge-clearance', type=float, default=0.0,
+                        help='Min clearance from stub/via copper to the Edge.Cuts '
+                             'outline in mm (default 0 = use --clearance). Stubs '
+                             'that would graze the board edge are shortened or '
+                             'dropped; underpad escape vias near the edge are '
+                             'rejected (issue #288).')
     parser.add_argument('--allow-via-in-pad', action='store_true',
                         help='Underpad escape: let the escape via overlap its OWN pad '
                              '(via-in-pad), so a via boxed in on the outward side can '
@@ -741,6 +794,7 @@ def main():
         extension=args.extension,
         clearance=args.clearance,
         grid_step=args.grid_step,
+        board_edge_clearance=args.board_edge_clearance,
         escape_method=args.escape_method,
         via_size=args.via_size,
         via_drill=args.via_drill,

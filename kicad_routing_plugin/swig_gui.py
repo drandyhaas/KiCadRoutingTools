@@ -1375,6 +1375,9 @@ class RoutingDialog(wx.Dialog):
                 'grid_step': self.grid_step.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
+                # Edge.Cuts keep-out for QFN escape stubs/vias (issue #288);
+                # 0 = fall back to the copper clearance inside generate_qfn_fanout.
+                'board_edge_clearance': self._effective_board_edge_clearance(),
             }
 
         return FanoutTab(
