@@ -217,7 +217,8 @@ def generate_underpad_escape(footprint: Footprint,
                              via_cost: float = 14.0,
                              outer_rings: float = 2.0,
                              keepout_margin: float = 0.0,
-                             verbose: bool = True
+                             verbose: bool = True,
+                             grid_step: float = 0.0
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -569,6 +570,50 @@ def generate_underpad_escape(footprint: Footprint,
         # the exemption covers it exactly.
         return set(occ._disk(p.global_x, p.global_y, max(pad_keep, via_keep)))
 
+    def snap_exit_end(pts, li, exempt=None):
+        """Move an escape's outer free end onto the routing grid (issue #302).
+
+        The occupancy lattice has an arbitrary origin, so A* exit points land
+        off the router's --grid-step grid; the channel engine snaps its stub
+        ends (#149) but the under-pad engine never did -- and since 'auto'
+        fallback (#288) its results appear on boards that never asked for
+        underpad. Round the final vertex to the grid: OUTWARD on the dominant
+        travel axis (the free end must stay past the boundary), nearest on the
+        other. The re-aimed final segment is clearance-checked; on a conflict
+        the original off-grid end is kept (route.py still copes, just slower).
+        """
+        if grid_step <= 0 or len(pts) < 2:
+            return
+        (ax, ay), (bx, by) = pts[-2], pts[-1]
+        dx, dy = bx - ax, by - ay
+
+        def snap_out(v, d):
+            k = v / grid_step
+            if d > 1e-9:
+                k = math.ceil(k - 1e-9)
+            elif d < -1e-9:
+                k = math.floor(k + 1e-9)
+            else:
+                k = round(k)
+            return k * grid_step
+
+        if abs(dx) >= abs(dy):
+            gx, gy = snap_out(bx, dx), snap_out(by, 0.0)
+        else:
+            gx, gy = snap_out(bx, 0.0), snap_out(by, dy)
+        if abs(gx - bx) < 1e-9 and abs(gy - by) < 1e-9:
+            return
+        # Append a short jog from the found end to the grid point rather than
+        # re-aiming the whole final segment: the corridor behind the end is
+        # often exactly one lattice cell wide (neighbouring escapes block the
+        # rest), so a lateral re-aim rarely clears -- but the sub-grid-step
+        # jog lives just past the boundary where only the fanned-out exits
+        # run, comfortably spaced.
+        if occ.seg_clear(li, (bx, by), (gx, gy), exempt=exempt):
+            pts.append((gx, gy))
+        elif occ.seg_clear(li, (ax, ay), (gx, gy), exempt=exempt):
+            pts[-1] = (gx, gy)
+
     def commit(p, path):
         """Emit tracks + the via-in-pad for a found path and mark occupancy."""
         nonlocal nvia
@@ -587,13 +632,25 @@ def generate_underpad_escape(footprint: Footprint,
             else:
                 cur_cells.append((ix, iy))
         runs.append((cur_layer, cur_cells))
+        # Compute (and grid-snap, #302) every run's polyline BEFORE blocking
+        # occupancy: blocking stamps a track+clearance disk around each own
+        # cell, which would veto the snap jog against the route's own copper.
+        runs_pts = []
+        for ri, (li, cells) in enumerate(runs):
+            pts = _segments_from_cells(occ, cells)
+            if ri == 0 and pts:
+                pts[0] = (p.global_x, p.global_y)  # start exactly at the pad
+            if ri == len(runs) - 1:
+                snap_exit_end(pts, li, exempt=home)
+            runs_pts.append(pts)
         for ri, (li, cells) in enumerate(runs):
             for (ix, iy) in cells:
                 if (ix, iy) not in home:
                     occ.block_layer(li, *occ.xy(ix, iy), trk_keep)
-            pts = _segments_from_cells(occ, cells)
-            if ri == 0 and pts:
-                pts[0] = (p.global_x, p.global_y)  # start exactly at the pad
+            pts = runs_pts[ri]
+            if ri == len(runs) - 1 and len(pts) >= 2:
+                # the snapped tail may extend past the A* cells -- stamp it
+                occ.block_segment(li, pts[-2], pts[-1], trk_keep)
             for a, b in zip(pts, pts[1:]):
                 tracks.append({'start': a, 'end': b, 'width': track_width,
                                'layer': layers[li], 'net_id': net_id})

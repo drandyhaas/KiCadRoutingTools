@@ -1723,6 +1723,7 @@ def generate_bga_fanout(footprint: Footprint,
             via_size=via_size, via_drill=via_drill, exit_margin=exit_margin,
             net_filter_fn=net_filter_fn,
             diff_pairs=up_diff_pairs, diff_pair_gap=diff_pair_gap,
+            grid_step=grid_step,
         )
         return tracks, vias_to_add, [], failed_nets
 
