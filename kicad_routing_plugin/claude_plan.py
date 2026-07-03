@@ -23,7 +23,7 @@ PLAN_RESULT_SCHEMA = (
     '{"steps": [ '
     '{"action": "fanout", "component": "<ref e.g. U1>", "kind": "bga"|"qfn", '
     '"nets": ["<glob>", ...], '
-    '"params": {"escape_method": "underpad"|"channel", "exit_margin": <mm>, '
+    '"params": {"escape_method": "auto"|"underpad"|"channel", "exit_margin": <mm>, '
     '"extension": <mm>}} | '
     '{"action": "route_diff", "pairs": ["<pair base name, the net name with its '
     'P/N suffix stripped, e.g. /lvds_rx0>", ...], '
@@ -244,7 +244,7 @@ def apply_step_params(step, dialog):
         if kind == "bga":
             opts = dialog.fanout_tab.bga_options
             if "escape_method" in params:
-                opts.underpad_escape.SetValue(str(params["escape_method"]).lower() == "underpad")
+                opts.set_escape_method(params["escape_method"])
             if "exit_margin" in params:
                 try:
                     opts.exit_margin.SetValue(float(params["exit_margin"]))

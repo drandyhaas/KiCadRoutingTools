@@ -732,8 +732,16 @@ class NetSelectionPanel(wx.Panel):
         return text.split(' (')[0]
 
 
-class BGAOptionsPanel(wx.Panel):
-    """BGA fanout options panel (parameters not in Basic tab)."""
+class BGAOptionsPanel(wx.ScrolledWindow):
+    """BGA fanout options panel (parameters not in Basic tab).
+
+    A vertical ScrolledWindow: the panel has more sections (escape, options,
+    cap placement) than fit a short dialog, and without scrolling the lower
+    controls were simply unreachable.
+    """
+
+    # wx.Choice index -> engine escape_method value (order matches the dropdown)
+    ESCAPE_METHODS = ('auto', 'channel', 'underpad')
 
     def __init__(self, parent, on_differential_changed=None):
         """
@@ -743,7 +751,8 @@ class BGAOptionsPanel(wx.Panel):
             parent: Parent window
             on_differential_changed: Callback(bool) when differential checkbox changes
         """
-        super().__init__(parent)
+        super().__init__(parent, style=wx.VSCROLL)
+        self.SetScrollRate(0, 10)
         self._on_differential_changed_callback = on_differential_changed
         self._create_ui()
 
@@ -815,14 +824,24 @@ class BGAOptionsPanel(wx.Panel):
         self.no_inner_top.SetToolTip("Prevent inner pads from using F.Cu")
         options_sizer.Add(self.no_inner_top, 0, wx.LEFT | wx.BOTTOM, 5)
 
-        self.underpad_escape = wx.CheckBox(self, label="Under-pad escape (dense BGA)")
-        self.underpad_escape.SetToolTip(
-            "Use the under-pad grid escape instead of the channel router. Each "
-            "signal vias in its pad and routes under the pad field on inner "
-            "layers - escapes fully-populated arrays the channel router can't "
-            "(#122). Routes diff pairs as single-ended; power nets tap planes. "
-            "Use a small via/track for dense pitch (e.g. via 0.35, track 0.12).")
-        options_sizer.Add(self.underpad_escape, 0, wx.LEFT | wx.BOTTOM, 5)
+        esc_method_row = wx.BoxSizer(wx.HORIZONTAL)
+        esc_method_row.Add(wx.StaticText(self, label="Escape method:"), 0,
+                           wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.escape_method_choice = wx.Choice(
+            self, choices=["Auto (channel, under-pad retry)",
+                           "Channel",
+                           "Under-pad (dense BGA)"])
+        self.escape_method_choice.SetSelection(0)
+        self.escape_method_choice.SetToolTip(
+            "Auto (default): run the channel router and, if it drops any ball, "
+            "retry with the under-pad grid escape and keep whichever escapes "
+            "more (#288). Channel: 45-stub + channel router only. Under-pad: "
+            "each signal vias in its pad and routes under the pad field on "
+            "inner layers - escapes fully-populated arrays the channel router "
+            "can't (#122); use a small via/track for dense pitch (e.g. via "
+            "0.35, track 0.12).")
+        esc_method_row.Add(self.escape_method_choice, 1)
+        options_sizer.Add(esc_method_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
         self.optimize_caps.SetValue(False)
@@ -898,6 +917,20 @@ class BGAOptionsPanel(wx.Panel):
 
         self.SetSizer(main_sizer)
 
+    def get_escape_method(self) -> str:
+        """The engine escape_method value for the current dropdown selection."""
+        sel = self.escape_method_choice.GetSelection()
+        return self.ESCAPE_METHODS[sel] if 0 <= sel < len(self.ESCAPE_METHODS) else 'auto'
+
+    def set_escape_method(self, value):
+        """Set the dropdown from an engine value ('auto'/'channel'/'underpad').
+
+        Unknown values are ignored (dropdown keeps its current selection).
+        """
+        v = str(value).strip().lower()
+        if v in self.ESCAPE_METHODS:
+            self.escape_method_choice.SetSelection(self.ESCAPE_METHODS.index(v))
+
     def _on_differential_changed(self, event):
         """Handle differential checkbox change."""
         is_diff = self.differential_check.GetValue()
@@ -917,9 +950,9 @@ class BGAOptionsPanel(wx.Panel):
             'rebalance_escape': self.rebalance_escape.GetValue(),
             'check_for_previous': self.check_previous.GetValue(),
             'no_inner_top_layer': self.no_inner_top.GetValue(),
-            # Unchecked = 'auto': channel first, under-pad retry when the
-            # channel engine drops balls (issue #288) - same as the CLI default.
-            'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'auto',
+            # Dropdown: auto (default, channel + under-pad retry, #288) /
+            # channel / underpad - same choices and default as the CLI.
+            'escape_method': self.get_escape_method(),
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -934,7 +967,7 @@ class BGAOptionsPanel(wx.Panel):
         }
 
 
-class QFNOptionsPanel(wx.Panel):
+class QFNOptionsPanel(wx.ScrolledWindow):
     """QFN fanout options panel (parameters not in Basic tab)."""
 
     def __init__(self, parent):
@@ -944,7 +977,8 @@ class QFNOptionsPanel(wx.Panel):
         Args:
             parent: Parent window
         """
-        super().__init__(parent)
+        super().__init__(parent, style=wx.VSCROLL)
+        self.SetScrollRate(0, 10)
         self._create_ui()
 
     def _create_ui(self):

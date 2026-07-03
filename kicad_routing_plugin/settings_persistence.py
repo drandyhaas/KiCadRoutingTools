@@ -170,7 +170,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_rebalance': dialog.fanout_tab.bga_options.rebalance_escape.GetValue(),
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
-        'fanout_bga_underpad': dialog.fanout_tab.bga_options.underpad_escape.GetValue(),
+        'fanout_bga_escape_method': dialog.fanout_tab.bga_options.get_escape_method(),
         'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
         'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
@@ -542,8 +542,13 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.check_previous.SetValue(settings['fanout_bga_check_previous'])
     if 'fanout_bga_no_inner_top' in settings:
         dialog.fanout_tab.bga_options.no_inner_top.SetValue(settings['fanout_bga_no_inner_top'])
-    if 'fanout_bga_underpad' in settings:
-        dialog.fanout_tab.bga_options.underpad_escape.SetValue(settings['fanout_bga_underpad'])
+    if 'fanout_bga_escape_method' in settings:
+        dialog.fanout_tab.bga_options.set_escape_method(settings['fanout_bga_escape_method'])
+    elif 'fanout_bga_underpad' in settings:
+        # Migrate the pre-dropdown checkbox (#288): checked meant under-pad,
+        # unchecked meant the default engine (now 'auto').
+        dialog.fanout_tab.bga_options.set_escape_method(
+            'underpad' if settings['fanout_bga_underpad'] else 'auto')
     if 'fanout_bga_optimize_caps' in settings:
         dialog.fanout_tab.bga_options.optimize_caps.SetValue(settings['fanout_bga_optimize_caps'])
     if 'fanout_bga_cap_capture_radius' in settings:
