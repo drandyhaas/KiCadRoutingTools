@@ -100,12 +100,16 @@ input) corpora are created from open-hardware GitHub repos. All tooling lives in
    (enumerate a repo's tree: `gh api "repos/OWNER/REPO/git/trees/BRANCH?recursive=1"
    --jq '.tree[].path | select(endswith(".kicad_pcb"))'`; plus `gh search repos`).
    `curl -sL --fail RAWURL -o <slug>.kicad_pcb`, then gate each with
-   **`validate_candidate.py <file>`** → one JSON line: parses in `kicad_parser`,
-   loads in **pcbnew** (so prep will work), reports copper layers / footprints /
-   routable_nets / a difficulty **tier** (easy/medium/hard). Keep only `pass:true`
-   (2–8 layers, ≥10 footprints, ≥20 routable nets, pcbnew-loadable). Common
-   rejects: KiCad v4/v5 format (parses to 0 footprints), git-LFS pointer files
-   (tiny), Eagle/Altium repos (no `.kicad_pcb`), blank templates.
+   **`validate_candidate.py <file>`** → one JSON line. Metrics come from **pcbnew**
+   (KiCad's C++ loader), NOT the Python parser: pcbnew loads a 62MB/800fp/8L board
+   in ~2s where the parser needs 30–100s+ (and hung unbounded on the biggest), and
+   "loads in pcbnew" is what prep needs anyway. Reports copper layers / footprints /
+   **off-board footprints** / routable_nets / a difficulty **tier**. Keep only
+   `pass:true` (2–8 layers, ≥10 footprints, ≥20 routable nets, has an outline with
+   ≤max(2,10%) footprints outside it). NB: a full **DRC** run is the WRONG check for
+   a *source* board — unrouted, it reports thousands of unconnected-net violations;
+   validation is a structural load. Common rejects: KiCad v4/v5 format, git-LFS
+   pointer files (tiny), Eagle/Altium repos (no `.kicad_pcb`), off-board footprints.
 2. **Curate** a balanced mix (easy/medium/hard) with variety (distinct
    designers/chip families), no duplicates with existing sets. Avoid 8-layer /
    600+-footprint monsters (too slow to route). **Verify each has a board outline**
