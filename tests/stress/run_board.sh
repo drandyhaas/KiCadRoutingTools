@@ -72,6 +72,13 @@ Rules that matter most:
   'I'll wait for the background task to finish'): this is a headless run with NO
   notifications and NO scheduled wakeups, so if you background a step and pause,
   the board is recorded as a FAILURE. Do not stop until the results JSON is written.
+- GRADE YOUR ACTUAL FINAL BOARD: the drc.final_violations (and connectivity) you
+  report MUST come from running check_drc.py + check_connected.py on the EXACT
+  .kicad_pcb you write as the final output, AFTER the last board-mutating step
+  (including any 'fix'/rip-up/reconnect retry). Never report a grade taken from an
+  earlier step. KEEP THE BEST: if a late fix step INCREASES DRC vs the prior board,
+  discard it and keep the prior, cleaner board as your final — never ship a final
+  with more DRC than an earlier step already achieved.
 
 When fully done:
   1. Write the results JSON to $RESULT (full RUNBOOK schema).
@@ -100,6 +107,16 @@ echo "[run_board] board=$BOARD exit=$rc end=$(date)" >> "$RUNDIR/worker.log"
 python3 "$REPO/tests/stress/extract_narrative.py" "$RUNDIR/transcript.jsonl" \
     -o "$RUNDIR/agent_narrative.md" --board "$BOARD (set $SET)" >> "$RUNDIR/worker.log" 2>&1 || true
 
-if [ -f "$RESULT" ]; then echo "ok rc=$rc"       > "$RUNDIR/.worker_done";
+# Harness backstop: independently grade the FINAL board (DRC at the routed
+# clearance + connectivity) and flag a MISGRADE if it disagrees with the agent's
+# self-reported drc.final_violations. Catches a stale/pre-mutation self-grade
+# (e.g. a `--rip-existing-nets '*'` fix step that corrupts a clean final). Non-fatal.
+MIS=""
+if [ -f "$RESULT" ]; then
+  python3 "$REPO/tests/stress/grade_final.py" "$RUNDIR" "$RESULT" >> "$RUNDIR/worker.log" 2>&1 || true
+  MIS=$(python3 -c "import json; print('MISGRADE' if json.load(open('$RUNDIR/authoritative_grade.json')).get('misgrade') else '')" 2>/dev/null)
+fi
+
+if [ -f "$RESULT" ]; then echo "ok rc=$rc $MIS"   > "$RUNDIR/.worker_done";
 else                       echo "NORESULT rc=$rc" > "$RUNDIR/.worker_done"; fi
 exit $rc

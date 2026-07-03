@@ -400,6 +400,16 @@ harmless.
     `timing.thinking_driving_s`=AGENT-tool_exec_s, and set
     `wall_clock_total_s`=AGENT. These let us compare both raw tool cost and
     end-to-end agent cost across runs.
+16. GRADE YOUR ACTUAL FINAL BOARD. `drc.final_violations` (and `connectivity`)
+    MUST come from `check_drc.py` + `check_connected.py` run on the EXACT
+    `.kicad_pcb` you write as your final output, AFTER the last board-mutating
+    step (including any `fix`/rip-up/reconnect retry). Never report a grade taken
+    from an earlier step — a late step (esp. `route.py --rip-existing-nets`, #284)
+    can corrupt a clean board (artix_dc_scm: `step5d`=0 → `step5e_fix`=519 shipped
+    as "0"). KEEP THE BEST: if a fix step INCREASES DRC vs the prior board, discard
+    it and keep the prior, cleaner board as your final. (The harness independently
+    re-grades your final via `grade_final.py` → `authoritative_grade.json` and marks
+    `MISGRADE` in `.worker_done` when it disagrees, so a stale self-grade is caught.)
 
 ## Results JSON schema
 
