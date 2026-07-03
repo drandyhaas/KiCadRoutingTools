@@ -541,6 +541,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             names = [pcb_data.nets[n].name for n in existing_rippable[:6]]
             print(f"{len(existing_rippable)} pre-existing net(s) eligible for rip-up: "
                   f"{', '.join(names)}{'...' if len(existing_rippable) > 6 else ''}")
+            # A ripped-existing net's copper is this run's responsibility from
+            # here on: include it in the cleanup/strip scope so the #220 stale
+            # input-copper strip (and dead-end/cycle sweeps) cover it. Without
+            # this a rerouted +3.3V shipped BOTH its original copper (crossing
+            # nets routed through the vacated corridor) and its reroute (#300
+            # follow-up, rp2350_dev GPIO4).
+            sweep_scope_ids |= set(existing_rippable)
     if progress_callback:
         progress_callback(0, 0, "Building base obstacle map...")
     print("Building base obstacle map...")
@@ -983,6 +990,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         dead_end_input_segments = list(dead_end_input_segments) + _stale_input_segs
         print(f"Stripped {len(_stale_input_segs)} stale input segment(s) of "
               f"ripped/re-routed nets not on the final board (#220)")
+    # Same for input VIAS (the #220 strip was segments-only): a ripped-existing
+    # net's original vias otherwise ship next to its reroute's replacements as
+    # same-net drill pairs.
+    _final_via_sig_by_net: Dict[int, set] = {}
+    for _v in pcb_data.vias:
+        _final_via_sig_by_net.setdefault(_v.net_id, set()).add((round(_v.x, 3), round(_v.y, 3)))
+    stale_input_vias = [
+        _v for _nid in sweep_scope_ids
+        for _v in _orig_via_by_net.get(_nid, [])
+        if (round(_v.x, 3), round(_v.y, 3)) not in _final_via_sig_by_net.get(_nid, ())
+    ]
+    if stale_input_vias:
+        print(f"Stripping {len(stale_input_vias)} stale input via(s) of "
+              f"ripped/re-routed nets not on the final board")
 
     # Issue #209 fix C: re-check the snapshotted nets against the post-cleanup
     # write-list and report any net a cleanup pass disconnected, listing the
@@ -1236,6 +1257,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Original-file dead-end copper the caller (GUI) should delete from the
             # live board, mirroring the writer's strip (issue #84).
             'segments_to_remove': dead_end_input_segments,
+            'vias_to_remove': stale_input_vias,
         }
     else:
         # Write output file using extracted output_writer module
@@ -1254,7 +1276,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             boundary_debug_labels=boundary_debug_labels,
             skip_routing=skip_routing,
             add_teardrops=add_teardrops,
-            segments_to_remove=dead_end_input_segments
+            segments_to_remove=dead_end_input_segments,
+            vias_to_remove=stale_input_vias
         )
         # When nothing could be routed (every net failed) there is no copper to
         # write, so write_routed_output produces no file. Pass the board through

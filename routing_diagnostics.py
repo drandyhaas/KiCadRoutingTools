@@ -351,6 +351,105 @@ def format_suggestions_for_dialog(suggestions: List[str]) -> str:
     return "\n".join(lines)
 
 
+def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
+                              routed_net_ids=(), rip_existing_names=None) -> str:
+    """Name the PRE-EXISTING nets whose copper blocks a failed route (#301).
+
+    Copper committed by an earlier run/step lives in the BASE obstacle map, so
+    the rip-up blocker attribution (which only knows this run's routed nets)
+    cannot see it and the net dies with a bare 'no rippable blockers found'
+    (rp2350_dev GPIO4: boxed in by GPIO5/GPIO3 escape stubs from the fanout
+    step). Geometric frontier attribution (the plane-repair machinery) names
+    them, and --rip-existing-nets (#103) is the existing, connectivity-safe way
+    to let this run rip + re-route them. Returns '' when nothing attributable.
+    """
+    if not blocked_cells or pcb_data is None:
+        return ""
+    import io
+    import math
+    from contextlib import redirect_stdout
+    from plane_blocker_detection import find_route_blocker_from_frontier
+    protected = set(routed_net_ids) | {net_id, 0}
+    protected |= {z.net_id for z in (getattr(pcb_data, 'zones', None) or [])}
+
+    # Attribute NEAR-ENDPOINT cells first: the decisive blockers of a boxed-in
+    # pad are the couple of stubs at the corridor mouth, while a whole-frontier
+    # cell count is dominated by whatever big power stub the search spread
+    # along (rp2350_dev GPIO4: global attribution named +3.3V/+1V1, the actual
+    # lockout was GPIO5/GPIO3 flanking the pad).
+    near_cells = []
+    try:
+        from connectivity import get_net_endpoints
+        srcs, tgts, _err = get_net_endpoints(pcb_data, net_id, config)
+        anchors = [(s[3], s[4]) for s in (srcs or [])[:2]] + \
+                  [(t[3], t[4]) for t in (tgts or [])[:2]]
+        if anchors:
+            r_cells = max(4, int(2.0 / config.grid_step))
+            for (gx, gy, l) in blocked_cells:
+                cx, cy = gx * config.grid_step, gy * config.grid_step
+                if any(math.hypot(cx - ax, cy - ay) <= r_cells * config.grid_step
+                       for ax, ay in anchors):
+                    near_cells.append((gx, gy, l))
+    except Exception:
+        near_cells = []
+
+    # Rank by blocked-cell count, but the DECISIVE blocker of a boxed pad can
+    # be a small stub ranked below bigger bystanders (GPIO5's stub vs GPIO2's
+    # on rp2350_dev) -- so name a generous candidate set rather than a top-3.
+    names = []
+    for cell_set in (near_cells, blocked_cells):
+        if not cell_set:
+            continue
+        for _ in range(8):
+            if len(names) >= 6:
+                break
+            with redirect_stdout(io.StringIO()):  # silence the helper's
+                blocker = find_route_blocker_from_frontier(  # protected-net chatter
+                    cell_set, pcb_data, config, net_id, protected)
+            if blocker is None:
+                break
+            protected.add(blocker)
+            net = pcb_data.nets.get(blocker)
+            if net and net.name:
+                names.append(net.name)
+    # Frontier attribution can only name nets whose copper TOUCHES the
+    # recorded frontier; a stub the search never reached (because a bigger
+    # blocker stopped it first) is invisible there, yet ripping it may be the
+    # actual unlock (rp2350_dev GPIO5). Add every net with copper within ~1mm
+    # of the failing net's endpoints -- the candidates that box the pad in.
+    try:
+        seen = set(names)
+        for ax, ay in anchors:
+            for s in pcb_data.segments:
+                if s.net_id in protected or s.net_id == net_id:
+                    continue
+                # coarse distance to segment bbox, then exact point-to-segment
+                if min(s.start_x, s.end_x) - 1.0 <= ax <= max(s.start_x, s.end_x) + 1.0 and \
+                   min(s.start_y, s.end_y) - 1.0 <= ay <= max(s.start_y, s.end_y) + 1.0:
+                    from geometry_utils import point_to_segment_distance
+                    if point_to_segment_distance(ax, ay, s.start_x, s.start_y,
+                                                 s.end_x, s.end_y) <= 1.0:
+                        net = pcb_data.nets.get(s.net_id)
+                        if net and net.name and net.name not in seen:
+                            seen.add(net.name)
+                            names.append(net.name)
+                            protected.add(s.net_id)
+    except Exception:
+        pass
+    if rip_existing_names:
+        names = [n for n in names if n not in rip_existing_names]
+    if not names:
+        return ""
+    quoted = " ".join(f"'{n}'" for n in names)
+    return (f"Hint: the blocking copper belongs to pre-existing net(s) {quoted} "
+            f"(committed by an earlier run/step), which this run is not allowed "
+            f"to rip. Retry with --rip-existing-nets {quoted} to rip and "
+            f"re-route them in this run (issue #103) -- the decisive blocker "
+            f"may be any of them, so start with the full set (each ripped net "
+            f"is re-routed and the run reports honestly if one cannot be), "
+            f"then bisect if you want a minimal rip.")
+
+
 def static_boxin_hint(result, config, pcb_data=None) -> str:
     """One-line hint when a route died immediately with nothing rippable.
 

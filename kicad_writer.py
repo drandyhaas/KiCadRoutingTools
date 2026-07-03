@@ -756,6 +756,80 @@ def remove_segments_from_content(content: str, segments: List,
     return ''.join(out), count
 
 
+def remove_vias_from_content(content: str, vias: List,
+                             net_id_to_name: Dict = None) -> Tuple[str, int]:
+    """Delete whole ``(via ...)`` blocks matching the given vias.
+
+    Via twin of remove_segments_from_content: strips original input-file vias
+    of a ripped/re-routed net that are no longer on the final board (#103 rip-
+    existing; without this the old via AND its reroute's replacement both ship,
+    stacking same-net drill pairs). Matched by position + net token; duplicates
+    are interchangeable. Returns ``(modified_content, count_removed)``.
+    """
+    if not vias:
+        return content, 0
+
+    use_names = net_id_to_name is not None and is_kicad_10(content)
+
+    targets = set()
+    for v in vias:
+        net_token = (net_id_to_name.get(v.net_id) if use_names else v.net_id)
+        targets.add((pos_key(v.x, v.y), net_token))
+
+    at_re = re.compile(r'\(at\s+([\d.-]+)\s+([\d.-]+)\)')
+    net_name_re = re.compile(r'\(net\s+"([^"]*)"\)')
+    net_id_re = re.compile(r'\(net\s+(\d+)\)')
+
+    out = []
+    pos = 0
+    n = len(content)
+    count = 0
+    while True:
+        j = content.find('(via', pos)
+        # skip non-via tokens sharing the prefix: (vias allowed) in rule areas
+        while j >= 0 and j + 4 < n and content[j + 4] not in ' \t\r\n(':
+            j = content.find('(via', j + 4)
+        if j < 0:
+            out.append(content[pos:])
+            break
+        out.append(content[pos:j])
+        depth = 0
+        in_str = False
+        k = j
+        while k < n:
+            ch = content[k]
+            if in_str:
+                if ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    k += 1
+                    break
+            k += 1
+        block = content[j:k]
+        ma = at_re.search(block)
+        keep = True
+        if ma:
+            if use_names:
+                mn = net_name_re.search(block)
+                net_token = mn.group(1) if mn else None
+            else:
+                mn = net_id_re.search(block)
+                net_token = int(mn.group(1)) if mn else None
+            if (pos_key(float(ma.group(1)), float(ma.group(2))), net_token) in targets:
+                keep = False
+                count += 1
+        if keep:
+            out.append(block)
+        pos = k
+    return ''.join(out), count
+
+
 def swap_via_nets_at_positions(content: str, positions: set,
                                old_net_id: int, new_net_id: int,
                                tolerance: float = 0.02,

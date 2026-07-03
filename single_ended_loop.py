@@ -765,10 +765,28 @@ def route_single_ended_nets(
                     "reason": "no rippable blockers found"
                 })
                 print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
-                from routing_diagnostics import static_boxin_hint
+                from routing_diagnostics import static_boxin_hint, preexisting_blocker_hint
                 hint = static_boxin_hint(result, config, pcb_data)
                 if hint:
                     print(f"  {hint}")
+                # #301: the blockers may be PRE-EXISTING copper (earlier run/
+                # step) the rip-up attribution cannot see -- name them and the
+                # --rip-existing-nets retry. Cells were popped into
+                # blocked_cells when the rip-up branch ran; else read them off
+                # the result.
+                _cells301 = []
+                if result:
+                    _cells301 = ((result.get('blocked_cells_forward') or []) +
+                                 (result.get('blocked_cells_backward') or []))
+                if not _cells301:
+                    _cells301 = list(locals().get('blocked_cells') or [])
+                hint301 = preexisting_blocker_hint(
+                    _cells301, config, pcb_data, net_id,
+                    routed_net_ids=state.routed_net_ids)
+                if hint301:
+                    print(f"  {hint301}")
+                    record_net_event(state, net_id, "preexisting_blockers", {
+                        "hint": hint301})
                 failed += 1
 
     return successful, failed, total_time, total_iterations, route_index, user_quit
