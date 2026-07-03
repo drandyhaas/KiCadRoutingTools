@@ -793,8 +793,9 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             if net_id in segments_by_net or net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
         else:
-            # Only check nets that have both segments and pads
-            if net_id in segments_by_net and net_id in pads_by_net:
+            # Only check nets that have copper (segments, or vias -- a via alone
+            # can bridge opposite-layer pads it overlaps, issue #285) and pads
+            if (net_id in segments_by_net or net_id in vias_by_net) and net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
 
     # Find unrouted nets (pads but no segments) unless routed_only
@@ -815,11 +816,16 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             # Filter by pattern if specified
             if net_patterns and not matches_any_pattern(net_info.name, net_patterns):
                 continue
-            # Check if net has pads but no segments
+            # Check if net has pads but no copper at all. A net with VIAS but no
+            # segments is NOT automatically unrouted (issue #285, icepi_zero's
+            # USB-C CC2 nets): a single via can legitimately bridge two
+            # opposite-layer pads it physically overlaps (via-in-pad), and the
+            # per-net union-find below is via/pad-shape aware -- let it decide.
             has_pads = net_id in pads_by_net and len(pads_by_net[net_id]) >= 2
             has_segments = net_id in segments_by_net
+            has_vias = net_id in vias_by_net
             has_zones = net_id in zones_by_net
-            if has_pads and not has_segments and not has_zones:
+            if has_pads and not has_segments and not has_zones and not has_vias:
                 # A net whose pads all overlap (e.g. a castellated module's
                 # co-located TH+SMD pad pairs) is already connected (issue #92).
                 if _net_pads_connected_by_overlap(pads_by_net[net_id], copper_layers):
