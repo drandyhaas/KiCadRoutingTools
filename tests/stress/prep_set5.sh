@@ -19,15 +19,15 @@ MAP=(
   "nrfmicro|joric__nrfmicro__nrfmicro"
   "teensy4_galvos|weiwei__teensy4-galvos"
   "usbgpib|xyphro__usbgpib"
-  "apple1|jgw4__apple1_mainboard"
   "dilemma|Bastardkb__dilemma"
   "ecp5_mini|joshajohnson__ecp5_mini"
+  "ghoul|tzarc__ghoul"
   "neptune|wntrblm__neptune-mainboard"
   "sechzig|machdyne__sechzig_ml2"
   "core1106_cam|exie1122__core1106-stereo"
+  "datalogger|stephen__mcu_datalogger"
   "eit_mux|ErenErenel__eit_multiplexer"
   "nebula_watch|cactusman__nebula-watch"
-  "pico_disp|homelith__pico-disp-ident"
   "usb_pd|loxodes__usb_pd"
 )
 

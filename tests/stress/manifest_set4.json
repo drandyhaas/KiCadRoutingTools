@@ -168,23 +168,6 @@
   },
   {
     "set": "set4",
-    "repo": "hoellwerth/FrameworkDock",
-    "path": "framework-dock.kicad_pcb",
-    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set4/hoellwerth__framework-dock.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/hoellwerth/FrameworkDock/master/framework-dock.kicad_pcb",
-    "github_url": "https://github.com/hoellwerth/FrameworkDock/blob/master/framework-dock.kicad_pcb",
-    "size_kb": 259,
-    "layers_est": 2,
-    "footprints": 48,
-    "routable_nets": 20,
-    "tier": "medium",
-    "packages": "4-layer,USB,MCU",
-    "license": "see repo",
-    "short_name": "framework_dock",
-    "note": "Framework laptop USB-C/DP dock, 48 fp"
-  },
-  {
-    "set": "set4",
     "repo": "Schmacksby/macropad_kicad",
     "path": "Keyboard.kicad_pcb",
     "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set4/Schmacksby__macropad.kicad_pcb",
@@ -199,6 +182,23 @@
     "license": "see repo",
     "short_name": "macropad4l",
     "note": "Custom macropad/keyboard PCB, 4-layer"
+  },
+  {
+    "set": "set4",
+    "repo": "zsellera/openstint-transponder",
+    "path": "hardware/openstint-transponder.kicad_pcb",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set4/zsellera__openstint_transponder.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/zsellera/openstint-transponder/master/hardware/openstint-transponder.kicad_pcb",
+    "github_url": "https://github.com/zsellera/openstint-transponder",
+    "size_kb": 251,
+    "layers_est": 4,
+    "footprints": 39,
+    "routable_nets": 22,
+    "tier": "medium",
+    "packages": "4-layer,USB,MCU",
+    "license": "see repo",
+    "short_name": "openstint",
+    "note": "OpenStint RC lap-timing RF transponder, 4-layer"
   },
   {
     "set": "set4",
