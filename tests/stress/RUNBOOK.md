@@ -155,6 +155,15 @@ harmless.
    `issues` (with the step and board), then try ONE cheaper variant (e.g.
    default `--max-iterations`, no retry round, or fewer nets); if that also
    blows the cap, mark the step as OOM and move on.
+1b. PARSER-PARITY VALIDATION (per board, start AND end): run
+   `python3 /Users/andy/Documents/KiCadRoutingTools/validate_pcb_data.py <board>`
+   on the input board before any routing step, and again on the final board.
+   It diffs the pcbnew-built PCBData (the GUI's model) against the text parse
+   (the CLI's model) — the headless twin of the GUI's "Validate PCB Data"
+   button; it re-execs into KiCad's bundled python by itself. A FAIL means one
+   parser mis-models the board (custom pads, arc tracks, zones, bounds, ...):
+   record the diff lines in the results JSON `issues` array and FINDINGS.md
+   (it is a parser bug to file, not a board defect), then continue the run.
 2. Follow SKILL.md's analysis steps (board stats, layers, fanout candidates,
    diff pairs via `list_nets.py <board> --diff-pairs --power`, power strategy,
    plan generation) but DO NOT invoke other skills and DO NOT ask the user

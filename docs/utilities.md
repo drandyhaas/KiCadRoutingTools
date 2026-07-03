@@ -762,6 +762,25 @@ shared-endpoint loops; loops that remain here are typically **overlapping
 collinear copper** (a fanout stub and the route on top of it) or **via stacks**,
 which that pass does not yet handle.
 
+## Parser-Parity Validator (`validate_pcb_data.py`)
+
+Headless twin of the GUI About-tab "Validate PCB Data" button: loads the board
+with pcbnew, builds `PCBData` from the live board objects (the GUI plugin's
+path), text-parses the same file with `parse_kicad_pcb` (the CLI path), and
+diffs the two models with `compare_pcb_data`. Any difference means one of the
+two parsers mis-models the board (pad geometry, arc tracks, zones, bounds,
+...) and the CLI and GUI would route against different worlds.
+
+```bash
+python3 validate_pcb_data.py board.kicad_pcb [more.kicad_pcb ...]
+```
+
+Needs the pcbnew Python module; when run with a plain `python3` it re-execs
+itself into KiCad's bundled interpreter automatically. Exit 0 = all boards
+match, 1 = differences, 2 = error. The stress-test flows run it per board
+(RUNBOOK rule 1b; `redo_stress_test.py` validates the final board after each
+replay, `--skip-validate` to opt out).
+
 ## DRC Settings Fixer (`fix_kicad_drc_settings.py`)
 
 Rewrites a board's **project file** (`.kicad_pro`) so that a manual DRC in the

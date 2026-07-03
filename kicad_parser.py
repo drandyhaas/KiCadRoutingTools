@@ -263,6 +263,14 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
 _PAD_ORTHO_TOL = 1.0
 
 
+# 3-point arc entry, two spellings with identical fields: (arc ...) inside a
+# KiCad 7+ polygon point list, and a standalone (gr_arc ...) pad primitive.
+#   (pts (arc (start x y) (mid x y) (end x y)) (xy x y) ...)
+_PTS_ARC_RE = (r'\((?:gr_)?arc\s+\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+'
+               r'\(mid\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+'
+               r'\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)')
+
+
 def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
     """Half-extent (|x|, |y|) of a custom pad's real copper in the pad's local
     frame, from its (primitives ...) block. A custom pad's (size ...) is only the
@@ -279,6 +287,23 @@ def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
     xs, ys = [], []
     for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
         xs.append(float(m.group(1))); ys.append(float(m.group(2)))
+    # A gr_poly outline can be drawn entirely from arc entries (rounded pads,
+    # e.g. thunderscope U11's B0QFN): zero (xy ...) matches, so without this the
+    # extent came back (0,0) and the pad was modelled at its 0.2mm anchor.
+    # Linearize each arc so its bulge is covered, not just its endpoints. The
+    # regex also matches standalone gr_arc PRIMITIVES (comexpress7 H1..H10
+    # thermal-spoke pads draw their ring from ten of them).
+    for m in re.finditer(_PTS_ARC_RE, prim):
+        s = (float(m.group(1)), float(m.group(2)))
+        mid = (float(m.group(3)), float(m.group(4)))
+        e = (float(m.group(5)), float(m.group(6)))
+        for p1, p2 in _arc_to_segments(s, mid, e):
+            xs += [p1[0], p2[0]]; ys += [p1[1], p2[1]]
+    # gr_rect / gr_line reach: their (start)/(end) corners
+    for m in re.finditer(r'\(gr_(?:rect|line)\s+\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)'
+                         r'\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
+        xs += [float(m.group(1)), float(m.group(3))]
+        ys += [float(m.group(2)), float(m.group(4))]
     # gr_circle: (center x y) (end x y) -> radius reaches center +/- r on both axes
     for m in re.finditer(r'\(gr_circle\s+\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
         cx, cy, ex, ey = map(float, m.groups())
@@ -345,8 +370,22 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
         block = prim[pm2.start():find_matching_paren(prim, pm2.start()) - 1]
         local = None
         if kind == 'poly':
-            pts = [(float(a), float(b))
-                   for a, b in re.findall(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)]
+            # Walk the pts list in order; KiCad 7+ outlines mix (xy ...) with
+            # (arc (start)(mid)(end)) entries -- and can be arcs ONLY
+            # (thunderscope U11's rounded B0QFN pads). Linearize each arc in
+            # place so the polygon follows the real curved outline.
+            pts = []
+            for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)|' + _PTS_ARC_RE, block):
+                if m.group(1) is not None:
+                    pts.append((float(m.group(1)), float(m.group(2))))
+                else:
+                    s = (float(m.group(3)), float(m.group(4)))
+                    a_mid = (float(m.group(5)), float(m.group(6)))
+                    e = (float(m.group(7)), float(m.group(8)))
+                    segs = _arc_to_segments(s, a_mid, e)
+                    pts.append(segs[0][0])
+                    for _p1, p2 in segs:
+                        pts.append(p2)
             local = pts if len(pts) >= 3 else None
         elif kind == 'circle':
             c = _field(block, 'center', 2)
@@ -649,11 +688,54 @@ def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
 # token. A plain `.*?` gap let a silk/fab gr_* element match across element
 # boundaries to a later Edge.Cuts token, consuming the real edge elements in
 # between (issue #77). Shared by the Edge.Cuts and guide-corridor readers.
-_GR_ELEMENT_GAP = r'(?:(?!\(gr_)[\s\S])*?'
+# ... and must not cross a (layer ...)/(layers ...) tag either: the first
+# layer tag after an element's fields is that element's own layer, so allowing
+# the gap to run past one lets a layer-less element (e.g. a pad-primitive
+# gr_line) borrow a LATER element's layer tag and materialize as a phantom
+# board graphic.
+_GR_ELEMENT_GAP = r'(?:(?!\(gr_|\(layers?\b)[\s\S])*?'
+
+
+def _mask_pad_primitives(content: str) -> str:
+    """Blank out pad ``(primitives ...)`` blocks before board-level graphic scans.
+
+    Custom pads draw their copper with gr_line/gr_arc/gr_poly PRIMITIVES. The
+    board-level gr_* scanners (Edge.Cuts bounds/outline, guide corridors,
+    keepouts) regex over the whole file with a gap that only refuses to cross
+    another ``(gr_`` token -- so a primitive's coordinates could be stitched to
+    a LATER element's layer tag (comexpress7: a thermal-spoke gr_line inside an
+    F.Paste aperture pad + a footprint fp_line's ``(layer "User.1")`` = a
+    phantom guide path with pad-local coordinates). Masking the primitives
+    blocks keeps those scans to real board graphics. Returns content unchanged
+    when there are no primitives.
+    """
+    out = []
+    pos = 0
+    for m in re.finditer(r'\(primitives\b', content):
+        if m.start() < pos:
+            continue
+        end = find_matching_paren(content, m.start())
+        if end <= m.start():
+            continue
+        out.append(content[pos:m.start()])
+        # Leave a (gr_ barrier token in place of the block: the gr_* scanners'
+        # gap regex refuses to cross (gr_ tokens, and blanking the primitives
+        # entirely would REMOVE barriers that stopped an earlier element's
+        # scan from bridging across this pad.
+        barrier = '(gr_masked)'
+        pad_len = end - m.start()
+        out.append(barrier + ' ' * (pad_len - len(barrier)) if pad_len >= len(barrier)
+                   else ' ' * pad_len)
+        pos = end
+    if not out:
+        return content
+    out.append(content[pos:])
+    return ''.join(out)
 
 
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
     """Extract board outline bounds from Edge.Cuts layer."""
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     min_x = min_y = float('inf')
     max_x = max_y = float('-inf')
     found = False
@@ -710,6 +792,7 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
 
 def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
     """Parse all gr_line, gr_arc, and gr_rect segments on Edge.Cuts from file content."""
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     segments = []
 
     # gr_line
@@ -745,6 +828,7 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
 
 def _parse_gr_polys_on_layer(content: str, layer: str) -> List[List[Tuple[float, float]]]:
     """Return the vertex list of every gr_poly drawn on the given layer."""
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     layer_re = re.escape(layer)
     pattern = (
         r'\(gr_poly\s+\(pts\s+((?:\(xy\s+[\d.-]+\s+[\d.-]+\)\s*)+)\)'
@@ -771,6 +855,7 @@ def parse_guide_paths(content: str, layer: str) -> List["GuidePath"]:
     Returns:
         List of GuidePath (mm coordinates). Empty if none found.
     """
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     layer_re = re.escape(layer)
     paths: List[GuidePath] = []
 
@@ -894,6 +979,7 @@ def parse_keepout_zones(content: str, layer: str) -> List["GuidePath"]:
     Returns:
         List of closed GuidePath (mm coordinates). Empty if none found.
     """
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     layer_re = re.escape(layer)
     zones: List[GuidePath] = []
 
@@ -1154,6 +1240,10 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
         # Discover all net names from their usage in pads, segments, vias, and zones.
         # Match (net "name") anywhere in the file — deduplicate to build the net list.
         net_pattern = r'\(net\s+"([^"]*)"\)'
+        # (net "") is the canonical NO-NET (net 0), not a real net: pcbnew maps
+        # it to net code 0, so synthesizing an id for it split no-net copper
+        # onto a phantom net (comexpress7's two dangling F.Cu segments).
+        name_to_id[""] = 0
         synthetic_id = 1
         for m in re.finditer(net_pattern, content):
             net_name = m.group(1)
@@ -1190,8 +1280,11 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
 
         fp_text = content[start:end]
 
-        # Extract footprint name
-        fp_name_match = re.search(r'\(footprint\s+"([^"]+)"', fp_text)
+        # Extract footprint name. May be EMPTY: KiCad writes (footprint "")
+        # for reference-less drill/graphic footprints (thunderscope's 86 locked
+        # NPTH dots) -- requiring a non-empty name silently dropped them and
+        # their hole obstacles.
+        fp_name_match = re.search(r'\(footprint\s+"([^"]*)"', fp_text)
         if not fp_name_match:
             continue
         fp_name = fp_name_match.group(1)
@@ -1216,7 +1309,17 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
         if not ref_match:
             ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
-        reference = ref_match.group(1) if ref_match else "?"
+        if ref_match:
+            reference = ref_match.group(1)
+        else:
+            # Reference-less footprint (e.g. a locked NPTH drill dot). The
+            # footprints dict is keyed by reference, so a shared '' / '?' key
+            # would collapse them all onto one entry and lose the rest's pads
+            # (86 NPTH holes on thunderscope). Key by the footprint's uuid --
+            # build_pcb_data_from_board synthesizes the same key, so the GUI
+            # and file models stay comparable.
+            uid_match = re.search(r'\(uuid\s+"([^"]+)"', fp_text)
+            reference = "#" + uid_match.group(1) if uid_match else "?"
 
         # Extract value (component part number or value)
         value_match = re.search(r'\(property\s+"Value"\s+"([^"]+)"', fp_text)
@@ -1253,7 +1356,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
 
         # Extract pads
         # Pattern for pad: (pad "num" type shape ... (at x y [rot]) ... (size sx sy) ... (net id "name") ...)
-        pad_pattern = r'\(pad\s+"([^"]+)"\s+(\w+)\s+(\w+)(.*?)\)\s*(?=\(pad|\(model|\(zone|\Z|$)'
+        pad_pattern = r'\(pad\s+"([^"]*)"\s+(\w+)\s+(\w+)(.*?)\)\s*(?=\(pad|\(model|\(zone|\Z|$)'
 
         # Simpler approach: find pad starts and extract info
         # Note: pad number can be empty string (pad "") so use [^"]* not [^"]+
@@ -1608,11 +1711,31 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         else:
             net_name = ""
 
-        # Extract layer
-        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_content)
-        if not layer_match:
-            continue
-        layer = layer_match.group(1)
+        # Extract layer(s). A zone can span several copper layers via
+        # (layers "F.Cu" "In2.Cu" ...) -- emit one Zone per copper layer so the
+        # obstacle/connectivity model sees its copper everywhere it exists
+        # (single-layer (layer "...") zones are the common case). Search the
+        # zone HEADER only: each (filled_polygon ...) inside the zone carries
+        # its own (layer "...") tag, which would mask the (layers ...) clause
+        # and pin a 5-layer zone to just its first filled layer.
+        _hdr_end = len(zone_content)
+        for _tok in ('(polygon', '(filled_polygon', '(keepout'):
+            _i = zone_content.find(_tok)
+            if _i != -1:
+                _hdr_end = min(_hdr_end, _i)
+        zone_header = zone_content[:_hdr_end]
+        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_header)
+        if layer_match:
+            zone_layers = [layer_match.group(1)]
+        else:
+            layers_match = re.search(r'\(layers\s+((?:"[^"]+"\s*)+)\)', zone_header)
+            if not layers_match:
+                continue
+            zone_layers = [l for l in re.findall(r'"([^"]+)"', layers_match.group(1))
+                           if l.endswith('.Cu') or l == '*.Cu']
+            if not zone_layers:
+                continue
+        layer = zone_layers[0]
 
         # Extract UUID
         uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', zone_content)
@@ -1644,14 +1767,14 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         if not polygon:
             continue
 
-        zone = Zone(
-            net_id=net_id,
-            net_name=net_name,
-            layer=layer,
-            polygon=polygon,
-            uuid=uuid
-        )
-        zones.append(zone)
+        for zl in zone_layers:
+            zones.append(Zone(
+                net_id=net_id,
+                net_name=net_name,
+                layer=zl,
+                polygon=polygon,
+                uuid=uuid
+            ))
 
     return zones
 
@@ -1892,6 +2015,26 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                         continue
                     x0, y0 = to_mm(bbox.GetX()), to_mm(bbox.GetY())
                     x1, y1 = to_mm(bbox.GetX() + w), to_mm(bbox.GetY() + h)
+                    # GetBoundingBox is inflated by the stroke half-width; the
+                    # board edge is the CENTERLINE of the Edge.Cuts stroke (the
+                    # fab cuts on the line), which is also what the text parser
+                    # returns. Deflate so GUI and CLI agree on board_bounds.
+                    try:
+                        hs = to_mm(drawing.GetWidth()) / 2.0
+                    except Exception:
+                        hs = 0.0
+                    if hs > 0:
+                        # per-axis: a straight line's bbox is exactly one
+                        # stroke wide across it -- collapse that axis to the
+                        # centerline instead of leaving it inflated.
+                        if (x1 - x0) > 2 * hs:
+                            x0, x1 = x0 + hs, x1 - hs
+                        else:
+                            x0 = x1 = (x0 + x1) / 2.0
+                        if (y1 - y0) > 2 * hs:
+                            y0, y1 = y0 + hs, y1 - hs
+                        else:
+                            y0 = y1 = (y0 + y1) / 2.0
                     bmin_x = min(bmin_x, x0, x1)
                     bmin_y = min(bmin_y, y0, y1)
                     bmax_x = max(bmax_x, x0, x1)
@@ -1957,6 +2100,14 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
     for fp in board.GetFootprints():
         reference = fp.GetReference()
+        if not reference:
+            # Reference-less footprint: key by uuid, mirroring the text parser
+            # (see extract_footprints_and_pads) so both models keep every such
+            # footprint (NPTH drill dots) instead of collapsing them onto ''.
+            try:
+                reference = "#" + fp.m_Uuid.AsString()
+            except Exception:
+                reference = "?"
 
         # Get footprint name (library:footprint)
         try:
@@ -2201,6 +2352,25 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 net_id=track.GetNetCode(),
             )
             segments.append(seg)
+        elif track_class == "PCB_ARC":
+            # Arc tracks: linearize with the same helper (and the same three
+            # defining points) the text parser uses, so GUI and CLI see the
+            # identical copper graph. Skipping them left the GUI's obstacle /
+            # connectivity model blind to arc-routed copper (thunderscope:
+            # 19,520 file-only segments in validate-board).
+            try:
+                s = (to_mm(track.GetStart().x), to_mm(track.GetStart().y))
+                a_mid = (to_mm(track.GetMid().x), to_mm(track.GetMid().y))
+                e = (to_mm(track.GetEnd().x), to_mm(track.GetEnd().y))
+            except Exception:
+                continue
+            for p0, p1 in _arc_to_segments(s, a_mid, e):
+                segments.append(Segment(
+                    start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                    width=to_mm(track.GetWidth()),
+                    layer=get_layer_name(track.GetLayer()),
+                    net_id=track.GetNetCode(),
+                ))
         elif track_class == "PCB_VIA":
             v = Via(
                 x=to_mm(track.GetPosition().x),
@@ -2398,9 +2568,30 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
 
     try:
         for zone in board.Zones():
+            # Keepout / rule areas are routing restrictions, NOT copper. The
+            # text parser's zones are filled copper only (a rule area has no
+            # (net ...) clause and is skipped there), and every zone consumer
+            # (obstacle map, plane connectivity) treats pcb.zones as copper --
+            # including rule areas over-blocked the GUI's model and made
+            # validate-board report phantom zone-count diffs (comexpress7: 14).
+            try:
+                if zone.GetIsRuleArea():
+                    continue
+            except Exception:
+                pass
             net_id = zone.GetNetCode()
             net_name = zone.GetNetname()
-            layer = get_layer_name(zone.GetLayer())
+            # A zone can span several copper layers; GetLayer() returns
+            # UNDEFINED for those. Emit one Zone per copper layer (the text
+            # parser does the same for (layers ...) zones).
+            try:
+                import pcbnew as _pcbnew
+                zone_layers = [get_layer_name(l) for l in zone.GetLayerSet().Seq()
+                               if _pcbnew.IsCopperLayer(l)]
+            except Exception:
+                zone_layers = []
+            if not zone_layers:
+                zone_layers = [get_layer_name(zone.GetLayer())]
 
             # Extract polygon outline
             polygon = []
@@ -2417,13 +2608,13 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
             if not polygon:
                 continue
 
-            zone_obj = Zone(
-                net_id=net_id,
-                net_name=net_name,
-                layer=layer,
-                polygon=polygon
-            )
-            zones.append(zone_obj)
+            for zl in zone_layers:
+                zones.append(Zone(
+                    net_id=net_id,
+                    net_name=net_name,
+                    layer=zl,
+                    polygon=polygon
+                ))
     except Exception:
         pass
 
