@@ -155,6 +155,14 @@ harmless.
    `issues` (with the step and board), then try ONE cheaper variant (e.g.
    default `--max-iterations`, no retry round, or fewer nets); if that also
    blows the cap, mark the step as OOM and move on.
+1a. PROJECT FILE TRAVELS WITH THE BOARD (#295): every board-mutating tool
+   writes/updates a sibling `.kicad_pro` carrying the routed DRC floors. If
+   you `cp`/rename a board to a canonical name (e.g. `final_board.kicad_pcb`),
+   COPY ITS `.kicad_pro` (and `.kicad_prl`) alongside -- a board opened in
+   KiCad without its project gets DEFAULT constraints and storms with
+   hundreds of phantom annular/track/hole-clearance errors. For a board that
+   never had one, `python3 fix_kicad_drc_settings.py <board>` now seeds and
+   fills a correct project file.
 1b. PARSER-PARITY VALIDATION (per board, start AND end): run
    `python3 /Users/andy/Documents/KiCadRoutingTools/validate_pcb_data.py <board>`
    on the input board before any routing step, and again on the final board.

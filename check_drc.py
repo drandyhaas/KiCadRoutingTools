@@ -2154,6 +2154,11 @@ if __name__ == "__main__":
         if not found and not args.quiet:
             print("Grading at clearance 0.2 mm (no project clearance found; "
                   "pass -c to override)")
+            print(f"  WARNING: {os.path.basename(args.pcb)} has NO sibling .kicad_pro. "
+                  f"Opening it in KiCad will auto-create a project with DEFAULT "
+                  f"constraints and report hundreds of phantom annular/track/hole "
+                  f"violations on a fine-pitch board (#295). Generate one with:\n"
+                  f"    python3 fix_kicad_drc_settings.py {args.pcb}")
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,

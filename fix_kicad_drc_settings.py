@@ -706,8 +706,19 @@ def main():
 
     pro = find_project(args.board)
     if not os.path.isfile(pro):
-        sys.exit(f"error: no project file found at {pro}\n"
-                 f"  Open the board in KiCad once (it creates the .kicad_pro), then re-run.")
+        # Seed a minimal valid project rather than refusing (mirrors
+        # fix_project_for_output): a board WITHOUT a sibling .kicad_pro is the
+        # worst case this tool exists for -- KiCad auto-creates one with
+        # DEFAULT constraints and a fine-pitch board storms with hundreds of
+        # annular/track/hole "violations" (#295, zynq_ad9364's cp'd final).
+        if args.dry_run:
+            sys.exit(f"error: no project file at {pro} (would seed one; re-run without --dry-run)")
+        print(f"  No project file at {pro} - seeding a minimal one")
+        with open(pro, "w") as f:
+            json.dump({"board": {"design_settings": {"rules": {}, "rule_severities": {}}},
+                       "meta": {"filename": os.path.basename(pro), "version": 1},
+                       "net_settings": {"classes": [], "meta": {"version": 0}}},
+                      f, indent=2)
 
     with open(pro) as f:
         proj = json.load(f)
