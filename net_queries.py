@@ -426,6 +426,14 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     if net_name.endswith('-') and not net_name.endswith('--'):
         return (net_name[:-1], False, '+')
 
+    # +/- with a suffix AFTER the sign, e.g. /D+_L and /D-_L (issue #290,
+    # dilemma's split-keyboard USB pair). Only an underscore-led suffix
+    # qualifies -- a bare mid-name '-' is ordinary hyphenation (3V3-MCU), not
+    # polarity. Same passive-terminal guard as above ('BZ1--_L' must not pair).
+    pm_match = re.match(r'^(.+?)([+-])(_[A-Za-z0-9_]*)$', net_name)
+    if pm_match and pm_match.group(1)[-1] not in '+-':
+        return (pm_match.group(1) + pm_match.group(3), pm_match.group(2) == '+', '+')
+
     # DDR true/complement, _t/_c -- checked LAST so a mid-name _t_/_c_ section
     # letter never shadows a real +/- or _P/_N pair (issue #192). Case-insensitive
     # (CK_t/CK_c, CK_T/CK_C). With an explicit channel separator: DQS0_t_A / DQS0_c_A

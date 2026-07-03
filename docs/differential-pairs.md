@@ -27,6 +27,7 @@ The router recognizes common differential pair naming conventions:
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
 | `DP` / `DM` / `DN`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DPLUS` | `USB_DM`, `USB_DN`, `USB_DMINUS` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
+| `+` / `-` before an `_`-led suffix | `D+_L` | `D-_L` |
 
 For the indexed `_PX` / `_NX` convention the trailing index is kept in the base
 name, so each index pairs only with its own twin (`FE_CLK_P0` pairs with

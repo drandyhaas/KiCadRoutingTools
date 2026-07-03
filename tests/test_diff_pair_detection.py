@@ -42,10 +42,16 @@ PAIRS = [
     ("FOO_T_BAR+", "FOO_T_BAR-"),
     ("ADC_C_OUT+", "ADC_C_OUT-"),
     ("TARGET_C_SENSE_P", "TARGET_C_SENSE_N"),
+    # issue #290: +/- with a suffix after the sign (dilemma split-keyboard USB)
+    ("/D+_L", "/D-_L"),
+    ("USB_D+_R", "USB_D-_R"),
 ]
 
 # Names that are NOT diff-pair halves -> None
-NON_PAIRS = ["GND", "VCC", "CLK", "Net-(R1-Pad1)", "+3V3", ""]
+NON_PAIRS = ["GND", "VCC", "CLK", "Net-(R1-Pad1)", "+3V3", "",
+             # ordinary hyphenation is not polarity (issue #290 stays narrow:
+             # only an underscore-led suffix after the sign qualifies)
+             "3V3-MCU", "+3V3_AUX"]
 
 
 def run():
