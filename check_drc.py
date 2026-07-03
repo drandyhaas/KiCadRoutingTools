@@ -757,9 +757,18 @@ def check_pad_drill_via_overlap(pad: Pad, via: Via, hole_to_hole_clearance: floa
     if pad.drill <= 0:
         return False, 0.0  # SMD pad, no drill
 
-    # Required distance between drill hole centers
-    required_dist = pad.drill / 2 + via.drill / 2 + hole_to_hole_clearance
-    actual_dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
+    # Distance from the via's hole to the pad's drill CAPSULE (slot-aware:
+    # a slot's hole edge follows its axis, not a long-dimension circle).
+    from kicad_parser import pad_drill_capsule
+    (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(pad)
+    required_dist = prad + via.drill / 2 + hole_to_hole_clearance
+    ddx, ddy = c2x - c1x, c2y - c1y
+    len2 = ddx * ddx + ddy * ddy
+    if len2 > 0:
+        t = max(0.0, min(1.0, ((via.x - c1x) * ddx + (via.y - c1y) * ddy) / len2))
+        actual_dist = math.sqrt((via.x - (c1x + t * ddx))**2 + (via.y - (c1y + t * ddy))**2)
+    else:
+        actual_dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
     overlap = required_dist - actual_dist
 
     tolerance = hole_to_hole_clearance * clearance_margin
@@ -1650,9 +1659,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 th_pads.append(pad)
                 th_pad_nets.append(pad_net)
         if th_pads and all_vias:
-            px = np.array([p.global_x for p in th_pads], dtype=np.float64)
-            py = np.array([p.global_y for p in th_pads], dtype=np.float64)
-            pdrill = np.array([p.drill for p in th_pads], dtype=np.float64)
+            # Each pad hole as its drill CAPSULE (slot-aware, see
+            # pad_drill_capsule): distance is via-centre to the capsule axis,
+            # radius is the slot's SHORT dimension. Round drills degenerate to
+            # the old centre-to-centre circle test.
+            from kicad_parser import pad_drill_capsule
+            _caps = [pad_drill_capsule(p) for p in th_pads]
+            p1x = np.array([c[0][0] for c in _caps], dtype=np.float64)
+            p1y = np.array([c[0][1] for c in _caps], dtype=np.float64)
+            p2x = np.array([c[1][0] for c in _caps], dtype=np.float64)
+            p2y = np.array([c[1][1] for c in _caps], dtype=np.float64)
+            prad = np.array([c[2] for c in _caps], dtype=np.float64)
+            cdx = p2x - p1x
+            cdy = p2y - p1y
+            clen2 = cdx * cdx + cdy * cdy
+            safe_clen2 = np.where(clen2 > 0, clen2, 1.0)
             if matching_pad_nets is None:
                 pmatch = None
             else:
@@ -1660,8 +1681,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             tolerance = hole_to_hole_clearance * 0.05
             for via in all_vias:
                 via_matches = matching_via_nets is None or via.net_id in matching_via_nets
-                required = pdrill / 2 + via.drill / 2 + hole_to_hole_clearance
-                actual = np.sqrt((px - via.x) ** 2 + (py - via.y) ** 2)
+                required = prad + via.drill / 2 + hole_to_hole_clearance
+                t = np.clip(((via.x - p1x) * cdx + (via.y - p1y) * cdy) / safe_clen2, 0.0, 1.0)
+                actual = np.sqrt((via.x - (p1x + t * cdx)) ** 2 + (via.y - (p1y + t * cdy)) ** 2)
                 overlap = required - actual
                 viol = overlap > tolerance
                 # Skip (via, pad) where neither net matches the filter. When the via
@@ -1695,11 +1717,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # and KiCad likewise reports only the NPTH cases. Mirrors KiCad's hole_clearance.
     if not quiet:
         print("Checking copper-to-hole (track <-> NPTH drill) clearances...")
-    holes = []  # (x, y, drill, net_id, ref) -- NPTH (no-copper) pad holes only
+    # Each hole is its drill CAPSULE ((x1,y1),(x2,y2),r): a slot drill's real
+    # shape. Round drills degenerate to a zero-length capsule (the old circle).
+    from kicad_parser import pad_drill_capsule
+    holes = []  # (p1, p2, r, net_id, ref) -- NPTH (no-copper) pad holes only
     for pad_net, pads in pads_by_net.items():
         for pad in pads:
             if pad.drill > 0 and _pad_has_no_copper(pad):
-                holes.append((pad.global_x, pad.global_y, pad.drill, pad_net,
+                hp1, hp2, hr = pad_drill_capsule(pad)
+                holes.append((hp1, hp2, hr, pad_net,
                               f"{pad.component_ref}.{pad.pad_number}"))
     segs = list(pcb_data.segments)
     if holes and segs:
@@ -1718,15 +1744,35 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         tolerance = npth_clr * clearance_margin
         if matching_net_ids is not None:
             seg_match = np.array([n in matching_net_ids for n in snet], dtype=bool)
-        for hx, hy, drill, hnet, ref in holes:
-            # Point(hole)-to-segment distance, vectorized over all tracks. A drill
-            # is a through-hole, so any track layer crossing it conflicts (no layer
-            # filter). The hole's own-net track legitimately connects to it -> skip.
+        def _pts_to_tracks(hx, hy):
+            # point -> per-track closest distance, vectorized over all tracks
             t = np.clip(((hx - sx1) * dx + (hy - sy1) * dy) / safe_len2, 0.0, 1.0)
             cxp = sx1 + t * dx
             cyp = sy1 + t * dy
-            dist = np.sqrt((hx - cxp) ** 2 + (hy - cyp) ** 2)
-            overlap = (drill / 2.0 + sw / 2.0 + npth_clr) - dist
+            return np.sqrt((hx - cxp) ** 2 + (hy - cyp) ** 2)
+
+        for (h1x, h1y), (h2x, h2y), hr, hnet, ref in holes:
+            # Capsule(hole)-to-segment distance, vectorized over all tracks. A
+            # drill is a through-hole, so any track layer crossing it conflicts
+            # (no layer filter). The hole's own-net track legitimately connects
+            # to it -> skip. Segment-to-segment distance = min of the four
+            # endpoint-to-other-segment distances, or 0 when they intersect.
+            dist = np.minimum(_pts_to_tracks(h1x, h1y), _pts_to_tracks(h2x, h2y))
+            hdx, hdy = h2x - h1x, h2y - h1y
+            if hdx * hdx + hdy * hdy > 1e-12:
+                hlen2 = hdx * hdx + hdy * hdy
+                for px, py in ((sx1, sy1), (sx2, sy2)):
+                    t2 = np.clip(((px - h1x) * hdx + (py - h1y) * hdy) / hlen2, 0.0, 1.0)
+                    dist = np.minimum(dist, np.sqrt((px - (h1x + t2 * hdx)) ** 2 +
+                                                    (py - (h1y + t2 * hdy)) ** 2))
+                # Proper intersection -> distance 0 (orientation sign test)
+                d1 = (sx2 - sx1) * (h1y - sy1) - (sy2 - sy1) * (h1x - sx1)
+                d2 = (sx2 - sx1) * (h2y - sy1) - (sy2 - sy1) * (h2x - sx1)
+                d3 = hdx * (sy1 - h1y) - hdy * (sx1 - h1x)
+                d4 = hdx * (sy2 - h1y) - hdy * (sx2 - h1x)
+                crossing = (d1 * d2 < 0) & (d3 * d4 < 0)
+                dist = np.where(crossing, 0.0, dist)
+            overlap = (hr + sw / 2.0 + npth_clr) - dist
             viol = (overlap > tolerance) & (snet != hnet)
             if matching_net_ids is not None:
                 viol &= seg_match | (hnet in matching_net_ids)
@@ -1743,7 +1789,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'hole_ref': ref or 'via',
                     'layer': seg.layer,
                     'overlap_mm': float(overlap[k]),
-                    'hole_loc': (hx, hy),
+                    'hole_loc': ((h1x + h2x) / 2.0, (h1y + h2y) / 2.0),
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                 })
 

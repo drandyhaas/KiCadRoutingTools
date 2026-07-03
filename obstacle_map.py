@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import math
 
-from kicad_parser import PCBData, Segment, Via, Pad
+from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles
 from routing_config import GridRouteConfig, GridCoord
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
@@ -834,9 +834,13 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             continue
         for pad in pads:
             if pad.drill > 0:
-                drill_holes.append((pad.global_x, pad.global_y, pad.drill))
+                # Slot drills expand to circles along the slot axis (short-
+                # dimension diameter) instead of one long-dimension disc --
+                # a 30.2x1mm milled slot must not become a 30mm round keep-out.
+                circles = pad_drill_circles(pad)
+                drill_holes.extend(circles)
                 if not _pad_has_copper(pad):
-                    npth_holes.append((pad.global_x, pad.global_y, pad.drill))
+                    npth_holes.extend(circles)
 
     # Track keep-out for NPTH holes on every copper layer (issue #233). The
     # copper-to-NPTH-hole floor is the JLC "NPTH to Track" fab value, never below

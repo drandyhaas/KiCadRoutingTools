@@ -63,7 +63,12 @@ class Pad:
     net_name: str
     rotation: float = 0.0  # Total rotation in degrees (pad + footprint)
     pinfunction: str = ""
-    drill: float = 0.0  # Drill size for through-hole pads (0 for SMD)
+    drill: float = 0.0  # Drill size for through-hole pads (0 for SMD). For an
+                         # oval/slot drill this is max(w, h) (back-compat: the
+                         # slot's long axis); use pad_drill_capsule()/
+                         # pad_drill_circles() for the real slot geometry.
+    drill_w: float = 0.0  # Oval/slot drill x-size in the PAD frame (0 = round)
+    drill_h: float = 0.0  # Oval/slot drill y-size in the PAD frame (0 = round)
     pintype: str = ""
     pad_type: str = ""  # KiCad pad kind: 'smd', 'thru_hole', 'np_thru_hole',
     # 'connect'. NPTH pads have NO copper (their size is just a mask opening /
@@ -427,6 +432,60 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
         if local:
             polys.append(to_global(local))
     return polys or None
+
+
+def pad_drill_capsule(pad) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
+    """A pad's drill hole as a capsule: (end1, end2, radius) in board mm.
+
+    KiCad slot drills -- ``(drill oval w h)`` -- are milled slots, not round
+    holes. Modelling one as a circle of its LONG dimension (the back-compat
+    ``pad.drill`` scalar) turns a 30.2x1mm milled slot into a phantom 15mm-
+    radius hole that "conflicts" with every track within reach (thunderscope:
+    817 phantom copper-to-hole violations; KiCad's own DRC reports none).
+    The capsule axis follows the pad's absolute rotation with the same negate
+    convention as local_to_global. Round drills (and drills parsed before the
+    slot fields existed) return a zero-length capsule at the pad centre.
+    """
+    w = getattr(pad, 'drill_w', 0.0) or 0.0
+    h = getattr(pad, 'drill_h', 0.0) or 0.0
+    if w <= 0 or h <= 0 or abs(w - h) < 1e-9:
+        centre = (pad.global_x, pad.global_y)
+        return centre, centre, (pad.drill or max(w, h)) / 2.0
+    radius = min(w, h) / 2.0
+    half_span = (max(w, h) - min(w, h)) / 2.0
+    # Local long-axis direction: +x when w >= h, else +y; rotate to board frame.
+    rad = math.radians(-(getattr(pad, 'rotation', 0.0) or 0.0))
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+    if w >= h:
+        ux, uy = cos_r, sin_r          # local (1, 0)
+    else:
+        ux, uy = -sin_r, cos_r         # local (0, 1)
+    p1 = (pad.global_x - ux * half_span, pad.global_y - uy * half_span)
+    p2 = (pad.global_x + ux * half_span, pad.global_y + uy * half_span)
+    return p1, p2, radius
+
+
+def pad_drill_circles(pad, step: float = 0.0) -> List[Tuple[float, float, float]]:
+    """A pad's drill hole as (x, y, diameter) circles for circle-based hole
+    keep-outs (obstacle maps, via hole-to-hole tests).
+
+    Round drills yield the single (x, y, drill) circle -- identical to the old
+    behaviour. Slot drills yield circles of the slot's SHORT dimension sampled
+    along the capsule axis (default spacing radius/2, max union sag ~3%% of the
+    radius), so the keep-out follows the real slot instead of a long-axis disc.
+    """
+    p1, p2, r = pad_drill_capsule(pad)
+    if r <= 0:
+        return []
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    span = math.hypot(dx, dy)
+    if span < 1e-9:
+        return [(pad.global_x, pad.global_y, 2.0 * r)]
+    if step <= 0:
+        step = r / 2.0
+    n = max(1, int(math.ceil(span / step)))
+    return [(p1[0] + dx * (i / n), p1[1] + dy * (i / n), 2.0 * r)
+            for i in range(n + 1)]
 
 
 def _resolve_pad_rect(size_x: float, size_y: float,
@@ -1447,8 +1506,11 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # (drill oval w h); take max(w, h) so the pad keeps drill>0 (TH)
             # semantics instead of being misread as SMD (issue #106).
             oval_match = re.search(r'\(drill\s+oval\s+([\d.]+)\s+([\d.]+)', pad_text)
+            drill_w = drill_h = 0.0
             if oval_match:
-                drill_size = max(float(oval_match.group(1)), float(oval_match.group(2)))
+                drill_w = float(oval_match.group(1))
+                drill_h = float(oval_match.group(2))
+                drill_size = max(drill_w, drill_h)
             else:
                 drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
                 drill_size = float(drill_match.group(1)) if drill_match else 0.0
@@ -1493,6 +1555,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 pintype=pintype,
                 pad_type=pad_type,
                 drill=drill_size,
+                drill_w=drill_w,
+                drill_h=drill_h,
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
                 local_clearance=local_clearance,
@@ -2281,8 +2345,13 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             try:
                 drill_size = pad.GetDrillSize()
                 drill = to_mm(max(drill_size.x, drill_size.y))
+                if drill_size.x != drill_size.y:
+                    drill_w, drill_h = to_mm(drill_size.x), to_mm(drill_size.y)
+                else:
+                    drill_w = drill_h = 0.0
             except Exception:
                 drill = 0.0
+                drill_w = drill_h = 0.0
 
             # Roundrect ratio
             try:
@@ -2317,6 +2386,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 pintype=pintype,
                 pad_type=pad_type,
                 drill=drill,
+                drill_w=drill_w,
+                drill_h=drill_h,
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
                 local_clearance=local_clearance,

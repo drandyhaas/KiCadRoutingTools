@@ -741,10 +741,13 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # hole-to-hole minimum of a same-net TH pad -- issue #125
     # (PAD-DRILL-VIA-DRILL-SAME-NET). A same-net TH pad already reaches the
     # plane through its own barrel, so blocking vias around it costs nothing.
+    from kicad_parser import pad_drill_circles
     for net_id, pads in pcb_data.pads_by_net.items():
         for pad in pads:
             if pad.drill > 0:
-                drill_holes.append((pad.global_x, pad.global_y, pad.drill))
+                # slot-aware (see pad_drill_circles): a milled slot blocks along
+                # its axis at its short dimension, not as a long-dimension disc
+                drill_holes.extend(pad_drill_circles(pad))
 
     # Enforce the keepout by REAL mm distance from each drill centre (shared with
     # the signal router) rather than a disk centred on the quantized drill cell,
@@ -937,7 +940,8 @@ def build_routing_obstacle_map(
             continue
         for pad in pads:
             if pad.drill > 0 and not _pad_has_copper(pad):
-                npth_holes.append((pad.global_x, pad.global_y, pad.drill))
+                from kicad_parser import pad_drill_circles
+                npth_holes.extend(pad_drill_circles(pad))
     npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
     block_track_cells_near_drills(obstacles, npth_holes, route_track_w,
                                   npth_clr, config.grid_step, [layer_idx])
