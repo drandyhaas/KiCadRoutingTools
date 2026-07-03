@@ -6,6 +6,7 @@ Routes differential pairs (P and N nets) together using centerline + offset appr
 from __future__ import annotations
 
 import math
+import numpy as np
 from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
@@ -3194,6 +3195,40 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     if best:
         ax, ay, alayer, on_via = best[1], best[2], best[3], True
 
+    # Same-net hole-to-hole gate (#300): reuse_holes lets the leg change layers
+    # ON an own-net via, but nothing stopped A* from dropping a FRESH transition
+    # via a couple of cells away from one (thunderscope M2_PER0_N: leg via
+    # 0.284mm from its own coupled-middle via, vs drill/2+drill/2+h2h = 0.403).
+    # Hole-to-hole is net-independent at the fab (#282), so block via placement
+    # inside each own-net via's ring -- the via CELL itself stays open for
+    # reuse, and only cells we actually flipped are un-blocked afterwards.
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    ring_cells = []
+    if h2h > 0:
+        own_vias = [v for v in (mid_vias or []) if v.net_id == net_id]
+        own_vias += [v for v in (getattr(pcb_data, 'vias', None) or [])
+                     if v.net_id == net_id]
+        seen_ring = set()
+        for _v in own_vias:
+            vdrill = getattr(_v, 'drill', 0.0) or config.via_drill
+            required = vdrill / 2.0 + config.via_drill / 2.0 + h2h
+            gr = int(math.ceil(required / config.grid_step)) + 1
+            cgx, cgy = coord.to_grid(_v.x, _v.y)
+            for dgx in range(-gr, gr + 1):
+                for dgy in range(-gr, gr + 1):
+                    gx2, gy2 = cgx + dgx, cgy + dgy
+                    if (gx2, gy2) == (cgx, cgy) or (gx2, gy2) in seen_ring:
+                        continue
+                    # mm-exact test (mirrors block_via_cells_near_drills)
+                    cxm, cym = gx2 * config.grid_step, gy2 * config.grid_step
+                    if math.hypot(cxm - _v.x, cym - _v.y) >= required:
+                        continue
+                    seen_ring.add((gx2, gy2))
+                    if not obstacles.is_via_blocked(gx2, gy2):
+                        ring_cells.append((gx2, gy2))
+        if ring_cells:
+            obstacles.add_blocked_vias_batch(np.array(ring_cells, dtype=np.int32))
+
     add_segments_list_as_obstacles(obstacles, partner_segs, config)
     add_vias_list_as_obstacles(obstacles, partner_vias, config)
     add_pads_via_keepout(obstacles, partner_pads, config)
@@ -3242,6 +3277,8 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         remove_segments_list_from_obstacles(obstacles, partner_segs, config)
         remove_vias_list_from_obstacles(obstacles, partner_vias, config)
         remove_pads_via_keepout(obstacles, partner_pads, config)
+        if ring_cells:
+            obstacles.remove_blocked_vias_batch(np.array(ring_cells, dtype=np.int32))
 
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
