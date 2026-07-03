@@ -111,6 +111,20 @@ class SegmentIndex:
         gx, gy = int(x // self.cell_size), int(y // self.cell_size)
         return self.grid.get((gx, gy, layer), [])
 
+    def query_near(self, x: float, y: float, layer: str):
+        """Like query_at but over the 3x3 cell neighbourhood, deduped - for
+        proximity tests whose tolerance (a track width) can cross a cell edge."""
+        gx, gy = int(x // self.cell_size), int(y // self.cell_size)
+        seen = set()
+        out = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for item in self.grid.get((gx + dx, gy + dy, layer), ()):
+                    if id(item[0]) not in seen:
+                        seen.add(id(item[0]))
+                        out.append(item)
+        return out
+
 
 def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:
     """Check if point (px, py) lies on the segment from (x1, y1) to (x2, y2) within tolerance.
@@ -489,14 +503,27 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # Check for T-junctions: points that lie on the middle of a segment (same layer)
     # Use spatial index for O(n) average instead of O(n × m)
     for px, py, player, pid, psize in all_points:
+        ptype = point_info[pid][0]
         # Query segments that might contain this point
-        for seg, seg_start_id in seg_index.query_at(px, py, player):
+        for seg, seg_start_id in seg_index.query_near(px, py, player):
             seg_end_id = seg_start_id + 1
             # Skip if this point IS one of the segment's endpoints
             if pid == seg_start_id or pid == seg_end_id:
                 continue
-            # Check if point lies on this segment
-            seg_tolerance = max(seg.width / 2, tolerance)
+            # Check if point lies on this segment. For a SEGMENT endpoint the
+            # copper is a round end cap of radius psize/2 (its track's half
+            # width), so it physically overlaps this segment's copper whenever
+            # the centreline distance is under (psize + seg.width)/2 -- two
+            # 0.1mm tracks whose endpoints sit 0.05mm apart overlap in a
+            # 0.087mm-wide lens, which KiCad counts as connected (issue #285:
+            # eit_mux /S1 graded as a phantom "0.05mm gap"; the old width/2
+            # threshold also made exact-tangency flip on FP epsilon across the
+            # file write/parse round-trip). Exact tangency (zero-width copper)
+            # is still NOT credited, so a real end-to-end gap stays flagged.
+            if ptype in ('segment_start', 'segment_end'):
+                seg_tolerance = max((psize + seg.width) / 2 - 1e-6, tolerance)
+            else:
+                seg_tolerance = max(seg.width / 2, tolerance)
             if point_on_segment(px, py, seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg_tolerance):
                 # Connect this point to the segment (via one of its endpoints)
                 _union(pid, seg_start_id)
