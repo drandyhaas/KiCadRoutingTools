@@ -653,6 +653,26 @@ def calculate_stub_via_barrel_length(stub_vias: List, stub_layer: str, pcb_data)
     return total
 
 
+def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
+    """Drop pads whose centre is clearly outside the Edge.Cuts outline (#291).
+
+    Such pads are unreachable -- the edge keep-out blocks every legal cell
+    around the outline -- but the keep-out's blocked band only extends a few
+    grid cells past the outline bbox, so an edge between TWO off-board pads
+    routes entirely in the unblocked space beyond it and ships as board-edge
+    DRC (framework_dock: TX/VBUS multipoint copper 20-50mm below the board).
+    Filtering them out of the endpoint set means no copper is drawn toward
+    them and no search is wasted; the pre-route warning in batch_route names
+    them, and the final connectivity reconciliation still reports them as
+    failed pads.
+    """
+    from check_drc import make_off_board_test
+    off_board = make_off_board_test(pcb_data.board_info)
+    if off_board is None:
+        return pads
+    return [p for p in pads if not off_board(p.global_x, p.global_y)]
+
+
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """
@@ -678,7 +698,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     layer_map = build_layer_map(config.layers)
 
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    net_pads = drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, []))
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
     # Case 1: Multiple segment groups
@@ -945,7 +965,7 @@ def get_multipoint_net_pads(
     # does not netlist individually; they must not become routing targets or
     # they show up as failed pads with component_ref '?' (issue #94). They are
     # still copper, so they keep blocking via pcb_data.pads_by_net elsewhere.
-    net_pads = [p for p in pcb_data.pads_by_net.get(net_id, [])
+    net_pads = [p for p in drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, []))
                 if (p.pad_number or '').strip() != '']
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 

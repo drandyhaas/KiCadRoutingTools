@@ -15,6 +15,7 @@ from kicad_parser import (
 )
 from routing_config import GridRouteConfig
 from connectivity import get_net_endpoints, _point_in_polygon
+from check_drc import OFF_BOARD_TOLERANCE
 from obstacle_map import build_base_obstacle_map
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, precompute_net_obstacles,
@@ -194,19 +195,25 @@ def warn_targets_outside_board(pcb_data: PCBData,
             padnum = getattr(pad, 'pad_number', '')
             where = f"{ref}.{padnum}" if ref else f"pad {padnum}"
             if not inside:
-                flagged.append((net_name, where, x, y, 'outside'))
+                # Distinguish pads the router will actually SKIP (clearly
+                # outside, issue #291) from pads grazing the outline (kept
+                # routable -- castellated / edge-connector pads).
+                out_dist = (_dist_point_to_polygon(x, y, outline) if has_poly
+                            else -dist)
+                kind = 'outside' if out_dist > OFF_BOARD_TOLERANCE else 'near-edge'
+                flagged.append((net_name, where, x, y, kind))
             elif edge_margin > 0 and dist < edge_margin:
                 flagged.append((net_name, where, x, y, 'near-edge'))
 
     if flagged:
-        print(f"\nWARNING: {len(flagged)} {label} pad(s) at/over the board outline "
-              f"-- these may be unroutable (the router cannot route past the board edge):")
+        print(f"\nWARNING: {len(flagged)} {label} pad(s) at/over the board outline:")
         for net_name, where, x, y, kind in flagged:
             if kind == 'outside':
-                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is OUTSIDE the board outline")
+                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is OUTSIDE the board "
+                      f"outline -- unreachable, SKIPPED (no copper will be drawn toward it, #291)")
             else:
-                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is within "
-                      f"{edge_margin:.2f}mm of the board edge (inside the edge keep-out)")
+                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is at/near the board "
+                      f"edge (inside the edge keep-out) -- may be unroutable")
     return flagged
 
 

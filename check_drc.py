@@ -947,6 +947,41 @@ def _point_on_board(x: float, y: float, outer: Optional[List[Tuple[float, float]
     return True
 
 
+# A point must be at least this far outside the Edge.Cuts outline (or inside a
+# cutout) before routing treats it as unreachable and skips it (#291). Pads ON
+# or grazing the outline (castellated / edge connectors) stay routable.
+OFF_BOARD_TOLERANCE = 0.5
+
+
+def make_off_board_test(board_info, tolerance: float = OFF_BOARD_TOLERANCE):
+    """Return f(x, y) -> True when the point is clearly off the copper-bearing
+    board: outside the Edge.Cuts outline (or inside a cutout) by more than
+    `tolerance` mm, falling back to the board_bounds bbox when the parser found
+    no usable outline. Returns None when the board has neither (no test
+    possible).
+
+    Routing pre-flights use this to treat off-board pads as unreachable (issue
+    #291): the routable area stops at the board edge, so copper drawn toward an
+    off-board pad -- or between two off-board pads, beyond the edge keep-out's
+    blocked band -- can only end as board-edge DRC.
+    """
+    rings, outer, cutouts = board_edge_geometry(board_info)
+    if rings:
+        def test(x: float, y: float) -> bool:
+            if _point_on_board(x, y, outer, cutouts):
+                return False
+            return _point_to_rings_distance(x, y, rings) > tolerance
+        return test
+    bounds = getattr(board_info, 'board_bounds', None)
+    if bounds:
+        min_x, min_y, max_x, max_y = bounds
+        def test(x: float, y: float) -> bool:
+            return (x < min_x - tolerance or x > max_x + tolerance or
+                    y < min_y - tolerance or y > max_y + tolerance)
+        return test
+    return None
+
+
 def check_segment_board_edge_poly(seg: Segment, rings, outer, cutouts,
                                    clearance: float,
                                    clearance_margin: float = 0.05

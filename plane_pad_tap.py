@@ -912,8 +912,19 @@ def find_unconnected_plane_pads(
 
     Returns list of (pad, pad_layer) for pads needing repair.
     """
+    # A pad clearly outside the Edge.Cuts outline can never reach the plane and
+    # a repair trace toward it (or between two off-board same-net pads) ships as
+    # board-edge DRC (issue #291, framework_dock: 170 off-board GND segments) --
+    # skip it instead of "repairing" it.
+    from check_drc import make_off_board_test
+    off_board = make_off_board_test(pcb_data.board_info)
+    skipped_off_board = 0
+
     unconnected: List[Tuple[Pad, str]] = []
     for pad in pcb_data.pads_by_net.get(net_id, []):
+        if off_board is not None and off_board(pad.global_x, pad.global_y):
+            skipped_off_board += 1
+            continue
         if pad.drill > 0:
             continue
         if '*.Cu' in pad.layers or any(zl in pad.layers for zl in zone_layers):
@@ -929,4 +940,7 @@ def find_unconnected_plane_pads(
                for zl in zone_layers):
             continue
         unconnected.append((pad, pad_layer))
+    if skipped_off_board:
+        print(f"  Skipped {skipped_off_board} pad(s) OUTSIDE the board outline "
+              f"(unreachable, no repair copper drawn, #291)")
     return unconnected

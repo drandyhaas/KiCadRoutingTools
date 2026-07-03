@@ -2050,6 +2050,7 @@ def create_plane(
         pads_direct = sum(1 for p in target_pads if p['type'] == 'direct')
         pads_already_connected = sum(1 for p in target_pads if p['type'] == 'already_connected')
         pads_need_via = sum(1 for p in target_pads if p['type'] == 'via_needed')
+        pads_off_board = sum(1 for p in target_pads if p['type'] == 'off_board')
         total_pads_needing_vias += pads_need_via
 
         print(f"\nPad analysis for net '{net_name}':")
@@ -2058,6 +2059,9 @@ def create_plane(
         if pads_already_connected:
             print(f"  SMD pads already routed to plane (no via needed): {pads_already_connected}")
         print(f"  SMD pads on other layers (via needed): {pads_need_via}")
+        if pads_off_board:
+            print(f"  {RED}Pads OUTSIDE the board outline (unreachable, skipped, #291): "
+                  f"{pads_off_board}{RESET}")
 
         # Step 6: Collect existing vias on target net (for reuse)
         existing_net_vias: List[Tuple[float, float]] = []

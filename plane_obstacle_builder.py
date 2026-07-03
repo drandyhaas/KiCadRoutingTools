@@ -306,7 +306,22 @@ def identify_target_pads(
     target_pads = []
     pads = pcb_data.pads_by_net.get(net_id, [])
 
+    # A pad clearly outside the Edge.Cuts outline can never reach the plane
+    # (the fill is clipped to the outline) and any via/trace drawn toward it
+    # lands as board-edge DRC (issue #291, framework_dock GND). Classify it
+    # off_board so no copper is drawn for it; callers report the count.
+    from check_drc import make_off_board_test
+    off_board = make_off_board_test(pcb_data.board_info)
+
     for pad in pads:
+        if off_board is not None and off_board(pad.global_x, pad.global_y):
+            target_pads.append({
+                'pad': pad,
+                'type': 'off_board',
+                'needs_via': False,
+                'needs_trace': False
+            })
+            continue
         # Check if pad has drill (through-hole)
         if pad.drill > 0:
             # Through-hole pad - directly connects to all layers including plane
