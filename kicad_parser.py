@@ -415,8 +415,11 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
     if not pm:
         return None
     prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
-    # Arcs/beziers aren't approximated yet -- fall back to the bbox for the whole pad.
-    if re.search(r'\(gr_(arc|curve)\b', prim):
+    # Beziers aren't approximated yet -- fall back to the bbox for the whole pad.
+    # (gr_arc strokes ARE handled below: linearized into a width band. sofle_pico's
+    # rotated LED lens pads are drawn from gr_arc+gr_line strokes; bailing to the
+    # bbox modelled ~10x more copper than exists and made phantom PAD-SEGMENT.)
+    if re.search(r'\(gr_curve\b', prim):
         return None
     rad = math.radians(-pad_abs_rotation_deg)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
@@ -433,9 +436,38 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
         m = re.search(r'\(width\s+(-?[\d.]+)\)', block)
         return float(m.group(1)) if m else 0.0
 
+    def _stroke_band(pts, hw):
+        """Polygon for a stroked polyline: offset +-hw using per-vertex averaged
+        normals, ends extended by hw (square cap covers the round cap)."""
+        if len(pts) < 2 or hw <= 0:
+            return None
+        # extend ends along their tangents so the cap is covered
+        (x0, y0), (x1, y1) = pts[0], pts[1]
+        d0 = math.hypot(x1 - x0, y1 - y0) or 1.0
+        pts = [(x0 - (x1 - x0) / d0 * hw, y0 - (y1 - y0) / d0 * hw)] + pts[1:]
+        (xa, ya), (xb, yb) = pts[-2], pts[-1]
+        d1 = math.hypot(xb - xa, yb - ya) or 1.0
+        pts = pts[:-1] + [(xb + (xb - xa) / d1 * hw, yb + (yb - ya) / d1 * hw)]
+        normals = []
+        for i in range(len(pts)):
+            acc_x = acc_y = 0.0
+            for j in (i - 1, i):
+                if 0 <= j < len(pts) - 1:
+                    dx = pts[j + 1][0] - pts[j][0]
+                    dy = pts[j + 1][1] - pts[j][1]
+                    L = math.hypot(dx, dy)
+                    if L > 1e-12:
+                        acc_x += -dy / L
+                        acc_y += dx / L
+            L = math.hypot(acc_x, acc_y)
+            normals.append((acc_x / L, acc_y / L) if L > 1e-12 else (0.0, 0.0))
+        left = [(p[0] + n[0] * hw, p[1] + n[1] * hw) for p, n in zip(pts, normals)]
+        right = [(p[0] - n[0] * hw, p[1] - n[1] * hw) for p, n in zip(pts, normals)]
+        return left + right[::-1]
+
     polys = []
     # Iterate primitives in order; one polygon per primitive, transformed to global.
-    for pm2 in re.finditer(r'\(gr_(poly|circle|rect|line)\b', prim):
+    for pm2 in re.finditer(r'\(gr_(poly|circle|rect|line|arc)\b', prim):
         kind = pm2.group(1)
         block = prim[pm2.start():find_matching_paren(prim, pm2.start()) - 1]
         local = None
@@ -478,6 +510,17 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                 x0, x1 = min(s[0], e[0]) - hw, max(s[0], e[0]) + hw
                 y0, y1 = min(s[1], e[1]) - hw, max(s[1], e[1]) + hw
                 local = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        elif kind == 'arc':
+            # 3-point arc stroke: linearize the centerline, offset into a band.
+            am = re.search(_PTS_ARC_RE, block)
+            if am:
+                s = (float(am.group(1)), float(am.group(2)))
+                a_mid = (float(am.group(3)), float(am.group(4)))
+                e = (float(am.group(5)), float(am.group(6)))
+                cpts = [s]
+                for _p1, p2 in _arc_to_segments(s, a_mid, e):
+                    cpts.append(p2)
+                local = _stroke_band(cpts, max(_width(block) / 2.0, 1e-3))
         elif kind == 'line':
             s = _field(block, 'start', 2)
             e = _field(block, 'end', 2)
