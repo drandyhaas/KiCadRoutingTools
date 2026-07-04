@@ -94,44 +94,89 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
 
 
+def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
+                                emitted_copper, full_sig, pos_sig):
+    """Shared core for #284 stale-copper stripping (vias and segments).
+
+    The output writer copies the input file verbatim, then APPENDS the routing
+    results' copper (each result's new segments/vias plus stub layer-swap
+    copper). So an original item of a ripped/re-routed net can ship TWICE, or
+    next to a replacement, leaving redundant same-net copper stacked on itself.
+
+    Strip an in-scope net's original item when EITHER:
+
+    - its FULL signature is no longer on the final board -- the net was rerouted
+      away or ripped-and-not-restored. An item route.py kept unchanged still
+      matches its identical final-board item and is left alone.
+    - the writer will RE-EMIT an item for the SAME net at the SAME POSITION: the
+      re-emitted item is authoritative, so the verbatim original is the redundant
+      copy (this covers a byte-identical replacement, which a full-signature match
+      alone treats as "kept").
+
+    ``full_sig`` distinguishes a superseded item from a kept one; ``pos_sig`` is
+    the coarser locus a replacement lands on (via drill hole / segment span).
+    """
+    final = {}
+    for c in final_copper:
+        final.setdefault(c.net_id, set()).add(full_sig(c))
+    emit = {}
+    for c in emitted_copper:
+        emit.setdefault(c.net_id, set()).add(pos_sig(c))
+    stale = []
+    for nid in scope_ids:
+        nfinal = final.get(nid, ())
+        nemit = emit.get(nid, ())
+        for c in orig_by_net.get(nid, []):
+            if full_sig(c) not in nfinal or pos_sig(c) in nemit:
+                stale.append(c)
+    return stale
+
+
+def _via_full_sig(v):
+    return (round(v.x, 3), round(v.y, 3), round(v.size, 3), round(v.drill, 3))
+
+
+def _via_pos_sig(v):
+    # A via's drill hole is a point: two same-net vias at one (x, y) overlap
+    # regardless of size, and the drill hole-to-hole check is net-independent.
+    return (round(v.x, 3), round(v.y, 3))
+
+
+def _seg_span_sig(s):
+    a = (round(s.start_x, 3), round(s.start_y, 3))
+    b = (round(s.end_x, 3), round(s.end_y, 3))
+    return (min(a, b), max(a, b), s.layer)
+
+
 def compute_stale_input_vias(orig_via_by_net, scope_ids, final_vias, emitted_vias):
     """Original input vias to strip from the verbatim output copy (issue #284).
 
-    The output writer copies the input file verbatim, then APPENDS the routing
-    results' vias (each result's ``new_vias`` plus stub layer-swap vias). So an
-    original via of a ripped/re-routed net can end up written TWICE, or written
-    next to a replacement -- two same-net vias in one hole, which the
-    net-independent drill hole-to-hole check flags as a DRC violation.
-
-    Strip an in-scope net's original via when EITHER:
-
-    - its exact ``(x, y, size, drill)`` is no longer on the final board -- the net
-      was rerouted away or ripped-and-not-restored. A via route.py kept unchanged
-      still matches its identical final-board via and is left alone. (Keying on
-      size+drill, not position alone: a reroute often lands a shrunk via-in-pad
-      via at the original position -- position-only kept the superseded original.)
-    - the writer will RE-EMIT a via for the SAME net at the SAME ``(x, y)``:
-      keeping the verbatim original stacks two vias in one hole even when the
-      re-emitted via is byte-identical (identical-size stacks trip the drill
-      hole-to-hole check just like different-size ones). The re-emitted via is
-      authoritative, so the verbatim original is always the redundant copy.
+    A ripped/re-routed net's reroute often lands a via-in-pad via at the EXACT
+    position of the net's original via; without stripping the original, the
+    output ships two same-net vias in one hole -- and the drill hole-to-hole
+    check is net-independent, so this violates DRC whether the two are the same
+    size or not. See ``_compute_stale_input_copper``.
     """
-    def _sig(v):
-        return (round(v.x, 3), round(v.y, 3), round(v.size, 3), round(v.drill, 3))
-    final_sig = {}
-    for v in final_vias:
-        final_sig.setdefault(v.net_id, set()).add(_sig(v))
-    emit_pos = {}
-    for v in emitted_vias:
-        emit_pos.setdefault(v.net_id, set()).add((round(v.x, 3), round(v.y, 3)))
-    stale = []
-    for nid in scope_ids:
-        nfinal = final_sig.get(nid, ())
-        nemit = emit_pos.get(nid, ())
-        for v in orig_via_by_net.get(nid, []):
-            if _sig(v) not in nfinal or (round(v.x, 3), round(v.y, 3)) in nemit:
-                stale.append(v)
-    return stale
+    return _compute_stale_input_copper(
+        orig_via_by_net, scope_ids, final_vias, emitted_vias,
+        full_sig=_via_full_sig, pos_sig=_via_pos_sig)
+
+
+def compute_stale_input_segments(orig_seg_by_net, scope_ids, final_segments,
+                                 emitted_segments):
+    """Original input segments to strip from the verbatim output copy (issue
+    #284, segment twin of ``compute_stale_input_vias``).
+
+    Unlike vias, two exactly-overlapping same-net segments are DRC-benign (KiCad
+    permits same-net copper overlap and there is no net-independent segment
+    check), so this is a cleanliness fix, not a DRC one -- it keeps a ripped/
+    re-routed net from shipping a verbatim original segment next to a byte-
+    identical re-emitted copy. A segment is keyed by span+layer for both roles
+    (the reroute either reproduces the span exactly or routes a different one).
+    """
+    return _compute_stale_input_copper(
+        orig_seg_by_net, scope_ids, final_segments, emitted_segments,
+        full_sig=_seg_span_sig, pos_sig=_seg_span_sig)
 
 
 def _write_passthrough_output(input_file: str, output_file: str) -> None:
@@ -1015,17 +1060,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # input segment that is no longer on the final board. A segment route.py kept
     # or re-routed identically is still in pcb_data (matched by signature) and is
     # NOT stripped, so legitimate copper is untouched.
-    def _seg_sig220(s):
-        a, b = (round(s.start_x, 3), round(s.start_y, 3)), (round(s.end_x, 3), round(s.end_y, 3))
-        return (min(a, b), max(a, b), s.layer)
-    _final_sig_by_net: Dict[int, set] = {}
-    for _s in pcb_data.segments:
-        _final_sig_by_net.setdefault(_s.net_id, set()).add(_seg_sig220(_s))
-    _stale_input_segs = [
-        _s for _nid in sweep_scope_ids
-        for _s in _orig_seg_by_net.get(_nid, [])
-        if _seg_sig220(_s) not in _final_sig_by_net.get(_nid, ())
-    ]
+    # Issue #284 (segment twin of the via strip below): also strip an original
+    # segment the writer will RE-EMIT verbatim (same net, same span+layer, in
+    # results.new_segments) -- otherwise a ripped/re-routed net that reproduces a
+    # span exactly ships the verbatim original next to a byte-identical copy. This
+    # is DRC-benign (same-net overlap is permitted) but keeps the output clean.
+    _emitted_segs = [_s for _r in results for _s in (_r.get('new_segments') or [])]
+    _stale_input_segs = compute_stale_input_segments(
+        _orig_seg_by_net, sweep_scope_ids, pcb_data.segments, _emitted_segs)
     if _stale_input_segs:
         dead_end_input_segments = list(dead_end_input_segments) + _stale_input_segs
         print(f"Stripped {len(_stale_input_segs)} stale input segment(s) of "

@@ -25,13 +25,24 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from route import compute_stale_input_vias
-from kicad_writer import remove_vias_from_content
+from route import compute_stale_input_vias, compute_stale_input_segments
+from kicad_writer import remove_vias_from_content, remove_segments_from_content
 
 
 def _via(x, y, size, drill, net=67, layers=('F.Cu', 'B.Cu')):
     return SimpleNamespace(x=x, y=y, size=size, drill=drill, net_id=net,
                            layers=list(layers))
+
+
+def _seg(x1, y1, x2, y2, width=0.15, layer='In3.Cu', net=74):
+    return SimpleNamespace(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                           width=width, layer=layer, net_id=net)
+
+
+def _span_key(s):
+    a = (round(s.start_x, 3), round(s.start_y, 3))
+    b = (round(s.end_x, 3), round(s.end_y, 3))
+    return (s.net_id, min(a, b), max(a, b), s.layer)
 
 
 def _final_output_vias(input_vias, stale, emitted):
@@ -45,8 +56,10 @@ def _final_output_vias(input_vias, stale, emitted):
 
 def run():
     fails = []
+    _ALL_CHECKS = []
 
     def check(name, cond):
+        _ALL_CHECKS.append(name)
         if not cond:
             fails.append(name)
 
@@ -117,15 +130,50 @@ def run():
     check("writer strips original (identical-size)",
           nB == 1 and '"orig"' not in outB)
 
+    # ---- Segment twin: a re-emitted identical span must not double-ship ----
+    SEG = (152.9, 133.4, 152.9, 133.5)
+    origS = _seg(*SEG, net=74)             # original input segment
+    kept_seg = _seg(140.0, 100.0, 141.0, 100.0, net=74)  # untouched elsewhere
+    reemitS = _seg(*SEG, net=74)           # reroute reproduces the same span
+    orig_seg_by_net = {74: [origS, kept_seg]}
+    final_segs = [reemitS, _seg(140.0, 100.0, 141.0, 100.0, net=74)]
+    staleS = compute_stale_input_segments(orig_seg_by_net, {74}, final_segs, [reemitS])
+    check("segment: re-emitted identical span flagged stale", origS in staleS)
+    check("segment: untouched span left alone", kept_seg not in staleS)
+    # writer view: verbatim (minus stale) + appended re-emit -> one copy per span
+    stale_seg_ids = {id(s) for s in staleS}
+    written = [s for s in [origS, kept_seg] if id(s) not in stale_seg_ids] + [reemitS]
+    keysS = [_span_key(s) for s in written]
+    check("segment: no span shipped twice", len(keysS) == len(set(keysS)))
+
+    # end-to-end through the real segment writer
+    seg_content = (
+        '(kicad_pcb\n\t(version 20250101)\n'
+        '\t(segment (start 152.9 133.4) (end 152.9 133.5) (width 0.15) '
+        '(layer "In3.Cu") (net 74) (uuid "s_orig"))\n'
+        '\t(segment (start 140 100) (end 141 100) (width 0.15) '
+        '(layer "In3.Cu") (net 74) (uuid "s_kept"))\n)')
+    outS, nS = remove_segments_from_content(seg_content, staleS)
+    check("writer strips the re-emitted original segment, keeps the untouched one",
+          nS == 1 and '"s_orig"' not in outS and '"s_kept"' in outS)
+
+    # ---- Segment: DIFFERENT span (rerouted away) still stripped as stale ----
+    origS2 = _seg(152.9, 133.4, 152.9, 133.5, net=74)
+    reemitS2 = _seg(153.5, 133.4, 153.5, 133.9, net=74)  # different path
+    staleS2 = compute_stale_input_segments({74: [origS2]}, {74}, [reemitS2], [reemitS2])
+    check("segment: original stripped when net rerouted to a different span",
+          origS2 in staleS2)
+
     print("=" * 60)
     if fails:
         for f in fails:
             print(f"  FAIL  {f}")
         print(f"\n{len(fails)} failure(s)")
         return 1
-    print("  PASS  #284 stacked-via de-dup: diff-size + identical-size, "
-          "kept vias untouched, end-to-end writer strip")
-    print("\n11/11 checks passed")
+    print("  PASS  #284 stacked-copper de-dup: vias (diff+identical size) and "
+          "segments (re-emit + rerouted-away), kept copper untouched, "
+          "end-to-end writer strip")
+    print(f"\n{len(_ALL_CHECKS)}/{len(_ALL_CHECKS)} checks passed")
     return 0
 
 
