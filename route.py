@@ -94,6 +94,46 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
 
 
+def compute_stale_input_vias(orig_via_by_net, scope_ids, final_vias, emitted_vias):
+    """Original input vias to strip from the verbatim output copy (issue #284).
+
+    The output writer copies the input file verbatim, then APPENDS the routing
+    results' vias (each result's ``new_vias`` plus stub layer-swap vias). So an
+    original via of a ripped/re-routed net can end up written TWICE, or written
+    next to a replacement -- two same-net vias in one hole, which the
+    net-independent drill hole-to-hole check flags as a DRC violation.
+
+    Strip an in-scope net's original via when EITHER:
+
+    - its exact ``(x, y, size, drill)`` is no longer on the final board -- the net
+      was rerouted away or ripped-and-not-restored. A via route.py kept unchanged
+      still matches its identical final-board via and is left alone. (Keying on
+      size+drill, not position alone: a reroute often lands a shrunk via-in-pad
+      via at the original position -- position-only kept the superseded original.)
+    - the writer will RE-EMIT a via for the SAME net at the SAME ``(x, y)``:
+      keeping the verbatim original stacks two vias in one hole even when the
+      re-emitted via is byte-identical (identical-size stacks trip the drill
+      hole-to-hole check just like different-size ones). The re-emitted via is
+      authoritative, so the verbatim original is always the redundant copy.
+    """
+    def _sig(v):
+        return (round(v.x, 3), round(v.y, 3), round(v.size, 3), round(v.drill, 3))
+    final_sig = {}
+    for v in final_vias:
+        final_sig.setdefault(v.net_id, set()).add(_sig(v))
+    emit_pos = {}
+    for v in emitted_vias:
+        emit_pos.setdefault(v.net_id, set()).add((round(v.x, 3), round(v.y, 3)))
+    stale = []
+    for nid in scope_ids:
+        nfinal = final_sig.get(nid, ())
+        nemit = emit_pos.get(nid, ())
+        for v in orig_via_by_net.get(nid, []):
+            if _sig(v) not in nfinal or (round(v.x, 3), round(v.y, 3)) in nemit:
+                stale.append(v)
+    return stale
+
+
 def _write_passthrough_output(input_file: str, output_file: str) -> None:
     """Write the output as an unchanged copy of the input (issue #86).
 
@@ -993,24 +1033,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Same for input VIAS (the #220 strip was segments-only): a ripped-existing
     # net's original vias otherwise ship next to its reroute's replacements as
     # same-net drill pairs.
-    # Issue #284: the signature must include size+drill, not position alone. A
-    # ripped net's reroute often lands a via-in-pad via at the EXACT position of
-    # the net's original via but with a different (shrunk-to-fit) size/drill. On
-    # a position-only match the original input via looked "kept" and survived
-    # verbatim next to the reroute's replacement -> two same-net vias stacked at
-    # one hole (a net-independent drill hole-to-hole violation). Keying on
-    # (x, y, size, drill) strips the superseded original; a via route.py kept
-    # unchanged still matches its identical final-board via and is untouched.
-    def _via_sig284(_v):
-        return (round(_v.x, 3), round(_v.y, 3), round(_v.size, 3), round(_v.drill, 3))
-    _final_via_sig_by_net: Dict[int, set] = {}
-    for _v in pcb_data.vias:
-        _final_via_sig_by_net.setdefault(_v.net_id, set()).add(_via_sig284(_v))
-    stale_input_vias = [
-        _v for _nid in sweep_scope_ids
-        for _v in _orig_via_by_net.get(_nid, [])
-        if _via_sig284(_v) not in _final_via_sig_by_net.get(_nid, ())
-    ]
+    # Issue #284: strip an original input via of a ripped/re-routed net when it is
+    # superseded on the final board (size/drill-aware) OR when the writer will
+    # re-emit a via for the same net at the same position -- either way keeping
+    # the verbatim original stacks two vias in one hole. The emitted-via set is
+    # the writer's: each result's new_vias plus the stub layer-swap vias (same
+    # basis as _writelist_copper_209 above).
+    _emitted_vias = [_v for _r in results for _v in (_r.get('new_vias') or [])]
+    _emitted_vias += list(all_swap_vias)
+    stale_input_vias = compute_stale_input_vias(
+        _orig_via_by_net, sweep_scope_ids, pcb_data.vias, _emitted_vias)
     if stale_input_vias:
         print(f"Stripping {len(stale_input_vias)} stale input via(s) of "
               f"ripped/re-routed nets not on the final board")
