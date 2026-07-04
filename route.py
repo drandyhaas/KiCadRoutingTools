@@ -993,13 +993,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Same for input VIAS (the #220 strip was segments-only): a ripped-existing
     # net's original vias otherwise ship next to its reroute's replacements as
     # same-net drill pairs.
+    # Issue #284: the signature must include size+drill, not position alone. A
+    # ripped net's reroute often lands a via-in-pad via at the EXACT position of
+    # the net's original via but with a different (shrunk-to-fit) size/drill. On
+    # a position-only match the original input via looked "kept" and survived
+    # verbatim next to the reroute's replacement -> two same-net vias stacked at
+    # one hole (a net-independent drill hole-to-hole violation). Keying on
+    # (x, y, size, drill) strips the superseded original; a via route.py kept
+    # unchanged still matches its identical final-board via and is untouched.
+    def _via_sig284(_v):
+        return (round(_v.x, 3), round(_v.y, 3), round(_v.size, 3), round(_v.drill, 3))
     _final_via_sig_by_net: Dict[int, set] = {}
     for _v in pcb_data.vias:
-        _final_via_sig_by_net.setdefault(_v.net_id, set()).add((round(_v.x, 3), round(_v.y, 3)))
+        _final_via_sig_by_net.setdefault(_v.net_id, set()).add(_via_sig284(_v))
     stale_input_vias = [
         _v for _nid in sweep_scope_ids
         for _v in _orig_via_by_net.get(_nid, [])
-        if (round(_v.x, 3), round(_v.y, 3)) not in _final_via_sig_by_net.get(_nid, ())
+        if _via_sig284(_v) not in _final_via_sig_by_net.get(_nid, ())
     ]
     if stale_input_vias:
         print(f"Stripping {len(stale_input_vias)} stale input via(s) of "
