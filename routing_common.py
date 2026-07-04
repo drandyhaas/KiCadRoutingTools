@@ -172,8 +172,12 @@ def warn_targets_outside_board(pcb_data: PCBData,
     bounds = getattr(pcb_data.board_info, 'board_bounds', None)
     if not bounds:
         return []
-    outline = getattr(pcb_data.board_info, 'board_outline', None)
-    has_poly = bool(outline) and len(outline) >= 3
+    outlines = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
+                if len(o) >= 3]
+    if not outlines:
+        outline = getattr(pcb_data.board_info, 'board_outline', None)
+        outlines = [outline] if outline and len(outline) >= 3 else []
+    has_poly = bool(outlines)
     min_x, min_y, max_x, max_y = bounds
 
     flagged = []
@@ -186,8 +190,10 @@ def warn_targets_outside_board(pcb_data: PCBData,
             seen.add(key)
             x, y = pad.global_x, pad.global_y
             if has_poly:
-                inside = _point_in_polygon(x, y, outline)
-                dist = _dist_point_to_polygon(x, y, outline) if inside else -1.0
+                # multi-outline boards (#304): on-board = inside ANY outer ring
+                inside = any(_point_in_polygon(x, y, o) for o in outlines)
+                dist = (min(_dist_point_to_polygon(x, y, o) for o in outlines)
+                        if inside else -1.0)
             else:
                 dist = min(x - min_x, max_x - x, y - min_y, max_y - y)
                 inside = dist >= 0

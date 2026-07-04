@@ -601,13 +601,23 @@ def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: 
     px = gx_flat.astype(np.float64) * coord.grid_step
     py = gy_flat.astype(np.float64) * coord.grid_step
 
-    poly = np.array(board_outline, dtype=np.float64)
-    x1 = poly[:, 0]
-    y1 = poly[:, 1]
-    x2 = np.roll(poly[:, 0], -1)
-    y2 = np.roll(poly[:, 1], -1)
-
-    inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
+    # One outer ring or a LIST of them (#304): inside ANY ring is on-board,
+    # edge distance is the minimum over all rings' edges.
+    rings = [board_outline] if board_outline and isinstance(board_outline[0], tuple) \
+        else list(board_outline)
+    inside = None
+    ex1, ey1, ex2, ey2 = [], [], [], []
+    for ring in rings:
+        poly = np.array(ring, dtype=np.float64)
+        x1 = poly[:, 0]
+        y1 = poly[:, 1]
+        x2 = np.roll(poly[:, 0], -1)
+        y2 = np.roll(poly[:, 1], -1)
+        ex1.append(x1); ey1.append(y1); ex2.append(x2); ey2.append(y2)
+        ins = _points_inside_polygon(px, py, x1, y1, x2, y2)
+        inside = ins if inside is None else (inside | ins)
+    x1, y1 = np.concatenate(ex1), np.concatenate(ey1)
+    x2, y2 = np.concatenate(ex2), np.concatenate(ey2)
     mask = ~inside
     in_idx = np.nonzero(inside)[0]
     if in_idx.size:
@@ -638,9 +648,16 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     grid_margin = via_expand + 5
 
-    # Check for non-rectangular board outline
-    board_outline = pcb_data.board_info.board_outline
-    use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
+    # Check for non-rectangular board outline; multi-outline boards (#304)
+    # pass ALL outer rings so both halves of a split board stay usable.
+    board_outlines = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
+                      if len(o) >= 3]
+    board_outline = (board_outlines if len(board_outlines) > 1
+                     else pcb_data.board_info.board_outline)
+    single = board_outlines[0] if len(board_outlines) == 1 else pcb_data.board_info.board_outline
+    use_polygon = bool(len(board_outlines) > 1 or
+                       (single and len(single) >= 3
+                        and not _is_rectangular_outline(single, board_bounds)))
 
     if use_polygon:
         # Polygon board: rasterize the outline bbox + margin in one shot. Every
@@ -694,9 +711,16 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     grid_margin = track_expand + 5
 
-    # Check for non-rectangular board outline
-    board_outline = pcb_data.board_info.board_outline
-    use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
+    # Check for non-rectangular board outline; multi-outline boards (#304)
+    # pass ALL outer rings so both halves of a split board stay usable.
+    board_outlines = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
+                      if len(o) >= 3]
+    board_outline = (board_outlines if len(board_outlines) > 1
+                     else pcb_data.board_info.board_outline)
+    single = board_outlines[0] if len(board_outlines) == 1 else pcb_data.board_info.board_outline
+    use_polygon = bool(len(board_outlines) > 1 or
+                       (single and len(single) >= 3
+                        and not _is_rectangular_outline(single, board_bounds)))
 
     if use_polygon:
         # Polygon board: rasterize the outline bbox + margin once and block (on this

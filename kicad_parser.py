@@ -185,6 +185,12 @@ class BoardInfo:
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
     board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
     board_cutouts: List[List[Tuple[float, float]]] = field(default_factory=list)  # Interior cutout polygons
+    # ALL outer boundary rings (issue #304). A board can carry several disjoint
+    # outlines in one file (split keyboards drawn as left+right halves,
+    # panelized boards); board_outline keeps the LARGEST for back-compat, this
+    # holds every outer ring. Empty on single-outline/rectangular boards means
+    # "use board_outline".
+    board_outlines: List[List[Tuple[float, float]]] = field(default_factory=list)
     keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
@@ -730,13 +736,15 @@ def extract_layers(content: str) -> BoardInfo:
     # Extract board bounds from Edge.Cuts
     bounds = extract_board_bounds(content)
 
-    # Extract board outline polygon and cutouts for non-rectangular boards
-    outline, cutouts = extract_board_contours(content)
+    # Extract board outline polygon(s) and cutouts for non-rectangular boards
+    outers, cutouts = extract_board_contours(content)
 
     # Extract stackup information
     stackup = extract_stackup(content)
 
-    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds, stackup=stackup, board_outline=outline, board_cutouts=cutouts)
+    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds,
+                     stackup=stackup, board_outline=(outers[0] if outers else []),
+                     board_outlines=outers, board_cutouts=cutouts)
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
@@ -982,6 +990,26 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
     return None
 
 
+def _bezier_to_segments(p0, p1, p2, p3, num_segments: int = 16):
+    """Cubic bezier -> consecutive line segments (de Casteljau sampling)."""
+    pts = []
+    for i in range(num_segments + 1):
+        t = i / num_segments
+        mt = 1.0 - t
+        x = (mt ** 3) * p0[0] + 3 * (mt ** 2) * t * p1[0] + 3 * mt * (t ** 2) * p2[0] + (t ** 3) * p3[0]
+        y = (mt ** 3) * p0[1] + 3 * (mt ** 2) * t * p1[1] + 3 * mt * (t ** 2) * p2[1] + (t ** 3) * p3[1]
+        pts.append((x, y))
+    return list(zip(pts, pts[1:]))
+
+
+def _circle_to_segments(cx, cy, r, num_segments: int = 64):
+    """Circle -> closed ring of line segments."""
+    pts = [(cx + r * math.cos(2 * math.pi * k / num_segments),
+            cy + r * math.sin(2 * math.pi * k / num_segments))
+           for k in range(num_segments + 1)]
+    return list(zip(pts, pts[1:]))
+
+
 def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
     """Parse all gr_line, gr_arc, and gr_rect segments on Edge.Cuts from file content."""
     content = _mask_pad_primitives(content)  # pad primitives are not board graphics
@@ -1019,7 +1047,85 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         for i in range(len(poly)):
             segments.append((poly[i], poly[(i + 1) % len(poly)]))
 
+    # gr_curve - cubic bezier corner/edge (#304: crkbd's outline corners are
+    # 100 gr_curves; without them the outline never chains closed, the halves'
+    # small slots masquerade as the whole outline, and every track "leaves the
+    # board"). Control points are (pts (xy)x4) in GLOBAL coords.
+    curve_pattern = (r'\(gr_curve\s+\(pts\s+'
+                     r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*'
+                     r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\)'
+                     + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)')
+    for m in re.finditer(curve_pattern, content, re.DOTALL):
+        g = [float(v) for v in m.groups()]
+        segments.extend(_bezier_to_segments((g[0], g[1]), (g[2], g[3]),
+                                            (g[4], g[5]), (g[6], g[7])))
+
+    # gr_circle - a standalone ring (mounting hole / round cutout)
+    circle_pattern = (r'\(gr_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                      r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP
+                      + r'\(layer\s+"Edge\.Cuts"\)')
+    for m in re.finditer(circle_pattern, content, re.DOTALL):
+        cx, cy, ex, ey = (float(v) for v in m.groups())
+        r = math.hypot(ex - cx, ey - cy)
+        if r > 1e-6:
+            segments.extend(_circle_to_segments(cx, cy, r))
+
+    # Footprint-embedded Edge.Cuts (#304): reversible split keyboards draw
+    # per-LED cutout windows as fp_lines on Edge.Cuts inside the LED
+    # footprints (crkbd: 184 of them). File-local coords are already
+    # side-resolved; transform = footprint position + rotation with the KiCad
+    # negate convention (verified against pcbnew GraphicalItems on crkbd
+    # LED16, flipped + rot 180).
+    segments.extend(_collect_footprint_edge_segments(content))
+
     return segments
+
+
+def _collect_footprint_edge_segments(content: str):
+    """Edge.Cuts fp_line/fp_arc/fp_circle/fp_rect segments inside footprints,
+    transformed to global coordinates (issue #304)."""
+    out = []
+    for fm in re.finditer(r'\(footprint\s+"[^"]*"', content):
+        end = find_matching_paren(content, fm.start())
+        block = content[fm.start():end]
+        if '"Edge.Cuts"' not in block:
+            continue
+        at = re.search(r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)', block)
+        if not at:
+            continue
+        fx, fy = float(at.group(1)), float(at.group(2))
+        rot = float(at.group(3)) if at.group(3) else 0.0
+        rad = math.radians(-rot)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+
+        def to_g(x, y):
+            return (fx + x * cos_r - y * sin_r, fy + x * sin_r + y * cos_r)
+
+        gap = _GR_ELEMENT_GAP
+        for m in re.finditer(r'\(fp_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            a = to_g(float(m.group(1)), float(m.group(2)))
+            b = to_g(float(m.group(3)), float(m.group(4)))
+            if abs(b[0] - a[0]) >= 0.001 or abs(b[1] - a[1]) >= 0.001:
+                out.append((a, b))
+        for m in re.finditer(r'\(fp_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            x1, y1, x2, y2 = (float(v) for v in m.groups())
+            c = [to_g(x1, y1), to_g(x2, y1), to_g(x2, y2), to_g(x1, y2)]
+            out.extend([(c[0], c[1]), (c[1], c[2]), (c[2], c[3]), (c[3], c[0])])
+        for m in re.finditer(r'\(fp_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            g = [float(v) for v in m.groups()]
+            for p1, p2 in _arc_to_segments((g[0], g[1]), (g[2], g[3]), (g[4], g[5])):
+                out.append((to_g(*p1), to_g(*p2)))
+        for m in re.finditer(r'\(fp_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            cx, cy, ex, ey = (float(v) for v in m.groups())
+            r = math.hypot(ex - cx, ey - cy)
+            if r > 1e-6:
+                for p1, p2 in _circle_to_segments(cx, cy, r):
+                    out.append((to_g(*p1), to_g(*p2)))
+    return out
 
 
 def _parse_gr_polys_on_layer(content: str, layer: str) -> List[List[Tuple[float, float]]]:
@@ -1366,6 +1472,54 @@ def _chain_segments_into_contours(segments: List[Tuple[Tuple[float, float], Tupl
     return contours
 
 
+def _pt_in_ring(x: float, y: float, ring) -> bool:
+    """Ray-cast point-in-polygon for a vertex ring."""
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _classify_contours(contours):
+    """Split closed Edge.Cuts contours into (outers, cutouts) by CONTAINMENT.
+
+    The old rule -- largest contour is THE outline, everything else a cutout --
+    breaks boards with several disjoint outlines in one file (split keyboards:
+    crkbd's right half became a "cutout", so every track in it graded as a
+    board-edge violation, issue #304). A contour is a CUTOUT only if it lies
+    inside another contour; disjoint top-level contours are all outer
+    boundaries. Containment is decided by majority vote over sampled vertices
+    (robust to shared/touching vertices). Nested islands (ring inside a cutout)
+    are rare and classified as cutouts -- conservative.
+    Returns (outers sorted largest-first, cutouts).
+    """
+    def bbox_area(c):
+        xs = [p[0] for p in c]
+        ys = [p[1] for p in c]
+        return (max(xs) - min(xs)) * (max(ys) - min(ys))
+
+    outers, cutouts = [], []
+    for i, c in enumerate(contours):
+        samples = c[:: max(1, len(c) // 5)][:5]
+        contained = False
+        for j, other in enumerate(contours):
+            if j == i or len(other) < 3:
+                continue
+            votes = sum(1 for (px, py) in samples if _pt_in_ring(px, py, other))
+            if votes * 2 > len(samples):
+                contained = True
+                break
+        (cutouts if contained else outers).append(c)
+    outers.sort(key=bbox_area, reverse=True)
+    return outers, cutouts
+
+
 def extract_board_outline(content: str) -> List[Tuple[float, float]]:
     """Extract board outline polygon from Edge.Cuts layer.
 
@@ -1373,17 +1527,18 @@ def extract_board_outline(content: str) -> List[Tuple[float, float]]:
     closed polygons. Returns the largest contour as the board outline.
     Returns an empty list if no outline is found or if it's a simple rectangle.
     """
-    outline, _ = extract_board_contours(content)
-    return outline
+    outers, _ = extract_board_contours(content)
+    return outers[0] if outers else []
 
 
-def extract_board_contours(content: str) -> Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]:
+def extract_board_contours(content: str) -> Tuple[List[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]:
     """Extract board outline and cutout polygons from Edge.Cuts layer.
 
     Returns:
-        (outline, cutouts) where outline is the outer boundary polygon vertices
-        and cutouts is a list of interior cutout polygons.
-        outline is empty if no outline found or if it's a simple axis-aligned rectangle.
+        (outers, cutouts): outers is the list of OUTER boundary rings (largest
+        first -- several on split-keyboard/panelized boards, issue #304), and
+        cutouts the truly-contained interior rings. outers is empty if no
+        outline is found or if it's a simple axis-aligned rectangle.
     """
     segments = _collect_edge_cuts_segments(content)
 
@@ -1408,17 +1563,10 @@ def extract_board_contours(content: str) -> Tuple[List[Tuple[float, float]], Lis
     if not contours:
         return [], []
 
-    # Find the largest contour by bounding box area (outer boundary)
-    def contour_bbox_area(contour):
-        xs = [p[0] for p in contour]
-        ys = [p[1] for p in contour]
-        return (max(xs) - min(xs)) * (max(ys) - min(ys))
-
-    contours.sort(key=contour_bbox_area, reverse=True)
-    outline = contours[0]
-    cutouts = contours[1:]
-
-    return outline, cutouts
+    outers, cutouts = _classify_contours(contours)
+    if not outers:
+        return [], []
+    return outers, cutouts
 
 
 def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], Dict[str, int]]:
@@ -2330,8 +2478,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         except Exception:
             pass
 
-    # Board outline and cutouts from Edge.Cuts drawings
-    board_outline, board_cutouts = _extract_board_contours_from_pcbnew(board, to_mm)
+    # Board outline(s) and cutouts from Edge.Cuts drawings
+    board_outlines, board_cutouts = _extract_board_contours_from_pcbnew(board, to_mm)
+    board_outline = board_outlines[0] if board_outlines else []
 
     # Stackup
     stackup = _extract_stackup_from_pcbnew(board, to_mm)
@@ -2342,6 +2491,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         board_bounds=board_bounds,
         stackup=stackup,
         board_outline=board_outline,
+        board_outlines=board_outlines,
         board_cutouts=board_cutouts
     )
 
@@ -2715,8 +2865,9 @@ def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
 def _extract_board_contours_from_pcbnew(board, to_mm):
     """Extract board outline and cutout polygons from Edge.Cuts drawings via pcbnew.
 
-    Returns (outline, cutouts) where outline is the outer boundary polygon
-    and cutouts is a list of interior cutout polygons.
+    Returns (outers, cutouts): the OUTER boundary rings (largest first --
+    several on multi-outline boards, issue #304) and the truly-contained
+    interior cutout rings.
     """
     import pcbnew
 
@@ -2724,46 +2875,76 @@ def _extract_board_contours_from_pcbnew(board, to_mm):
     if edge_cuts_id is None:
         return [], []
 
+    def _shape_segments(drawing):
+        """Segments for one Edge.Cuts PCB_SHAPE (line/rect/arc/circle/bezier)."""
+        segs = []
+        shape_type = drawing.GetShape()
+                # Line segment
+        if shape_type == getattr(pcbnew, 'SHAPE_T_SEGMENT', getattr(pcbnew, 'S_SEGMENT', -1)):
+            start = drawing.GetStart()
+            end = drawing.GetEnd()
+            x1, y1 = to_mm(start.x), to_mm(start.y)
+            x2, y2 = to_mm(end.x), to_mm(end.y)
+            # Degenerate zero-length lines (zynq_ad9364 has a (0,0)-(0,0)
+            # dot and two point-lines on Edge.Cuts) duplicate contour
+            # endpoints and break the chain into no closed outline at all.
+            if abs(x2 - x1) >= 0.001 or abs(y2 - y1) >= 0.001:
+                segs.append(((x1, y1), (x2, y2)))
+        elif shape_type == getattr(pcbnew, 'SHAPE_T_RECT', getattr(pcbnew, 'S_RECT', -1)):
+            start = drawing.GetStart()
+            end = drawing.GetEnd()
+            x1, y1 = to_mm(start.x), to_mm(start.y)
+            x2, y2 = to_mm(end.x), to_mm(end.y)
+            segs.append(((x1, y1), (x2, y1)))
+            segs.append(((x2, y1), (x2, y2)))
+            segs.append(((x2, y2), (x1, y2)))
+            segs.append(((x1, y2), (x1, y1)))
+        elif shape_type == getattr(pcbnew, 'SHAPE_T_ARC', getattr(pcbnew, 'S_ARC', -1)):
+            start = drawing.GetStart()
+            mid = drawing.GetArcMid()
+            end = drawing.GetEnd()
+            segs.extend(_arc_to_segments(
+                (to_mm(start.x), to_mm(start.y)),
+                (to_mm(mid.x), to_mm(mid.y)),
+                (to_mm(end.x), to_mm(end.y))
+            ))
+        elif shape_type == getattr(pcbnew, 'SHAPE_T_CIRCLE', getattr(pcbnew, 'S_CIRCLE', -1)):
+            c = drawing.GetCenter()
+            e = drawing.GetEnd()
+            r = math.hypot(to_mm(e.x) - to_mm(c.x), to_mm(e.y) - to_mm(c.y))
+            if r > 1e-6:
+                segs.extend(_circle_to_segments(to_mm(c.x), to_mm(c.y), r))
+        elif shape_type == getattr(pcbnew, 'SHAPE_T_BEZIER', getattr(pcbnew, 'S_CURVE', -1)):
+            p0, p3 = drawing.GetStart(), drawing.GetEnd()
+            c1, c2 = drawing.GetBezierC1(), drawing.GetBezierC2()
+            segs.extend(_bezier_to_segments(
+                (to_mm(p0.x), to_mm(p0.y)), (to_mm(c1.x), to_mm(c1.y)),
+                (to_mm(c2.x), to_mm(c2.y)), (to_mm(p3.x), to_mm(p3.y))))
+        return segs
+
     segments = []
     for drawing in board.GetDrawings():
         if drawing.GetLayer() != edge_cuts_id:
             continue
-        class_name = drawing.GetClass()
-        if class_name in ("PCB_SHAPE", "DRAWSEGMENT"):
+        if drawing.GetClass() in ("PCB_SHAPE", "DRAWSEGMENT"):
             try:
-                shape_type = drawing.GetShape()
-                # Line segment
-                if shape_type == getattr(pcbnew, 'SHAPE_T_SEGMENT', getattr(pcbnew, 'S_SEGMENT', -1)):
-                    start = drawing.GetStart()
-                    end = drawing.GetEnd()
-                    x1, y1 = to_mm(start.x), to_mm(start.y)
-                    x2, y2 = to_mm(end.x), to_mm(end.y)
-                    # Degenerate zero-length lines (zynq_ad9364 has a (0,0)-(0,0)
-                    # dot and two point-lines on Edge.Cuts) duplicate contour
-                    # endpoints and break the chain into no closed outline at all.
-                    if abs(x2 - x1) < 0.001 and abs(y2 - y1) < 0.001:
-                        continue
-                    segments.append(((x1, y1), (x2, y2)))
-                elif shape_type == getattr(pcbnew, 'SHAPE_T_RECT', getattr(pcbnew, 'S_RECT', -1)):
-                    start = drawing.GetStart()
-                    end = drawing.GetEnd()
-                    x1, y1 = to_mm(start.x), to_mm(start.y)
-                    x2, y2 = to_mm(end.x), to_mm(end.y)
-                    segments.append(((x1, y1), (x2, y1)))
-                    segments.append(((x2, y1), (x2, y2)))
-                    segments.append(((x2, y2), (x1, y2)))
-                    segments.append(((x1, y2), (x1, y1)))
-                elif shape_type == getattr(pcbnew, 'SHAPE_T_ARC', getattr(pcbnew, 'S_ARC', -1)):
-                    start = drawing.GetStart()
-                    mid = drawing.GetArcMid()
-                    end = drawing.GetEnd()
-                    segments.extend(_arc_to_segments(
-                        (to_mm(start.x), to_mm(start.y)),
-                        (to_mm(mid.x), to_mm(mid.y)),
-                        (to_mm(end.x), to_mm(end.y))
-                    ))
+                segments.extend(_shape_segments(drawing))
             except Exception:
                 continue
+    # Footprint-embedded Edge.Cuts (#304): per-LED cutout windows etc. live as
+    # fp_ shapes inside footprints; GraphicalItems() returns them in absolute
+    # board coordinates, so the same shape handler applies.
+    try:
+        for fp in board.GetFootprints():
+            for g in fp.GraphicalItems():
+                if g.GetLayer() != edge_cuts_id or g.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
+                    continue
+                try:
+                    segments.extend(_shape_segments(g))
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     if len(segments) < 3:
         return [], []
@@ -2786,13 +2967,10 @@ def _extract_board_contours_from_pcbnew(board, to_mm):
     if not contours:
         return [], []
 
-    def contour_bbox_area(contour):
-        xs = [p[0] for p in contour]
-        ys = [p[1] for p in contour]
-        return (max(xs) - min(xs)) * (max(ys) - min(ys))
-
-    contours.sort(key=contour_bbox_area, reverse=True)
-    return contours[0], contours[1:]
+    # Containment-based classification (issue #304) -- same rule as the text
+    # parser, so split-keyboard second halves stay OUTER boundaries.
+    outers, cutouts = _classify_contours(contours)
+    return outers, cutouts
 
 
 def _extract_stackup_from_pcbnew(board, to_mm):
@@ -3115,6 +3293,11 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     cut_f = bi_f.board_cutouts or []
     if len(cut_b) != len(cut_f):
         diffs.append(f"Board cutout count: board={len(cut_b)} file={len(cut_f)}")
+    # Multi-outline boards (#304): both sides must agree on the OUTER ring set
+    outs_b = sorted(len(o) for o in (getattr(bi_b, 'board_outlines', None) or []))
+    outs_f = sorted(len(o) for o in (getattr(bi_f, 'board_outlines', None) or []))
+    if outs_b != outs_f:
+        diffs.append(f"Board outer-ring set: board={outs_b} file={outs_f}")
 
     # --- Compare keepout zones (routing obstacles) ---
     kz_b = from_board.keepout_zones or []

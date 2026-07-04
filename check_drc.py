@@ -902,12 +902,17 @@ def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
     is returned only if it has >=3 vertices; an empty edge_rings means the parser
     found no usable outline and the caller should fall back to the bbox checks.
     """
-    outline = getattr(board_info, 'board_outline', None) or []
+    outlines = [o for o in (getattr(board_info, 'board_outlines', None) or [])
+                if len(o) >= 3]
+    if not outlines:
+        outline = getattr(board_info, 'board_outline', None) or []
+        outlines = [outline] if len(outline) >= 3 else []
     cutouts = [c for c in (getattr(board_info, 'board_cutouts', None) or []) if len(c) >= 3]
-    outer = outline if len(outline) >= 3 else None
-    rings = []
-    if outer:
-        rings.append(outer)
+    # `outer` is a LIST of outer rings (multi-outline boards, issue #304:
+    # split keyboards carry several disjoint outlines in one file);
+    # _point_on_board accepts either form. None when the board has no outline.
+    outer = outlines or None
+    rings = list(outlines)
     rings.extend(cutouts)
     return rings, outer, cutouts
 
@@ -943,13 +948,18 @@ def _segment_to_rings_distance(x1: float, y1: float, x2: float, y2: float,
     return best
 
 
-def _point_on_board(x: float, y: float, outer: Optional[List[Tuple[float, float]]],
-                    cutouts: List[List[Tuple[float, float]]]) -> bool:
-    """True if (x, y) is on copper-bearing board: inside the outer outline and
+def _point_on_board(x: float, y: float, outer, cutouts) -> bool:
+    """True if (x, y) is on copper-bearing board: inside AN outer outline and
     not inside any cutout. A point off-board / inside a cutout is a hard edge
-    violation regardless of its distance to the nearest edge segment."""
-    if outer is not None and not _point_in_poly(x, y, outer):
-        return False
+    violation regardless of its distance to the nearest edge segment.
+
+    ``outer`` may be one vertex ring or a LIST of outer rings (multi-outline
+    boards, issue #304); on-board means inside ANY of them.
+    """
+    if outer:
+        outers = [outer] if isinstance(outer[0], tuple) else outer
+        if not any(_point_in_poly(x, y, o) for o in outers):
+            return False
     for cut in cutouts:
         if _point_in_poly(x, y, cut):
             return False

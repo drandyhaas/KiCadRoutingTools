@@ -511,11 +511,18 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
 
-    # Check if we have a non-rectangular board outline
-    board_outline = pcb_data.board_info.board_outline
-    if board_outline and len(board_outline) >= 3:
+    # Check if we have a non-rectangular board outline. Multi-outline boards
+    # (#304: split keyboards / panels carry several disjoint outer rings) pass
+    # ALL outers so cells inside ANY of them stay routable.
+    board_outlines = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
+                      if len(o) >= 3]
+    if not board_outlines:
+        board_outline = pcb_data.board_info.board_outline
+        if board_outline and len(board_outline) >= 3:
+            board_outlines = [board_outline]
+    if board_outlines:
         # Use polygon-based blocking for non-rectangular boards
-        _add_polygon_edge_obstacles(obstacles, board_outline, coord, num_layers,
+        _add_polygon_edge_obstacles(obstacles, board_outlines, coord, num_layers,
                                      track_edge_clearance, via_edge_clearance,
                                      gmin_x, gmin_y, gmax_x, gmax_y, track_expand, via_expand)
     else:
@@ -623,17 +630,21 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
                 obstacles.add_blocked_via(gx, gy)
 
 
-def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[float, float]],
+def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
                                  coord: GridCoord, num_layers: int,
                                  track_edge_clearance: float, via_edge_clearance: float,
                                  gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
                                  track_expand: int, via_expand: int):
     """Add obstacles for non-rectangular board outline using polygon testing.
 
-    For each grid cell in the bounding box area, checks if it's outside the board
-    polygon or too close to the polygon edge (within clearance distance).
-    Uses numpy vectorization for all geometry computations.
+    ``polygons`` is one outer ring or a LIST of outer rings (#304): a cell is
+    on-board if inside ANY ring, and the edge distance is the minimum over all
+    rings. For each grid cell in the bounding box area, checks if it's outside
+    the board or too close to an edge (within clearance distance). Uses numpy
+    vectorization for all geometry computations.
     """
+    if polygons and isinstance(polygons[0], tuple):
+        polygons = [polygons]
     grid_margin = max(track_expand, via_expand) + 5
 
     # Generate all grid coordinates as numpy arrays
@@ -647,16 +658,20 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[
     px = gx_flat.astype(np.float64) * coord.grid_step
     py = gy_flat.astype(np.float64) * coord.grid_step
 
-    # Build polygon edge arrays: each edge is (x1, y1) -> (x2, y2)
-    poly_arr = np.array(polygon, dtype=np.float64)  # shape (n_edges, 2)
-    x1 = poly_arr[:, 0]  # (n_edges,)
-    y1 = poly_arr[:, 1]
-    x2 = np.roll(poly_arr[:, 0], -1)  # next vertex
-    y2 = np.roll(poly_arr[:, 1], -1)
-
-    # Point-in-polygon ray cast, chunked over points so the (points, edges)
-    # broadcast temporaries stay bounded (issue #81).
-    inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
+    # Per-ring edge arrays; on-board = inside ANY ring (ray cast, chunked so
+    # the (points, edges) broadcast temporaries stay bounded, issue #81).
+    ring_edges = []
+    inside = None
+    for polygon in polygons:
+        poly_arr = np.array(polygon, dtype=np.float64)
+        rx1 = poly_arr[:, 0]
+        ry1 = poly_arr[:, 1]
+        rx2 = np.roll(poly_arr[:, 0], -1)
+        ry2 = np.roll(poly_arr[:, 1], -1)
+        ring_edges.append((rx1, ry1, rx2, ry2))
+        ins = _points_inside_polygon(px, py, rx1, ry1, rx2, ry2)
+        inside = ins if inside is None else (inside | ins)
+    x1, y1, x2, y2 = (np.concatenate([e[i] for e in ring_edges]) for i in range(4))
 
     # --- Vectorized point-to-polygon-edge distance ---
     # For inside points, compute min distance to any edge
