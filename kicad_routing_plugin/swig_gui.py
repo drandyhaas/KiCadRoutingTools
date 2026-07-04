@@ -1118,6 +1118,36 @@ class RoutingDialog(wx.Dialog):
         options_scroll.SetScrollRate(0, 10)
         options_inner = wx.BoxSizer(wx.VERTICAL)
 
+        # DRC settings fix (sub-options of the Basic tab's "Fix DRC settings
+        # after routing" toggle) -- kept at the top of the Options box.
+        drc_label = wx.StaticText(options_scroll, label="DRC Settings Fix:")
+        drc_label.SetFont(drc_label.GetFont().Bold())
+        options_inner.Add(drc_label, 0, wx.LEFT | wx.TOP, 3)
+
+        self.keep_thermal_check = wx.CheckBox(options_scroll, label="Keep thermal-relief DRC severity")
+        self.keep_thermal_check.SetValue(False)
+        self.keep_thermal_check.SetToolTip(
+            "When 'Fix DRC settings after routing' runs (Basic tab), by default it "
+            "demotes the starved_thermal DRC category to a warning. Check this to "
+            "leave thermal-relief severity untouched (matches the CLI's "
+            "--keep-thermal). Off by default.")
+        options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
+
+        self.no_clamp_netclasses_check = wx.CheckBox(
+            options_scroll, label="Keep net-class clearances")
+        self.no_clamp_netclasses_check.SetValue(False)
+        self.no_clamp_netclasses_check.SetToolTip(
+            "When 'Fix DRC settings after routing' runs, by default it clamps every "
+            "NON-Default net class's clearance/track/via floors down to the routed "
+            "values, so KiCad's per-net-class DRC does not flag copper routed at the "
+            "smaller run clearance (affects any non-Default class -- impedance, "
+            "power, etc.). Check this to leave the net-class spec untouched for a "
+            "FINAL board whose class rules must survive (matches the CLI's "
+            "--no-clamp-netclasses). Off by default.")
+        options_inner.Add(self.no_clamp_netclasses_check, 0, wx.ALL, 3)
+
+        options_inner.AddSpacer(10)
+
         # MPS options
         mps_label = wx.StaticText(options_scroll, label="MPS Options:")
         mps_label.SetFont(mps_label.GetFont().Bold())
@@ -1134,15 +1164,6 @@ class RoutingDialog(wx.Dialog):
         self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
         options_inner.Add(self.mps_segment_intersection, 0, wx.ALL, 3)
-
-        self.keep_thermal_check = wx.CheckBox(options_scroll, label="Keep thermal-relief DRC severity")
-        self.keep_thermal_check.SetValue(False)
-        self.keep_thermal_check.SetToolTip(
-            "When 'Fix DRC settings after routing' runs (Basic tab), by default it "
-            "demotes the starved_thermal DRC category to a warning. Check this to "
-            "leave thermal-relief severity untouched (matches the CLI's "
-            "--keep-thermal). Off by default.")
-        options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
 
         options_inner.AddSpacer(10)
 
@@ -1432,6 +1453,7 @@ class RoutingDialog(wx.Dialog):
                 # routing" toggle lives on the Basic tab (issue #160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
+                'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
             }
@@ -1518,6 +1540,7 @@ class RoutingDialog(wx.Dialog):
                 # Shared Basic-tab toggle, inherited by the Differential tab (#160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
+                'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
             }
 
         def sync_pcb_data():
@@ -2229,6 +2252,7 @@ class RoutingDialog(wx.Dialog):
             'add_teardrops': self.add_teardrops_check.GetValue(),
             'fix_drc_settings': self.fix_drc_check.GetValue(),
             'keep_thermal': self.keep_thermal_check.GetValue(),
+            'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
@@ -3129,7 +3153,8 @@ class RoutingDialog(wx.Dialog):
                     via_diameter=config.get('via_size'),
                     via_drill=config.get('via_drill'))
                 drc_changes = apply_targets_to_board(
-                    board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)))
+                    board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)),
+                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', False))
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "

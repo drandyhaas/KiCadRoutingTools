@@ -377,7 +377,8 @@ def severity_plan(keep_courtyards=False, keep_mask=False, keep_footprint=False,
 
 def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
                              ignore_current_warnings=False,
-                             diff_pair_gap=None, diff_pair_width=None):
+                             diff_pair_gap=None, diff_pair_width=None,
+                             clamp_nondefault_netclasses=True):
     """Apply the floors + severity plan to a parsed ``.kicad_pro`` dict, only
     ever loosening (lowering a constraint / lowering a severity rank), never
     tightening. Returns a list of human-readable change strings.
@@ -388,7 +389,16 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     fab-floor ~0.1 mm coupled pairs route_diff places, and a planner reading the
     net class back would recommend the wide value). Neither is a DRC-enforced
     minimum -- they are draw defaults -- so lowering them cannot create a new
-    violation, consistent with the only-loosen guarantee."""
+    violation, consistent with the only-loosen guarantee.
+
+    ``clamp_nondefault_netclasses`` (default True, #295 addendum) clamps the
+    NON-Default net classes' clearance/track/via floors down to the routed values
+    too. Disable it (CLI ``--no-clamp-netclasses``) for a FINAL impedance-
+    controlled board, where the impedance classes' 0.125 mm clearance and wide
+    track/via ARE the spec and must survive -- clamping them would erase the
+    impedance intent (and silence genuine impedance-clearance shortfalls). Leave
+    it ON for mid-chain / mixed-clearance boards so KiCad's per-net-class DRC does
+    not storm the copper legitimately routed at the smaller run clearance."""
     EPS = 1e-9
     ds = proj.setdefault("board", {}).setdefault("design_settings", {})
     rules = ds.setdefault("rules", {})
@@ -441,18 +451,21 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     # routing the class floors must be clamped down to what was actually
     # routed (only-lower, same guarantee as everything else here). Via sizes /
     # diff-pair geometry are draw defaults, clamped for planner consistency.
-    for cls in classes:
-        if cls is default_cls or not isinstance(cls, dict):
-            continue
-        cname = cls.get("name", "?")
-        for field, target in nc_map.items():
-            if target is None:
+    # Skipped when clamp_nondefault_netclasses is False (--no-clamp-netclasses):
+    # a final impedance board keeps its impedance classes as the enforced spec.
+    if clamp_nondefault_netclasses:
+        for cls in classes:
+            if cls is default_cls or not isinstance(cls, dict):
                 continue
-            target = round(float(target), 6)
-            cur = cls.get(field)
-            if cur is not None and cur > target + EPS:
-                changes.append(f"net_class[{cname}].{field}: {cur} -> {target} mm")
-                cls[field] = target
+            cname = cls.get("name", "?")
+            for field, target in nc_map.items():
+                if target is None:
+                    continue
+                target = round(float(target), 6)
+                cur = cls.get(field)
+                if cur is not None and cur > target + EPS:
+                    changes.append(f"net_class[{cname}].{field}: {cur} -> {target} mm")
+                    cls[field] = target
 
     def loosen_severity(cat, level):
         cur = sev.get(cat, "error")  # KiCad's default severity is "error"
@@ -488,6 +501,12 @@ def add_drc_fix_args(parser, *, include_no_fix=True):
     g.add_argument("--keep-thermal", action="store_true",
                    help="When fixing DRC settings, leave thermal-relief severity (starved_thermal) "
                         "untouched instead of demoting it to a warning.")
+    g.add_argument("--no-clamp-netclasses", action="store_true",
+                   help="Do not clamp NON-Default net classes' clearance/track/via floors down to "
+                        "the routed values (issue #295). By default every non-Default class "
+                        "(impedance, power, etc.) IS clamped so KiCad's per-net-class DRC does not "
+                        "flag copper routed at the smaller run clearance. Pass this for a FINAL "
+                        "board whose net-class rules ARE the spec and must survive.")
     g.add_argument("--enable-used-layers", action="store_true",
                    help="Add any layer the board uses but that is missing from its (layers) table "
                         "back into the .kicad_pcb, so KiCad shows it as selectable and stops "
@@ -500,7 +519,8 @@ def drc_fix_kwargs(args):
     """Map args parsed via :func:`add_drc_fix_args` to :func:`fix_project_for_output`
     keyword arguments (the shared DRC-fix flags only -- per-script routing floors
     like clearance/track/via are passed separately by each caller)."""
-    return dict(keep_thermal=args.keep_thermal, enable_layers=args.enable_used_layers)
+    return dict(keep_thermal=args.keep_thermal, enable_layers=args.enable_used_layers,
+                clamp_nondefault_netclasses=not args.no_clamp_netclasses)
 
 
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
@@ -509,6 +529,7 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            diff_pair_gap=None, diff_pair_width=None,
                            keep_courtyards=False, keep_mask=False, keep_footprint=False,
                            keep_thermal=False, enable_layers=False,
+                           clamp_nondefault_netclasses=True,
                            extra_ignore=(), verbose=True):
     """Make the DRC settings of a freshly written board consistent with the
     routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
@@ -553,7 +574,8 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                          extra_ignore=extra_ignore)
     changes = apply_targets_to_project(proj, targets, plan,
                                        diff_pair_gap=diff_pair_gap,
-                                       diff_pair_width=diff_pair_width)
+                                       diff_pair_width=diff_pair_width,
+                                       clamp_nondefault_netclasses=clamp_nondefault_netclasses)
     if not changes:
         if verbose:
             print(f"  DRC settings already consistent ({out_pro})")
@@ -568,12 +590,19 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
 
 
 def apply_targets_to_board(board, targets: dict, sev_plan: dict,
-                           diff_pair_gap=None, diff_pair_width=None):
+                           diff_pair_gap=None, diff_pair_width=None,
+                           clamp_nondefault_netclasses=True):
     """GUI path: apply the same floors + severity plan to a live pcbnew BOARD
     via BOARD_DESIGN_SETTINGS (issue #160). Best-effort and defensive -- the
     pcbnew API field/severity names vary across KiCad versions, so each step is
     guarded. Returns a list of change strings. Caller should mark the board
-    modified so the user's next save persists the change."""
+    modified so the user's next save persists the change.
+
+    ``clamp_nondefault_netclasses`` (default True, #295 parity with
+    apply_targets_to_project) also clamps the NON-Default net classes' floors down
+    to the routed values; disable it (GUI "Keep impedance net-class clearances" /
+    CLI ``--no-clamp-netclasses``) for a final impedance board whose class spec
+    must survive."""
     import pcbnew
     MM = 1e6  # mm -> internal nm
     EPS = 1.0  # nm
@@ -644,6 +673,55 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
                 changes.append(f"net_class[Default].{setter} -> {target:.4g} mm")
             except Exception:
                 pass
+
+    # NON-Default net classes (#295 parity with the CLI apply_targets_to_project):
+    # clamp their clearance/track/via floors down to the routed values too, so a
+    # board carrying the original impedance classes (0.125mm) does not storm KiCad
+    # with per-net-class clearance violations on copper routed at the run floor.
+    # Best-effort across KiCad versions (the non-Default enumeration API varies),
+    # guarded so an unknown shape simply no-ops. Skipped when the flag is off.
+    if clamp_nondefault_netclasses:
+        nd_map = {"SetClearance": targets.get("min_clearance"),
+                  "SetTrackWidth": targets.get("min_track_width"),
+                  "SetViaDiameter": targets.get("min_via_diameter"),
+                  "SetViaDrill": targets.get("min_through_hole_diameter")}
+        if any(v is not None for v in nd_map.values()):
+            other = {}
+            ns2 = getattr(bds, "m_NetSettings", None)
+            for getter in ("GetNetclasses", "GetNetClasses"):
+                src = (ns2 if ns2 is not None and hasattr(ns2, getter)
+                       else (bds if hasattr(bds, getter) else None))
+                if src is None:
+                    continue
+                try:
+                    m = getattr(src, getter)()
+                    if hasattr(m, "items"):
+                        other = dict(m.items())
+                    elif hasattr(m, "keys"):
+                        other = {k: m[k] for k in m.keys()}
+                    if other:
+                        break
+                except Exception:
+                    pass
+            for cname, nc in (other or {}).items():
+                if nc is None or nc is default_nc or cname == "Default":
+                    continue
+                for setter, target in nd_map.items():
+                    if target is None or not hasattr(nc, setter):
+                        continue
+                    getter = "Get" + setter[3:]
+                    if hasattr(nc, getter):
+                        try:
+                            cur = getattr(nc, getter)()
+                            if cur is not None and cur <= round(float(target) * MM) + EPS:
+                                continue  # only loosen
+                        except Exception:
+                            pass
+                    try:
+                        getattr(nc, setter)(round(float(target) * MM))
+                        changes.append(f"net_class[{cname}].{setter} -> {target:.4g} mm")
+                    except Exception:
+                        pass
 
     # Severities. Map our category strings to pcbnew DRCE_* codes (best-effort).
     sev_const = {"ignore": getattr(pcbnew, "RPT_SEVERITY_IGNORE", 0),
@@ -777,7 +855,8 @@ def main():
     changes = apply_targets_to_project(proj, targets, plan,
                                        ignore_current_warnings=args.ignore_warnings,
                                        diff_pair_gap=args.diff_pair_gap,
-                                       diff_pair_width=args.diff_pair_width)
+                                       diff_pair_width=args.diff_pair_width,
+                                       clamp_nondefault_netclasses=not args.no_clamp_netclasses)
 
     if not changes:
         print(f"{pro}: already consistent, nothing to change.")

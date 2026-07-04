@@ -43,6 +43,7 @@ def get_dialog_settings(dialog):
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
         'fix_drc_settings': dialog.fix_drc_check.GetValue(),
         'keep_thermal': dialog.keep_thermal_check.GetValue(),
+        'no_clamp_netclasses': dialog.no_clamp_netclasses_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -278,6 +279,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
     if 'keep_thermal' in settings:
         dialog.keep_thermal_check.SetValue(settings['keep_thermal'])
+    if 'no_clamp_netclasses' in settings:
+        dialog.no_clamp_netclasses_check.SetValue(settings['no_clamp_netclasses'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:
