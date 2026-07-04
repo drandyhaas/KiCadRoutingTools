@@ -1401,6 +1401,50 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(format_obstacle_map_stats(state.working_obstacles))
         print("=" * 60)
 
+    # Obstacle-map ref-count integrity audit (issue: ref-count leak/desync hunt).
+    # Invariant: working_obstacles == base_obstacles + sum(net_obstacles_cache).
+    # Clone the working map, remove every net's CURRENT cache, and compare to the
+    # base. Any residual means a per-net contribution the cache no longer accounts
+    # for -- a leak (add not mirrored by remove) or an over-decrement. Env-gated so
+    # normal runs pay nothing; fully defensive (never breaks a real route).
+    if os.environ.get("KICAD_OBSTACLE_AUDIT"):
+        try:
+            from obstacle_cache import remove_net_obstacles_from_cache
+            _base = base_obstacles
+            _wo = state.working_obstacles
+            if _base is not None and _wo is not None:
+                _probe = _wo.clone_fresh()
+                _cache = state.net_obstacles_cache or {}
+                for _nid, _cd in list(_cache.items()):
+                    remove_net_obstacles_from_cache(_probe, _cd)
+                _labels = ("blocked_cells", "blocked_vias", "stub_prox",
+                           "layer_prox", "cross_layer", "source_target", "free_vias")
+                # HARD = ref-counted obstacle sets that cause DRC/routing errors when
+                # leaked; SOFT = proximity/cost maps whose residual is expected (a
+                # routed net legitimately drops its stub proximity, etc.).
+                _hard = {"blocked_cells", "blocked_vias", "source_target", "free_vias"}
+                _bs, _ps = _base.get_stats(), _probe.get_stats()
+                _resid = [(_labels[_i], _ps[_i] - _bs[_i])
+                          for _i in range(min(len(_labels), len(_bs), len(_ps)))]
+                _leak = [(_n, _d) for _n, _d in _resid if _d != 0 and _n in _hard]
+                _soft = [(_n, _d) for _n, _d in _resid if _d != 0 and _n not in _hard]
+                print("\n" + "=" * 60)
+                print("[OBSTACLE AUDIT] working - sum(caches) vs base "
+                      f"({len(_cache)} net caches removed)")
+                if _leak:
+                    print("  LEAK/DESYNC in ref-counted obstacle maps:")
+                    for _n, _d in _leak:
+                        print(f"    {_n}: {_d:+d} cells unaccounted for by any net cache")
+                else:
+                    print("  BALANCED: ref-counted maps (blocked_cells/blocked_vias/"
+                          "source_target/free_vias) return exactly to base.")
+                if _soft:
+                    print("  (soft cost maps, residual expected: "
+                          + ", ".join(f"{_n} {_d:+d}" for _n, _d in _soft) + ")")
+                print("=" * 60)
+        except Exception as _e:
+            print(f"[OBSTACLE AUDIT] skipped ({_e})")
+
     if return_results:
         return successful, failed, total_time, results_data
     return successful, failed, total_time
