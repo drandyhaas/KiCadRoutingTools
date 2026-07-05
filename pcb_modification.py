@@ -1506,16 +1506,27 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if best is None or sf > best[0]:
             best = (sf, float(ts[i]), float(qx), float(qy))
 
-    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, s.layer)
+    nids, cx, cy, hx, hy, cr = _foreign_pad_arrays(pcb_data, s.layer)
     if cx.size:
         near = ((cx + hx >= sx.min() - R) & (cx - hx <= sx.max() + R) &
                 (cy + hy >= sy.min() - R) & (cy - hy <= sy.max() + R) &
                 (nids != net_id))
         if near.any():
-            fcx, fcy, fhx, fhy = cx[near], cy[near], hx[near], hy[near]
-            qx = fcx[None, :] + np.clip(sx[:, None] - fcx[None, :], -fhx[None, :], fhx[None, :])
-            qy = fcy[None, :] + np.clip(sy[:, None] - fcy[None, :], -fhy[None, :], fhy[None, :])
-            d = np.hypot(sx[:, None] - qx, sy[:, None] - qy)
+            fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
+            # Closest point on the pad's rounded-rect boundary: clamp to the inner
+            # (corner-radius-shrunk) rect, then step out by the radius toward the
+            # sample point. Exact circle/oval for round pads (#315), plain rect at
+            # fcr=0. qx/qy is the boundary point -> correct "away" direction.
+            qxi = fcx[None, :] + np.clip(sx[:, None] - fcx[None, :],
+                                         -(fhx[None, :] - fcr[None, :]), fhx[None, :] - fcr[None, :])
+            qyi = fcy[None, :] + np.clip(sy[:, None] - fcy[None, :],
+                                         -(fhy[None, :] - fcr[None, :]), fhy[None, :] - fcr[None, :])
+            vx = sx[:, None] - qxi; vy = sy[:, None] - qyi
+            vlen = np.hypot(vx, vy)
+            safe = np.where(vlen > 1e-12, vlen, 1.0)
+            qx = qxi + fcr[None, :] * vx / safe
+            qy = qyi + fcr[None, :] * vy / safe
+            d = vlen - fcr[None, :]
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j])
 

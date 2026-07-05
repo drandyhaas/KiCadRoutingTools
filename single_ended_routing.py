@@ -47,37 +47,68 @@ except ImportError:
 _FOREIGN_PAD_WINDOW = 5.0  # mm
 
 
+def _pad_corner_radius(pad):
+    """Corner radius that turns a pad's board-axis bounding rect (half_x, half_y)
+    into an accurate rounded-rect model for the foreign-pad distance kernels:
+
+      * circle / oval -> min(half) : the rect becomes a capsule/circle, so the
+        distance to a round BGA ball is exact (not the rect corner, which sticks
+        out ~half the ball diameter past the copper and manufactures phantom
+        pad grazes -- butterstick DQ5 vs the round DQ6 ball).
+      * roundrect      -> roundrect_rratio * min(size) : KiCad's rounded corners.
+      * rect / custom  -> 0 : plain bounding rect (custom pads keep the
+        conservative over-approximation; their real outline is a polygon).
+
+    A pad rotated off the orthogonal axes (rect_rotation != 0) keeps the axis-
+    aligned bounding rect (radius 0): the rounded-rect SDF below is evaluated in
+    board axes, so a non-zero corner radius on a tilted rect would be wrong;
+    bbox is conservative there (rare -- most pads are axis-aligned)."""
+    sx = pad.size_x; sy = pad.size_y
+    if getattr(pad, 'rect_rotation', 0.0):
+        return 0.0
+    shape = getattr(pad, 'shape', 'rect')
+    if shape in ('circle', 'oval'):
+        return min(sx, sy) / 2.0
+    if shape == 'roundrect':
+        rr = getattr(pad, 'roundrect_rratio', 0.0) or 0.0
+        return rr * min(sx, sy)
+    return 0.0
+
+
 def _foreign_pad_arrays(pcb_data, layer):
-    """Cached per-layer numpy arrays (net_id, cx, cy, half_x, half_y) for every pad
-    on `layer`. Pads never change during a route, so this is built once per board
-    and reused across the millions of foreign-pad distance queries (the terminal
-    graze/merge checks). Returns five parallel arrays."""
+    """Cached per-layer numpy arrays (net_id, cx, cy, half_x, half_y, corner_r) for
+    every pad on `layer`. Pads never change during a route, so this is built once
+    per board and reused across the millions of foreign-pad distance queries (the
+    terminal graze/merge checks). `corner_r` makes the distance kernels model the
+    pad as a rounded rect (accurate for circle/oval/roundrect, exact rect at r=0).
+    Returns six parallel arrays."""
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
     if cache is None:
         cache = {}
         pcb_data._foreign_pad_arr_cache = cache
     arr = cache.get(layer)
     if arr is None:
-        nids, cx, cy, hx, hy = [], [], [], [], []
+        nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
         for nid, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if layer in pad.layers or '*.Cu' in pad.layers:
                     nids.append(nid)
                     cx.append(pad.global_x); cy.append(pad.global_y)
                     hx.append(pad.size_x / 2.0); hy.append(pad.size_y / 2.0)
+                    cr.append(_pad_corner_radius(pad))
         arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
-               np.asarray(hx), np.asarray(hy))
+               np.asarray(hx), np.asarray(hy), np.asarray(cr))
         cache[layer] = arr
     return arr
 
 
 def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
-    The pad is treated as its full board-axis rect (rounded corners ignored -> a
-    slight under-estimate, i.e. conservative). Vectorized + windowed (see
-    _FOREIGN_PAD_WINDOW); exact for any distance within the window, which is all
-    the callers ever look at."""
-    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, layer)
+    The pad is modelled as a rounded rect (accurate for circle/oval/roundrect,
+    exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
+    bounding-box corner. Vectorized + windowed (see _FOREIGN_PAD_WINDOW); exact
+    for any distance within the window, which is all the callers ever look at."""
+    nids, cx, cy, hx, hy, cr = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     R = _FOREIGN_PAD_WINDOW
@@ -87,16 +118,19 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
     near = (np.abs(cx - x) <= R + hx) & (np.abs(cy - y) <= R + hy) & (nids != net_id)
     if not near.any():
         return 1e9
-    dx = np.maximum(np.abs(x - cx[near]) - hx[near], 0.0)
-    dy = np.maximum(np.abs(y - cy[near]) - hy[near], 0.0)
-    return float(np.min(np.hypot(dx, dy)))
+    fcr = cr[near]
+    dx = np.maximum(np.abs(x - cx[near]) - (hx[near] - fcr), 0.0)
+    dy = np.maximum(np.abs(y - cy[near]) - (hy[near] - fcr), 0.0)
+    return float(np.min(np.hypot(dx, dy) - fcr))
 
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
-    Vectorized: windows pads to the segment's bbox + margin, then evaluates ALL
-    sample points against them in one numpy matrix op."""
-    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, layer)
+    Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
+    e.g. BGA balls -- use their true outline, not the bounding-box corner that
+    manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
+    bbox + margin, then evaluates ALL sample points against them in one matrix op."""
+    nids, cx, cy, hx, hy, cr = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
@@ -107,13 +141,15 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
             (cy + hy >= min(y1, y2) - R) & (cy - hy <= max(y1, y2) + R) & (nids != net_id))
     if not near.any():
         return 1e9
-    fcx, fcy, fhx, fhy = cx[near], cy[near], hx[near], hy[near]
+    fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
     t = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * t
     sy = y1 + (y2 - y1) * t
-    dx = np.maximum(np.abs(sx[:, None] - fcx[None, :]) - fhx[None, :], 0.0)
-    dy = np.maximum(np.abs(sy[:, None] - fcy[None, :]) - fhy[None, :], 0.0)
-    return float(np.min(np.hypot(dx, dy)))
+    # Rounded-rect signed distance: shrink the half-extents by the corner radius,
+    # take the outside distance to that inner rect, then subtract the radius.
+    dx = np.maximum(np.abs(sx[:, None] - fcx[None, :]) - (fhx[None, :] - fcr[None, :]), 0.0)
+    dy = np.maximum(np.abs(sy[:, None] - fcy[None, :]) - (fhy[None, :] - fcr[None, :]), 0.0)
+    return float(np.min(np.hypot(dx, dy) - fcr[None, :]))
 
 
 def _foreign_seg_arrays(pcb_data, layer):
