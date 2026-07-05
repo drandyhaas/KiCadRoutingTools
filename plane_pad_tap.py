@@ -252,6 +252,21 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
 
     board_info = copy.copy(pcb_data.board_info)
     board_info.board_bounds = (min_x, min_y, max_x, max_y)
+    # A rectangular board's outline is no longer rectangular W.R.T. the window's
+    # clamped bounds, so the edge-blocking rectangularity test would send the
+    # WINDOW build down the polygon path while the whole-board map uses the
+    # integer rect band. At a row EXACTLY at the edge clearance the two paths
+    # break the float tie differently (one-cell disagreement), making window
+    # maps inconsistent with the shared map (TAP_MAP_VERIFY, #309 hunt). Drop
+    # the outline from the window copy for genuinely rectangular boards so both
+    # builds use the same rect-band semantics; polygonal boards keep the
+    # outline and use the polygon path in both builds.
+    from plane_obstacle_builder import _is_rectangular_outline
+    if (bb and pcb_data.board_info.board_outline
+            and len(getattr(pcb_data.board_info, 'board_outlines', None) or []) <= 1
+            and _is_rectangular_outline(pcb_data.board_info.board_outline, bb)):
+        board_info.board_outline = []
+        board_info.board_outlines = []
     board_info.board_cutouts = [
         c for c in pcb_data.board_info.board_cutouts
         if _polygon_overlaps_window(c, wmin_x, wmin_y, wmax_x, wmax_y)
@@ -497,7 +512,8 @@ class SharedViaMaps:
 
 
 def _verify_shared_via_map(shared_obs, local, config, net_id,
-                           same_net_pad_clearance, pad, max_search_radius):
+                           same_net_pad_clearance, pad, max_search_radius,
+                           full_pcb_data=None):
     """TAP_MAP_VERIFY=1: assert the shared whole-board map answers this tap's
     queries exactly like a freshly built per-pad window map (the pre-#263
     behavior). find_via_position reads only is_via_blocked(pad centre) and
@@ -513,6 +529,38 @@ def _verify_shared_via_map(shared_obs, local, config, net_id,
     radius = coord.to_grid_dist(max_search_radius)
     a = shared_obs.open_via_cells_within(gx, gy, radius)
     b = ref.open_via_cells_within(gx, gy, radius)
+    if a != b:
+        sa, sb = set(a), set(b)
+        only_shared = sorted(sa - sb)   # open in shared, blocked in window
+        only_window = sorted(sb - sa)   # open in window, blocked in shared
+        print(f"TAP_MAP_VERIFY divergence at {pad.component_ref}.{pad.pad_number} "
+              f"pad=({pad.global_x:.3f},{pad.global_y:.3f}) radius={radius} cells:")
+        for label, cells in (("open-in-SHARED-only (shared missing a block)", only_shared),
+                             ("open-in-WINDOW-only (window missing a block)", only_window)):
+            print(f"  {label}: {len(cells)}")
+            for cgx, cgy in cells[:10]:
+                print(f"    grid ({cgx},{cgy}) = mm ({cgx * coord.grid_step:.3f},"
+                      f"{cgy * coord.grid_step:.3f})")
+        dump = os.environ.get("TAP_MAP_VERIFY_DUMP")
+        if dump:
+            with open(dump, "w") as fh:
+                for tag, cells in (("shared_only", only_shared), ("window_only", only_window)):
+                    for cgx, cgy in cells:
+                        fh.write(f"{tag} {cgx} {cgy}\n")
+            # Diagnose: does a fresh WHOLE-BOARD build block these cells?
+            if full_pcb_data is not None:
+                fresh_full = build_via_obstacle_map(full_pcb_data, config, net_id,
+                                                    verbose=False,
+                                                    same_net_pad_clearance=same_net_pad_clearance)
+                sample = (only_shared or only_window)[:5]
+                for cgx, cgy in sample:
+                    print(f"    cell ({cgx},{cgy}): shared={shared_obs.is_via_blocked(cgx, cgy)} "
+                          f"window={ref.is_via_blocked(cgx, cgy)} "
+                          f"fresh_whole_board={fresh_full.is_via_blocked(cgx, cgy)}")
+                print(f"    local board_bounds={local.board_info.board_bounds} "
+                      f"real={full_pcb_data.board_info.board_bounds} "
+                      f"edge_clr={config.board_edge_clearance} clr={config.clearance} "
+                      f"grid={config.grid_step} via={config.via_size}")
     assert a == b, (
         f"TAP_MAP_VERIFY: open-via-cell mismatch at {pad.component_ref}."
         f"{pad.pad_number} (shared {len(a)} vs window {len(b)} cells)")
@@ -740,7 +788,8 @@ def try_tap_pad(
         obstacles = shared_via_maps.get(config, same_net_pad_clearance)
         if obstacles is not None and _TAP_MAP_VERIFY:
             _verify_shared_via_map(obstacles, local, config, net_id,
-                                   same_net_pad_clearance, pad, max_search_radius)
+                                   same_net_pad_clearance, pad, max_search_radius,
+                                   full_pcb_data=pcb_data)
     if obstacles is None:
         obstacles = build_via_obstacle_map(
             local, config, net_id, verbose=False,
