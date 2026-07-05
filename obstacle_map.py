@@ -1083,6 +1083,26 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
 
 
+def _ledger_bracket(obstacles):
+    """(cells, vias) counts if the #309 obstacle ledger is armed for this map,
+    else None. Zero cost when KICAD_OBSTACLE_LEDGER is off."""
+    import obstacle_cache as _oc
+    L = _oc._LEDGER
+    if L is None or L.get("wid") != id(obstacles):
+        return None
+    st = obstacles.get_stats()
+    return st[0], st[1]
+
+
+def _ledger_close(obstacles, pre, tag: str):
+    if pre is None:
+        return
+    import obstacle_cache as _oc
+    st = obstacles.get_stats()
+    site = _oc._ledger_site(depth=3, frames=2)
+    _oc.ledger_raw_delta(obstacles, f"{tag} @ {site}", st[0] - pre[0], st[1] - pre[1])
+
+
 def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
                                 config: GridRouteConfig,
                                 extra_clearance: float = 0.0,
@@ -1100,6 +1120,7 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
+    _pre = _ledger_bracket(obstacles)
 
     # Add vias - use actual via size and max track width (vias span all layers)
     for via in vias:
@@ -1113,6 +1134,7 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
         # required) -- a real cross-net via-via DRC violation the router never saw.
         via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+    _ledger_close(obstacles, _pre, "add_vias_list")
 
 
 def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
@@ -1130,6 +1152,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     """
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
+    _pre = _ledger_bracket(obstacles)
 
     # Add segments - use actual segment width and layer-specific routing track width
     for seg in segments:
@@ -1141,6 +1164,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
             via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance
             _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
+    _ledger_close(obstacles, _pre, "add_segments_list")
 
 
 def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: list,
@@ -1159,6 +1183,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
     """
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
+    _pre = _ledger_bracket(obstacles)
 
     # Collect all cells and vias to remove
     cells_to_remove = []  # (gx, gy, layer_idx) tuples
@@ -1191,6 +1216,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
     if vias_to_remove:
         vias_array = np.array(vias_to_remove, dtype=np.int32)
         obstacles.remove_blocked_vias_batch(vias_array)
+    _ledger_close(obstacles, _pre, "remove_segments_list")
 
 
 def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
@@ -1211,6 +1237,7 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
     """
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
+    _pre = _ledger_bracket(obstacles)
 
     # Collect all cells and vias to remove
     cells_to_remove = []  # (gx, gy, layer_idx) tuples
@@ -1261,6 +1288,7 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
     if vias_to_remove:
         vias_array = np.array(vias_to_remove, dtype=np.int32)
         obstacles.remove_blocked_vias_batch(vias_array)
+    _ledger_close(obstacles, _pre, "remove_vias_list")
 
 
 def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,

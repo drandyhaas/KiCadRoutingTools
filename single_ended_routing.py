@@ -2358,6 +2358,36 @@ def route_multipoint_taps(
     global_total: int = 0,
     global_failed: int = 0
 ) -> Optional[dict]:
+    """route_multipoint_taps with guaranteed cleanup of the in-progress-via
+    rings (issue #309). _register_inprogress_via stamps raw ref-counted
+    blocked-via rings into `obstacles` while the taps route; when the caller
+    passed the PERSISTENT working map (reroute_loop's in-place mode) rather
+    than a per-net clone, those rings leaked forever - restore_obstacles_inplace
+    only removes its own same-net-via cells. The rings are per-route
+    scaffolding (the committed route's vias get their real keep-outs from the
+    net's recomputed obstacle cache), so remove exactly the cells added, on
+    every exit path. On a clone the removal is harmless."""
+    ring_cells: list = []
+    try:
+        return _route_multipoint_taps_impl(
+            pcb_data, net_id, config, obstacles, main_result,
+            global_offset, global_total, global_failed, ring_cells)
+    finally:
+        if ring_cells:
+            obstacles.remove_blocked_vias_batch(np.array(ring_cells, dtype=np.int32))
+
+
+def _route_multipoint_taps_impl(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    obstacles: 'GridObstacleMap',
+    main_result: dict,
+    global_offset: int = 0,
+    global_total: int = 0,
+    global_failed: int = 0,
+    _ring_cells: list = None
+) -> Optional[dict]:
     """
     Route the remaining MST edges for a multi-point net.
 
@@ -2433,6 +2463,10 @@ def route_multipoint_taps(
                 d = ex * ex + ey * ey
                 if 0 < d <= radius_sq:
                     obstacles.add_blocked_via(vgx + ex, vgy + ey)
+                    # Ref-counted raw add: the wrapper removes these on exit so
+                    # they can't leak into a persistent working map (#309).
+                    if _ring_cells is not None:
+                        _ring_cells.append((vgx + ex, vgy + ey))
 
     for _v in all_vias:
         _register_inprogress_via(_v)

@@ -401,6 +401,51 @@ class RouteResult:
     success: bool
 
 
+def _audit_plane_via_map(obstacles, pcb_data, config, net_id,
+                         same_net_pad_clearance, session_vias, coord,
+                         hole_to_hole_clearance, via_drill, via_size, net_name):
+    """KICAD_OBSTACLE_AUDIT (issue #309): whole-board integrity check of the
+    per-net via-placement map after a net's pad pass.
+
+    The map is mutated incrementally through rip-ups (ViaPlacementObstacleData
+    removal, the #208 desync class) and per-placement block_via_position calls;
+    it must end equal to a fresh rebuild from the current pcb_data plus the
+    same session-via blocking. Wrongly-OPEN cells are under-blocking (a later
+    via can land on ripped-net copper); wrongly-BLOCKED cells are a leak.
+    """
+    try:
+        fresh = build_via_obstacle_map(pcb_data, config, net_id, verbose=False,
+                                       same_net_pad_clearance=same_net_pad_clearance)
+        for pv in session_vias:
+            block_via_position(fresh, pv['x'], pv['y'], coord,
+                               hole_to_hole_clearance, via_drill,
+                               via_size, config.clearance)
+        bb = pcb_data.board_info.board_bounds
+        if not bb:
+            return
+        cgx, cgy = coord.to_grid((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2)
+        r = int(max(bb[2] - bb[0], bb[3] - bb[1]) / config.grid_step / 2) + 50
+        maintained = obstacles.open_via_cells_within(cgx, cgy, r)
+        rebuilt = fresh.open_via_cells_within(cgx, cgy, r)
+        if maintained == rebuilt:
+            print(f"  [OBSTACLE AUDIT route_planes:{net_name}] via map BALANCED "
+                  f"vs fresh rebuild ({len(maintained)} open cells)")
+            return
+        sm, sr = set(maintained), set(rebuilt)
+        under = sm - sr   # open in maintained, blocked in fresh: under-blocked
+        over = sr - sm    # blocked in maintained, open in fresh: leaked block
+        print(f"  [OBSTACLE AUDIT route_planes:{net_name}] via map DIVERGED: "
+              f"{len(under)} wrongly-open (under-blocked), "
+              f"{len(over)} wrongly-blocked (leak) "
+              f"(maintained {len(sm)} vs rebuilt {len(sr)} open cells)")
+        for cell in sorted(under)[:3]:
+            print(f"      under-blocked at grid {cell}")
+        for cell in sorted(over)[:3]:
+            print(f"      leaked block at grid {cell}")
+    except Exception as e:
+        print(f"  [OBSTACLE AUDIT route_planes] skipped ({e})")
+
+
 def _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord):
     """Convert an A* grid path (oriented via->pad) into trace segment dicts.
 
@@ -2559,6 +2604,17 @@ def create_plane(
                 failed_pad_infos.remove(entry)
             if recovered_entries:
                 print(f"  Fine-pitch retry recovered {len(recovered_entries)}/{len(fine_candidates)} pad(s)")
+
+        # Ref-count integrity audit of this net's via-placement map (#309, same
+        # class as #208): after all rips/placements the maintained map must
+        # equal a fresh rebuild from the CURRENT pcb_data plus the session vias
+        # (mirroring its Step-7 construction + per-placement blocking).
+        if os.environ.get("KICAD_OBSTACLE_AUDIT") and obstacles is not None:
+            _audit_plane_via_map(obstacles, pcb_data, config, net_id,
+                                 same_net_pad_clearance,
+                                 all_new_vias + new_vias, coord,
+                                 hole_to_hole_clearance, via_drill, via_size,
+                                 net_name)
 
         # Step 10: Generate zone for this net (if needed)
         # For multi-net layers, defer zone generation until all nets are processed

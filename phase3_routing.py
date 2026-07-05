@@ -573,7 +573,11 @@ def try_phase3_ripup(
                 # and won't be properly removed when the net is later ripped.
                 if tap_segments_added or tap_vias_added:
                     remove_segments_list_from_obstacles(state.working_obstacles, tap_segments_added, config)
-                    remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config)
+                    # diagonal_margin MUST match the add above (0.25): the margin
+                    # inflates every via's per-layer track disc, so removing
+                    # without it leaves a quarter-cell ring ref-counted forever
+                    # (the working-map blocked_cells leak of issue #309).
+                    remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
                     pop_inflight_copper(pcb_data, inflight_token)
 
                 # Issue #85: only commit the rip-up if it is a net improvement.
@@ -665,7 +669,8 @@ def try_phase3_ripup(
                     )
                     if guard:
                         remove_segments_list_from_obstacles(state.working_obstacles, orig_tap_segs, config)
-                        remove_vias_list_from_obstacles(state.working_obstacles, orig_tap_vias, config)
+                        # diagonal_margin must match the add above (0.25) - see #309.
+                        remove_vias_list_from_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
                         pop_inflight_copper(pcb_data, guard_token)
                     return None
 

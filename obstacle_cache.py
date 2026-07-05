@@ -32,6 +32,162 @@ except ImportError:
 
 _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
 
+# --- Obstacle-map ref-count ledger (issue #309) --------------------------------
+# KICAD_OBSTACLE_LEDGER=1 arms a cheap per-object ledger over the persistent
+# working map: every NetObstacleData gets a creation serial, and every
+# add/remove of a cache object against the WORKING map (identified by id(); set
+# by build_working_obstacle_map) is recorded with its call site. The invariant
+# `working == base + sum(current caches)` holds iff, at end of run, every
+# serial's adds - removes == 1 for objects still resident in the cache dict and
+# == 0 for replaced/dropped ones. obstacle_ledger_report() prints the serials
+# (and sites) that violate it - naming the exact leaking interleaving that the
+# whole-map KICAD_OBSTACLE_AUDIT diff can only total. Raw (non-cache) list ops
+# on the working map are accounted separately by get_stats() deltas per site.
+_LEDGER_ENV = os.environ.get("KICAD_OBSTACLE_LEDGER") == "1"
+_LEDGER = None
+if _LEDGER_ENV:
+    import itertools as _itertools
+    _LEDGER = {
+        "wid": None,             # id() of the persistent working map
+        "serial": _itertools.count(1),
+        "meta": {},              # serial -> (net_id, creation site)
+        "adds": {},              # serial -> {site: count}
+        "removes": {},           # serial -> {site: count}
+        "raw": {},               # site -> [d_cells, d_vias] cumulative (raw list ops)
+        "events": 0,
+    }
+
+
+def _ledger_site(depth: int = 2, frames: int = 3) -> str:
+    import sys as _sys
+    parts = []
+    try:
+        f = _sys._getframe(depth)
+    except ValueError:
+        return "?"
+    for _ in range(frames):
+        if f is None:
+            break
+        parts.append(f"{os.path.basename(f.f_code.co_filename)}:{f.f_code.co_name}:{f.f_lineno}")
+        f = f.f_back
+    return " <- ".join(parts)
+
+
+def ledger_set_working_map(obstacles) -> None:
+    """Mark `obstacles` as THE persistent working map the ledger audits."""
+    if _LEDGER is not None:
+        _LEDGER["wid"] = id(obstacles)
+
+
+def _ledger_cache_op(op: str, obstacles, cache_data) -> None:
+    if _LEDGER is None or _LEDGER["wid"] != id(obstacles):
+        return
+    serial = getattr(cache_data, "_audit_serial", 0)
+    site = _ledger_site(depth=3)
+    book = _LEDGER["adds" if op == "add" else "removes"]
+    per = book.setdefault(serial, {})
+    per[site] = per.get(site, 0) + 1
+    _LEDGER["events"] += 1
+
+
+def ledger_raw_delta(obstacles, site_tag: str, d_cells: int, d_vias: int) -> None:
+    """Record a raw (non-cache) mutation of the working map, as get_stats deltas."""
+    if _LEDGER is None or _LEDGER["wid"] != id(obstacles):
+        return
+    ent = _LEDGER["raw"].setdefault(site_tag, [0, 0])
+    ent[0] += d_cells
+    ent[1] += d_vias
+    _LEDGER["events"] += 1
+
+
+def run_obstacle_audit(base_obstacles, working_obstacles,
+                       net_obstacles_cache: Dict[int, "NetObstacleData"],
+                       label: str = "") -> None:
+    """End-of-run ref-count integrity audit (issue #309), shared by every
+    front-end that maintains a persistent working map + per-net cache dict.
+
+    Invariant: working == base + sum(current net caches). Clones the working
+    map, removes every net's CURRENT cache, and compares entry counts to the
+    base. Any residual in the ref-counted sets is a leak (an add not mirrored
+    by a remove) or an over-decrement. Fully defensive; env-gated by callers.
+    """
+    try:
+        if base_obstacles is None or working_obstacles is None:
+            return
+        probe = working_obstacles.clone_fresh()
+        cache = net_obstacles_cache or {}
+        for _nid, _cd in list(cache.items()):
+            remove_net_obstacles_from_cache(probe, _cd)
+        labels = ("blocked_cells", "blocked_vias", "stub_prox",
+                  "layer_prox", "cross_layer", "source_target", "free_vias")
+        # HARD = ref-counted obstacle sets that cause DRC/routing errors when
+        # leaked; SOFT = proximity/cost maps whose residual is expected.
+        hard = {"blocked_cells", "blocked_vias", "source_target", "free_vias"}
+        bs, ps = base_obstacles.get_stats(), probe.get_stats()
+        resid = [(labels[i], ps[i] - bs[i])
+                 for i in range(min(len(labels), len(bs), len(ps)))]
+        leak = [(n, d) for n, d in resid if d != 0 and n in hard]
+        soft = [(n, d) for n, d in resid if d != 0 and n not in hard]
+        print("\n" + "=" * 60)
+        print(f"[OBSTACLE AUDIT{' ' + label if label else ''}] "
+              f"working - sum(caches) vs base ({len(cache)} net caches removed)")
+        if leak:
+            print("  LEAK/DESYNC in ref-counted obstacle maps:")
+            for n, d in leak:
+                print(f"    {n}: {d:+d} cells unaccounted for by any net cache")
+        else:
+            print("  BALANCED: ref-counted maps (blocked_cells/blocked_vias/"
+                  "source_target/free_vias) return exactly to base.")
+        if soft:
+            print("  (soft cost maps, residual expected: "
+                  + ", ".join(f"{n} {d:+d}" for n, d in soft) + ")")
+        print("=" * 60)
+        if os.environ.get("KICAD_OBSTACLE_LEDGER") == "1":
+            obstacle_ledger_report(net_obstacles_cache)
+    except Exception as e:
+        print(f"[OBSTACLE AUDIT] skipped ({e})")
+
+
+def obstacle_ledger_report(final_cache: Dict[int, "NetObstacleData"]) -> None:
+    """Print every cache object whose working-map adds/removes don't balance."""
+    if _LEDGER is None:
+        print("[OBSTACLE LEDGER] not armed (KICAD_OBSTACLE_LEDGER != 1)")
+        return
+    resident = {getattr(cd, "_audit_serial", 0) for cd in (final_cache or {}).values()}
+    serials = set(_LEDGER["adds"]) | set(_LEDGER["removes"])
+    bad = []
+    for s in sorted(serials):
+        adds = _LEDGER["adds"].get(s, {})
+        removes = _LEDGER["removes"].get(s, {})
+        balance = sum(adds.values()) - sum(removes.values())
+        expected = 1 if s in resident else 0
+        if balance != expected:
+            bad.append((s, balance, expected, adds, removes))
+    print("\n" + "=" * 60)
+    print(f"[OBSTACLE LEDGER] {_LEDGER['events']} events, "
+          f"{len(serials)} cache objects touched the working map, "
+          f"{len(resident)} resident at end")
+    if _LEDGER["events"] == 0:
+        print("  WARNING: zero events recorded - instrument did not engage "
+              "(working map id never matched?)")
+    for s, balance, expected, adds, removes in bad:
+        net_id, created = _LEDGER["meta"].get(s, ("?", "?"))
+        print(f"  UNBALANCED serial {s} (net {net_id}): adds-removes={balance}, "
+              f"expected {expected} (resident={s in resident})")
+        print(f"    created at: {created}")
+        for site, n in adds.items():
+            print(f"    +{n} add    {site}")
+        for site, n in removes.items():
+            print(f"    -{n} remove {site}")
+    if not bad:
+        print("  cache-object ledger BALANCED (leak, if any, is in raw ops below)")
+    raw = {k: v for k, v in _LEDGER["raw"].items() if v[0] or v[1]}
+    if raw:
+        print("  raw-op cumulative stats deltas (should cancel per add/remove pair):")
+        for site, (dc, dv) in sorted(raw.items()):
+            print(f"    cells {dc:+d} vias {dv:+d}  {site}")
+    print("=" * 60)
+
 # Bitmap dedupe allocates one bool per cell in the rows' bounding box; cap the
 # allocation (200M bools = 200MB) and fall back to sorting for outliers.
 _BITMAP_DEDUPE_MAX_CELLS = 200_000_000
@@ -187,10 +343,14 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     else:
         blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
 
-    return NetObstacleData(
+    data = NetObstacleData(
         blocked_cells=blocked_cells_arr,
         blocked_vias=blocked_vias_arr
     )
+    if _LEDGER is not None:
+        data._audit_serial = next(_LEDGER["serial"])
+        _LEDGER["meta"][data._audit_serial] = (net_id, _ledger_site(depth=2))
+    return data
 
 
 def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
@@ -376,6 +536,8 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
         obstacles: The obstacle map to add to
         cache_data: Pre-computed NetObstacleData for the net
     """
+    if _LEDGER is not None:
+        _ledger_cache_op("add", obstacles, cache_data)
     if len(cache_data.blocked_cells) > 0:
         # Pass numpy array directly to Rust (no conversion needed)
         obstacles.add_blocked_cells_batch(cache_data.blocked_cells)
@@ -393,6 +555,8 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
         obstacles: The obstacle map to remove from
         cache_data: Pre-computed NetObstacleData for the net
     """
+    if _LEDGER is not None:
+        _ledger_cache_op("remove", obstacles, cache_data)
     if len(cache_data.blocked_cells) > 0:
         obstacles.remove_blocked_cells_batch(cache_data.blocked_cells)
     if len(cache_data.blocked_vias) > 0:
@@ -414,6 +578,7 @@ def build_working_obstacle_map(base_obstacles: GridObstacleMap,
         Working obstacle map ready for incremental updates
     """
     working = base_obstacles.clone_fresh()
+    ledger_set_working_map(working)  # no-op unless KICAD_OBSTACLE_LEDGER=1 (#309)
     for net_id, cache_data in net_obstacles_cache.items():
         add_net_obstacles_from_cache(working, cache_data)
     return working

@@ -1107,6 +1107,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(format_obstacle_map_stats(state.working_obstacles))
         print("=" * 60)
 
+    # Obstacle-map ref-count integrity audit (#309), same invariant as route.py:
+    # the diff loop maintains its own persistent working map + per-net caches.
+    if os.environ.get("KICAD_OBSTACLE_AUDIT"):
+        from obstacle_cache import run_obstacle_audit
+        run_obstacle_audit(base_obstacles, state.working_obstacles,
+                           state.net_obstacles_cache, label="route_diff")
+
     if return_results:
         return successful, failed, total_time, results_data
     return successful, failed, total_time
