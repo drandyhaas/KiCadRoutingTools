@@ -3072,7 +3072,8 @@ Examples:
     # otherwise. Gated against connectivity + pours, so it never breaks a net.
     if not args.dry_run:
         from pcb_modification import clean_plane_copper
-        _snapped, _removed = clean_plane_copper(args.output_file, net_names, args.clearance)
+        _snapped, _removed = clean_plane_copper(args.output_file, net_names,
+                                                args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
 

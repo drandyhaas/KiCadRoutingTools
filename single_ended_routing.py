@@ -226,6 +226,84 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     return float(np.min(d))
 
 
+def _foreign_hole_capsules(pcb_data):
+    """Cached NPTH (no-copper) drill capsules: (net_id, ax, ay, bx, by, r) numpy
+    arrays, one row per pad whose drill carries no copper ring (mechanical /
+    mounting holes -- np_thru_hole, or a pad with no copper layer). The pad /
+    segment / via distance trio all measure to COPPER, so they never see these
+    holes; but a track crossing one is a real fab short (check_drc's track-hole
+    rule, issue #233), gated by the higher NPTH-to-track floor. Holes are
+    through, so the distance is layer-agnostic. Round drills degenerate to a
+    zero-length capsule (a=b). Rebuilt when the board's pad count changes (pads
+    are static during routing, so this almost never refires)."""
+    from check_drc import _pad_has_no_copper
+    from kicad_parser import pad_drill_capsule
+    sig = sum(len(p) for p in pcb_data.pads_by_net.values())
+    cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
+    if cache is None or cache[0] != sig:
+        nid, ax, ay, bx, by, r = [], [], [], [], [], []
+        for pad_net, pads in pcb_data.pads_by_net.items():
+            for pad in pads:
+                if pad.drill > 0 and _pad_has_no_copper(pad):
+                    (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
+                    nid.append(pad_net)
+                    ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)
+                    r.append(hr)
+        cache = (sig, (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
+                       np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
+                       np.asarray(by, dtype=float), np.asarray(r, dtype=float)))
+        pcb_data._foreign_hole_cap_cache = cache
+    return cache[1]
+
+
+def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2):
+    """Min edge distance from a segment to any OTHER-net NPTH drill hole (the
+    hole analogue of _seg_foreign_via_dist). Exact segment-to-capsule distance
+    minus the hole radius; a negative result (segment over the hole) is returned
+    as-is. Own-net holes are excluded (a track legitimately reaches its own
+    mounting-hole pad). 1e9 when there are no foreign holes."""
+    nid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
+    if nid.size == 0:
+        return 1e9
+    R = _FOREIGN_PAD_WINDOW
+    hminx = np.minimum(hax, hbx) - hr; hmaxx = np.maximum(hax, hbx) + hr
+    hminy = np.minimum(hay, hby) - hr; hmaxy = np.maximum(hay, hby) + hr
+    near = ((hmaxx >= min(x1, x2) - R) & (hminx <= max(x1, x2) + R) &
+            (hmaxy >= min(y1, y2) - R) & (hminy <= max(y1, y2) + R) & (nid != net_id))
+    if not near.any():
+        return 1e9
+    ax, ay, bx, by, rr = hax[near], hay[near], hbx[near], hby[near], hr[near]
+    d = _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by) - rr
+    return float(np.min(d))
+
+
+def _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by):
+    """Exact distance from segment (x1,y1)-(x2,y2) to each capsule AXIS segment
+    (ax,ay)-(bx,by) (vectorized over the capsule arrays), returned per capsule.
+    Segment-to-segment distance = min of the four endpoint-to-other-segment
+    distances, or 0 where the two segments properly cross -- the same measure
+    check_drc uses for track-hole."""
+    def pt_to_seg(px, py, qx1, qy1, qx2, qy2):
+        dx = qx2 - qx1; dy = qy2 - qy1
+        L2 = dx * dx + dy * dy
+        safe = np.where(L2 > 0, L2, 1.0)
+        t = np.clip(((px - qx1) * dx + (py - qy1) * dy) / safe, 0.0, 1.0)
+        return np.hypot(px - (qx1 + t * dx), py - (qy1 + t * dy))
+    d = np.minimum(pt_to_seg(ax, ay, x1, y1, x2, y2),
+                   pt_to_seg(bx, by, x1, y1, x2, y2))
+    d = np.minimum(d, pt_to_seg(x1, y1, ax, ay, bx, by))
+    d = np.minimum(d, pt_to_seg(x2, y2, ax, ay, bx, by))
+    # Proper crossing -> distance 0 (orientation sign test, per capsule).
+    sdx, sdy = x2 - x1, y2 - y1
+    hdx, hdy = bx - ax, by - ay
+    o1 = sdx * (ay - y1) - sdy * (ax - x1)
+    o2 = sdx * (by - y1) - sdy * (bx - x1)
+    o3 = hdx * (y1 - ay) - hdy * (x1 - ax)
+    o4 = hdx * (y2 - ay) - hdy * (x2 - ax)
+    crossing = (o1 * o2 < 0) & (o3 * o4 < 0)
+    return np.where(crossing, 0.0, d)
+
+
 def _emit_via_size(pcb_data, gx, gy, config):
     """(size, drill) for a via the route conversion emits at cell (gx, gy). If a #189
     via-in-pad unblock placed a DRC-legal shrunk via here, return THAT size so the

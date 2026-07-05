@@ -441,7 +441,11 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
                            check_via_segment_overlap)
     clearance = config.clearance
     margin = _DRC_CLEARANCE_MARGIN
-    fan_vias = [v for v, _ in fans]
+    # A fan entry's via is None when apply_bare_pad_target_via REUSED an existing
+    # same-net via (#282) instead of drilling a new one - there is no new via to
+    # validate (the reused via is already committed and gets checked as an
+    # existing via when the partner fan via is tested). Skip the None entries.
+    fan_vias = [v for v, _ in fans if v is not None]
     fan_ids = {id(v) for v in fan_vias}
     reloc_ids = {id(p) for p in relocated_pads}
     routing_layers = _routing_copper_layers(pcb_data, config)
@@ -482,7 +486,10 @@ def _attach_fans(merged, fans, legs=None):
     real leg result so the writer emits its vias, and keep `merged` consistent
     for obstacle sync."""
     fan_segs = [s for _, s in fans]
-    fan_vias = [v for v, _ in fans]
+    # A reused existing via (#282) is recorded as None: it is already in
+    # pcb_data.vias / an earlier result's new_vias, so it must NOT be re-emitted
+    # here (a duplicate via in the writer). Only NEW fan vias reach new_vias.
+    fan_vias = [v for v, _ in fans if v is not None]
     sink = legs[0] if legs else merged
     sink['new_segments'] = list(sink.get('new_segments', [])) + fan_segs
     sink['new_vias'] = list(sink.get('new_vias', [])) + fan_vias

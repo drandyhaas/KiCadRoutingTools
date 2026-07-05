@@ -150,6 +150,52 @@ def run():
           any(abs(s.start_x - 167.3) < 1e-6 and abs(s.start_y - 84.2) < 1e-6
               for s in pcb2.segments if s.net_id == 1))
 
+    # --- HOLE: a track grazing a foreign NPTH drill hole (urti J3 shape, #308) --
+    # NPTH mounting holes carry no copper, so the pad/seg/via terms never see
+    # them; a track crossing one is graded at the higher NPTH-to-track floor.
+    CLR3 = 0.09
+    NPTH_CLR = 0.20  # max(CLR3, NPTH_TO_TRACK_CLEARANCE)
+    HR = 0.25        # drill 0.5 -> radius 0.25
+    W = 0.0889
+    OVERLAP = 0.017  # urti's measured graze
+    npth = _pad('J3', 100.0, 100.0, 0.5, 0.5, 2, '/OTHER')
+    npth.drill = 0.5
+    npth.pad_type = 'np_thru_hole'
+    # Own GND net: two pads with a track between them, grazing the hole mid-span.
+    gy = 100.0 - (HR + NPTH_CLR + W / 2 - OVERLAP)
+    own_a = _pad('U1', 98.5, gy, 0.4, 0.4, 1, '/SIG')
+    own_b = _pad('U2', 101.5, gy, 0.4, 0.4, 1, '/SIG')
+    segsH = [Segment(start_x=98.5, start_y=gy, end_x=101.5, end_y=gy,
+                     width=W, layer='F.Cu', net_id=1)]
+    pcbH = _board({1: [own_a, own_b], 2: [npth]}, segsH, [])
+    from single_ended_routing import _seg_foreign_hole_dist
+    hole_d = _seg_foreign_hole_dist(pcbH, 1, 98.5, gy, 101.5, gy)
+    shortH = (NPTH_CLR + W / 2) - hole_d
+    check("hole fixture actually grazes (~17um)", 0.010 < shortH < 0.020)
+    compsH = _comps(pcbH, 1)
+    n_chH, n_netsH, removedH, addedH = nudge_grazing_microshift(
+        [], pcbH, {1}, clearance=CLR3, max_shift=0.025)
+    check("hole: pass fired", n_chH > 0 and n_netsH == 1)
+    worstH = min(_seg_foreign_hole_dist(pcbH, 1, s.start_x, s.start_y, s.end_x, s.end_y)
+                 - (NPTH_CLR + s.width / 2 - 1e-4)
+                 for s in pcbH.segments if s.net_id == 1)
+    check("hole: graze cleared", worstH >= 0)
+    check("hole: connectivity preserved", _comps(pcbH, 1) == compsH)
+
+    # --- HOLE CAP: a hole graze beyond max_shift is left alone ----------------
+    npth2 = _pad('J4', 100.0, 100.0, 0.5, 0.5, 2, '/OTHER')
+    npth2.drill = 0.5
+    npth2.pad_type = 'np_thru_hole'
+    gy2 = 100.0 - (HR + NPTH_CLR + W / 2 - 0.035)  # 35um graze -> needs > 25um cap
+    ownc = _pad('U3', 98.5, gy2, 0.4, 0.4, 1, '/SIG')
+    ownd = _pad('U4', 101.5, gy2, 0.4, 0.4, 1, '/SIG')
+    segsHc = [Segment(start_x=98.5, start_y=gy2, end_x=101.5, end_y=gy2,
+                      width=W, layer='F.Cu', net_id=1)]
+    pcbHc = _board({1: [ownc, ownd], 2: [npth2]}, segsHc, [])
+    n_chHc, _, _, addedHc = nudge_grazing_microshift(
+        [], pcbHc, {1}, clearance=CLR3, max_shift=0.025)
+    check("hole cap: over-cap hole graze left alone", n_chHc == 0 and not addedHc)
+
     # --- CAP: a graze needing more than max_shift is left alone --------------
     pcb3, foreign3 = _vertex_fixture(pad_x=115.51)  # ~40um past the fixable range
     g3 = [s for s in pcb3.segments if s.width == 0.0889][0]

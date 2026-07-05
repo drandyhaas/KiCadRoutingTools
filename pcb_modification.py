@@ -549,17 +549,22 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
     return True
 
 
-def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1) -> Tuple[int, int]:
-    """Apply the dead-end sweep + gap-snap to a plane tool's output file (issue #84).
+def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1,
+                       grid_step: float = 0.05) -> Tuple[int, int]:
+    """Apply the dead-end sweep + gap-snap + graze micro-shift to a plane tool's
+    output file (issue #84, #308).
 
     route_planes / route_disconnected_planes write copper outside route.py's
     write-list, so they miss the in-route cleanup, leaving dead-end stubs (and the
     occasional near-miss) on plane nets. This re-parses the written board, snaps
-    small same-net gaps and trims gated-safe dead ends on the given plane nets,
-    then rewrites the file (stripping removed segments, appending snap connectors).
-    The connectivity gate uses the plane zones, and the snap clearance check
-    rejects any connector that would enter another net's pour. Returns
-    ``(snapped, removed)``.
+    small same-net gaps, trims gated-safe dead ends, and micro-shifts a plane
+    repair track that grid-quantized sub-clearance to a foreign NPTH drill hole
+    (issue #308: urti's GND repair track grazed J3's mounting hole by 17um -- a
+    sub-grid quantization miss the plane path never ran the micro-shift on), then
+    rewrites the file (stripping removed segments, appending snap connectors and
+    shifted geometry). The connectivity gate uses the plane zones, and the snap /
+    shift clearance checks reject anything that would enter another net's pour or
+    graze other copper. Returns ``(snapped, removed)``.
     """
     from types import SimpleNamespace
     from kicad_parser import parse_kicad_pcb, is_kicad_10
@@ -577,6 +582,21 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     snapped = snap_stub_gaps(snap_results, pcb, scope, SimpleNamespace(clearance=clearance))
     connectors = [s for r in snap_results for s in (r.get('new_segments') or [])]
     _, _, to_remove = sweep_dead_ends(snap_results, pcb, scope)
+
+    # Micro-shift a plane repair track that quantized sub-clearance to a foreign
+    # NPTH hole / foreign copper (#308). Every plane segment is an "original" here
+    # (re-parsed from the file), so the shift is emitted as a remove-original +
+    # add-shifted pair. Plane-repair quantization grazes can be up to a full grid
+    # cell (the track is on-grid, the hole off-grid), so the cap is grid_step, not
+    # grid_step/2 -- still safe: each candidate is verified to clear all foreign
+    # copper and to keep the net connected before it replaces the original.
+    _ms, _msn, ms_remove, ms_add = nudge_grazing_microshift(
+        [], pcb, scope, clearance=clearance, max_shift=grid_step)
+    if ms_remove:
+        to_remove = list(to_remove) + list(ms_remove)
+    if ms_add:
+        connectors = list(connectors) + list(ms_add)
+
     if not (connectors or to_remove):
         return 0, 0
 
@@ -1463,20 +1483,28 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
     _seg_foreign_*_dist trio (pads as their board-axis rect)."""
     import numpy as np
     from single_ended_routing import (_foreign_pad_arrays, _foreign_seg_arrays,
-                                      _foreign_via_arrays)
+                                      _foreign_via_arrays, _foreign_hole_capsules)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     required = clearance + s.width / 2.0
+    # NPTH mounting/mechanical holes carry no copper, so the pad/seg/via terms
+    # miss them; a track crossing one is graded at the higher NPTH-to-track floor
+    # (issue #308, urti GND vs J3's hole). Their required clearance differs from
+    # the copper terms, so the worst offender is chosen by SHORTFALL, not raw
+    # edge distance (a hole 0.15 away can out-rank a via 0.12 away).
+    hole_required = max(clearance, NPTH_TO_TRACK_CLEARANCE) + s.width / 2.0
     x1, y1, x2, y2 = s.start_x, s.start_y, s.end_x, s.end_y
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.005) + 1)
     ts = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * ts
     sy = y1 + (y2 - y1) * ts
-    R = required + 0.2
-    best = None  # (edge_dist, t, qx, qy)
+    R = max(required, hole_required) + 0.2
+    best = None  # (shortfall, t, qx, qy)
 
-    def consider(dist, i, qx, qy):
+    def consider(dist, i, qx, qy, req=required):
         nonlocal best
-        if best is None or dist < best[0]:
-            best = (dist, float(ts[i]), float(qx), float(qy))
+        sf = req - dist
+        if best is None or sf > best[0]:
+            best = (sf, float(ts[i]), float(qx), float(qy))
 
     nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, s.layer)
     if cx.size:
@@ -1520,14 +1548,34 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
-    if best is None or best[0] >= required - 1e-4:
+    hnid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
+    if hnid.size:
+        near = ((np.maximum(hax, hbx) + hr >= sx.min() - R) &
+                (np.minimum(hax, hbx) - hr <= sx.max() + R) &
+                (np.maximum(hay, hby) + hr >= sy.min() - R) &
+                (np.minimum(hay, hby) - hr <= sy.max() + R) & (hnid != net_id))
+        if near.any():
+            ax, ay, bx, by, rr = hax[near], hay[near], hbx[near], hby[near], hr[near]
+            abx, aby = bx - ax, by - ay
+            L2 = np.where(abx * abx + aby * aby > 0, abx * abx + aby * aby, 1.0)
+            tt = np.clip(((sx[:, None] - ax[None, :]) * abx[None, :] +
+                          (sy[:, None] - ay[None, :]) * aby[None, :]) / L2[None, :], 0.0, 1.0)
+            qx = ax[None, :] + tt * abx[None, :]
+            qy = ay[None, :] + tt * aby[None, :]
+            # Edge distance = axis distance - hole radius; direction points away
+            # from the axis point (== away from the hole edge).
+            d = np.hypot(sx[:, None] - qx, sy[:, None] - qy) - rr[None, :]
+            i, j = np.unravel_index(int(np.argmin(d)), d.shape)
+            consider(float(d[i, j]), i, qx[i, j], qy[i, j], hole_required)
+
+    if best is None or best[0] <= 1e-4:
         return None
-    dist, t, qx, qy = best
+    shortfall, t, qx, qy = best
     px, py = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
     norm = math.hypot(px - qx, py - qy)
     if norm < 1e-6:
         return None  # centreline inside the offender: an overlap, not a graze
-    return (required - dist, t, (px - qx) / norm, (py - qy) / norm)
+    return (shortfall, t, (px - qx) / norm, (py - qy) / norm)
 
 
 def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
@@ -1567,7 +1615,12 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     from collections import defaultdict
     from check_connected import check_net_connectivity
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
-                                      _seg_foreign_via_dist)
+                                      _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+
+    # NPTH (no-copper) drill holes are graded at the higher NPTH-to-track floor,
+    # and the copper distance terms don't see them (issue #308, urti GND vs J3).
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
     routed_seg_result = {}
     for r in results:
@@ -1595,7 +1648,10 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
-        return d >= clearance + w / 2.0 - 1e-4 and edge_clears(x1, y1, x2, y2, w)
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+        return (d >= clearance + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4 and
+                edge_clears(x1, y1, x2, y2, w))
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
@@ -1628,12 +1684,17 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # offender is a track); the precise 0.005-sampled offender scan runs
         # only on the handful that fail this.
         thr = clearance + s.width / 2.0 - 1e-4
-        return min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                         s.end_x, s.end_y, s.layer),
-                   _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                         s.end_x, s.end_y, s.layer),
-                   _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                         s.end_x, s.end_y, s.layer)) < thr
+        if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                     s.end_x, s.end_y, s.layer),
+               _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                     s.end_x, s.end_y, s.layer),
+               _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                     s.end_x, s.end_y, s.layer)) < thr:
+            return True
+        # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308).
+        hole_thr = npth_clr + s.width / 2.0 - 1e-4
+        return _seg_foreign_hole_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                      s.end_x, s.end_y) < hole_thr
 
     MAX_ROUNDS = 3   # a fixed worst offender can expose the second-worst
 
