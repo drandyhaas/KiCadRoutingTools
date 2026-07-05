@@ -25,6 +25,63 @@ from typing import List, Tuple
 from kicad_parser import parse_kicad_pcb, Pad
 
 
+def _pad_outline_polygon(pad, k: int = 4) -> List[Tuple[float, float]]:
+    """Convex outline of a pad's copper in global coords, honouring shape and
+    rect_rotation. Circle/oval/roundrect corners are ARCS (sampled k points each),
+    not the sharp bounding-box corners -- so a round pad is not over-modelled by
+    its bbox (which manufactures phantom overlaps, #232/#260). Rect -> 4 corners."""
+    hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+    shape = getattr(pad, 'shape', 'rect')
+    if shape in ('circle', 'oval'):
+        r = min(hx, hy)
+    elif shape == 'roundrect':
+        r = (getattr(pad, 'roundrect_rratio', 0.0) or 0.0) * min(pad.size_x, pad.size_y)
+    else:
+        r = 0.0
+    r = max(0.0, min(r, hx, hy))
+    corners = [(hx - r, -(hy - r), -90, 0), (hx - r, hy - r, 0, 90),
+               (-(hx - r), hy - r, 90, 180), (-(hx - r), -(hy - r), 180, 270)]
+    local = []
+    for cx, cy, a0, a1 in corners:
+        if r > 1e-9:
+            for i in range(k + 1):
+                a = math.radians(a0 + (a1 - a0) * i / k)
+                local.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+        else:
+            local.append((cx, cy))
+    th = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
+    c, s = math.cos(th), math.sin(th)
+    out = []
+    for ox, oy in local:
+        gx = pad.global_x + ox * c - oy * s
+        gy = pad.global_y + ox * s + oy * c
+        if not out or math.hypot(gx - out[-1][0], gy - out[-1][1]) > 1e-9:
+            out.append((gx, gy))
+    return out
+
+
+def _overlap_depth(a: List[Tuple[float, float]], b: List[Tuple[float, float]]) -> float:
+    """Separating-axis penetration depth between two convex polygons (mm), for any
+    vertex count. >0 = overlap by that depth; <=0 = (negative) gap."""
+    max_gap = -1e18
+    for poly in (a, b):
+        n = len(poly)
+        for i in range(n):
+            ex = poly[(i + 1) % n][0] - poly[i][0]
+            ey = poly[(i + 1) % n][1] - poly[i][1]
+            nx, ny = -ey, ex
+            L = math.hypot(nx, ny) or 1.0
+            nx, ny = nx / L, ny / L
+            amin = min(nx * p[0] + ny * p[1] for p in a)
+            amax = max(nx * p[0] + ny * p[1] for p in a)
+            bmin = min(nx * p[0] + ny * p[1] for p in b)
+            bmax = max(nx * p[0] + ny * p[1] for p in b)
+            gap = max(bmin - amax, amin - bmax)
+            if gap > max_gap:
+                max_gap = gap
+    return -max_gap
+
+
 def _copper_layers(pad) -> set:
     """Copper layers a pad occupies. Through-hole pads (drill > 0) and pads with a
     '*.Cu' wildcard span every copper layer, so they conflict with anything."""
@@ -46,15 +103,15 @@ def _shares_layer(a, b) -> bool:
     return bool(la & lb)
 
 
-def _overlaps_in(pads, tolerance, copper_layers):
+def _overlaps_in(pads, tolerance):
     """Different-net copper overlaps among a flat pad list (deeper than tolerance).
     Only pads sharing a copper layer can short (edge-connector fingers on opposite
     sides, for example, never conflict). Overlap depth is measured with the pad's
     TRUE copper shape (check_drc's exact circle/oval/roundrect/custom-polygon
     model), not a bounding rectangle -- a round pad's bbox corner otherwise reads
     as overlapping a neighbour it doesn't actually touch (#232/#260 phantom)."""
-    from check_drc import check_pad_pad_overlap
     pads = [p for p in pads if p.size_x > 0 and p.size_y > 0 and p.net_id != 0]
+    polys = [_pad_outline_polygon(p) for p in pads]
     reach = [math.hypot(p.size_x, p.size_y) / 2.0 for p in pads]
     hits = []
     for i, a in enumerate(pads):
@@ -67,9 +124,8 @@ def _overlaps_in(pads, tolerance, copper_layers):
                 continue
             if not _shares_layer(a, b):
                 continue
-            # clearance 0 + margin 0: overlap_mm is the true penetration depth.
-            viol, depth, _ = check_pad_pad_overlap(a, b, 0.0, copper_layers, 0.0)
-            if viol and depth > tolerance:
+            depth = _overlap_depth(polys[i], polys[j])
+            if depth > tolerance:
                 hits.append((a, b, depth))
     return hits
 
@@ -85,15 +141,14 @@ def find_pad_overlaps(pcb, tolerance: float = 0.05, component: str = None,
     tests pads across different footprints (a broader board-level short check, but
     noisier on tightly-placed passives).
     """
-    copper_layers = getattr(pcb.board_info, 'copper_layers', None) or ['F.Cu', 'B.Cu']
     if cross_footprint:
         pads = [pd for fp in pcb.footprints.values() for pd in fp.pads]
-        return _overlaps_in(pads, tolerance, copper_layers)
+        return _overlaps_in(pads, tolerance)
     hits = []
     for ref, fp in pcb.footprints.items():
         if component and ref != component:
             continue
-        hits.extend(_overlaps_in(fp.pads, tolerance, copper_layers))
+        hits.extend(_overlaps_in(fp.pads, tolerance))
     return hits
 
 

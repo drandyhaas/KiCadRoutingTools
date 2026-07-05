@@ -32,6 +32,11 @@ import routing_defaults as defaults
 _EXPAND_CACHE: Dict[tuple, List[str]] = {}
 _EXPAND_ROUTING = None
 
+# Same-net endpoints closer than this are treated as a COINCIDENT (clean) joint;
+# a larger gap that is still within cap-overlap is a fragile soft joint (#soft-joint).
+# ~10um is above grid-quantization noise (~8um) so a snapped junction is not flagged.
+_SOFT_JOINT_MIN_GAP = 0.010
+
 
 def _expand_cu(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
     """Memoized expand_pad_layers for the duration of one run_drc call."""
@@ -1390,6 +1395,64 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
                 })
 
+    # Same-net SOFT JOINT: a DANGLING FREE END (a segment terminus that is NOT a
+    # shared vertex, NOT on a via, and NOT on an own-net pad) that reaches the rest
+    # of the net ONLY by cap-overlapping another dangling free end. A clean route
+    # ends every piece at a coincident vertex, a via, or a pad; a free end floating
+    # in copper means the real connecting segment was ripped and never restored (or
+    # a tap landed on-grid short of the off-grid endpoint), leaving the net held by
+    # a sliver of overlap -- a fragile near-open. Only DANGLING ends qualify, so
+    # parallel same-net tracks and normal bends (shared vertices) are not flagged.
+    if not quiet:
+        print("Checking for same-net soft joints (dangling free ends)...")
+    from collections import defaultdict as _dd
+    def _rk(x, y):
+        return (round(x, 3), round(y, 3))
+    _ep_count = _dd(int)
+    for s in pcb_data.segments:
+        if matching_net_ids is not None and s.net_id not in matching_net_ids:
+            continue
+        _ep_count[(s.net_id, s.layer, _rk(s.start_x, s.start_y))] += 1
+        _ep_count[(s.net_id, s.layer, _rk(s.end_x, s.end_y))] += 1
+    _via_by_net = _dd(list)
+    for v in pcb_data.vias:
+        _via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
+    def _at_anchor(nid, x, y):
+        for vx, vy, vr in _via_by_net.get(nid, []):
+            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+                return True
+        for p in pcb_data.pads_by_net.get(nid, []):
+            if point_to_pad_distance(x, y, p) <= 0.02:
+                return True
+        return False
+    _dangles = _dd(list)  # (net_id, layer) -> [(x, y, width)]
+    for s in pcb_data.segments:
+        if matching_net_ids is not None and s.net_id not in matching_net_ids:
+            continue
+        for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            if _ep_count[(s.net_id, s.layer, _rk(x, y))] != 1:
+                continue  # shared vertex = clean joint
+            if _at_anchor(s.net_id, x, y):
+                continue  # terminates on a via / own pad = legitimate
+            _dangles[(s.net_id, s.layer)].append((x, y, s.width))
+    for (net_id, layer), ends in _dangles.items():
+        for i in range(len(ends)):
+            xi, yi, wi = ends[i]
+            for j in range(i + 1, len(ends)):
+                xj, yj, wj = ends[j]
+                gap = math.hypot(xi - xj, yi - yj)
+                cap = (wi + wj) / 2.0
+                if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                    net_name = pcb_data.nets.get(net_id, None)
+                    net_str = net_name.name if net_name else f"net_{net_id}"
+                    violations.append({
+                        'type': 'segment-endpoint-gap',
+                        'net1': net_str, 'net2': net_str, 'layer': layer,
+                        'gap_mm': gap, 'overlap_mm': cap - gap,
+                        'loc1': (xi, yi), 'loc2': (xj, yj),
+                    })
+
+
     # Check via-to-segment violations using spatial index
     if not quiet:
         print("Checking via-to-segment clearances...")
@@ -2012,6 +2075,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
+                    elif vtype == 'segment-endpoint-gap':
+                        print(f"  {v['net1']} (same-net soft joint)")
+                        print(f"    Layer: {v['layer']}, endpoint gap: {v['gap_mm']:.3f}mm "
+                              f"(cap overlap only {v['overlap_mm']:.3f}mm)")
+                        print(f"    Ends: ({v['loc1'][0]:.3f},{v['loc1'][1]:.3f}) <-> "
+                              f"({v['loc2'][0]:.3f},{v['loc2'][1]:.3f})")
                     elif vtype == 'pad-segment':
                         print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Seg:{v['net2']}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
