@@ -11,6 +11,25 @@ from kicad_parser import Pad, is_kicad_10
 from routing_utils import pos_key, POSITION_DECIMALS
 
 
+def _escape_net_name(name: Optional[str]) -> Optional[str]:
+    """Escape a net name for a quoted KiCad S-expr token — the exact inverse of
+    kicad_parser._unescape_kicad_string (backslash then quote).
+
+    The parser stores each net's DISPLAY name unescaped, but keys name-based net
+    dedup on the RAW file text (kicad_parser.extract_nets). So a net whose name
+    contains a literal backslash or quote -- e.g. `/GPIO24\\SPI1_RX(MISO)` -- must
+    be re-escaped on write, or route.py emits `(net "/GPIO24\\SPI1...")` with a
+    SINGLE backslash where the original board had it DOUBLE-escaped. The two raw
+    tokens then parse to two different synthetic net_ids for one net, so the
+    routed segment lands on a duplicate net and check_drc flags a phantom
+    pad-segment/via short against the pad (still on the original id). Compounds
+    every route.py step (issue #312, neo6502). Escape backslash FIRST, then quote.
+    """
+    if name is None:
+        return None
+    return name.replace('\\', '\\\\').replace('"', '\\"')
+
+
 def move_copper_text_to_silkscreen(content: str) -> str:
     """
     Move gr_text elements from copper layers to silkscreen layers.
@@ -149,7 +168,7 @@ def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
     Args:
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
     """
-    net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
+    net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     return f'''	(segment
 		(start {start[0]:.6f} {start[1]:.6f})
 		(end {end[0]:.6f} {end[1]:.6f})
@@ -186,7 +205,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
-    net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
+    net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
     if net_name is not None:
         tenting_str = "\n\t\t(tenting (front yes) (back yes))"
@@ -265,9 +284,9 @@ def generate_zone_sexpr(
 
     # KiCad 10: (net "name"), no (net_name ...) line; KiCad 9: (net id) + (net_name "name")
     if use_net_name:
-        net_lines = f'(net "{net_name}")'
+        net_lines = f'(net "{_escape_net_name(net_name)}")'
     else:
-        net_lines = f'(net {net_id})\n\t\t(net_name "{net_name}")'
+        net_lines = f'(net {net_id})\n\t\t(net_name "{_escape_net_name(net_name)}")'
 
     # KiCad 10 removes (filled_areas_thickness no) and adds (island_removal_mode 0) in fill
     if use_net_name:
