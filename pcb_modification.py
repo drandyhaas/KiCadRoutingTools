@@ -352,6 +352,98 @@ def _duplicate_connector(px: float, py: float, tx: float, ty: float,
     return False
 
 
+def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
+                      clearance: float = None) -> int:
+    """Bridge same-net SOFT JOINTS with a TINY coincident segment (#soft-joint).
+
+    A soft joint is a dangling free end (a segment terminus that is not a shared
+    vertex, a via, or an own pad) that reaches the rest of the net ONLY by cap-
+    OVERLAPPING another dangling free end -- a fragile near-open left when a
+    rip-up deleted the real connecting segment (butterstick DQ5) or a tap landed
+    on-grid short of the off-grid endpoint it joined. Rather than rely on the
+    overlap (which check_drc flags as 'segment-endpoint-gap') or snap a tap
+    endpoint (which distorts its route), add a short segment from endpoint 1 to
+    endpoint 2 so the joint becomes a COINCIDENT connection. The bridge spans only
+    the gap (< a track width), so it is always tiny. Uses check_drc's exact
+    soft-joint definition/tolerance so detection and repair agree. The bridge is
+    only added when it clears every OTHER net's copper (it lives inside the two
+    overlapping caps, so it normally does). Returns the number of bridges added.
+    """
+    import math
+    from collections import defaultdict
+    from check_drc import _SOFT_JOINT_MIN_GAP, point_to_pad_distance
+    from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
+                                       _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    clr = config.clearance if clearance is None else clearance
+
+    def rk(x, y):
+        return (round(x, 3), round(y, 3))
+
+    ep_count = defaultdict(int)
+    for s in pcb_data.segments:
+        if scope_net_ids is not None and s.net_id not in scope_net_ids:
+            continue
+        ep_count[(s.net_id, s.layer, rk(s.start_x, s.start_y))] += 1
+        ep_count[(s.net_id, s.layer, rk(s.end_x, s.end_y))] += 1
+    via_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
+
+    def at_anchor(nid, x, y):
+        for vx, vy, vr in via_by_net.get(nid, []):
+            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+                return True
+        for p in pcb_data.pads_by_net.get(nid, []):
+            if point_to_pad_distance(x, y, p) <= 0.02:
+                return True
+        return False
+
+    dangles = defaultdict(list)  # (net_id, layer) -> [(x, y, width)]
+    for s in pcb_data.segments:
+        if scope_net_ids is not None and s.net_id not in scope_net_ids:
+            continue
+        for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            if ep_count[(s.net_id, s.layer, rk(x, y))] != 1:
+                continue
+            if at_anchor(s.net_id, x, y):
+                continue
+            dangles[(s.net_id, s.layer)].append((x, y, s.width))
+
+    def clears(nid, x1, y1, x2, y2, layer, w):
+        d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer),
+                _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
+                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer),
+                _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2))
+        return d >= clr + w / 2.0 - 1e-4
+
+    new_conns = []
+    for (net_id, layer), ends in dangles.items():
+        used = set()
+        for i in range(len(ends)):
+            if i in used:
+                continue
+            xi, yi, wi = ends[i]
+            for j in range(i + 1, len(ends)):
+                if j in used:
+                    continue
+                xj, yj, wj = ends[j]
+                gap = math.hypot(xi - xj, yi - yj)
+                cap = (wi + wj) / 2.0
+                if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                    w = min(wi, wj)
+                    if not clears(net_id, xi, yi, xj, yj, layer, w):
+                        continue
+                    new_conns.append(Segment(start_x=xi, start_y=yi, end_x=xj,
+                                             end_y=yj, width=w, layer=layer, net_id=net_id))
+                    used.add(i); used.add(j)
+                    break
+    if new_conns:
+        for c in new_conns:
+            pcb_data.segments.append(c)
+        results.append({'new_segments': new_conns, 'new_vias': []})
+    return len(new_conns)
+
+
 def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                    max_gap_factor: float = 1.5) -> int:
     """Close small gaps where a routed dead end stopped just short of same-net
@@ -596,6 +688,14 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
         to_remove = list(to_remove) + list(ms_remove)
     if ms_add:
         connectors = list(connectors) + list(ms_add)
+
+    # Bridge same-net soft joints on the plane nets with a tiny coincident segment
+    # (#soft-joint) -- a plane repair track that overlaps existing copper without a
+    # shared endpoint is the same fragile near-open the signal path leaves.
+    sj_results = []
+    _sj = close_soft_joints(sj_results, pcb, scope, SimpleNamespace(clearance=clearance))
+    if _sj:
+        connectors = list(connectors) + [s for r in sj_results for s in (r.get('new_segments') or [])]
 
     if not (connectors or to_remove):
         return 0, 0

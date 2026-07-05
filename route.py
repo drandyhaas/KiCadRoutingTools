@@ -31,7 +31,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, prune_grazing_segments, nudge_grazing_octolinear, nudge_grazing_microshift, nudge_grazing_vias, neck_wide_segments_grazing_pads
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, close_soft_joints, prune_redundant_cycles, prune_grazing_segments, nudge_grazing_octolinear, nudge_grazing_microshift, nudge_grazing_vias, neck_wide_segments_grazing_pads
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -958,6 +958,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _snapped = snap_stub_gaps(results, pcb_data, sweep_scope_ids, config)
     if _snapped:
         print(f"Closed {_snapped} stub gap(s) to same-net copper")
+
+    # Bridge same-net SOFT JOINTS: two dangling free ends held together only by a
+    # sliver of cap overlap (a rip-up deleted the real connecting segment, or a tap
+    # landed on-grid short of the endpoint it joined). Add a TINY coincident segment
+    # so the joint is a real connection instead of a fragile near-open that
+    # check_drc flags (#soft-joint). Runs after snap_stub_gaps (which only closes
+    # gaps to copper that does NOT yet overlap).
+    _bridged = close_soft_joints(results, pcb_data, sweep_scope_ids, config)
+    if _bridged:
+        print(f"Bridged {_bridged} same-net soft joint(s) with a tiny connector")
 
     # Reconcile the write-list against the actual board so the output can never
     # contain copper that was ripped off and not restored (issue #133). See

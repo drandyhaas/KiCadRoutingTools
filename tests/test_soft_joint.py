@@ -11,17 +11,22 @@ pads/vias) must NOT be flagged.
 
     python3 tests/test_soft_joint.py
 """
+import math
 import os
+import re
+import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 
-from check_drc import run_drc
 from kicad_writer import generate_segment_sexpr, generate_via_sexpr
 
 
 def _run(body):
+    """Return the count of same-net soft-joint WARNINGS check_drc reports (they are
+    surfaced as warnings, not counted violations)."""
     text = f'''(kicad_pcb
  (version 20221018)
  (layers (0 "F.Cu" signal) (2 "B.Cu" signal))
@@ -33,8 +38,10 @@ def _run(body):
         f.write(text)
         path = f.name
     try:
-        v = run_drc(path, clearance=0.1, quiet=True)
-        return [x for x in v if x['type'] == 'segment-endpoint-gap']
+        r = subprocess.run([sys.executable, 'check_drc.py', path, '-c', '0.1'],
+                           capture_output=True, text=True, cwd=REPO)
+        m = re.search(r'same-net soft joint: (\d+)', r.stdout + r.stderr)
+        return int(m.group(1)) if m else 0
     finally:
         os.unlink(path)
 
@@ -53,24 +60,53 @@ def run():
 
     # 1. DANGLING soft joint: two free ends 0.07mm apart, caps (0.1) overlap.
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.05, 0.05, 2.0, 0.05)
-    n = len(_run(body))
+    n = _run(body)
     check("dangling free ends bridged by overlap -> flagged", n == 1, f"got {n}")
 
     # 2. Clean COINCIDENT joint (a bend): shared vertex -> NOT flagged.
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.0, 0.0, 1.5, 0.5)
-    n = len(_run(body))
+    n = _run(body)
     check("coincident vertex (bend) -> not flagged", n == 0, f"got {n}")
 
     # 3. Free ends anchored at a VIA -> NOT flagged (legitimate terminus).
     via = generate_via_sexpr(1.02, 0.02, 0.3, 0.2, ['F.Cu', 'B.Cu'], 1)
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.05, 0.05, 2.0, 0.05) + via
-    n = len(_run(body))
+    n = _run(body)
     check("free ends on a via -> not flagged", n == 0, f"got {n}")
 
     # 4. Far apart (no overlap) -> NOT flagged (genuine disconnection, not a soft joint).
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.5, 0.0, 2.5, 0.0)
-    n = len(_run(body))
+    n = _run(body)
     check("free ends beyond cap overlap -> not flagged", n == 0, f"got {n}")
+
+    # --- close_soft_joints repair pass ---
+    from kicad_parser import Segment, Net, PCBData, BoardInfo
+    from pcb_modification import close_soft_joints
+    from routing_config import GridRouteConfig
+
+    def _cfg():
+        c = GridRouteConfig()
+        c.clearance = 0.1
+        c.layers = ['F.Cu', 'B.Cu']
+        return c
+
+    # two dangling free ends 0.07mm apart (caps 0.1 overlap) -> one tiny bridge.
+    segs = [Segment(start_x=0.0, start_y=0.0, end_x=1.0, end_y=0.0, width=0.1, layer='F.Cu', net_id=1),
+            Segment(start_x=1.05, start_y=0.05, end_x=2.0, end_y=0.05, width=0.1, layer='F.Cu', net_id=1)]
+    pcb = PCBData(footprints={}, nets={1: Net(1, '/A')}, segments=segs, vias=[],
+                  board_info=BoardInfo(layers={}, copper_layers=['F.Cu', 'B.Cu']),
+                  pads_by_net={})
+    results = []
+    n = close_soft_joints(results, pcb, None, _cfg())
+    check("close_soft_joints bridges the soft joint", n == 1, f"added {n}")
+    bridge = [s for s in pcb.segments if abs(s.start_x - 1.0) < 1e-6 and abs(s.end_x - 1.05) < 1e-6]
+    check("bridge connects the two exact endpoints (coincident)", len(bridge) == 1)
+    check("bridge is TINY (< a track width)",
+          bridge and math.hypot(bridge[0].end_x - bridge[0].start_x,
+                                bridge[0].end_y - bridge[0].start_y) < 0.1)
+    # idempotent: re-running adds nothing (the joint is now coincident, count 2).
+    n2 = close_soft_joints([], pcb, None, _cfg())
+    check("close_soft_joints is idempotent", n2 == 0, f"added {n2}")
 
     print()
     if fails:

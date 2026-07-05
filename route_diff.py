@@ -880,7 +880,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Scoped to the diff-pair nets so other copper is untouched.
     from pcb_modification import (prune_grazing_segments, prune_redundant_cycles,
                                   sweep_dead_ends, nudge_grazing_microshift,
-                                  nudge_grazing_vias)
+                                  nudge_grazing_vias, close_soft_joints)
     # ONLY fully-routed pairs: a failed / single-ended-deferred pair's fanout stubs
     # have free ends by design (the single-ended follow-up connects them), so a
     # dead-end sweep there would strip copper the next pass needs.
@@ -922,6 +922,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if _de or _dev:
         print(f"Diff-pair dead-end sweep: trimmed {_de} segment(s), {_dev} via(s)")
         cleanup_input_strip += _de_in
+    # Bridge same-net soft joints with a tiny coincident segment (#soft-joint).
+    _sj = close_soft_joints(results, pcb_data, dp_scope, config)
+    if _sj:
+        print(f"Diff-pair soft-joint bridge: added {_sj} tiny connector(s)")
 
     # Build summary data
     import json
