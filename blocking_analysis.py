@@ -29,6 +29,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
+from check_drc import point_to_pad_distance
 from routing_utils import build_layer_map, segment_blocked_cells_array, pad_rect_halfspan
 
 _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
@@ -359,13 +360,19 @@ def analyze_static_blockers(
             expand_x = max(1, coord.to_grid_dist(pad_half_w + margin))
             expand_y = max(1, coord.to_grid_dist(pad_half_h + margin))
 
-            # Check if any blocked cells fall within this pad's area
+            # Check if any blocked cells fall within this pad's area. The bbox
+            # (expand_x/y) is a fast PREFILTER; confirm with the pad's TRUE copper
+            # shape so a round pad's bbox corner doesn't over-attribute a blocked
+            # cell it doesn't actually cover (matches the shape-aware obstacle map).
             for cell in blocked_set:
                 gx, gy, layer_idx = cell
                 layer_name = config.layers[layer_idx] if layer_idx < len(config.layers) else None
                 if layer_name and layer_name not in pad.layers:
                     continue
                 if abs(gx - pad_gx) <= expand_x and abs(gy - pad_gy) <= expand_y:
+                    cx, cy = coord.to_float(gx, gy)
+                    if point_to_pad_distance(cx, cy, pad) > margin:
+                        continue  # inside the bbox but outside the real pad shape
                     if net_name not in pad_blockers:
                         pad_blockers[net_name] = set()
                     pad_blockers[net_name].add(pad.component_ref)

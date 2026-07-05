@@ -13,7 +13,7 @@ import math
 
 import numpy as np
 
-from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
+from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS, pad_drill_circles
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import (point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect,
                            segment_blocked_cells_array)
@@ -1250,12 +1250,16 @@ def build_base_obstacles(
         for pad in pads:
             # Any drilled pad: PTH barrels AND NPTH mounting holes (which often
             # list only *.Mask) -- the drill goes through every layer (#268).
+            # A milled SLOT drill is a capsule, not a round hole: sample it as
+            # circles along its axis (pad_drill_circles) so the whole slot is
+            # kept clear, not just a circle at its centre. Round drills yield one
+            # circle == the old behaviour.
             if pad.drill > 0:
-                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                pad_hole_clearance_grid = max(1, coord.to_grid_dist_safe(hole_to_hole_clearance + pad.drill / 2 + config.via_drill / 2))
-                if pad_hole_clearance_grid not in pad_centers_by_radius:
-                    pad_centers_by_radius[pad_hole_clearance_grid] = []
-                pad_centers_by_radius[pad_hole_clearance_grid].append((gx, gy))
+                for hx, hy, hdia in pad_drill_circles(pad):
+                    gx, gy = coord.to_grid(hx, hy)
+                    r_grid = max(1, coord.to_grid_dist_safe(
+                        hole_to_hole_clearance + hdia / 2 + config.via_drill / 2))
+                    pad_centers_by_radius.setdefault(r_grid, []).append((gx, gy))
 
     for radius, centers in pad_centers_by_radius.items():
         pad_circle_offsets = _precompute_circle_offsets(radius * radius)

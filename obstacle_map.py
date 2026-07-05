@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import math
 
-from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles
+from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_drill_capsule
 from routing_config import GridRouteConfig, GridCoord
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
@@ -1346,21 +1346,23 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
         if pad.drill <= 0:
             continue  # SMD pad, no drill hole
 
-        # Required center-to-center distance = (pad_drill/2) + (new_via_drill/2) + clearance
-        # mm-distance test (not floored integer cells) so a via cannot land a
-        # sub-cell inside the hole-to-hole minimum (issue #70 / #125).
-        required_dist = pad.drill / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        req_sq = required_dist * required_dist
-        hx, hy = pad.global_x, pad.global_y
-        gx, gy = coord.to_grid(hx, hy)
+        # Keep-out radius = (drill_radius) + (new_via_drill/2) + clearance, measured
+        # to the drill's real CAPSULE axis (a milled slot is a capsule, not a round
+        # hole -- pad.drill/2 as a plain circle mis-models it). mm-distance test (not
+        # floored cells) so a via cannot land a sub-cell inside the hole-to-hole
+        # minimum (issue #70 / #125). Round drills degenerate to the old centre test.
+        (p1x, p1y), (p2x, p2y), prad = pad_drill_capsule(pad)
+        required_dist = prad + config.via_drill / 2 + config.hole_to_hole_clearance
+        gx, gy = coord.to_grid(pad.global_x, pad.global_y)  # pad centre = capsule midpoint
         step = config.grid_step
-        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
+        half_len = math.hypot(p2x - p1x, p2y - p1y) / 2.0
+        expand = coord.to_grid_dist_safe(required_dist + half_len) + 1  # ceil + 1-cell margin
 
         for ex in range(-expand, expand + 1):
             cx = (gx + ex) * step
             for ey in range(-expand, expand + 1):
                 cy = (gy + ey) * step
-                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
+                if point_to_segment_distance(cx, cy, p1x, p1y, p2x, p2y) < required_dist:
                     # Skip the pad center - the router can use the existing
                     # through-hole for layer transitions without a new via
                     if ex == 0 and ey == 0:

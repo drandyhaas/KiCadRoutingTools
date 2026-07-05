@@ -25,44 +25,6 @@ from typing import List, Tuple
 from kicad_parser import parse_kicad_pcb, Pad
 
 
-def _pad_polygon(pad: Pad) -> List[Tuple[float, float]]:
-    """Four corners of the pad rectangle in global coords, honouring rect_rotation.
-
-    Circle/oval/roundrect pads are treated as their bounding rectangle - a
-    conservative (slightly over-inclusive) model that is fine for a short check.
-    """
-    hw, hh = pad.size_x / 2.0, pad.size_y / 2.0
-    th = math.radians(pad.rect_rotation)
-    c, s = math.cos(th), math.sin(th)
-    return [(pad.global_x + ox * c - oy * s, pad.global_y + ox * s + oy * c)
-            for ox, oy in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh))]
-
-
-def _overlap_depth(a: List[Tuple[float, float]], b: List[Tuple[float, float]]) -> float:
-    """Separating-axis penetration depth between two convex quads (mm).
-
-    Returns the minimum overlap across all edge normals: > 0 means the polygons
-    are disjoint (this is their gap); <= 0 means they overlap by that depth.
-    Result is -max_gap, so a positive return value is the penetration depth.
-    """
-    max_gap = -1e18
-    for poly in (a, b):
-        for i in range(4):
-            ex = poly[(i + 1) % 4][0] - poly[i][0]
-            ey = poly[(i + 1) % 4][1] - poly[i][1]
-            nx, ny = -ey, ex
-            n = math.hypot(nx, ny) or 1.0
-            nx, ny = nx / n, ny / n
-            amin = min(nx * p[0] + ny * p[1] for p in a)
-            amax = max(nx * p[0] + ny * p[1] for p in a)
-            bmin = min(nx * p[0] + ny * p[1] for p in b)
-            bmax = max(nx * p[0] + ny * p[1] for p in b)
-            gap = max(bmin - amax, amin - bmax)
-            if gap > max_gap:
-                max_gap = gap
-    return -max_gap  # >0 = penetration depth, <=0 = (negative) gap
-
-
 def _copper_layers(pad) -> set:
     """Copper layers a pad occupies. Through-hole pads (drill > 0) and pads with a
     '*.Cu' wildcard span every copper layer, so they conflict with anything."""
@@ -84,12 +46,15 @@ def _shares_layer(a, b) -> bool:
     return bool(la & lb)
 
 
-def _overlaps_in(pads, tolerance):
+def _overlaps_in(pads, tolerance, copper_layers):
     """Different-net copper overlaps among a flat pad list (deeper than tolerance).
     Only pads sharing a copper layer can short (edge-connector fingers on opposite
-    sides, for example, never conflict)."""
+    sides, for example, never conflict). Overlap depth is measured with the pad's
+    TRUE copper shape (check_drc's exact circle/oval/roundrect/custom-polygon
+    model), not a bounding rectangle -- a round pad's bbox corner otherwise reads
+    as overlapping a neighbour it doesn't actually touch (#232/#260 phantom)."""
+    from check_drc import check_pad_pad_overlap
     pads = [p for p in pads if p.size_x > 0 and p.size_y > 0 and p.net_id != 0]
-    polys = [_pad_polygon(p) for p in pads]
     reach = [math.hypot(p.size_x, p.size_y) / 2.0 for p in pads]
     hits = []
     for i, a in enumerate(pads):
@@ -102,8 +67,9 @@ def _overlaps_in(pads, tolerance):
                 continue
             if not _shares_layer(a, b):
                 continue
-            depth = _overlap_depth(polys[i], polys[j])
-            if depth > tolerance:
+            # clearance 0 + margin 0: overlap_mm is the true penetration depth.
+            viol, depth, _ = check_pad_pad_overlap(a, b, 0.0, copper_layers, 0.0)
+            if viol and depth > tolerance:
                 hits.append((a, b, depth))
     return hits
 
@@ -119,14 +85,15 @@ def find_pad_overlaps(pcb, tolerance: float = 0.05, component: str = None,
     tests pads across different footprints (a broader board-level short check, but
     noisier on tightly-placed passives).
     """
+    copper_layers = getattr(pcb.board_info, 'copper_layers', None) or ['F.Cu', 'B.Cu']
     if cross_footprint:
         pads = [pd for fp in pcb.footprints.values() for pd in fp.pads]
-        return _overlaps_in(pads, tolerance)
+        return _overlaps_in(pads, tolerance, copper_layers)
     hits = []
     for ref, fp in pcb.footprints.items():
         if component and ref != component:
             continue
-        hits.extend(_overlaps_in(fp.pads, tolerance))
+        hits.extend(_overlaps_in(fp.pads, tolerance, copper_layers))
     return hits
 
 

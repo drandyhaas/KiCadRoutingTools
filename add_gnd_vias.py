@@ -8,7 +8,8 @@ from __future__ import annotations
 import math
 from typing import List, Dict
 
-from kicad_parser import PCBData, Via
+from kicad_parser import PCBData, Via, pad_drill_capsule
+from geometry_utils import point_to_segment_distance
 from routing_config import GridRouteConfig, GridCoord
 from grid_router import GridObstacleMap
 
@@ -134,8 +135,12 @@ def add_gnd_vias_to_existing_board(
         for net_id, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if pad.drill and pad.drill > 0:
-                    dist = math.sqrt((x_mm - pad.global_x)**2 + (y_mm - pad.global_y)**2)
-                    min_pad_dist = pad.drill / 2 + config.hole_to_hole_clearance + config.via_drill / 2
+                    # Measure to the drill's real CAPSULE (a slot is a milled slot,
+                    # not a round hole): distance to the capsule axis minus its
+                    # radius. Round drills degenerate to the old centre distance.
+                    (p1x, p1y), (p2x, p2y), prad = pad_drill_capsule(pad)
+                    dist = point_to_segment_distance(x_mm, y_mm, p1x, p1y, p2x, p2y) - prad
+                    min_pad_dist = config.hole_to_hole_clearance + config.via_drill / 2
                     if dist < min_pad_dist:
                         return (False, f"too_close_to_th_pad({dist:.2f}mm)")
 
