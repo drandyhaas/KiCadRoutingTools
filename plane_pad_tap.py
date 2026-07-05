@@ -272,6 +272,62 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
     return local
 
 
+# --- In-flight copper registry (issue #310) ------------------------------------
+# Phase-3 tap rip-up retries stamp their tap copper into the WORKING obstacle
+# map while the ripped victims re-route, and only commit it to pcb_data
+# afterwards (phase3_routing). During that window the copper is invisible to
+# anything that rebuilds obstacles from pcb_data - in particular the #189
+# via-in-pad unblock, whose local via map let a fab-floor via drill straight
+# through a pending foreign track (snapdragon ETH_ISOLATEB via on PCIE1_WAKE_N
+# In2.Cu, #308/#310). Producers push the pending copper here for the window's
+# duration; try_tap_pad callers merge it via extra_vias/extra_segments so via
+# placement sees the same copper the A* does.
+
+def push_inflight_copper(pcb_data: PCBData, segments, vias):
+    """Register copper that is stamped in the working obstacle map but not yet
+    in pcb_data. Returns a token for pop_inflight_copper. Nestable (rip-up
+    cascades push their own windows)."""
+    entry = (list(segments), list(vias))
+    stack = getattr(pcb_data, '_inflight_copper', None)
+    if stack is None:
+        stack = []
+        pcb_data._inflight_copper = stack
+    stack.append(entry)
+    return entry
+
+
+def pop_inflight_copper(pcb_data: PCBData, entry) -> None:
+    """Unregister a push_inflight_copper window (copper was committed to
+    pcb_data or removed from the obstacle map)."""
+    stack = getattr(pcb_data, '_inflight_copper', None)
+    if not stack:
+        return
+    for i in range(len(stack) - 1, -1, -1):
+        if stack[i] is entry:
+            del stack[i]
+            return
+
+
+def inflight_copper_dicts(pcb_data: PCBData):
+    """All currently in-flight copper as (extra_vias, extra_segments) dict
+    lists in try_tap_pad's format; (None, None) when no window is open."""
+    stack = getattr(pcb_data, '_inflight_copper', None)
+    if not stack:
+        return None, None
+    extra_vias, extra_segments = [], []
+    for segments, vias in stack:
+        for v in vias:
+            extra_vias.append({'x': v.x, 'y': v.y, 'size': v.size,
+                               'drill': v.drill, 'layers': list(v.layers),
+                               'net_id': v.net_id})
+        for s in segments:
+            extra_segments.append({'start': (s.start_x, s.start_y),
+                                   'end': (s.end_x, s.end_y),
+                                   'width': s.width, 'layer': s.layer,
+                                   'net_id': s.net_id})
+    return (extra_vias or None), (extra_segments or None)
+
+
 # --- Cross-pad via-obstacle-map reuse (issue #263) -----------------------------
 # In a plane-repair net-pass every tapped pad excludes the SAME plane net, so
 # build_via_obstacle_map yields an identical map for every pad at a given

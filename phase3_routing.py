@@ -31,6 +31,7 @@ from obstacle_cache import (
     add_net_obstacles_from_cache, precompute_net_obstacles
 )
 from obstacle_costs import compute_track_proximity_for_net
+from plane_pad_tap import push_inflight_copper, pop_inflight_copper
 from terminal_colors import RED, RESET
 
 
@@ -537,6 +538,7 @@ def try_phase3_ripup(
                 ripped_net_ids = {item[0] for item in ripped_items}
                 tap_segments_added = []
                 tap_vias_added = []
+                inflight_token = None
                 if state.working_obstacles is not None and net_id not in ripped_net_ids:
                     tap_segments_added = retry_result['new_segments'][len(lm_segments):]
                     tap_vias_added = retry_result['new_vias'][len(lm_vias):]
@@ -544,6 +546,11 @@ def try_phase3_ripup(
                         print(f"    Adding {len(tap_segments_added)} tap segments, {len(tap_vias_added)} tap vias to obstacles before re-routing...")
                         add_segments_list_as_obstacles(state.working_obstacles, tap_segments_added, config)
                         add_vias_list_as_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
+                        # This copper is in the obstacle map but NOT in pcb_data
+                        # until the caller commits it; register it so pcb_data-
+                        # windowed via placement (#189 unblock) sees it too (#310).
+                        inflight_token = push_inflight_copper(
+                            pcb_data, tap_segments_added, tap_vias_added)
                 elif net_id in ripped_net_ids:
                     print(f"    Skipping tap obstacle addition - net will be re-routed")
 
@@ -567,6 +574,7 @@ def try_phase3_ripup(
                 if tap_segments_added or tap_vias_added:
                     remove_segments_list_from_obstacles(state.working_obstacles, tap_segments_added, config)
                     remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config)
+                    pop_inflight_copper(pcb_data, inflight_token)
 
                 # Issue #85: only commit the rip-up if it is a net improvement.
                 # Stranding (totally losing) a previously-routed victim is fine
@@ -598,9 +606,14 @@ def try_phase3_ripup(
                     orig_tap_vias = completed_result['new_vias'][len(lm_vias):]
                     guard = (state.working_obstacles is not None
                              and (orig_tap_segs or orig_tap_vias))
+                    guard_token = None
                     if guard:
                         add_segments_list_as_obstacles(state.working_obstacles, orig_tap_segs, config)
                         add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
+                        # Same in-flight window as above: the kept original tap
+                        # is not in pcb_data while the victims re-route (#310).
+                        guard_token = push_inflight_copper(
+                            pcb_data, orig_tap_segs, orig_tap_vias)
                     # Issue #171: the victims that DID re-route above avoided the
                     # RETRY tap copper (added to obstacles before the re-route),
                     # but we are now DISCARDING that retry in favour of net_id's
@@ -653,6 +666,7 @@ def try_phase3_ripup(
                     if guard:
                         remove_segments_list_from_obstacles(state.working_obstacles, orig_tap_segs, config)
                         remove_vias_list_from_obstacles(state.working_obstacles, orig_tap_vias, config)
+                        pop_inflight_copper(pcb_data, guard_token)
                     return None
 
                 return retry_result

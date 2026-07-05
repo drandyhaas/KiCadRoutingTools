@@ -1328,8 +1328,13 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
     if key in cache:
         return None
 
-    from plane_pad_tap import tap_pad_with_escalation
+    from plane_pad_tap import tap_pad_with_escalation, inflight_copper_dicts
     from list_nets import fab_floor_ladder, warn_fab_escalation
+    # Copper stamped in the working obstacle map but not yet committed to
+    # pcb_data (phase-3 tap rip-up windows) must block this via too, or it is
+    # drilled straight through a pending foreign track (#310, snapdragon
+    # ETH_ISOLATEB via on PCIE1_WAKE_N In2.Cu).
+    inflight_vias, inflight_segments = inflight_copper_dicts(pcb_data)
     ncu = len([l for l in layer_names if l.endswith('.Cu')]) or 2
     # Forced last-resort via sizes, largest first: the configured via, then the
     # active fab-tier floor ladder (nominal floor, then any escalation rung). The
@@ -1358,6 +1363,7 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
             pad_obj, pad_layer, net_id, pcb_data,
             replace(config, via_size=vd, via_drill=dr, board_edge_clearance=0.0),
             max_search_radius=0.0, via_size=vd, via_drill=dr,
+            extra_vias=inflight_vias, extra_segments=inflight_segments,
             try_default=False, fine_for_all=True,
             distant_trace_radius=0.0, disable_reuse=True)
         if tap_res.success and tap_res.via is not None:
@@ -1365,7 +1371,10 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
                 warn_fab_escalation(f"last-resort via for net {net_id} ({vd}/{dr}mm)")
             break
     if tap_res is None or not tap_res.success or tap_res.via is None:
-        cache.add(key)
+        # Don't memoise a failure caused (possibly) by TRANSIENT in-flight
+        # copper: once that window closes the pad may be genuinely tappable.
+        if not (inflight_vias or inflight_segments):
+            cache.add(key)
         return None
     v = tap_res.via
     via = Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
