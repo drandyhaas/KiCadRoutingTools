@@ -204,7 +204,12 @@ def do_board(set_dir, out_dir, label, board):
 
 
 def run_wave(set_dir, out_dir, label, jobs):
-    boards = sorted(d.name for d in set_dir.iterdir() if (d / "redo_commands.sh").exists())
+    # Skip dot-prefixed dirs: those are headless-worker artifacts (a paused /
+    # NORESULT retry copy of a real board, e.g. `.framework_dock_noresult_...`),
+    # not corpus boards -- the clean board dir is present separately (see memory
+    # stress-headless-worker-noresult).
+    boards = sorted(d.name for d in set_dir.iterdir()
+                    if not d.name.startswith(".") and (d / "redo_commands.sh").exists())
     out_dir.mkdir(parents=True, exist_ok=True)
     ver = write_git_version(out_dir, REPO, label=label)  # provenance: which code produced this wave
     print(f"[{label}] code under test: {format_version(ver)}  (commit {ver.get('commit')})")
