@@ -412,6 +412,151 @@ def get_zone_connected_pad_groups(
     return pad_components
 
 
+def get_copper_connected_terminal_groups(
+    pcb_data: PCBData,
+    net_id: int,
+    pad_info: List[Tuple],
+) -> Dict[int, int]:
+    """Group multipoint terminals by the net's EXISTING copper connectivity,
+    using the authoritative overlap-aware definition (check_net_connectivity:
+    cap overlap, T-junctions, zones, pad outlines and via-in-pad all count).
+
+    Soft-jointed copper -- endpoints not coincident but caps overlapping -- is
+    ONE group here and must never be re-tapped (issue #317). This is what the
+    0.02mm endpoint-coincidence grouping of get_zone_connected_pad_groups got
+    wrong for MST seeding: it called overlap-joined escapes disconnected, so
+    the multipoint MST routed redundant loops between already-connected copper
+    while the genuinely missing edge could still fail.
+
+    pad_info rows are (gx, gy, layer_idx, orig_x, orig_y, endpoint_obj) as
+    returned by get_multipoint_net_pads; endpoint_obj is a real Pad or an
+    _EndpointStub sitting on a copper free end.
+
+    Returns {pad_info index -> component id}. Terminals that cannot be tied
+    to any copper/pad point each get a unique (negative) component.
+    """
+    # Local import: check_connected -> net_queries -> connectivity would cycle.
+    from check_connected import check_net_connectivity
+
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    net_zones = [z for z in pcb_data.zones if z.net_id == net_id]
+    # ALL net pads (not just terminals): a non-terminal pad can be the copper
+    # that bridges two islands (e.g. both escapes land in one connector pad).
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+    res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
+                                 net_zones, return_graph=True)
+    graph = res.get('graph') or {}
+    uf = UnionFind()
+    for a, b in graph.get('edges', []):
+        uf.union(a, b)
+
+    # Map real-Pad terminals through the pad's representative point id; the
+    # terminal objects come from pads_by_net, so identity holds (objects are
+    # alive in net_pads, so id() keying is safe here).
+    pad_obj_repr = {id(net_pads[idx]): rep
+                    for idx, rep in graph.get('pad_index_repr', {}).items()}
+
+    # Stub terminals sit on a segment free end; segment i's endpoints are
+    # point ids 2i / 2i+1 in the connectivity graph.
+    endpoint_points = []  # (x, y, layer, point_id)
+    for si, seg in enumerate(net_segments):
+        endpoint_points.append((seg.start_x, seg.start_y, seg.layer, 2 * si))
+        endpoint_points.append((seg.end_x, seg.end_y, seg.layer, 2 * si + 1))
+
+    components: Dict[int, int] = {}
+    next_unique = -1
+    for i, info in enumerate(pad_info):
+        obj = info[5] if len(info) > 5 else None
+        rep = None
+        if obj is not None and id(obj) in pad_obj_repr:
+            rep = pad_obj_repr[id(obj)]
+        elif obj is not None:
+            # Stub (or unmatched pad-like) terminal: nearest same-layer
+            # segment endpoint within the coincidence tolerance that created
+            # the stub. Terminal coords are info[3]/info[4] (orig x/y).
+            tx, ty = info[3], info[4]
+            tlayer = getattr(obj, 'layer', None)
+            best = None
+            for ex, ey, elayer, pid in endpoint_points:
+                if tlayer is not None and elayer != tlayer:
+                    continue
+                d = abs(ex - tx) + abs(ey - ty)
+                if d < 0.01 and (best is None or d < best[0]):
+                    best = (d, pid)
+            if best is not None:
+                rep = best[1]
+        if rep is None:
+            components[i] = next_unique
+            next_unique -= 1
+        else:
+            components[i] = uf.find(rep)
+    return components
+
+
+def compute_component_mst_edges(
+    positions: List[Tuple[float, float]],
+    components: Dict[int, int],
+) -> List[Tuple[int, int, float]]:
+    """Minimum spanning tree over connected COMPONENTS of terminals (#317).
+
+    Nodes are component ids; the distance between two components is the
+    minimum Manhattan distance over their terminal pairs, and the chosen MST
+    edge is realized by that closest pair. Joining N components takes exactly
+    N-1 routed connections; intra-component edges never appear, so copper the
+    authoritative checker already grades connected is never re-routed.
+
+    Args:
+        positions: (x, y) per terminal, indexed like pad_info
+        components: {terminal index -> component id} (missing -> own index)
+
+    Returns [(idx_a, idx_b, dist)] with indices into `positions`; idx_a is on
+    the already-spanned side of the tree when the edge is added.
+    """
+    n = len(positions)
+    comp_terminals: Dict[int, List[int]] = {}
+    for i in range(n):
+        comp_terminals.setdefault(components.get(i, i), []).append(i)
+    comp_ids = sorted(comp_terminals)
+    num_comps = len(comp_ids)
+    if num_comps <= 1:
+        return []
+
+    # Classic O(C^2) Prim keyed on components, each candidate edge kept as its
+    # realizing closest terminal pair. best[c] = (dist, term_in_tree, term_in_c)
+    # is the cheapest connection from the current tree to component c. Growing
+    # the tree relaxes each outside component against ONLY the newly added
+    # component's terminals, so total terminal-pair work is sum(|A|*|B|) <=
+    # N^2/2 -- same order as the old pad-position MST (a fresh power net is all
+    # singleton components), never O(C^3) re-scans of tree-vs-outside pairs.
+    # Deterministic: sorted component ids, strict-< relaxation, id tie-break.
+    INF = float('inf')
+    best: Dict[int, Tuple[float, int, int]] = {c: (INF, -1, -1) for c in comp_ids}
+
+    def relax(from_comp: int) -> None:
+        for a in comp_terminals[from_comp]:
+            ax, ay = positions[a]
+            for c, entry in best.items():
+                for b in comp_terminals[c]:
+                    bx, by = positions[b]
+                    d = abs(ax - bx) + abs(ay - by)
+                    if d < entry[0]:
+                        entry = (d, a, b)
+                best[c] = entry
+
+    start = comp_ids[0]
+    del best[start]
+    relax(start)
+    edges: List[Tuple[int, int, float]] = []
+    while best:
+        next_comp = min(best, key=lambda c: (best[c][0], c))
+        d, a, b = best.pop(next_comp)
+        edges.append((a, b, d))
+        relax(next_comp)
+    return edges
+
+
 def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: float = 0.05) -> List[Tuple[float, float, str]]:
     """
     Find the free ends of a segment group (endpoints not connected to other segments or pads).

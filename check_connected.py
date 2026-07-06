@@ -529,8 +529,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 _union(pid, seg_start_id)
 
     # Optional reusable graph for exclusion re-evaluation (see _union note).
+    # pad_index_repr maps each input pad's INDEX to a representative point id,
+    # so a caller replaying the edges through its own UnionFind can read off
+    # per-pad components in the same id space (segment i's endpoints are point
+    # ids 2i / 2i+1). Used by the multipoint component grouping (issue #317).
     graph = ({'num_points': point_id, 'pad_ids': list(pad_ids),
-              'pad_locations': list(pad_locations), 'edges': edges}
+              'pad_locations': list(pad_locations), 'edges': edges,
+              'pad_index_repr': dict(pad_repr_id)}
              if return_graph else None)
 
     # Check if all pads are in the same component

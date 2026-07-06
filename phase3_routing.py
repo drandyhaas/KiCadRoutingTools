@@ -19,7 +19,7 @@ from routing_config import GridRouteConfig
 from routing_state import RoutingState, record_net_event
 from routing_context import build_single_ended_obstacles, build_incremental_obstacles
 from single_ended_routing import route_multipoint_taps, route_net_with_obstacles, route_multipoint_main
-from connectivity import get_multipoint_net_pads, get_zone_connected_pad_groups
+from connectivity import get_multipoint_net_pads, get_copper_connected_terminal_groups
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
@@ -89,14 +89,12 @@ def _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id):
     pad_info = new_result.get('multipoint_pad_info')
     if not pad_info:
         return
-    pads = [pi[5] if len(pi) > 5 else None for pi in pad_info]
-    if any(p is None for p in pads):
+    if any((pi[5] if len(pi) > 5 else None) is None for pi in pad_info):
         return  # can't map pads reliably; leave as-is
-    segs = [s for s in pcb_data.segments if s.net_id == net_id]
-    vias = [v for v in pcb_data.vias if v.net_id == net_id]
-    zones = [z for z in getattr(pcb_data, 'zones', []) if z.net_id == net_id]
-    layers = [l for l in config.layers if l.endswith('.Cu')]
-    groups = get_zone_connected_pad_groups(segs, vias, pads, zones, layers)
+    # Overlap-aware grouping (#317): must match the definition used to seed
+    # the component MST, or copper joined by cap overlap would be graded as
+    # failed pads here and pointlessly re-tapped.
+    groups = get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
     if not groups:
         return
     from collections import Counter
@@ -188,7 +186,9 @@ def run_phase3_tap_routing(
 
     # Count total tap edges across all nets for progress display
     total_tap_edges = sum(
-        len(result.get('mst_edges', [])) - 1  # -1 for the main edge routed in Phase 1
+        # -1 for the main edge routed in Phase 1; an already-connected net
+        # (#317 single-component result) has no edges at all, not -1
+        max(0, len(result.get('mst_edges', [])) - 1)
         for result in state.pending_multipoint_nets.values()
     )
     global_tap_offset = 0
