@@ -1009,9 +1009,54 @@ def _generate_debug_arrows(center_src_x, center_src_y, src_dir_x, src_dir_y,
     return arrows
 
 
+def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data):
+    """#318: neck a polarity's segment that sits sub-clearance to its PARTNER's
+    just-created copper.
+
+    Emission-time necking against pcb_data cannot see the partner's legs: both
+    polarities are assembled in ONE commit, so neither is on the board when the
+    other converts. The un-necked full-impedance-width leg (e.g. 0.3mm at
+    100 ohm) then sits a few um inside clearance of the partner's base-width
+    fanout jog or leg; the downstream graze prune deletes the thin jog
+    (overlap-gated) and close_soft_joints cannot re-bridge across the pair gap,
+    shipping a soft joint (sechzig DDMI/USBH/DS0, #318).
+
+    Applied to EVERY segment pairwise: the coupled middle keeps the pair gap
+    (>= clearance) by construction, so only genuine attach-region violations
+    neck. Widths only shrink (floored at the fab minimum), the centreline never
+    moves, so coupling and connectivity are untouched. P is necked against N
+    first, then N against P's (possibly necked) widths -- one side clearing the
+    mutual gap is enough, so this settles in one pass. Returns segments necked.
+    """
+    from single_ended_routing import _fab_track_floor
+    from pcb_modification import _seg_seg_min_dist
+    floor = _fab_track_floor(pcb_data)
+    necked = 0
+
+    def neck_side(own, partner):
+        nonlocal necked
+        for s in own:
+            for o in partner:
+                if o.layer != s.layer:
+                    continue
+                d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
+                                      o.start_x, o.start_y, o.end_x, o.end_y)
+                allowed_half = d - o.width / 2.0 - config.clearance - 2e-4
+                if allowed_half < s.width / 2.0 - 1e-9:
+                    new_w = max(floor, 2.0 * allowed_half)
+                    if new_w < s.width - 1e-9:
+                        s.width = round(new_w, 4)
+                        necked += 1
+
+    neck_side(p_segs, n_segs)
+    neck_side(n_segs, p_segs)
+    return necked
+
+
 def _float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
                             src_stub_dir, tgt_stub_dir, src_extension, tgt_extension,
-                            config, layer_names, omit_connectors=False):
+                            config, layer_names, omit_connectors=False,
+                            pcb_data=None):
     """Convert floating-point path (x, y, layer) to segments and vias.
 
     Adds extension segments to ensure P and N connectors are parallel.
@@ -1188,6 +1233,26 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                 ))
                 if config.debug_lines:
                     connector_lines.append(((last_x, last_y), (orig_x, orig_y)))
+
+    # #318 fix: neck a TERMINAL leg segment that grazes foreign copper -- the
+    # impedance-width (e.g. 0.3mm) leg attaches coincident to a base-width
+    # fanout jog, and the PARTNER polarity's jog can sit sub-clearance to the
+    # fat leg (sechzig DDMI/USBH/DS0: ~0.07mm edge gap at 0.09 clearance).
+    # Left un-necked, the downstream graze prune deletes the partner's jog
+    # (overlap-gated) and close_soft_joints cannot re-bridge across the pair
+    # gap, shipping a soft joint. Same proportional, fab-floored neck the
+    # single-ended terminals get (#212); only segments touching a route
+    # terminal are considered, so the coupled middle (which keeps the pair
+    # gap >= clearance by construction) is never touched.
+    if pcb_data is not None and float_path:
+        from single_ended_routing import _neck_terminal_grazes
+        term_pts = [(float_path[0][0], float_path[0][1]),
+                    (float_path[-1][0], float_path[-1][1])]
+        if original_start:
+            term_pts.append((original_start[0], original_start[1]))
+        if original_end:
+            term_pts.append((original_end[0], original_end[1]))
+        _neck_terminal_grazes(segs, term_pts, pcb_data, net_id, config)
 
     return segs, vias, connector_lines
 
@@ -2819,9 +2884,11 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             n_float = list(off_minus if ps == 1 else off_plus)
             p_float, n_float = _process_via_positions(simplified, p_float, n_float, coord, config, ps, ns, spacing_mm)
             p_segs, p_vias, _ = _float_path_to_geometry(
-                p_float, p_net_id, None, None, ps, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+                p_float, p_net_id, None, None, ps, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True,
+                pcb_data=pcb_data)
             n_segs, n_vias, _ = _float_path_to_geometry(
-                n_float, n_net_id, None, None, ns, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+                n_float, n_net_id, None, None, ns, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True,
+                pcb_data=pcb_data)
             mid_segs = p_segs + n_segs
             if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
                 return None, "coupled middle P/N tracks cross"
@@ -2955,6 +3022,11 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         via_mm = config.via_cost * REFERENCE_GRID_STEP
         best = min(cands, key=lambda c: (c['overlaps'], round(c['length'] + c['vias'] * via_mm, 3)))
         leg_segs = best['leg_segs']
+        # #318: pairwise partner neck on the assembled candidate (see helper).
+        _neck_pair_partner_grazes(
+            [s for s in best['all_segs'] if s.net_id == p_net_id],
+            [s for s in best['all_segs'] if s.net_id == n_net_id],
+            config, pcb_data)
         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
         _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
@@ -3857,7 +3929,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     p_segs, p_vias, p_conn_lines = _float_path_to_geometry(
         p_float_path, p_net_id, p_start, p_end, p_sign,
         src_stub_dir_tuple, tgt_stub_dir_tuple, src_p_ext, tgt_p_ext,
-        config, layer_names
+        config, layer_names, pcb_data=pcb_data
     )
     new_segments.extend(p_segs)
     new_vias.extend(p_vias)
@@ -3867,11 +3939,15 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     n_segs, n_vias, n_conn_lines = _float_path_to_geometry(
         n_float_path, n_net_id, n_start, n_end, n_sign,
         src_stub_dir_tuple, tgt_stub_dir_tuple, src_n_ext, tgt_n_ext,
-        config, layer_names
+        config, layer_names, pcb_data=pcb_data
     )
     new_segments.extend(n_segs)
     new_vias.extend(n_vias)
     debug_connector_lines.extend(n_conn_lines)
+
+    # #318: pairwise partner neck -- emission-time necking cannot see the
+    # partner's copper (assembled in the same commit), see helper docstring.
+    _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data)
 
     # Create GND vias at layer changes if enabled
     gnd_vias = _create_gnd_vias(

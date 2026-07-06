@@ -389,6 +389,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print("All nets are already fully connected - nothing to route!")
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+        # Pass the board through unchanged so a chained pipeline never loses
+        # its output file (#86/#90/#167 -- route.py has had this fallback all
+        # along; this early-exit lacked it, so a retry step whose pairs turned
+        # out already-connected broke the NEXT step with FileNotFoundError).
+        if output_file:
+            from pcb_io_utils import passthrough_copy
+            if passthrough_copy(input_file, output_file):
+                print(f"Wrote unchanged copy to {output_file} (nothing to route)")
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output
