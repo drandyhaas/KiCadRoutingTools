@@ -882,9 +882,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # ----- Post-route cleanup (#215): the ONE shared pipeline ---------------
     # Same passes, ordering and strip plumbing as route.py's single-ended
     # cleanup (cleanup_pipeline.py), scoped to the diff-pair nets so other
-    # copper is untouched. snap/phantom/octolinear/neck are off for parity
-    # with this front's historical pass set -- enabling them here is a
-    # deliberate behavior change, not part of the #319 restructure.
+    # copper is untouched. snap/phantom/neck are off for parity with this
+    # front's historical pass set. octolinear IS enabled (deliberately, #318):
+    # its re-bend keeps the anchor endpoints coincident and its clears() gate
+    # includes the partner net, so a grazing terminal jog the prune must now
+    # KEEP (tightened coincidence gate) gets re-bent clear instead of shipping
+    # as a violation.
     from cleanup_pipeline import run_post_route_cleanup
     # ONLY fully-routed pairs: a failed / single-ended-deferred pair's fanout stubs
     # have free ends by design (the single-ended follow-up connects them), so a
@@ -896,8 +899,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             dp_scope.add(_pair.n_net_id)
     _dp_cleanup = run_post_route_cleanup(
         results, pcb_data, dp_scope, config,
-        label='Diff-pair ', snap=False, phantom=False,
-        octolinear=False, neck=False)
+        label='Diff-pair ', snap=False, phantom=False, neck=False)
     cleanup_input_strip = _dp_cleanup.input_strip_segments
 
     # Build summary data

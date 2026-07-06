@@ -102,9 +102,10 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
 
     ``label`` prefixes the progress prints (e.g. "Diff-pair "). The pass
     switches exist for front parity, not taste:
-      * route_diff.py historically runs without snap/phantom/octolinear/neck;
-        flipping them on there is a deliberate behavior change, not a side
-        effect of this refactor;
+      * route_diff.py historically runs without snap/phantom/neck; flipping
+        them on there is a deliberate behavior change, not a side effect of
+        this refactor (octolinear WAS flipped on for #318: the re-bend keeps
+        anchors coincident and clears() includes the partner net);
       * the plane fronts' file-round-trip (clean_plane_copper) must keep
         ``via_nudge`` OFF -- it re-parses the written board, so every via is
         an "input" via whose in-place geometry move the segment-level

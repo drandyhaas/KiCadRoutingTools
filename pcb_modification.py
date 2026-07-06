@@ -1499,13 +1499,31 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                             d = dd
                 allowed = 2.0 * (d - clearance - 1e-4)
                 floor = _fab_track_floor(pcb_data)
-                if allowed >= floor - 1e-9 and allowed < s.width - 1e-9:
+                if (allowed >= floor - 1e-9 and allowed < s.width - 1e-9
+                        and id(s) in routed_seg_ids):
+                    # Necking mutates width in place, which only the writer's
+                    # re-emit path can express -- so ROUTED segments only. An
+                    # ORIGINAL input segment falls through to the defer path
+                    # below: the octolinear/microshift passes have proper
+                    # strip+replace plumbing for originals (in-place necking
+                    # them drifted board vs file, and a strip+re-emit attempt
+                    # here interacted badly with the later passes' results
+                    # bookkeeping -- sechzig /DRAM_CK, /DRAM_LDQS_P).
                     s.width = round(max(floor, allowed), 4)
                     continue  # necked clear; keep the coincident bridge
                 if allowed >= s.width - 1e-9:
                     continue  # already clear at current width (stale cache)
-                # fab floor can't clear it either: fall through to removal
-                # (a real violation outweighs the warning-grade soft joint)
+                # Even the fab floor cannot clear it. Under the TIGHTENED
+                # connectivity definition (#320 direction: cap overlap without
+                # coincidence is NOT a connection), this segment is load-
+                # bearing -- removing it would really disconnect the net. KEEP
+                # it and let the downstream nudge passes (octolinear re-bend /
+                # microshift) move it clear; they preserve coincident anchors
+                # and are verified + connectivity-gated. If they also cannot
+                # fix it, the graze ships as an honest DRC violation instead
+                # of a masked near-open (smartknob /STRAIN_S- vs the rotated
+                # J5.3 oval: shortfall 49um -- inside the microshift's cap).
+                continue
             dropped_idx.add(seg_pos[id(s)])
             dropped.append(s)
         if not dropped:
