@@ -216,7 +216,7 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # is deliberately asymmetric (measure reality physically; refuse to ship
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
-_STRICT_GATE_WIDTH = 0.02
+from connectivity import COINCIDENCE_TOL as _STRICT_GATE_WIDTH  # one constant (#320)
 
 
 def _strict_conn_graph(net_id, universe, vias, pads, zones):
@@ -236,7 +236,7 @@ def _strict_conn_graph(net_id, universe, vias, pads, zones):
 
 
 def _safe_prune_net(net_id, prunable, vias, pads, zones,
-                    anchor_segments=None, aggressive=False, tol=0.05):
+                    anchor_segments=None, aggressive=False, tol=None):
     """Prune a net's dead ends, but never at the cost of pad connectivity.
 
     prune_dead_end_segments works on an endpoint-coincidence model that does not
@@ -252,6 +252,9 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     geometric model's blind spot) fails that check and is kept, while the net's
     true dead ends are still removed. Returns ``(kept_prunable, removed)``.
     """
+    if tol is None:
+        from connectivity import COINCIDENCE_TOL
+        tol = COINCIDENCE_TOL  # #320: the one strict coincidence tolerance
     _, candidates = prune_dead_end_segments(prunable, anchor_segments=anchor_segments,
                                             vias=vias, pads=pads, tol=tol,
                                             keep_terminal_escapes=not aggressive)
@@ -861,7 +864,7 @@ def _restore_soft_joint_bridges(kept, removed, vias, pads):
 
 
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
-                    tol: float = 0.05) -> Tuple[int, int, List[Segment]]:
+                    tol: float = None) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
 
     the per-commit self-intersection clean (removed #159) used to fix
@@ -885,6 +888,10 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     with copper. Returns ``(segments_removed, vias_removed, original_segments_to_remove)``.
     """
     from collections import defaultdict
+
+    if tol is None:
+        from connectivity import COINCIDENCE_TOL
+        tol = COINCIDENCE_TOL  # #320: the one strict coincidence tolerance
 
     routed_seg_ids = set()
     for r in results:
@@ -1049,7 +1056,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
     for free). Returns (kept, removed)."""
     if len(net_segs) < 3:
         return net_segs, []
-    tol = 0.02  # endpoint coincidence tolerance (mm), matching check_connected
+    from connectivity import COINCIDENCE_TOL
+    tol = COINCIDENCE_TOL  # THE endpoint coincidence tolerance (#320)
 
     def grazes(s):
         # Query only the foreign copper whose CENTRE could lie within
@@ -1098,11 +1106,17 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
             pp[ra] = rb
 
     n = len(ports)
+    # Same-layer coincidence via the ONE shared primitive (#320) -- replaces
+    # an O(n^2) pairwise loop with spatial hashing, same tolerance.
+    from connectivity import cluster_coincident_points
+    _roots = cluster_coincident_points([(p[0], p[1], p[2]) for p in ports], tol)
+    _first_in_cluster = {}
     for a in range(n):
-        xa, ya, la = ports[a][0], ports[a][1], ports[a][2]
-        for b in range(a + 1, n):
-            if ports[b][2] == la and abs(ports[b][0] - xa) < tol and abs(ports[b][1] - ya) < tol:
-                punion(a, b)
+        r = _roots[a]
+        if r in _first_in_cluster:
+            punion(_first_in_cluster[r], a)
+        else:
+            _first_in_cluster[r] = a
 
     # Vias and through-hole pads bridge layers: union all ports within the
     # connector's copper reach (size/4, >= tol), regardless of layer.

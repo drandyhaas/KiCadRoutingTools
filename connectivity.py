@@ -204,7 +204,58 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
     return False
 
 
-def find_connected_groups(segments: List[Segment], tolerance: float = 0.01,
+# THE strict endpoint-coincidence tolerance (#320). Every coincidence-based
+# consumer (segment grouping, stub free ends, cycle-prune port clustering,
+# dead-end chaining, and the cleanup gates' width-clamped strict graph) uses
+# this ONE constant: 0.02mm = 2 x check_drc's _SOFT_JOINT_MIN_GAP, i.e. two
+# endpoints may each carry quantization-level slack (<=10um) and still count
+# as coincident, while anything a soft joint could flag does not. The
+# PHYSICAL (overlap) definition in check_net_connectivity is deliberately
+# untouched: it grades electrical reality; this constant grades geometric
+# intent. See issue #320 for the role assignment.
+COINCIDENCE_TOL = 0.02
+
+
+def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
+    """Union-find clustering of (x, y, layer) points by endpoint coincidence.
+
+    Two points join when |dx| < tol and |dy| < tol on the SAME layer (pass a
+    shared sentinel layer for layer-agnostic clustering). O(n) via spatial
+    hashing. Returns a list of cluster root indices, one per input point --
+    the ONE shared implementation behind every coincidence consumer (#320).
+    """
+    n = len(points)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    inv = 1.0 / tol
+    buckets: Dict[Tuple[int, int], List[int]] = {}
+    for i, (x, y, _layer) in enumerate(points):
+        buckets.setdefault((int(x * inv), int(y * inv)), []).append(i)
+    for i, (x, y, layer) in enumerate(points):
+        gx, gy = int(x * inv), int(y * inv)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in buckets.get((gx + dx, gy + dy), ()):
+                    if j <= i:
+                        continue
+                    ox, oy, olayer = points[j]
+                    if olayer == layer and abs(x - ox) < tol and abs(y - oy) < tol:
+                        union(i, j)
+    return [find(i) for i in range(n)]
+
+
+def find_connected_groups(segments: List[Segment], tolerance: float = COINCIDENCE_TOL,
                           layer_aware: bool = True, vias: List = None) -> List[List[Segment]]:
     """Find groups of connected segments using union-find with spatial hashing.
 
@@ -233,38 +284,37 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01,
         for via in vias:
             via_positions.add((round(via.x, 3), round(via.y, 3)))
 
-    # Spatial hash: map rounded coordinates to (segment_index, x, y, layer) tuples
-    # Use tolerance-based grid cells
-    inv_tol = 1.0 / tolerance
-    endpoint_map: Dict[Tuple[int, int], List[Tuple[int, float, float, str]]] = {}
-
-    # First pass: build spatial hash with actual coordinates
+    # Endpoint coincidence via the ONE shared primitive (#320). Cluster
+    # layer-agnostically, then apply the layer rule inside each spatial
+    # cluster: same layer joins outright; different layers join only through
+    # a via at that position (the original pairwise rule, unchanged).
+    _AGNOSTIC = None
+    points = []
+    owners = []  # (segment_index, layer, x, y)
     for i, seg in enumerate(segments):
         for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
-            key = (int(x * inv_tol), int(y * inv_tol))
-            if key not in endpoint_map:
-                endpoint_map[key] = []
-            endpoint_map[key].append((i, x, y, seg.layer))
-
-    # Second pass: check each endpoint against neighbors (handles bucket boundary issues)
-    for i, seg in enumerate(segments):
-        for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
-            gx, gy = int(x * inv_tol), int(y * inv_tol)
-            # Check current cell and 8 neighbors
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    key = (gx + dx, gy + dy)
-                    if key in endpoint_map:
-                        for j, ox, oy, other_layer in endpoint_map[key]:
-                            if i < j:  # Avoid duplicate checks
-                                if abs(x - ox) < tolerance and abs(y - oy) < tolerance:
-                                    # Check layer connectivity
-                                    if layer_aware and seg.layer != other_layer:
-                                        # Different layers - only connect if there's a via
-                                        pos_key = (round(x, 3), round(y, 3))
-                                        if pos_key not in via_positions:
-                                            continue  # Not connected without via
-                                    uf.union(i, j)
+            points.append((x, y, _AGNOSTIC))
+            owners.append((i, seg.layer, x, y))
+    roots = cluster_coincident_points(points, tolerance)
+    by_cluster: Dict[int, List[int]] = {}
+    for pi, r in enumerate(roots):
+        by_cluster.setdefault(r, []).append(pi)
+    for members in by_cluster.values():
+        if len(members) < 2:
+            continue
+        for a_idx in range(len(members)):
+            i, la, xa, ya = owners[members[a_idx]]
+            for b_idx in range(a_idx + 1, len(members)):
+                j, lb, xb, yb = owners[members[b_idx]]
+                if i == j:
+                    continue
+                if abs(xa - xb) >= tolerance or abs(ya - yb) >= tolerance:
+                    continue  # same cluster by transitivity, not direct contact
+                if layer_aware and la != lb:
+                    pos_key = (round(xa, 3), round(ya, 3))
+                    if pos_key not in via_positions:
+                        continue  # Not connected without via
+                uf.union(i, j)
 
     # Group segments by their root
     groups: Dict[int, List[Segment]] = {}
@@ -292,124 +342,6 @@ def _point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) ->
             inside = not inside
         j = i
     return inside
-
-
-def get_zone_connected_pad_groups(
-    segments: List[Segment],
-    vias: List[Via],
-    pads: List[Pad],
-    zones: List[Zone],
-    routing_layers: List[str] = None
-) -> Dict[int, int]:
-    """
-    Get connected component membership for each pad based on zone/plane connectivity.
-
-    Returns a dict mapping pad index to component ID. Pads with the same component ID
-    are already connected through zones/tracks/vias and don't need MST edges between them.
-
-    Args:
-        segments: Track segments for this net
-        vias: Vias for this net
-        pads: Pads for this net
-        zones: Zones/planes for this net
-        routing_layers: List of routing layers (for expanding *.Cu pads)
-
-    Returns:
-        Dict mapping pad index (0-based) to component ID
-    """
-    if len(pads) < 2:
-        return {i: 0 for i in range(len(pads))}
-
-    from net_queries import expand_pad_layers
-
-    uf = UnionFind()
-
-    # Detect all copper layers
-    copper_layers = set()
-    for seg in segments:
-        if seg.layer.endswith('.Cu'):
-            copper_layers.add(seg.layer)
-    for via in vias:
-        if via.layers:
-            for layer in via.layers:
-                if layer.endswith('.Cu'):
-                    copper_layers.add(layer)
-    for zone in zones:
-        if zone.layer.endswith('.Cu'):
-            copper_layers.add(zone.layer)
-    if routing_layers:
-        copper_layers.update(routing_layers)
-    if not copper_layers:
-        copper_layers = {'F.Cu', 'B.Cu'}
-
-    all_copper_layers = sorted(copper_layers)
-
-    # Collect all points with pad index tracking
-    all_points = []  # (x, y, layer, point_id)
-    point_id = 0
-    pad_point_ids: Dict[int, List[int]] = {}  # pad_index -> list of point_ids
-
-    # Add segment endpoints
-    for seg in segments:
-        start_id = point_id
-        all_points.append((seg.start_x, seg.start_y, seg.layer, start_id))
-        point_id += 1
-        end_id = point_id
-        all_points.append((seg.end_x, seg.end_y, seg.layer, end_id))
-        point_id += 1
-        uf.union(start_id, end_id)
-
-    # Add vias
-    for via in vias:
-        via_layers = all_copper_layers if (via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers) else (via.layers or all_copper_layers)
-        via_ids = []
-        for layer in via_layers:
-            all_points.append((via.x, via.y, layer, point_id))
-            via_ids.append(point_id)
-            point_id += 1
-        for vid in via_ids[1:]:
-            uf.union(via_ids[0], vid)
-
-    # Add pads with index tracking
-    for pad_idx, pad in enumerate(pads):
-        expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
-        this_pad_ids = []
-        for layer in expanded_layers:
-            if layer in copper_layers:
-                all_points.append((pad.global_x, pad.global_y, layer, point_id))
-                this_pad_ids.append(point_id)
-                point_id += 1
-        for pid in this_pad_ids[1:]:
-            uf.union(this_pad_ids[0], pid)
-        pad_point_ids[pad_idx] = this_pad_ids
-
-    # Connect points through zones
-    for zone in zones:
-        zone_layer = zone.layer
-        points_on_layer = [(x, y, layer, pid) for x, y, layer, pid in all_points if layer == zone_layer]
-        points_in_zone = [pid for x, y, layer, pid in points_on_layer if _point_in_polygon(x, y, zone.polygon)]
-        if len(points_in_zone) > 1:
-            for pid in points_in_zone[1:]:
-                uf.union(points_in_zone[0], pid)
-
-    # Connect nearby points on same layer
-    tolerance = 0.02
-    for i, (x1, y1, l1, id1) in enumerate(all_points):
-        for j, (x2, y2, l2, id2) in enumerate(all_points):
-            if i < j and l1 == l2:
-                if abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance:
-                    uf.union(id1, id2)
-
-    # Map each pad index to its component root
-    pad_components = {}
-    for pad_idx, point_ids in pad_point_ids.items():
-        if point_ids:
-            pad_components[pad_idx] = uf.find(point_ids[0])
-        else:
-            # Pad has no valid layers - give it a unique component
-            pad_components[pad_idx] = -pad_idx - 1
-
-    return pad_components
 
 
 def get_copper_connected_terminal_groups(
@@ -557,14 +489,21 @@ def compute_component_mst_edges(
     return edges
 
 
-def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: float = 0.05) -> List[Tuple[float, float, str]]:
+def find_stub_free_ends(segments: List[Segment], pads: List[Pad],
+                        tolerance: float = 0.05,
+                        coincidence_tol: float = COINCIDENCE_TOL) -> List[Tuple[float, float, str]]:
     """
     Find the free ends of a segment group (endpoints not connected to other segments or pads).
 
     Args:
         segments: Connected group of segments
         pads: Pads that might be connected to the segments
-        tolerance: Distance tolerance for considering points as connected
+        tolerance: PAD-attach tolerance -- an endpoint this close to a pad
+            center is a pad attach, not a free end. This is a pad-geometry
+            heuristic, deliberately NOT the copper-coincidence tolerance.
+        coincidence_tol: endpoint-to-endpoint coincidence (#320, the one
+            shared COINCIDENCE_TOL; was exact 1um rounding before, so
+            quantization-slop joins now correctly count as connected).
 
     Returns:
         List of (x, y, layer) tuples for free endpoints
@@ -572,29 +511,32 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: flo
     if not segments:
         return []
 
-    # Count how many times each endpoint appears
-    endpoint_counts: Dict[Tuple[float, float, str], int] = {}
+    # Cluster endpoints with the ONE shared coincidence primitive (#320);
+    # an endpoint alone in its cluster is a candidate free end.
+    points = []
     for seg in segments:
-        key_start = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS), seg.layer)
-        key_end = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS), seg.layer)
-        endpoint_counts[key_start] = endpoint_counts.get(key_start, 0) + 1
-        endpoint_counts[key_end] = endpoint_counts.get(key_end, 0) + 1
+        points.append((seg.start_x, seg.start_y, seg.layer))
+        points.append((seg.end_x, seg.end_y, seg.layer))
+    roots = cluster_coincident_points(points, coincidence_tol)
+    cluster_size: Dict[int, int] = {}
+    for r in roots:
+        cluster_size[r] = cluster_size.get(r, 0) + 1
 
     # Get pad positions
-    pad_positions = [(round(p.global_x, POSITION_DECIMALS), round(p.global_y, POSITION_DECIMALS)) for p in pads]
+    pad_positions = [(p.global_x, p.global_y) for p in pads]
 
-    # Free ends are endpoints that appear only once AND are not near a pad
+    # Free ends are endpoints alone in their cluster AND not near a pad
     free_ends = []
-    for (x, y, layer), count in endpoint_counts.items():
-        if count == 1:
-            # Check if near a pad
-            near_pad = False
-            for px, py in pad_positions:
-                if abs(x - px) < tolerance and abs(y - py) < tolerance:
-                    near_pad = True
-                    break
-            if not near_pad:
-                free_ends.append((x, y, layer))
+    for pi, (x, y, layer) in enumerate(points):
+        if cluster_size[roots[pi]] != 1:
+            continue
+        near_pad = False
+        for px, py in pad_positions:
+            if abs(x - px) < tolerance and abs(y - py) < tolerance:
+                near_pad = True
+                break
+        if not near_pad:
+            free_ends.append((round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS), layer))
 
     return free_ends
 

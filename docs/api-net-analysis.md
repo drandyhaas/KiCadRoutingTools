@@ -318,15 +318,6 @@ component — keeps crossing detection consistent across nets.
 ### Connectivity through zones
 
 ```python
-get_zone_connected_pad_groups(segments, vias, pads, zones,
-                              routing_layers=None) -> Dict[int, int]
-```
-
-Pad index → component ID, where pads sharing an ID are already connected
-through tracks **or copper zones/planes** (endpoint coincidence, 0.02 mm).
-Pads with no usable copper layer get unique negative IDs.
-
-```python
 get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
     -> Dict[int, int]
 ```
