@@ -959,16 +959,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _snapped:
         print(f"Closed {_snapped} stub gap(s) to same-net copper")
 
-    # Bridge same-net SOFT JOINTS: two dangling free ends held together only by a
-    # sliver of cap overlap (a rip-up deleted the real connecting segment, or a tap
-    # landed on-grid short of the endpoint it joined). Add a TINY coincident segment
-    # so the joint is a real connection instead of a fragile near-open that
-    # check_drc flags (#soft-joint). Runs after snap_stub_gaps (which only closes
-    # gaps to copper that does NOT yet overlap).
-    _bridged = close_soft_joints(results, pcb_data, sweep_scope_ids, config)
-    if _bridged:
-        print(f"Bridged {_bridged} same-net soft joint(s) with a tiny connector")
-
     # Reconcile the write-list against the actual board so the output can never
     # contain copper that was ripped off and not restored (issue #133). See
     # drop_phantom_copper for the full rationale.
@@ -1050,6 +1040,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
     if _necked:
         print(f"Width neck: narrowed {_necked} wide segment(s) grazing a foreign pad")
+
+    # Bridge same-net SOFT JOINTS as the FINAL copper step (issue #319 ordering):
+    # two dangling free ends held together only by a sliver of cap overlap (a rip-up
+    # deleted the real connecting segment, a tap landed on-grid short, or a prune
+    # pass above dropped a coincident bridge). Runs AFTER all the subtractive passes
+    # (snap runs before them; the prune passes now mutate pcb_data), so nothing can
+    # re-delete the bridges it adds and it sees every gap the prunes opened. Adds a
+    # TINY coincident connector so the joint is a real connection, not a fragile
+    # near-open check_drc flags (#soft-joint).
+    _bridged = close_soft_joints(results, pcb_data, sweep_scope_ids, config)
+    if _bridged:
+        print(f"Bridged {_bridged} same-net soft joint(s) with a tiny connector")
+
     # Merge any original input-file loop / grazing edges into the writer's strip list.
     if cycle_input_segments:
         dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments

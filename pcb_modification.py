@@ -868,6 +868,17 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
             if vias:
                 r['new_vias'] = [v for v in vias if id(v) not in removed_via_ids]
 
+    # Also drop the removed copper from pcb_data so it reflects the final board,
+    # like prune_redundant_cycles does. Without this, a later pass that scans
+    # pcb_data (e.g. close_soft_joints looking for the gaps this sweep just opened)
+    # would still see the removed copper and miss them (issue #319 / ordering).
+    orig_ids = {id(s) for s in original_to_remove}
+    if removed_routed_ids or orig_ids:
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_routed_ids and id(s) not in orig_ids]
+    if removed_via_ids:
+        pcb_data.vias = [v for v in pcb_data.vias if id(v) not in removed_via_ids]
+
     segs_removed = len(removed_routed_ids) + len(original_to_remove)
     return segs_removed, len(removed_via_ids), original_to_remove
 
