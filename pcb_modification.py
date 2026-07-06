@@ -716,6 +716,68 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     return snapped, len(to_remove)
 
 
+def _restore_soft_joint_bridges(kept, removed, vias, pads):
+    """Restrictive guard for the copper-removal passes (issue #319): put back any
+    just-removed segment whose removal turned a COINCIDENT joint into a SOFT JOINT
+    -- i.e. its two endpoints are now dangling free ends (degree-1 in ``kept``, not
+    on a via/pad) held together only by cap overlap.
+
+    sweep_dead_ends / prune_redundant_cycles gate removals on the OVERLAP
+    connectivity model, which counts that cap overlap as "still connected" and so
+    happily deletes the coincident bridge between two pieces (butterstick DQ5's
+    escape<->tap link). This pass NEVER removes copper -- it only moves a needed
+    bridge back from ``removed`` to ``kept`` -- so it cannot regress connectivity or
+    change any connectivity definition anywhere; it just stops the sweep from
+    manufacturing a soft joint. Returns updated ``(kept, removed)``.
+    """
+    if not removed:
+        return kept, removed
+    from collections import defaultdict
+    from routing_constants import SOFT_JOINT_MIN_GAP
+    from check_drc import point_to_pad_distance
+
+    def rk(x, y):
+        return (round(x, 3), round(y, 3))
+
+    via_pts = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in (vias or [])]
+
+    def anchored(x, y):
+        for vx, vy, vr in via_pts:
+            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+                return True
+        for p in (pads or []):
+            if point_to_pad_distance(x, y, p) <= 0.02:
+                return True
+        return False
+
+    changed = True
+    while changed and removed:
+        changed = False
+        deg = defaultdict(int)
+        for s in kept:
+            deg[(s.layer, rk(s.start_x, s.start_y))] += 1
+            deg[(s.layer, rk(s.end_x, s.end_y))] += 1
+        # (layer, rounded-point) -> width of the single kept segment dangling there
+        dangle_w = {}
+        for s in kept:
+            for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                key = (s.layer, rk(x, y))
+                if deg[key] == 1 and not anchored(x, y):
+                    dangle_w[key] = s.width
+        for r in list(removed):
+            k1 = (r.layer, rk(r.start_x, r.start_y))
+            k2 = (r.layer, rk(r.end_x, r.end_y))
+            if k1 in dangle_w and k2 in dangle_w:
+                gap = math.hypot(r.start_x - r.end_x, r.start_y - r.end_y)
+                cap = (dangle_w[k1] + dangle_w[k2]) / 2.0
+                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                    kept.append(r)
+                    removed.remove(r)
+                    changed = True
+                    break  # re-derive degrees before considering more
+    return kept, removed
+
+
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                     tol: float = 0.05) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
@@ -762,6 +824,8 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         zones = [z for z in all_zones if z.net_id == net_id]
         kept, removed = _safe_prune_net(net_id, net_segs, vias, pads, zones,
                                         aggressive=True, tol=tol)
+        # #319: never delete a coincident bridge and leave a soft joint.
+        kept, removed = _restore_soft_joint_bridges(kept, removed, vias, pads)
         kept_segs_by_net[net_id] = kept
         for s in removed:
             if id(s) in routed_seg_ids:
@@ -1132,6 +1196,8 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
         net_vias = vias_by_net.get(net_id, [])
         kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
                                           net_pads, fgrid, _FCELL, fmax_rad, clearance)
+        # #319: never break a "loop" whose alternate path is only a soft joint.
+        kept, removed = _restore_soft_joint_bridges(kept, removed, net_vias, net_pads)
         if not removed:
             continue
         # Safety: the cycle model uses tolerance clustering which can imperfectly
