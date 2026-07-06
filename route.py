@@ -97,7 +97,8 @@ from grid_router import GridObstacleMap, GridRouter
 
 
 def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
-                                emitted_copper, full_sig, pos_sig):
+                                emitted_copper, full_sig, pos_sig,
+                                final_ids=None):
     """Shared core for #284 stale-copper stripping (vias and segments).
 
     The output writer copies the input file verbatim, then APPENDS the routing
@@ -107,9 +108,16 @@ def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
 
     Strip an in-scope net's original item when EITHER:
 
-    - its FULL signature is no longer on the final board -- the net was rerouted
-      away or ripped-and-not-restored. An item route.py kept unchanged still
-      matches its identical final-board item and is left alone.
+    - it is no longer on the final (frozen committed) board -- the net was
+      rerouted away or ripped-and-not-restored. With ``final_ids`` (object
+      identity at freeze time) the test is exact; rip/restore preserves object
+      identity (restore_net re-adds the saved objects), so a kept original
+      always passes. The signature fallback (when ``final_ids`` is None) has a
+      TWIN-SHIELDING hole: an original whose net was ripped and re-routed onto
+      the byte-identical span is "matched" by the ROUTED twin's signature and
+      kept -- and when a later cleanup pass (the cycle prune) removes that
+      routed twin, the original ships as copper the board model no longer has
+      (neo6502 +3.3V slivers, found by KICAD_BOARD_LEDGER).
     - the writer will RE-EMIT an item for the SAME net at the SAME POSITION: the
       re-emitted item is authoritative, so the verbatim original is the redundant
       copy (this covers a byte-identical replacement, which a full-signature match
@@ -119,8 +127,9 @@ def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
     the coarser locus a replacement lands on (via drill hole / segment span).
     """
     final = {}
-    for c in final_copper:
-        final.setdefault(c.net_id, set()).add(full_sig(c))
+    if final_ids is None:
+        for c in final_copper:
+            final.setdefault(c.net_id, set()).add(full_sig(c))
     emit = {}
     for c in emitted_copper:
         emit.setdefault(c.net_id, set()).add(pos_sig(c))
@@ -129,7 +138,9 @@ def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
         nfinal = final.get(nid, ())
         nemit = emit.get(nid, ())
         for c in orig_by_net.get(nid, []):
-            if full_sig(c) not in nfinal or pos_sig(c) in nemit:
+            on_board = (id(c) in final_ids) if final_ids is not None \
+                else (full_sig(c) in nfinal)
+            if not on_board or pos_sig(c) in nemit:
                 stale.append(c)
     return stale
 
@@ -150,7 +161,8 @@ def _seg_span_sig(s):
     return (min(a, b), max(a, b), s.layer)
 
 
-def compute_stale_input_vias(orig_via_by_net, scope_ids, final_vias, emitted_vias):
+def compute_stale_input_vias(orig_via_by_net, scope_ids, final_vias, emitted_vias,
+                             final_ids=None):
     """Original input vias to strip from the verbatim output copy (issue #284).
 
     A ripped/re-routed net's reroute often lands a via-in-pad via at the EXACT
@@ -161,11 +173,11 @@ def compute_stale_input_vias(orig_via_by_net, scope_ids, final_vias, emitted_via
     """
     return _compute_stale_input_copper(
         orig_via_by_net, scope_ids, final_vias, emitted_vias,
-        full_sig=_via_full_sig, pos_sig=_via_pos_sig)
+        full_sig=_via_full_sig, pos_sig=_via_pos_sig, final_ids=final_ids)
 
 
 def compute_stale_input_segments(orig_seg_by_net, scope_ids, final_segments,
-                                 emitted_segments):
+                                 emitted_segments, final_ids=None):
     """Original input segments to strip from the verbatim output copy (issue
     #284, segment twin of ``compute_stale_input_vias``).
 
@@ -178,7 +190,7 @@ def compute_stale_input_segments(orig_seg_by_net, scope_ids, final_segments,
     """
     return _compute_stale_input_copper(
         orig_seg_by_net, scope_ids, final_segments, emitted_segments,
-        full_sig=_seg_span_sig, pos_sig=_seg_span_sig)
+        full_sig=_seg_span_sig, pos_sig=_seg_span_sig, final_ids=final_ids)
 
 
 def _write_passthrough_output(input_file: str, output_file: str) -> None:
@@ -531,9 +543,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
             verbose=verbose
         )
-        # Add stub swap vias to pcb_data so routing and length matching see them as obstacles
-        for via in all_swap_vias:
-            pcb_data.vias.append(via)
+        # NOTE: apply_stub_layer_switch already appends each swap via to
+        # pcb_data.vias itself -- re-appending all_swap_vias here put every
+        # pad swap via on the board TWICE (double obstacle stamp, and the
+        # board carried one more via than the written file; found by the
+        # FILE_LEDGER audit on ottercast AP_WAKE_BT et al).
 
     # Apply net ordering strategy
     if ordering_strategy == "mps":
@@ -978,10 +992,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # via's x,y in place) would leak into the snapshot's signatures.
     _committed_segments: list = []
     _committed_vias: list = []
+    _committed_seg_ids: set = set()
+    _committed_via_ids: set = set()
 
     def _freeze_committed():
         _committed_segments.extend(copy.copy(s) for s in pcb_data.segments)
         _committed_vias.extend(copy.copy(v) for v in pcb_data.vias)
+        # Identity of the LIVE objects at freeze time: the stale strip's
+        # "original still on the committed board" test is by id(), not
+        # signature -- a routed twin re-created on the byte-identical span
+        # must not shield a ripped original from the strip (twin-shielding
+        # leak, see _compute_stale_input_copper).
+        _committed_seg_ids.update(id(s) for s in pcb_data.segments)
+        _committed_via_ids.update(id(v) for v in pcb_data.vias)
 
     _cleanup = run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
@@ -1006,8 +1029,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # that stale input copper not only lingers but can CROSS nets that routed into
     # its vacated corridor while it was ripped. Strip every in-scope net's original
     # input segment that is no longer on the final board. A segment route.py kept
-    # or re-routed identically is still in pcb_data (matched by signature) and is
-    # NOT stripped, so legitimate copper is untouched.
+    # is still on the frozen board (matched by OBJECT IDENTITY -- rip/restore
+    # preserves it) and is NOT stripped, so legitimate copper is untouched.
     # Issue #284 (segment twin of the via strip below): also strip an original
     # segment the writer will RE-EMIT verbatim (same net, same span+layer, in
     # results.new_segments) -- otherwise a ripped/re-routed net that reproduces a
@@ -1018,7 +1041,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # cleanup pass's removals must not masquerade as rip signals (B1).
     _emitted_segs = [_s for _r in results for _s in (_r.get('new_segments') or [])]
     _stale_input_segs = compute_stale_input_segments(
-        _orig_seg_by_net, sweep_scope_ids, _committed_segments, _emitted_segs)
+        _orig_seg_by_net, sweep_scope_ids, _committed_segments, _emitted_segs,
+        final_ids=_committed_seg_ids)
     if _stale_input_segs:
         dead_end_input_segments = list(dead_end_input_segments) + _stale_input_segs
         print(f"Stripped {len(_stale_input_segs)} stale input segment(s) of "
@@ -1035,10 +1059,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _emitted_vias = [_v for _r in results for _v in (_r.get('new_vias') or [])]
     _emitted_vias += list(all_swap_vias)
     stale_input_vias = compute_stale_input_vias(
-        _orig_via_by_net, sweep_scope_ids, _committed_vias, _emitted_vias)
+        _orig_via_by_net, sweep_scope_ids, _committed_vias, _emitted_vias,
+        final_ids=_committed_via_ids)
     if stale_input_vias:
         print(f"Stripping {len(stale_input_vias)} stale input via(s) of "
               f"ripped/re-routed nets not on the final board")
+
+    # Uniform contract, stale-strip edition: the #284 re-emit clause can strip
+    # an original that is STILL on the board (a routed twin reproduced its
+    # span, so the file keeps only the emitted copy) -- mirror that removal
+    # into pcb_data like every other subtractive step, or the board carries
+    # copper the file won't have (ottercast Net-(C46-Pad1) sliver, found by
+    # KICAD_BOARD_LEDGER). Identity-based; absent objects are a no-op.
+    _stale_ids = {id(s) for s in _stale_input_segs}
+    if _stale_ids:
+        pcb_data.segments = [s for s in pcb_data.segments if id(s) not in _stale_ids]
+    _stale_via_ids = {id(v) for v in stale_input_vias}
+    if _stale_via_ids:
+        pcb_data.vias = [v for v in pcb_data.vias if id(v) not in _stale_via_ids]
 
     # Board-vs-file ledger (KICAD_BOARD_LEDGER=1): audit the pipeline contract
     # now that every strip is known -- per in-scope net, pcb_data must equal

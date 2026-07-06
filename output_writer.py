@@ -128,6 +128,26 @@ def write_routed_output(
     # Apply pad and stub net swaps for polarity fixes
     content = _apply_polarity_swaps(content, pad_swaps, pcb_data, net_id_to_name if kicad_v10 else None)
 
+    # Residual strip pass: a strip target whose object was LAYER-SWAPPED (or
+    # net-swapped) in memory carries its FINAL layer/net, which cannot match
+    # the file text until the mods/swaps above have been applied -- the first
+    # strip pass misses it and a relabeled zombie block ships (ottercast
+    # BT_UART_RTS stubs, found by the FILE_LEDGER audit). Re-running the strip
+    # AFTER all text transforms is idempotent for blocks already removed and
+    # catches exactly these.
+    if segments_to_remove:
+        content, removed2 = remove_segments_from_content(
+            content, segments_to_remove, net_id_to_name if kicad_v10 else None)
+        if removed2:
+            print(f"Removed {removed2} layer/net-swapped input segment(s) from "
+                  f"the output (post-transform strip)")
+    if vias_to_remove:
+        content, removed_v2 = remove_vias_from_content(
+            content, vias_to_remove, net_id_to_name if kicad_v10 else None)
+        if removed_v2:
+            print(f"Removed {removed_v2} swapped input via(s) from the output "
+                  f"(post-transform strip)")
+
     # Generate routing text (new segments and vias)
     routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None,
                                           all_swap_segments=all_swap_segments)

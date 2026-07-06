@@ -121,9 +121,38 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     counts = out.counts
     strip = out.input_strip_segments
 
+    # KICAD_LEDGER_TRACE="x,y;x,y;..." -- ledger-leak forensics: after every
+    # pass, print how many pcb_data / write-list segments have an endpoint
+    # within 0.05mm of each watched point. Pinpoints WHICH pass moved one
+    # representation without the other (pair with KICAD_BOARD_LEDGER).
+    _trace_pts = []
+    _t = os.environ.get('KICAD_LEDGER_TRACE')
+    if _t:
+        for tok in _t.split(';'):
+            try:
+                x, y = tok.split(',')
+                _trace_pts.append((float(x), float(y)))
+            except ValueError:
+                pass
+
+    def _trace(stage):
+        if not _trace_pts:
+            return
+        for (tx, ty) in _trace_pts:
+            def near(s):
+                return ((abs(s.start_x - tx) < 0.05 and abs(s.start_y - ty) < 0.05)
+                        or (abs(s.end_x - tx) < 0.05 and abs(s.end_y - ty) < 0.05))
+            nb = sum(1 for s in pcb_data.segments if near(s))
+            nr = sum(1 for r in results for s in (r.get('new_segments') or []) if near(s))
+            ns = sum(1 for s in strip if near(s))
+            print(f"[LEDGER_TRACE]{label} after {stage}: ({tx},{ty}) "
+                  f"board={nb} writelist={nr} strip={ns}")
+
+    _trace('start')
     if snap:
         _snapped = snap_stub_gaps(results, pcb_data, scope_net_ids, config)
         counts['stub_gaps_snapped'] = _snapped
+        _trace('snap')
         if _snapped:
             print(f"{label}Closed {_snapped} stub gap(s) to same-net copper")
 
@@ -138,6 +167,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             original_via_ids=original_via_ids)
         counts['phantom_segments'] = _ph_segs
         counts['phantom_vias'] = _ph_vias
+        _trace('phantom')
         if _ph_segs or _ph_vias:
             print(f"{label}Dropped {_ph_segs} phantom segment(s) and {_ph_vias} "
                   f"phantom via(s) not on the board from the write-list")
@@ -154,6 +184,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             check_foreign_segments=True)
         counts['graze_pruned'] = _gz_segs
+        _trace('graze')
         strip.extend(_gz_strip)
         if _gz_segs:
             print(f"{label}Graze prune: removed {_gz_segs} grazing segment(s) "
@@ -163,6 +194,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
             results, pcb_data, scope_net_ids, clearance=config.clearance)
         counts['octolinear_nudged'] = _nz_segs
+        _trace('octolinear')
         strip.extend(_nz_strip)
         if _nz_segs:
             print(f"{label}Graze nudge: re-bent grazing octolinear jog(s) "
@@ -173,6 +205,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
                    else config.grid_step / 2))
     counts['microshifted'] = _ms_segs
+    _trace('microshift')
     strip.extend(_ms_strip)
     if _ms_segs:
         print(f"{label}Graze micro-shift: moved copper by its clearance "
@@ -184,6 +217,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             hole_to_hole=config.hole_to_hole_clearance,
             max_shift=config.grid_step / 2)
         counts['vias_nudged'] = _vn_moved
+        _trace('via_nudge')
         if _vn_moved:
             print(f"{label}Via nudge: moved {_vn_moved} grazing via(s) on "
                   f"{_vn_nets} net(s) by their sub-grid clearance shortfall (#280)")
@@ -192,6 +226,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _cy_segs, _cy_nets, _cy_strip = prune_redundant_cycles(
             results, pcb_data, scope_net_ids, clearance=config.clearance)
         counts['cycles_pruned'] = _cy_segs
+        _trace('cycles')
         strip.extend(_cy_strip)
         if _cy_segs:
             print(f"{label}Cycle prune: removed {_cy_segs} redundant loop "
@@ -200,6 +235,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids)
     counts['dead_ends_swept'] = _de_segs
     counts['dead_end_vias'] = _de_vias
+    _trace('sweep')
     strip.extend(_de_strip)
     if _de_segs or _de_vias:
         print(f"{label}Dead-end sweep: trimmed {_de_segs} dead-end segment(s) "
@@ -208,6 +244,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if neck:
         _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
         counts['width_necked'] = _necked
+        _trace('neck')
         if _necked:
             print(f"{label}Width neck: narrowed {_necked} wide segment(s) "
                   f"grazing a foreign pad")
@@ -337,8 +374,26 @@ def verify_board_file_parity(pcb_data, scope_net_ids, orig_seg_by_net, results,
         for s in (r.get('new_segments') or []):
             emitted_by_net.setdefault(s.net_id, []).append(s)
     board_by_net = {}
+    _seen_board_ids = set()
     for s in pcb_data.segments:
+        # A duplicate OBJECT entry in pcb_data.segments is always a bug (#195:
+        # duplicate graph nodes defeat every connectivity gate; here it also
+        # desyncs the board from the write model, which holds the object once).
+        if id(s) in _seen_board_ids:
+            print(f"{RED}[BOARD_LEDGER]{label} DUPLICATE board entry: net "
+                  f"{s.net_id} ({s.start_x},{s.start_y})-({s.end_x},{s.end_y}) "
+                  f"{s.layer} appears more than once in pcb_data.segments{RESET}")
+        _seen_board_ids.add(id(s))
         board_by_net.setdefault(s.net_id, []).append(s)
+    _seen_via_ids = set()
+    for v in pcb_data.vias:
+        # Via twin of the duplicate check (the swap-via double-append shipped
+        # every pad swap via onto the board twice).
+        if id(v) in _seen_via_ids:
+            print(f"{RED}[BOARD_LEDGER]{label} DUPLICATE board via: net "
+                  f"{v.net_id} at ({v.x},{v.y}) appears more than once in "
+                  f"pcb_data.vias{RESET}")
+        _seen_via_ids.add(id(v))
 
     scope = sorted(scope_net_ids or [])
     bad = 0

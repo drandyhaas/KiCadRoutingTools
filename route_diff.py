@@ -982,6 +982,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             'all_segment_modifications': all_segment_modifications,
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
+            # Input-file copper the cleanup pipeline removed -- the CLI writer
+            # strips these blocks (segments_to_remove in the write path);
+            # without this key the GUI kept them on the live board (parity gap
+            # found in the #319 restructure audit).
+            'segments_to_remove': cleanup_input_strip,
         }
     else:
         wrote = write_routed_output(

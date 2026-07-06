@@ -7,7 +7,7 @@ import re
 import uuid
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import Pad, is_kicad_10
+from kicad_parser import Pad, is_kicad_10, _unescape_kicad_string
 from routing_utils import pos_key, POSITION_DECIMALS
 
 
@@ -574,7 +574,7 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
         r'\(width\s+[\d.]+\)\s*\n?\s*'
         r'\(layer\s+")([^"]+)("\)\s*\n?\s*'
-        r'\(net\s+(?:(\d+)|"([^"]*)")\))',
+        r'\(net\s+(?:(\d+)|"((?:[^"\\]|\\.)*)")\))',
         re.MULTILINE
     )
 
@@ -587,7 +587,10 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         end_y = float(match.group(5))
         layer = match.group(6)
         net_id = int(match.group(8)) if match.group(8) else None
-        net_name = match.group(9)  # KiCad 10: (net "name")
+        # KiCad 10: (net "name") -- unescape the raw file text before the
+        # name lookup, or backslash-named nets fall to the coordinate-only
+        # fallback (ambiguous on stacked identical-geometry stubs, #264).
+        net_name = _unescape_kicad_string(match.group(9)) if match.group(9) else None
 
         start_key = coord_key(start_x, start_y)
         end_key = coord_key(end_x, end_y)
@@ -718,7 +721,7 @@ def remove_segments_from_content(content: str, segments: List,
     start_re = re.compile(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)')
     end_re = re.compile(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)')
     layer_re = re.compile(r'\(layer\s+"?([^")]+)"?\)')
-    net_name_re = re.compile(r'\(net\s+"([^"]*)"\)')
+    net_name_re = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
     net_id_re = re.compile(r'\(net\s+(\d+)\)')
 
     # Scan top-level (segment ...) blocks with a quote-aware paren matcher. A
@@ -759,7 +762,12 @@ def remove_segments_from_content(content: str, segments: List,
         if ms and me and ml:
             if use_names:
                 mn = net_name_re.search(block)
-                net_token = mn.group(1) if mn else None
+                # The file stores the ESCAPED name (backslash doubled, quote
+                # backslashed); targets use the parser's unescaped name. Undo
+                # the escapes or every backslash-named net silently evades the
+                # strip and its stale copper ships (neo6502 /GPIO*\* nets,
+                # found by the FILE_LEDGER audit -- #312/#264 family).
+                net_token = _unescape_kicad_string(mn.group(1)) if mn else None
             else:
                 mn = net_id_re.search(block)
                 net_token = int(mn.group(1)) if mn else None
@@ -796,7 +804,7 @@ def remove_vias_from_content(content: str, vias: List,
         targets.add((pos_key(v.x, v.y), net_token))
 
     at_re = re.compile(r'\(at\s+([\d.-]+)\s+([\d.-]+)\)')
-    net_name_re = re.compile(r'\(net\s+"([^"]*)"\)')
+    net_name_re = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
     net_id_re = re.compile(r'\(net\s+(\d+)\)')
 
     out = []
@@ -836,7 +844,12 @@ def remove_vias_from_content(content: str, vias: List,
         if ma:
             if use_names:
                 mn = net_name_re.search(block)
-                net_token = mn.group(1) if mn else None
+                # The file stores the ESCAPED name (backslash doubled, quote
+                # backslashed); targets use the parser's unescaped name. Undo
+                # the escapes or every backslash-named net silently evades the
+                # strip and its stale copper ships (neo6502 /GPIO*\* nets,
+                # found by the FILE_LEDGER audit -- #312/#264 family).
+                net_token = _unescape_kicad_string(mn.group(1)) if mn else None
             else:
                 mn = net_id_re.search(block)
                 net_token = int(mn.group(1)) if mn else None

@@ -3080,6 +3080,24 @@ class RoutingDialog(wx.Dialog):
                     board.Remove(track)
                     tracks_removed += 1
 
+        # Remove stale input VIAS of ripped/re-routed nets (#284), mirroring the
+        # CLI writer's remove_vias_from_content -- previously the GUI only
+        # removed segments, so the old via and its reroute's replacement both
+        # stayed on the live board as a same-net drill pair.
+        vias_to_remove = results_data.get('vias_to_remove') or []
+        if vias_to_remove:
+            via_keys = {(round(v.x, POSITION_DECIMALS), round(v.y, POSITION_DECIMALS),
+                         v.net_id) for v in vias_to_remove}
+            for track in list(board.GetTracks()):
+                if track.Type() != pcbnew.PCB_VIA_T:
+                    continue
+                vk = (round(pcbnew.ToMM(track.GetPosition().x), POSITION_DECIMALS),
+                      round(pcbnew.ToMM(track.GetPosition().y), POSITION_DECIMALS),
+                      track.GetNetCode())
+                if vk in via_keys:
+                    board.Remove(track)
+                    tracks_removed += 1
+
         # Add segments from routing results
         for result in results_data.get('results', []):
             for seg in result.get('new_segments', []):
