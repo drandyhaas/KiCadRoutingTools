@@ -18,8 +18,8 @@ from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
     get_net_endpoints,
     get_multipoint_net_pads,
-    compute_mst_edges,
-    get_zone_connected_pad_groups
+    get_copper_connected_terminal_groups,
+    compute_component_mst_edges,
 )
 from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
 from bresenham_utils import walk_line
@@ -2135,67 +2135,43 @@ def route_multipoint_main(
     # Extract pad positions for MST computation
     pad_positions = [(info[3], info[4]) for info in pad_info]  # (orig_x, orig_y)
 
-    # Compute MST with Manhattan distance (better for PCB routing)
-    mst_edges = compute_mst_edges(pad_positions, use_manhattan=True)
-
-    # Filter out MST edges between pads already connected through zones/planes
-    # Also track pad_components for Phase 3 to know which pads are zone-connected
-    pad_components = {i: i for i in range(len(pad_info))}  # Default: each pad is its own component
-    net_zones = [z for z in pcb_data.zones if z.net_id == net_id]
-    if net_zones:
-        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
-        pads_list = [info[5] for info in pad_info if len(info) > 5]
-        if pads_list:
-            pad_components = get_zone_connected_pad_groups(
-                net_segments, net_vias, pads_list, net_zones, config.layers
-            )
-            # Group pads by component for quick lookup
-            component_pads: dict = {}  # component_id -> list of pad indices
-            for pad_idx, comp_id in pad_components.items():
-                if comp_id not in component_pads:
-                    component_pads[comp_id] = []
-                component_pads[comp_id].append(pad_idx)
-
-            # Filter edges and optimize: for edges crossing components, find closest pad in zone-connected group
-            original_count = len(mst_edges)
-            optimized_edges = []
-            seen_component_pairs = set()  # Track which component pairs we've already connected
-
-            for a, b, dist in mst_edges:
-                comp_a = pad_components.get(a)
-                comp_b = pad_components.get(b)
-                if comp_a == comp_b:
-                    continue  # Skip intra-component edges
-
-                # Normalize component pair to avoid duplicates
-                pair_key = (min(comp_a, comp_b), max(comp_a, comp_b))
-                if pair_key in seen_component_pairs:
-                    continue  # Already have an edge between these components
-                seen_component_pairs.add(pair_key)
-
-                # Optimize: find shortest edge between pads in these two components
-                best_edge = None
-                best_dist = float('inf')
-                for pa in component_pads.get(comp_a, [a]):
-                    for pb in component_pads.get(comp_b, [b]):
-                        px_a, py_a = pad_positions[pa]
-                        px_b, py_b = pad_positions[pb]
-                        d = abs(px_a - px_b) + abs(py_a - py_b)  # Manhattan distance
-                        if d < best_dist:
-                            best_dist = d
-                            best_edge = (pa, pb, d)
-                if best_edge:
-                    optimized_edges.append(best_edge)
-
-            mst_edges = optimized_edges
-            if original_count > len(mst_edges):
-                skipped = original_count - len(mst_edges)
-                print(f"  Skipping {skipped} MST edge(s) already connected through plane")
+    # Component-based multipoint (issue #317): group the terminals by the
+    # net's EXISTING copper using the authoritative overlap-aware definition
+    # (check_net_connectivity -- cap overlap, T-junctions, zones, pad
+    # outlines), then span the COMPONENTS with an MST realized by the nearest
+    # terminal pair between each pair of components. N components take
+    # exactly N-1 routed connections; copper the checker already grades
+    # connected is never re-tapped (the old pad-position MST + 0.02mm
+    # coincidence filter routed redundant loops between overlap-joined
+    # escapes -- butterstick DQ5).
+    pad_components = get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
+    num_components = len(set(pad_components.values()))
+    if num_components < len(pad_info):
+        print(f"  Existing copper joins {len(pad_info)} terminals into "
+              f"{num_components} group(s)")
+    mst_edges = compute_component_mst_edges(pad_positions, pad_components)
 
     if not mst_edges:
-        print(f"  All pads already connected through plane - nothing to route")
-        return None
+        print(f"  All pads already connected by existing copper - nothing to route")
+        return {
+            'new_segments': [],
+            'new_vias': [],
+            'iterations': 0,
+            'path_length': 0,
+            'path': [],
+            'is_multipoint': True,
+            'multipoint_pad_info': pad_info,
+            'routed_pad_indices': set(range(len(pad_info))),
+            'pad_components': pad_components,
+            'original_segments': [],
+            'mst_edges': [],
+            'waypoint_buckets': {},
+            'already_connected': True,
+            'tap_edges_routed': 0,
+            'tap_edges_failed': 0,
+            'tap_pads_connected': len(pad_info),
+            'tap_pads_total': len(pad_info),
+        }
 
     # Sort MST edges by length (longest first)
     mst_edges = sorted(mst_edges, key=lambda e: -e[2])
