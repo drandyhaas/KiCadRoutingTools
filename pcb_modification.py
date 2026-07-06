@@ -440,7 +440,10 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     if new_conns:
         for c in new_conns:
             pcb_data.segments.append(c)
-        results.append({'new_segments': new_conns, 'new_vias': []})
+        # Tagged so accounting/summary code can tell this cleanup copper from a
+        # net's routed result (it has no net-level identity of its own).
+        results.append({'new_segments': new_conns, 'new_vias': [],
+                        'cleanup': 'soft_joint_bridge'})
     return len(new_conns)
 
 
@@ -587,7 +590,9 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     if new_conns:
         for c in new_conns:
             pcb_data.segments.append(c)
-        results.append({'new_segments': new_conns, 'new_vias': []})
+        # Tagged like close_soft_joints' bridges: cleanup copper, not a route.
+        results.append({'new_segments': new_conns, 'new_vias': [],
+                        'cleanup': 'stub_gap_snap'})
     return added
 
 
@@ -643,24 +648,29 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
 
 def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1,
                        grid_step: float = 0.05) -> Tuple[int, int]:
-    """Apply the dead-end sweep + gap-snap + graze micro-shift to a plane tool's
-    output file (issue #84, #308).
+    """Run the shared post-route cleanup pipeline on a plane tool's OUTPUT FILE
+    (issues #84, #308, #319 restructure).
 
     route_planes / route_disconnected_planes write copper outside route.py's
-    write-list, so they miss the in-route cleanup, leaving dead-end stubs (and the
-    occasional near-miss) on plane nets. This re-parses the written board, snaps
-    small same-net gaps, trims gated-safe dead ends, and micro-shifts a plane
-    repair track that grid-quantized sub-clearance to a foreign NPTH drill hole
-    (issue #308: urti's GND repair track grazed J3's mounting hole by 17um -- a
-    sub-grid quantization miss the plane path never ran the micro-shift on), then
-    rewrites the file (stripping removed segments, appending snap connectors and
-    shifted geometry). The connectivity gate uses the plane zones, and the snap /
-    shift clearance checks reject anything that would enter another net's pour or
-    graze other copper. Returns ``(snapped, removed)``.
+    write-list, so they miss the in-route cleanup. This re-parses the written
+    board and runs the same run_post_route_cleanup the signal fronts use --
+    gap snap, graze prune, octolinear re-bend, micro-shift (full-grid cap,
+    #308: urti's GND repair track grazed J3's mounting hole by 17um), cycle
+    prune (a no-op on zoned nets by design), dead-end sweep, and the final
+    soft-joint bridge -- then rewrites the file (stripping removed segments,
+    appending added ones). Because the board here IS a fresh parse of the
+    file, the board==file contract holds by construction; the only excluded
+    passes are the ones a segment-level file rewrite cannot express (via
+    moves) or that need a routing write-list (phantom drop, width neck).
+    The connectivity gates use the plane zones, so a tap the fill makes
+    redundant can be dropped and nothing that would enter another net's pour
+    is added. Returns ``(snapped, removed)``.
     """
     from types import SimpleNamespace
     from kicad_parser import parse_kicad_pcb, is_kicad_10
     from kicad_writer import remove_segments_from_content, generate_segment_sexpr
+    # Local import: cleanup_pipeline imports the passes from this module.
+    from cleanup_pipeline import run_post_route_cleanup
 
     pcb = parse_kicad_pcb(output_file)
     with open(output_file, 'r', encoding='utf-8') as f:
@@ -670,32 +680,30 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     if not scope:
         return 0, 0
 
-    snap_results = []
-    snapped = snap_stub_gaps(snap_results, pcb, scope, SimpleNamespace(clearance=clearance))
-    connectors = [s for r in snap_results for s in (r.get('new_segments') or [])]
-    _, _, to_remove = sweep_dead_ends(snap_results, pcb, scope)
-
-    # Micro-shift a plane repair track that quantized sub-clearance to a foreign
-    # NPTH hole / foreign copper (#308). Every plane segment is an "original" here
-    # (re-parsed from the file), so the shift is emitted as a remove-original +
-    # add-shifted pair. Plane-repair quantization grazes can be up to a full grid
-    # cell (the track is on-grid, the hole off-grid), so the cap is grid_step, not
-    # grid_step/2 -- still safe: each candidate is verified to clear all foreign
-    # copper and to keep the net connected before it replaces the original.
-    _ms, _msn, ms_remove, ms_add = nudge_grazing_microshift(
-        [], pcb, scope, clearance=clearance, max_shift=grid_step)
-    if ms_remove:
-        to_remove = list(to_remove) + list(ms_remove)
-    if ms_add:
-        connectors = list(connectors) + list(ms_add)
-
-    # Bridge same-net soft joints on the plane nets with a tiny coincident segment
-    # (#soft-joint) -- a plane repair track that overlaps existing copper without a
-    # shared endpoint is the same fragile near-open the signal path leaves.
-    sj_results = []
-    _sj = close_soft_joints(sj_results, pcb, scope, SimpleNamespace(clearance=clearance))
-    if _sj:
-        connectors = list(connectors) + [s for r in sj_results for s in (r.get('new_segments') or [])]
+    # Run the ONE shared cleanup pipeline on the re-parsed board. In this
+    # file-round-trip mode every segment is an "original" (nothing routed in
+    # this process), so pass an empty write-list: additions (snap connectors,
+    # micro-shift replacements, soft-joint bridges) come back as tagged
+    # results entries; removals come back in input_strip_segments.
+    # Front-parity switches:
+    #   phantom OFF -- no write-list to reconcile;
+    #   via_nudge OFF -- an input-via's in-place move cannot be expressed by
+    #     this segment-level write-back (#280/#281), it would strand the
+    #     dragged segment endpoints;
+    #   neck OFF -- width-only fix for ROUTED wide trunks; nothing routed here;
+    #   microshift_max_shift = grid_step (not grid_step/2): plane-repair
+    #     quantization grazes can be a full grid cell (#308 -- the track is
+    #     on-grid, the hole off-grid), and each shift is still verified to
+    #     clear all foreign copper and keep the net connected.
+    plane_results: list = []
+    _cfg = SimpleNamespace(clearance=clearance, grid_step=grid_step)
+    _outcome = run_post_route_cleanup(
+        plane_results, pcb, scope, _cfg,
+        label='Plane ', phantom=False, via_nudge=False, neck=False,
+        microshift_max_shift=grid_step)
+    snapped = _outcome.counts.get('stub_gaps_snapped', 0)
+    to_remove = _outcome.input_strip_segments
+    connectors = [s for r in plane_results for s in (r.get('new_segments') or [])]
 
     if not (connectors or to_remove):
         return 0, 0
@@ -716,28 +724,20 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     return snapped, len(to_remove)
 
 
-def _restore_soft_joint_bridges(kept, removed, vias, pads):
-    """Restrictive guard for the copper-removal passes (issue #319): put back any
-    just-removed segment whose removal turned a COINCIDENT joint into a SOFT JOINT
-    -- i.e. its two endpoints are now dangling free ends (degree-1 in ``kept``, not
-    on a via/pad) held together only by cap overlap.
+def _rk3(x, y):
+    """Endpoint-coincidence key at the soft-joint rounding (1um)."""
+    return (round(x, 3), round(y, 3))
 
-    sweep_dead_ends / prune_redundant_cycles gate removals on the OVERLAP
-    connectivity model, which counts that cap overlap as "still connected" and so
-    happily deletes the coincident bridge between two pieces (butterstick DQ5's
-    escape<->tap link). This pass NEVER removes copper -- it only moves a needed
-    bridge back from ``removed`` to ``kept`` -- so it cannot regress connectivity or
-    change any connectivity definition anywhere; it just stops the sweep from
-    manufacturing a soft joint. Returns updated ``(kept, removed)``.
-    """
-    if not removed:
-        return kept, removed
+
+def _soft_joint_pairs(segs, vias, pads):
+    """Canonical set of SOFT-JOINT pairs among ``segs``: same-layer degree-1
+    free ends (not anchored on a same-net via/pad) whose round end caps overlap
+    without the endpoints being coincident. Each pair is a frozenset of two
+    (layer, rounded-point) keys, so pair sets from different segment subsets of
+    the same net are directly comparable."""
     from collections import defaultdict
     from routing_constants import SOFT_JOINT_MIN_GAP
     from check_drc import point_to_pad_distance
-
-    def rk(x, y):
-        return (round(x, 3), round(y, 3))
 
     via_pts = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in (vias or [])]
 
@@ -750,31 +750,76 @@ def _restore_soft_joint_bridges(kept, removed, vias, pads):
                 return True
         return False
 
-    changed = True
-    while changed and removed:
-        changed = False
-        deg = defaultdict(int)
-        for s in kept:
-            deg[(s.layer, rk(s.start_x, s.start_y))] += 1
-            deg[(s.layer, rk(s.end_x, s.end_y))] += 1
-        # (layer, rounded-point) -> width of the single kept segment dangling there
-        dangle_w = {}
-        for s in kept:
-            for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
-                key = (s.layer, rk(x, y))
-                if deg[key] == 1 and not anchored(x, y):
-                    dangle_w[key] = s.width
+    deg = defaultdict(int)
+    for s in segs:
+        deg[(s.layer, _rk3(s.start_x, s.start_y))] += 1
+        deg[(s.layer, _rk3(s.end_x, s.end_y))] += 1
+    dangles = defaultdict(list)  # layer -> [(key, x, y, width)]
+    seen = set()
+    for s in segs:
+        for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            key = (s.layer, _rk3(x, y))
+            if deg[key] != 1 or key in seen:
+                continue
+            if anchored(x, y):
+                continue
+            seen.add(key)
+            dangles[s.layer].append((key, x, y, s.width))
+    pairs = set()
+    for layer, ends in dangles.items():
+        for i in range(len(ends)):
+            ki, xi, yi, wi = ends[i]
+            for j in range(i + 1, len(ends)):
+                kj, xj, yj, wj = ends[j]
+                gap = math.hypot(xi - xj, yi - yj)
+                if SOFT_JOINT_MIN_GAP < gap < (wi + wj) / 2.0 - 1e-6:
+                    pairs.add(frozenset((ki, kj)))
+    return pairs
+
+
+def _restore_soft_joint_bridges(kept, removed, vias, pads):
+    """Restrictive guard for the copper-removal passes (issue #319): put back any
+    just-removed segment whose removal CREATED a new SOFT JOINT anywhere on the
+    net -- two dangling free ends (degree-1, not on a via/pad) held together only
+    by cap overlap.
+
+    sweep_dead_ends / prune_redundant_cycles gate removals on the OVERLAP
+    connectivity model, which counts cap overlap as "still connected" and so
+    happily deletes the coincident bridge between two pieces (butterstick DQ5's
+    escape<->tap link). Generalized from the original both-endpoints-of-the-
+    removed-segment shape: the confirmed glasgow B1 mechanism is a removal that
+    turns a NEIGHBOUR endpoint into a degree-1 dangle which then cap-overlaps a
+    THIRD dangle elsewhere on the net -- the old guard missed it, which is why
+    mirroring the sweep into pcb_data used to let close_soft_joints plant a
+    butterfly bridge. Soft joints that existed BEFORE the removals (router-born)
+    never trigger a restore -- repairing those is close_soft_joints' job.
+
+    This pass NEVER removes copper -- it only moves segments back from
+    ``removed`` to ``kept`` -- so it cannot regress connectivity or change any
+    connectivity definition anywhere; it just stops the subtractive passes from
+    manufacturing a soft joint. Returns updated ``(kept, removed)``.
+    """
+    if not removed:
+        return kept, removed
+    baseline = _soft_joint_pairs(list(kept) + list(removed), vias, pads)
+    for _ in range(len(removed)):
+        new_pairs = _soft_joint_pairs(kept, vias, pads) - baseline
+        if not new_pairs:
+            break
+        hot = {key for pair in new_pairs for key in pair}
+        restored = False
         for r in list(removed):
-            k1 = (r.layer, rk(r.start_x, r.start_y))
-            k2 = (r.layer, rk(r.end_x, r.end_y))
-            if k1 in dangle_w and k2 in dangle_w:
-                gap = math.hypot(r.start_x - r.end_x, r.start_y - r.end_y)
-                cap = (dangle_w[k1] + dangle_w[k2]) / 2.0
-                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
-                    kept.append(r)
-                    removed.remove(r)
-                    changed = True
-                    break  # re-derive degrees before considering more
+            if ((r.layer, _rk3(r.start_x, r.start_y)) in hot
+                    or (r.layer, _rk3(r.end_x, r.end_y)) in hot):
+                # Restoring r re-anchors the dangle (its degree rises above 1),
+                # dissolving the new pair. r's other end may re-add a dangle,
+                # but any pair that one forms was already in the baseline.
+                kept.append(r)
+                removed.remove(r)
+                restored = True
+                break
+        if not restored:
+            break  # gap not attributable to these removals; leave it
     return kept, removed
 
 
@@ -868,10 +913,23 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
             if vias:
                 r['new_vias'] = [v for v in vias if id(v) not in removed_via_ids]
 
-    # Also drop the removed copper from pcb_data so it reflects the final board,
-    # like prune_redundant_cycles does. Without this, a later pass that scans
-    # pcb_data (e.g. close_soft_joints looking for the gaps this sweep just opened)
-    # would still see the removed copper and miss them (issue #319 / ordering).
+    # Uniform mutation contract (#319): mirror the removals into pcb_data so
+    # that after this pass -- like after every other cleanup pass -- pcb_data IS
+    # the board that will be written, and everything downstream
+    # (close_soft_joints' endpoint degrees, the board-vs-file ledger) reads
+    # truth instead of pre-sweep fiction. Two failure paths were found here
+    # (the glasgow_revC B1 regression) and are both fixed at the source:
+    #   (1) the #220/#284 stale-input strip read live pcb_data as "the final
+    #       board" and over-removed load-bearing input copper -- it now
+    #       references a frozen, object-copied pre-cleanup snapshot
+    #       (route.py freeze hook in the cleanup pipeline);
+    #   (2) close_soft_joints would bridge the gaps the sweep opened (glasgow:
+    #       a 24.8um bridge on /IO_Banks/Z4_P), perturbing the board the next
+    #       chain step starts from (rip-reroute butterfly) -- now prevented at
+    #       the source: the generalized _restore_soft_joint_bridges guard above
+    #       restores ANY removal that would create a new soft joint (including
+    #       the neighbour-dangle shape that caused B1), so the sweep cannot
+    #       open a gap for close to see in the first place.
     orig_ids = {id(s) for s in original_to_remove}
     if removed_routed_ids or orig_ids:
         pcb_data.segments = [s for s in pcb_data.segments
@@ -2544,10 +2602,14 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     result['new_segments'] = cleaned_segments
 
 
-def drop_phantom_copper(results, pcb_data: PCBData) -> Tuple[int, int]:
-    """Drop, from each result's write-list copper, any segment/via no longer on the board.
+def drop_phantom_copper(results, pcb_data: PCBData,
+                        original_segment_ids=None,
+                        original_via_ids=None) -> Tuple[int, int]:
+    """Reconcile the write-list and the board in BOTH directions (issue #133 /
+    #319 restructure).
 
-    A result's ``new_segments`` / ``new_vias`` hold the SAME objects that
+    Direction 1 -- write-list entries not on the board ("phantoms"): a result's
+    ``new_segments`` / ``new_vias`` hold the SAME objects that
     ``add_route_to_pcb_data`` appended to ``pcb_data``; ``remove_route_from_pcb_data``
     drops those objects when a net is ripped. But a result snapshot taken before a
     rip-reroute can keep referencing copper that was later ripped and not restored
@@ -2558,9 +2620,18 @@ def drop_phantom_copper(results, pcb_data: PCBData) -> Tuple[int, int]:
     net was ripped, an un-manufacturable drill-on-drill short (issue #133:
     EPHY_TX_N / EPHY_RX_P escape vias).
 
+    Direction 2 -- board copper this run created that no result references
+    ("orphans", only when ``original_segment_ids``/``original_via_ids`` identify
+    the input-file copper): rip/reroute and superseded-result drops can leave a
+    routed sliver in pcb_data whose result was discarded, so it will never be
+    written. Passes and connectivity gates reading pcb_data would reason about
+    copper the file won't have (the glasgow P1 phantom-success class; surfaced
+    by the KICAD_BOARD_LEDGER audit as a board-only /DRAM_VDDQ sliver on
+    sechzig). Remove it from pcb_data so board == write model.
+
     Membership is by object identity, so a re-cleaned or re-placed object (same
     position, different object) is never confused with the ripped one, and live
-    copper is never dropped. Mutates each result in place; returns
+    copper is never dropped. Mutates results and pcb_data in place; returns
     ``(phantom_segments_dropped, phantom_vias_dropped)``.
     """
     board_segs = {id(s) for s in pcb_data.segments}
@@ -2577,6 +2648,24 @@ def drop_phantom_copper(results, pcb_data: PCBData) -> Tuple[int, int]:
             kept = [v for v in vias if id(v) in board_vias]
             phantom_vias += len(vias) - len(kept)
             r['new_vias'] = kept
+
+    if original_segment_ids is not None:
+        emitted = {id(s) for r in results for s in (r.get('new_segments') or [])}
+        orphan = [s for s in pcb_data.segments
+                  if id(s) not in original_segment_ids and id(s) not in emitted]
+        if orphan:
+            _oids = {id(s) for s in orphan}
+            pcb_data.segments = [s for s in pcb_data.segments if id(s) not in _oids]
+            print(f"Dropped {len(orphan)} orphan routed segment(s) from the board "
+                  f"(rip/reroute copper no result references)")
+    if original_via_ids is not None:
+        emitted_v = {id(v) for r in results for v in (r.get('new_vias') or [])}
+        orphan_v = [v for v in pcb_data.vias
+                    if id(v) not in original_via_ids and id(v) not in emitted_v]
+        if orphan_v:
+            _ovids = {id(v) for v in orphan_v}
+            pcb_data.vias = [v for v in pcb_data.vias if id(v) not in _ovids]
+            print(f"Dropped {len(orphan_v)} orphan routed via(s) from the board")
     return phantom_segs, phantom_vias
 
 

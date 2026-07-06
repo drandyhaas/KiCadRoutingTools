@@ -871,16 +871,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Sync pcb_data with length-matched segments
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
 
-    # ----- Post-route cleanup (#215) --------------------------------------
-    # Mirror route.py's single-ended cleanup on the diff-pair copper. A redundant
-    # connector overshoot can poke within clearance of the PARTNER track (a tight
-    # terminal jog, a bare-pad target-swap stub): drop it when the net stays fully
-    # connected without it (connectivity-gated, so a load-bearing track is kept),
-    # then break any redundant cycle and trim the dead-end spur left behind.
-    # Scoped to the diff-pair nets so other copper is untouched.
-    from pcb_modification import (prune_grazing_segments, prune_redundant_cycles,
-                                  sweep_dead_ends, nudge_grazing_microshift,
-                                  nudge_grazing_vias, close_soft_joints)
+    # ----- Post-route cleanup (#215): the ONE shared pipeline ---------------
+    # Same passes, ordering and strip plumbing as route.py's single-ended
+    # cleanup (cleanup_pipeline.py), scoped to the diff-pair nets so other
+    # copper is untouched. snap/phantom/octolinear/neck are off for parity
+    # with this front's historical pass set -- enabling them here is a
+    # deliberate behavior change, not part of the #319 restructure.
+    from cleanup_pipeline import run_post_route_cleanup
     # ONLY fully-routed pairs: a failed / single-ended-deferred pair's fanout stubs
     # have free ends by design (the single-ended follow-up connects them), so a
     # dead-end sweep there would strip copper the next pass needs.
@@ -889,43 +886,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         if _pair.p_net_id in routed_results and _pair.n_net_id in routed_results:
             dp_scope.add(_pair.p_net_id)
             dp_scope.add(_pair.n_net_id)
-    cleanup_input_strip = []
-    _gz, _gzn, _gz_in = prune_grazing_segments(
-        results, pcb_data, dp_scope, clearance=config.clearance,
-        check_foreign_segments=True)
-    if _gz:
-        print(f"Diff-pair graze prune: removed {_gz} grazing segment(s) across {_gzn} net(s)")
-        cleanup_input_strip += _gz_in
-    # Micro-shift residual grazes the prune couldn't drop (load-bearing terminal
-    # joints / mid-segment bows, #276) -- verified + connectivity-gated.
-    _ms, _msn, _ms_in, _ = nudge_grazing_microshift(
-        results, pcb_data, dp_scope, clearance=config.clearance,
-        max_shift=config.grid_step / 2)
-    if _ms:
-        print(f"Diff-pair graze micro-shift: moved copper by its clearance "
-              f"shortfall on {_msn} net(s)")
-        cleanup_input_strip += _ms_in
-    # Sub-grid via nudge (#280): a grid-snapped via a few um inside clearance
-    # of a foreign via/track/hole moves by its shortfall (segments dragged).
-    _vn, _vnn, _ = nudge_grazing_vias(
-        results, pcb_data, dp_scope, clearance=config.clearance,
-        hole_to_hole=config.hole_to_hole_clearance,
-        max_shift=config.grid_step / 2)
-    if _vn:
-        print(f"Diff-pair via nudge: moved {_vn} grazing via(s) on {_vnn} net(s)")
-    _cy, _cyn, _cy_in = prune_redundant_cycles(
-        results, pcb_data, dp_scope, clearance=config.clearance)
-    if _cy:
-        print(f"Diff-pair cycle prune: removed {_cy} redundant loop segment(s) across {_cyn} net(s)")
-        cleanup_input_strip += _cy_in
-    _de, _dev, _de_in = sweep_dead_ends(results, pcb_data, dp_scope)
-    if _de or _dev:
-        print(f"Diff-pair dead-end sweep: trimmed {_de} segment(s), {_dev} via(s)")
-        cleanup_input_strip += _de_in
-    # Bridge same-net soft joints with a tiny coincident segment (#soft-joint).
-    _sj = close_soft_joints(results, pcb_data, dp_scope, config)
-    if _sj:
-        print(f"Diff-pair soft-joint bridge: added {_sj} tiny connector(s)")
+    _dp_cleanup = run_post_route_cleanup(
+        results, pcb_data, dp_scope, config,
+        label='Diff-pair ', snap=False, phantom=False,
+        octolinear=False, neck=False)
+    cleanup_input_strip = _dp_cleanup.input_strip_segments
 
     # Build summary data
     import json

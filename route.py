@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import os
+import copy
 
 # Run startup checks before other imports
 from startup_checks import run_all_checks
@@ -31,7 +32,8 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, close_soft_joints, prune_redundant_cycles, prune_grazing_segments, nudge_grazing_octolinear, nudge_grazing_microshift, nudge_grazing_vias, neck_wide_segments_grazing_pads
+from cleanup_pipeline import (run_post_route_cleanup, verify_board_file_parity,
+                              verify_written_file_parity)
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -911,9 +913,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # ship a silently-broken net (free_dap +3V3 IC2.13).
     from check_connected import check_net_connectivity as _cnc209
 
-    def _writelist_copper_209():
-        _s = {nid: list(lst) for nid, lst in _orig_seg_by_net.items()}
-        _v = {nid: list(lst) for nid, lst in _orig_via_by_net.items()}
+    def _writelist_copper_209(strip_seg_ids=frozenset(), strip_via_ids=frozenset()):
+        # strip_*_ids: original input copper the writer will DELETE from its
+        # verbatim copy (cleanup strip lists + the #220/#284 stale strips).
+        # The post-cleanup check must exclude it, or a strip that disconnects a
+        # net is invisible here -- the pre-snapshot passes empty sets (nothing
+        # stripped yet), so pre and post grade the same write model.
+        _s = {nid: [s for s in lst if id(s) not in strip_seg_ids]
+              for nid, lst in _orig_seg_by_net.items()}
+        _v = {nid: [v for v in lst if id(v) not in strip_via_ids]
+              for nid, lst in _orig_via_by_net.items()}
         for _r in results:
             for _seg in _r.get('new_segments') or []:
                 _s.setdefault(_seg.net_id, []).append(_seg)
@@ -950,118 +959,44 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             {(round(v.x, 3), round(v.y, 3)) for v in _pre_v_209.get(_nid, [])},
         )
 
-    # Close small gaps where a route stopped a fraction of a track width short of
-    # its same-net pad/via/trace (issue #84): extend the stub with a short
-    # connector when it clears other nets, so the copper physically touches
-    # instead of relying on a connectivity tolerance to bridge a gap KiCad's DRC
-    # would flag. Runs on the full routed board before the phantom/dead-end passes.
-    _snapped = snap_stub_gaps(results, pcb_data, sweep_scope_ids, config)
-    if _snapped:
-        print(f"Closed {_snapped} stub gap(s) to same-net copper")
+    # ---- Post-route cleanup: the ONE shared pipeline (#319 restructure) ----
+    # All passes run inside run_post_route_cleanup in their canonical order
+    # (see cleanup_pipeline.py), under the uniform contract that pcb_data is
+    # mutated in lockstep with the write-list -- pcb_data IS the board that
+    # will be written at every point after a pass.
+    #
+    # The freeze hook fires after the phantom drop, when the board holds
+    # exactly what ROUTING committed (rips applied, write-list reconciled) and
+    # no cleanup pass has trimmed it yet. The #220/#284 stale-input strip below
+    # must reference THAT board -- the rip signal -- not one a cleanup pass has
+    # since trimmed: a cleanup pass's own removals are already tracked in the
+    # pipeline's strip list, and feeding them into the stale strip too made it
+    # over-remove LOAD-BEARING input copper (the glasgow_revC B1 regression:
+    # 187 vs 28 stale strips, 6 nets dropped). copy.copy each object, not just
+    # the list: a list() alone is immune to list REBINDS but still shares
+    # objects, so an in-place field move (nudge_grazing_vias shifts a this-run
+    # via's x,y in place) would leak into the snapshot's signatures.
+    _committed_segments: list = []
+    _committed_vias: list = []
 
-    # Reconcile the write-list against the actual board so the output can never
-    # contain copper that was ripped off and not restored (issue #133). See
-    # drop_phantom_copper for the full rationale.
-    _phantom_segs, _phantom_vias = drop_phantom_copper(results, pcb_data)
-    if _phantom_segs or _phantom_vias:
-        print(f"Dropped {_phantom_segs} phantom segment(s) and {_phantom_vias} "
-              f"phantom via(s) not on the board from the write-list")
+    def _freeze_committed():
+        _committed_segments.extend(copy.copy(s) for s in pcb_data.segments)
+        _committed_vias.extend(copy.copy(v) for v in pcb_data.vias)
 
-    # Final dead-end sweep (issue #84): trim copper that dead-ends -- tap tails
-    # superseded by rip-and-reroute, spurs left when a blocker was ripped, and
-    # fanout/escape stubs a net routed away from or never completed -- which
-    # the per-commit self-intersection clean was removed (#159); only the
-    # fix since #148) does not reach. Runs after the phantom
-    # drop so it only sees real board copper. Scoped to the nets this run routed
-    # so untouched planes / excluded nets are never altered. Routed dead ends are
-    # dropped from `results`; original input-file dead ends are returned to strip
-    # from the output file.
-    # Enforce the per-net tree invariant (cycle analog of the dead-end sweep):
-    # rip-reroute / failed-edge retry re-adds same-net copper that closes loops
-    # (e.g. RAM_A9: 3 loops for a 3-pad net, with its short on a loop edge). Break
-    # every cycle by dropping a redundant non-bridge segment, preferring one that
-    # grazes foreign copper. Runs before the dead-end sweep so spurs left by a
-    # removed loop edge get trimmed. Scoped + zone-skipping like the dead-end sweep.
-    # Drop a terminal/tap segment that grazes a foreign pad/via below clearance when
-    # the net stays connected without it (issue #224 -- the redundant launch-jog /
-    # tap appendix). Runs BEFORE the cycle prune + dead-end sweep so the stub left
-    # when the grazing segment is removed gets collapsed (the whole appendage goes,
-    # not just the one segment). Connectivity-gated, so a load-bearing graze stays.
-    _gz_segs, _gz_nets, graze_input_segments = prune_grazing_segments(
-        results, pcb_data, sweep_scope_ids, clearance=config.clearance,
-        check_foreign_segments=True)
-    if _gz_segs:
-        print(f"Graze prune: removed {_gz_segs} grazing segment(s) across {_gz_nets} net(s)")
-
-    # For a grazing segment that is LOAD-BEARING (removal would disconnect the net),
-    # re-bend its octolinear jog around the pad instead (#224): the apex poking at the
-    # pad becomes a different 45-degree bend that keeps the same two anchor endpoints,
-    # so connectivity is untouched. Verified to clear before committing.
-    _nz_segs, _nz_nets, nudge_input_segments, _ = nudge_grazing_octolinear(
-        results, pcb_data, sweep_scope_ids, clearance=config.clearance)
-    if _nz_segs:
-        print(f"Graze nudge: re-bent grazing octolinear jog(s) on {_nz_nets} net(s)")
-
-    # For grazes the re-bend can't reach -- the closest approach IS an anchor
-    # vertex (a terminal joint 8-16um inside clearance, #276) or needs only a
-    # tiny mid-segment bow -- micro-shift the copper by the shortfall. Runs after
-    # the octolinear pass so it only sees its leftovers; verified + connectivity-
-    # gated like the other passes.
-    _ms_segs, _ms_nets, microshift_input_segments, _ = nudge_grazing_microshift(
-        results, pcb_data, sweep_scope_ids, clearance=config.clearance,
-        max_shift=config.grid_step / 2)
-    if _ms_segs:
-        print(f"Graze micro-shift: moved copper by its clearance shortfall on {_ms_nets} net(s)")
-
-    # A grid-snapped VIA can land a few um inside clearance of a foreign via/
-    # track/hole; the microshift never moves vias, so nudge the via itself
-    # (with its attached segment endpoints) by the sub-grid shortfall (#280).
-    _vn_moved, _vn_nets, _ = nudge_grazing_vias(
-        results, pcb_data, sweep_scope_ids, clearance=config.clearance,
-        hole_to_hole=config.hole_to_hole_clearance,
-        max_shift=config.grid_step / 2)
-    if _vn_moved:
-        print(f"Via nudge: moved {_vn_moved} grazing via(s) on {_vn_nets} net(s) "
-              f"by their sub-grid clearance shortfall (#280)")
-
-    _cy_segs, _cy_nets, cycle_input_segments = prune_redundant_cycles(
-        results, pcb_data, sweep_scope_ids, clearance=config.clearance)
-    if _cy_segs:
-        print(f"Cycle prune: removed {_cy_segs} redundant loop segment(s) across {_cy_nets} net(s)")
-
-    _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, sweep_scope_ids)
-    if _de_segs or _de_vias:
-        print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
-              f"{_de_vias} unsupported via(s)")
-
-    # Neck wide power segments that overlap a foreign pad at a fine-pitch terminal
-    # (the router exempts terminals, so a full-width trunk into a via-in-pad can
-    # short the neighbour pad). Centreline unchanged, so connectivity is preserved.
-    _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
-    if _necked:
-        print(f"Width neck: narrowed {_necked} wide segment(s) grazing a foreign pad")
-
-    # Bridge same-net SOFT JOINTS as the FINAL copper step (issue #319 ordering):
-    # two dangling free ends held together only by a sliver of cap overlap (a rip-up
-    # deleted the real connecting segment, a tap landed on-grid short, or a prune
-    # pass above dropped a coincident bridge). Runs AFTER all the subtractive passes
-    # (snap runs before them; the prune passes now mutate pcb_data), so nothing can
-    # re-delete the bridges it adds and it sees every gap the prunes opened. Adds a
-    # TINY coincident connector so the joint is a real connection, not a fragile
-    # near-open check_drc flags (#soft-joint).
-    _bridged = close_soft_joints(results, pcb_data, sweep_scope_ids, config)
-    if _bridged:
-        print(f"Bridged {_bridged} same-net soft joint(s) with a tiny connector")
-
-    # Merge any original input-file loop / grazing edges into the writer's strip list.
-    if cycle_input_segments:
-        dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments
-    if graze_input_segments:
-        dead_end_input_segments = list(dead_end_input_segments) + graze_input_segments
-    if nudge_input_segments:
-        dead_end_input_segments = list(dead_end_input_segments) + nudge_input_segments
-    if microshift_input_segments:
-        dead_end_input_segments = list(dead_end_input_segments) + microshift_input_segments
+    _cleanup = run_post_route_cleanup(
+        results, pcb_data, sweep_scope_ids, config,
+        freeze_hook=_freeze_committed,
+        # Lets the phantom step also remove ORPHAN routed copper from pcb_data
+        # (rip/reroute slivers no surviving result references), so board ==
+        # write model. Original input copper is identified by object identity
+        # (the keepalive prevents id() recycling, see _original_segments_keepalive).
+        # Stub layer-swap vias live in all_swap_vias (not in any result) but ARE
+        # written to the output -- protect them like originals or the orphan
+        # sweep would strip them from the board while the file keeps them.
+        original_segment_ids=original_segment_ids,
+        original_via_ids=({id(v) for lst in _orig_via_by_net.values() for v in lst}
+                          | {id(v) for v in all_swap_vias}))
+    dead_end_input_segments = _cleanup.input_strip_segments
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
     # write-list results and strips `segments_to_remove`. So an in-scope net's
@@ -1078,9 +1013,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # results.new_segments) -- otherwise a ripped/re-routed net that reproduces a
     # span exactly ships the verbatim original next to a byte-identical copy. This
     # is DRC-benign (same-net overlap is permitted) but keeps the output clean.
+    # The strip references the FROZEN committed board (_committed_segments,
+    # snapshotted by the pipeline's freeze hook), never live pcb_data: a
+    # cleanup pass's removals must not masquerade as rip signals (B1).
     _emitted_segs = [_s for _r in results for _s in (_r.get('new_segments') or [])]
     _stale_input_segs = compute_stale_input_segments(
-        _orig_seg_by_net, sweep_scope_ids, pcb_data.segments, _emitted_segs)
+        _orig_seg_by_net, sweep_scope_ids, _committed_segments, _emitted_segs)
     if _stale_input_segs:
         dead_end_input_segments = list(dead_end_input_segments) + _stale_input_segs
         print(f"Stripped {len(_stale_input_segs)} stale input segment(s) of "
@@ -1097,18 +1035,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _emitted_vias = [_v for _r in results for _v in (_r.get('new_vias') or [])]
     _emitted_vias += list(all_swap_vias)
     stale_input_vias = compute_stale_input_vias(
-        _orig_via_by_net, sweep_scope_ids, pcb_data.vias, _emitted_vias)
+        _orig_via_by_net, sweep_scope_ids, _committed_vias, _emitted_vias)
     if stale_input_vias:
         print(f"Stripping {len(stale_input_vias)} stale input via(s) of "
               f"ripped/re-routed nets not on the final board")
+
+    # Board-vs-file ledger (KICAD_BOARD_LEDGER=1): audit the pipeline contract
+    # now that every strip is known -- per in-scope net, pcb_data must equal
+    # the write model (original input copper - strips + emitted results).
+    verify_board_file_parity(
+        pcb_data, sweep_scope_ids, _orig_seg_by_net, results,
+        list(dead_end_input_segments) + list(_stale_input_segs),
+        label=' route')
 
     # Issue #209 fix C: re-check the snapshotted nets against the post-cleanup
     # write-list and report any net a cleanup pass disconnected, listing the
     # dropped copper. A non-empty list here is a cleanup BUG (the routed net was
     # connected and a graph-preserving pass severed it), not a routing failure.
+    # The post basis excludes everything the writer will STRIP (cleanup strip
+    # lists + stale strips) -- otherwise a strip that disconnects a net is
+    # invisible to this gate (the pre basis had no strips, so the comparison
+    # stays like-for-like).
     cleanup_disconnected = []
     if _pre_conn_209:
-        _post_s_209, _post_v_209 = _writelist_copper_209()
+        _post_s_209, _post_v_209 = _writelist_copper_209(
+            strip_seg_ids={id(s) for s in dead_end_input_segments}
+                          | {id(s) for s in _stale_input_segs},
+            strip_via_ids={id(v) for v in stale_input_vias})
         for _nid, (_was_conn, _was_disc, _pre_segsig, _pre_viasig) in _pre_conn_209.items():
             _pads209 = pcb_data.pads_by_net.get(_nid, [])
             _r209 = _cnc209(_nid, _post_s_209.get(_nid, []), _post_v_209.get(_nid, []),
@@ -1383,6 +1336,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # -- otherwise the whole chain FileNotFoundErrors on the missing output.
         if not wrote and output_file:
             _write_passthrough_output(input_file, output_file)
+        elif wrote and output_file:
+            # Deep ledger (KICAD_BOARD_LEDGER=1): the written FILE must match
+            # pcb_data per in-scope net -- audits the writer's text transforms
+            # (layer mods, polarity/target swap relabels, strips) on top of the
+            # in-memory contract checked before the write.
+            verify_written_file_parity(output_file, pcb_data, sweep_scope_ids,
+                                       label=' route')
 
     # Update schematics with swap info if directory specified
     if schematic_dir and single_ended_target_swap_info:

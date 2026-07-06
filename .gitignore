@@ -56,3 +56,6 @@ kicad_files/.history/
 # output patterns above (test_bga_fanout_summary, test_diff_pair_route).
 !/kicad_files/interf_u_unrouted_placed.kicad_pcb
 !/kicad_files/routed_output.kicad_pcb
+
+#Other
+/git_version*
