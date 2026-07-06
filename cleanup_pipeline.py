@@ -267,16 +267,26 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     return out
 
 
+def _q(x):
+    """Ledger coordinate quantizer: FIRST round at the writer's emission
+    precision (kicad_writer emits coordinates with :.6f), THEN bucket at 1um.
+    Without the pre-round, an in-memory float a half-ULP below a 0.5um
+    boundary (50.12249999...) and its 6dp file text (50.122500) land in
+    different 1um buckets and the post-write audit reports a phantom
+    board/file pair (castor_pollux VUSB etc. -- same copper, sub-0.5um)."""
+    return round(round(x, 6), 3)
+
+
 def _seg_ledger_sig(s):
-    a = (round(s.start_x, 3), round(s.start_y, 3))
-    b = (round(s.end_x, 3), round(s.end_y, 3))
-    return (min(a, b), max(a, b), s.layer, round(s.width, 3))
+    a = (_q(s.start_x), _q(s.start_y))
+    b = (_q(s.end_x), _q(s.end_y))
+    return (min(a, b), max(a, b), s.layer, _q(s.width))
 
 
 def _via_ledger_sig(v):
-    return (round(v.x, 3), round(v.y, 3),
-            round(getattr(v, 'size', 0) or 0, 3),
-            round(getattr(v, 'drill', 0) or 0, 3))
+    return (_q(v.x), _q(v.y),
+            _q(getattr(v, 'size', 0) or 0),
+            _q(getattr(v, 'drill', 0) or 0))
 
 
 def verify_written_file_parity(output_file, pcb_data, scope_net_ids,
