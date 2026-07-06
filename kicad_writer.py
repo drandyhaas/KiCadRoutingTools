@@ -699,7 +699,8 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
 
 def remove_segments_from_content(content: str, segments: List,
-                                 net_id_to_name: Dict = None) -> Tuple[str, int]:
+                                 net_id_to_name: Dict = None,
+                                 unmatched_out: List = None) -> Tuple[str, int]:
     """Delete whole ``(segment ...)`` blocks matching the given segments.
 
     Used by the dead-end sweep (issue #84) to strip original input-file copper
@@ -719,11 +720,19 @@ def remove_segments_from_content(content: str, segments: List,
     def seg_key(p1, p2, layer, net_token):
         return (frozenset((p1, p2)), layer, net_token)
 
-    targets = set()
+    # COUNTED multiset, not a set (#318 follow-up): a board can legitimately
+    # carry N identical-span segments with only K < N of them strip-listed
+    # (sechzig /PWR1V35: two byte-identical slivers, cleanup removed one). A
+    # set-based match deleted EVERY block with the key, including the keeper.
+    from collections import Counter
+    targets = Counter()
+    by_key = {}
     for s in segments:
         net_token = (net_id_to_name.get(s.net_id) if use_names else s.net_id)
-        targets.add(seg_key(pos_key(s.start_x, s.start_y),
-                            pos_key(s.end_x, s.end_y), s.layer, net_token))
+        k = seg_key(pos_key(s.start_x, s.start_y),
+                    pos_key(s.end_x, s.end_y), s.layer, net_token)
+        targets[k] += 1
+        by_key.setdefault(k, []).append(s)
 
     start_re = re.compile(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)')
     end_re = re.compile(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)')
@@ -781,17 +790,28 @@ def remove_segments_from_content(content: str, segments: List,
             key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
                           pos_key(float(me.group(1)), float(me.group(2))),
                           ml.group(1), net_token)
-            if key in targets:
+            if targets.get(key, 0) > 0:
+                targets[key] -= 1
                 keep = False
                 count += 1
         if keep:
             out.append(block)
         pos = k
+    if unmatched_out is not None:
+        # Strip targets whose block was NOT found (e.g. its layer/net token in
+        # the text only matches after the writer's later transforms). The
+        # residual post-transform pass retries EXACTLY these -- passing the
+        # full list again would let round 2 consume a same-key KEEPER block
+        # that round 1 legitimately left (the counted-multiset guarantee).
+        for k, n in targets.items():
+            if n > 0:
+                unmatched_out.extend(by_key[k][:n])
     return ''.join(out), count
 
 
 def remove_vias_from_content(content: str, vias: List,
-                             net_id_to_name: Dict = None) -> Tuple[str, int]:
+                             net_id_to_name: Dict = None,
+                             unmatched_out: List = None) -> Tuple[str, int]:
     """Delete whole ``(via ...)`` blocks matching the given vias.
 
     Via twin of remove_segments_from_content: strips original input-file vias
@@ -805,10 +825,16 @@ def remove_vias_from_content(content: str, vias: List,
 
     use_names = net_id_to_name is not None and is_kicad_10(content)
 
-    targets = set()
+    # Counted multiset like the segment strip (#318 follow-up): only remove as
+    # many blocks per key as were actually strip-listed.
+    from collections import Counter
+    targets = Counter()
+    _v_by_key = {}
     for v in vias:
         net_token = (net_id_to_name.get(v.net_id) if use_names else v.net_id)
-        targets.add((pos_key(v.x, v.y), net_token))
+        _vk = (pos_key(v.x, v.y), net_token)
+        targets[_vk] += 1
+        _v_by_key.setdefault(_vk, []).append(v)
 
     at_re = re.compile(r'\(at\s+([\d.-]+)\s+([\d.-]+)\)')
     net_name_re = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
@@ -860,12 +886,18 @@ def remove_vias_from_content(content: str, vias: List,
             else:
                 mn = net_id_re.search(block)
                 net_token = int(mn.group(1)) if mn else None
-            if (pos_key(float(ma.group(1)), float(ma.group(2))), net_token) in targets:
+            _vk = (pos_key(float(ma.group(1)), float(ma.group(2))), net_token)
+            if targets.get(_vk, 0) > 0:
+                targets[_vk] -= 1
                 keep = False
                 count += 1
         if keep:
             out.append(block)
         pos = k
+    if unmatched_out is not None:
+        for _vk, n in targets.items():
+            if n > 0:
+                unmatched_out.extend(_v_by_key[_vk][:n])
     return ''.join(out), count
 
 

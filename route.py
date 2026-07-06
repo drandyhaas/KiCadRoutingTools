@@ -927,6 +927,42 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # ship a silently-broken net (free_dap +3V3 IC2.13).
     from check_connected import check_net_connectivity as _cnc209
 
+    # Gate basis: ON-BOARD originals at gate-setup time (routing is done, so
+    # pcb_data already reflects rip-and-not-restored losses). Using the
+    # pristine input snapshot here mis-attributed ROUTING losses to cleanup:
+    # a ripped-and-lost net's original copper made the PRE check read
+    # "connected", the stale strip then truthfully removed the ghost copper
+    # from the file, and the POST check blamed the cleanup pass (smartknob
+    # +5V: "cleanup DISCONNECTED ... dropped 36 segment(s)" on every wave,
+    # while the disconnect was really a routing failure).
+    _gate_seg_by_net: Dict[int, list] = {}
+    for _s0 in pcb_data.segments:
+        if id(_s0) in original_segment_ids:
+            _gate_seg_by_net.setdefault(_s0.net_id, []).append(_s0)
+    _gate_orig_via_ids = {id(v) for lst in _orig_via_by_net.values() for v in lst}
+    _gate_via_by_net: Dict[int, list] = {}
+    for _v0 in pcb_data.vias:
+        if id(_v0) in _gate_orig_via_ids:
+            _gate_via_by_net.setdefault(_v0.net_id, []).append(_v0)
+    # Board membership for RESULTS copper at gate-setup time: a result can
+    # still reference copper a later net's rip-up removed from the board (the
+    # phantom drop reconciles that inside the pipeline, AFTER the pre-check).
+    # Counting it inflated the PRE connectivity, so a net routing honestly
+    # failed (smartknob +5V, 5 failed multipoint pads) was re-blamed on
+    # cleanup when the phantom drop removed the ghost copper from the
+    # write-list.
+    _gate_board_seg_ids = {id(s) for s in pcb_data.segments}
+    _gate_board_via_ids = {id(v) for v in pcb_data.vias}
+    # ...but only SETUP-ERA results copper needs board membership: cleanup
+    # passes legitimately ADD copper to results afterwards (snap connectors,
+    # octolinear/microshift replacements, soft-joint bridges) which is not in
+    # the setup snapshot -- filtering those out made every repaired net grade
+    # "disconnected" in the post check (false +5V//STRAIN_S- reports).
+    _gate_setup_result_seg_ids = {id(s) for r in results
+                                  for s in (r.get('new_segments') or [])}
+    _gate_setup_result_via_ids = {id(v) for r in results
+                                  for v in (r.get('new_vias') or [])}
+
     def _writelist_copper_209(strip_seg_ids=frozenset(), strip_via_ids=frozenset()):
         # strip_*_ids: original input copper the writer will DELETE from its
         # verbatim copy (cleanup strip lists + the #220/#284 stale strips).
@@ -934,14 +970,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # net is invisible here -- the pre-snapshot passes empty sets (nothing
         # stripped yet), so pre and post grade the same write model.
         _s = {nid: [s for s in lst if id(s) not in strip_seg_ids]
-              for nid, lst in _orig_seg_by_net.items()}
+              for nid, lst in _gate_seg_by_net.items()}
         _v = {nid: [v for v in lst if id(v) not in strip_via_ids]
-              for nid, lst in _orig_via_by_net.items()}
+              for nid, lst in _gate_via_by_net.items()}
         for _r in results:
             for _seg in _r.get('new_segments') or []:
-                _s.setdefault(_seg.net_id, []).append(_seg)
+                if (id(_seg) not in _gate_setup_result_seg_ids
+                        or id(_seg) in _gate_board_seg_ids):
+                    _s.setdefault(_seg.net_id, []).append(_seg)
             for _via in _r.get('new_vias') or []:
-                _v.setdefault(_via.net_id, []).append(_via)
+                if (id(_via) not in _gate_setup_result_via_ids
+                        or id(_via) in _gate_board_via_ids):
+                    _v.setdefault(_via.net_id, []).append(_via)
         # Stub layer-swap vias are written to the output but live only in
         # all_swap_vias (not in any result's new_vias, and the per-net snapshot
         # predates them). Without them every layer-swapped stub looks severed
