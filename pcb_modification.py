@@ -1455,6 +1455,16 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         dropped_idx = set()
         # Shortest grazing segments first: an appendix tip / tap stub is the most
         # likely to be redundant, and dropping it can only help the longer ones.
+        # Soft-joint-aware removal (#318): removing a COINCIDENT-BRIDGE segment
+        # whose neighbours' caps overlap passes the overlap-connectivity gate
+        # but manufactures a soft joint that close_soft_joints then cannot
+        # bridge (the bridge would graze the same foreign copper the removed
+        # segment did -- smartknob /STRAIN_S- 141um diagonal vs pad R5.2, the
+        # glasgow diff-step jog vs the partner leg). For such a segment,
+        # prefer NECKING it to clear the graze (fixes the violation AND keeps
+        # the coincident chain); only remove when even the fab floor cannot
+        # clear. Baseline joints (pre-existing) never block a removal.
+        baseline_joints = _soft_joint_pairs(net_segs, net_vias, net_pads)
         for s in sorted(grazing, key=lambda s: math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)):
             trial_excl = dropped_idx | {seg_pos[id(s)]}
             if graph is not None:
@@ -1469,6 +1479,33 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 after = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)
             if worse(before, after):
                 continue
+            kept_after = [x for i, x in enumerate(net_segs) if i not in trial_excl]
+            if _soft_joint_pairs(kept_after, net_vias, net_pads) - baseline_joints:
+                # Removal would open a soft joint: neck to clear instead.
+                from single_ended_routing import (_seg_foreign_pad_dist as _fpd,
+                                                  _seg_foreign_via_dist as _fvd,
+                                                  _fab_track_floor)
+                d = min(_fpd(pcb_data, s.net_id, s.start_x, s.start_y,
+                             s.end_x, s.end_y, s.layer),
+                        _fvd(pcb_data, s.net_id, s.start_x, s.start_y,
+                             s.end_x, s.end_y, s.layer))
+                if check_foreign_segments:
+                    for o in pcb_data.segments:
+                        if o.net_id == s.net_id or o.layer != s.layer or o is s:
+                            continue
+                        dd = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
+                                               o.start_x, o.start_y, o.end_x, o.end_y) - o.width / 2.0
+                        if dd < d:
+                            d = dd
+                allowed = 2.0 * (d - clearance - 1e-4)
+                floor = _fab_track_floor(pcb_data)
+                if allowed >= floor - 1e-9 and allowed < s.width - 1e-9:
+                    s.width = round(max(floor, allowed), 4)
+                    continue  # necked clear; keep the coincident bridge
+                if allowed >= s.width - 1e-9:
+                    continue  # already clear at current width (stale cache)
+                # fab floor can't clear it either: fall through to removal
+                # (a real violation outweighs the warning-grade soft joint)
             dropped_idx.add(seg_pos[id(s)])
             dropped.append(s)
         if not dropped:
