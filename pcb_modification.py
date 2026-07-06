@@ -206,6 +206,35 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
     return kept, removed
 
 
+# Width clamp for the STRICT connectivity gate (#322): overlap connectivity
+# is width-dependent (endpoint caps touch when gap < (w1+w2)/2), so a fat
+# power track grades "connected" across a 0.28mm hole in its own chain. For
+# REMOVAL decisions the cleanup passes also grade a width-clamped twin of the
+# net -- 0.02mm keeps quantization-level coincidence (<=10um slack per end,
+# matching the cycle prune's tol and SOFT_JOINT_MIN_GAP) while cap lenses and
+# wide T-slop no longer count. Grading/checker semantics are untouched: this
+# is deliberately asymmetric (measure reality physically; refuse to ship
+# fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
+# the overlap gate until 5 pads were genuinely disconnected).
+_STRICT_GATE_WIDTH = 0.02
+
+
+def _strict_conn_graph(net_id, universe, vias, pads, zones):
+    """check_net_connectivity graph over width-clamped copies of ``universe``
+    (same order, so analyze_conn_excluding indices are interchangeable with
+    the physical graph's). Returns (result_dict, graph_or_None)."""
+    import copy as _copy
+    from check_connected import check_net_connectivity
+    clamped = []
+    for s in universe:
+        c = _copy.copy(s)
+        c.width = min(c.width, _STRICT_GATE_WIDTH)
+        clamped.append(c)
+    r = check_net_connectivity(net_id, clamped, vias, pads, zones,
+                               return_graph=True)
+    return r, r.get('graph')
+
+
 def _safe_prune_net(net_id, prunable, vias, pads, zones,
                     anchor_segments=None, aggressive=False, tol=0.05):
     """Prune a net's dead ends, but never at the cost of pad connectivity.
@@ -242,6 +271,9 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     universe = anchor + list(prunable)
     graph = check_net_connectivity(net_id, universe, vias, pads, zones,
                                    return_graph=True).get('graph')
+    # Strict twin (#322): removals must ALSO not worsen coincidence-level
+    # connectivity, or fat-cap lenses let a chain be chipped hole by hole.
+    _, graph_strict = _strict_conn_graph(net_id, universe, vias, pads, zones)
     seg_pos = {id(s): i for i, s in enumerate(universe)}
     prunable_ids = [id(s) for s in prunable]
     _verify = os.environ.get('PRUNE_CONN_VERIFY')
@@ -256,8 +288,11 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
                                                  zones)['disconnected_pads'])
                 assert n == ref, \
                     f"safe-prune fast-path mismatch: net {net_id} ({n} vs {ref})"
-            return n
-        return len(check_net_connectivity(net_id, anchor + segs, vias, pads, zones)['disconnected_pads'])
+            ns = (len(analyze_conn_excluding(graph_strict, excl)['disconnected_pads'])
+                  if graph_strict is not None else 0)
+            return (n, ns)
+        return (len(check_net_connectivity(net_id, anchor + segs, vias, pads,
+                                           zones)['disconnected_pads']), 0)
 
     base = disconnected(list(prunable))
     kept = list(prunable)
@@ -286,7 +321,8 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
             break
         aids = {id(c) for c in active}
         trial_all = [s for s in kept if id(s) not in aids]
-        if disconnected(trial_all) <= base:
+        _d = disconnected(trial_all)
+        if _d[0] <= base[0] and _d[1] <= base[1]:
             kept = trial_all
             kept_ids = {id(s) for s in kept}
             removed.extend(active)
@@ -294,7 +330,8 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
             progress = False
             for c in active:
                 trial = [s for s in kept if s is not c]
-                if disconnected(trial) <= base:
+                _d = disconnected(trial)
+                if _d[0] <= base[0] and _d[1] <= base[1]:
                     kept = trial
                     kept_ids.discard(id(c))
                     removed.append(c)
@@ -1449,6 +1486,11 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         before = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
                                         net_zones, return_graph=True)
         graph = before.get('graph')
+        # Strict twin (#322): see _STRICT_GATE_WIDTH. A mid-chain removal whose
+        # hole is lens-bridged by fat caps passes the physical gate; the strict
+        # gate sees the split immediately.
+        before_strict, graph_strict = _strict_conn_graph(
+            net_id, net_segs, net_vias, net_pads, net_zones)
         seg_pos = {id(s): i for i, s in enumerate(net_segs)}
         _verify = os.environ.get('PRUNE_CONN_VERIFY')
         dropped = []
@@ -1479,6 +1521,9 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 after = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)
             if worse(before, after):
                 continue
+            if graph_strict is not None and worse(
+                    before_strict, analyze_conn_excluding(graph_strict, trial_excl)):
+                continue  # #322: coincidence-level connectivity would worsen
             kept_after = [x for i, x in enumerate(net_segs) if i not in trial_excl]
             if _soft_joint_pairs(kept_after, net_vias, net_pads) - baseline_joints:
                 # Removal would open a soft joint: neck to clear instead.
@@ -1509,7 +1554,21 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                     # them drifted board vs file, and a strip+re-emit attempt
                     # here interacted badly with the later passes' results
                     # bookkeeping -- sechzig /DRAM_CK, /DRAM_LDQS_P).
+                    #
+                    # #322: overlap connectivity is WIDTH-DEPENDENT -- a neck
+                    # can silently break a cap/T contact elsewhere on the
+                    # chain (smartknob +5V: neighbour necked 0.3->0.22 opened
+                    # a 0.28mm lens the physical gate had just relied on).
+                    # Verify the necked net before committing; revert + defer
+                    # to the nudges if connectivity would worsen.
+                    _old_w = s.width
                     s.width = round(max(floor, allowed), 4)
+                    _kept_now = [x for i, x in enumerate(net_segs)
+                                 if i not in dropped_idx]
+                    if worse(before, check_net_connectivity(
+                            net_id, _kept_now, net_vias, net_pads, net_zones)):
+                        s.width = _old_w  # neck would break a contact: defer
+                        continue
                     continue  # necked clear; keep the coincident bridge
                 if allowed >= s.width - 1e-9:
                     continue  # already clear at current width (stale cache)
