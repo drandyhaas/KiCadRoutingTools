@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import PCBData, parse_kicad_pcb
+from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads)
 
@@ -51,7 +51,7 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
         for match in re.finditer(zone_pattern_v10, content):
             zones.append(ZoneInfo(
                 net_id=0,  # No numeric ID in KiCad 10
-                net_name=match.group(1),
+                net_name=_unescape_kicad_string(match.group(1)),
                 layer=match.group(2)
             ))
 
@@ -164,8 +164,14 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int],
                     continue
             elif net_name_set:
                 # KiCad 10: (net "name")
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', element_text)
-                if net_match_v10 and net_match_v10.group(1) in net_name_set:
+                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', element_text)
+                # The file stores the ESCAPED name; the exclude set holds the
+                # parser's unescaped names -- without unescaping, every
+                # backslash-named ripped net evaded this filter and its stale
+                # copper shipped OVERLAPPING the tap via route_planes placed in
+                # the vacated spot (neo6502 GND-via-on-/GPIO9\OE2#, found by
+                # the #319 DRC attribution; #312/#264 escaping family).
+                if net_match_v10 and _unescape_kicad_string(net_match_v10.group(1)) in net_name_set:
                     i += 1
                     continue
 
@@ -231,9 +237,10 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
                     continue
             elif layer_match and remove_name_set:
                 # KiCad 10: (net "name")
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', element_text)
+                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', element_text)
                 if net_match_v10:
-                    zone_net_name = net_match_v10.group(1)
+                    # Unescape: remove_name_set holds parser display names.
+                    zone_net_name = _unescape_kicad_string(net_match_v10.group(1))
                     zone_layer = layer_match.group(1)
                     if (zone_net_name, zone_layer) in remove_name_set:
                         i += 1

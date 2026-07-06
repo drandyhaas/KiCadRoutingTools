@@ -654,7 +654,7 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
     if use_names:
         # KiCad 10: match (net "name")
-        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+"([^"]*)"\)'
+        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
     else:
         # KiCad 9: match (net <id>)
         segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
@@ -672,8 +672,11 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
         # Check if this segment has endpoints in our position set and correct net
         if use_names:
-            seg_net_name = match.group(6)
-            matches_net = seg_net_name == old_net_name
+            # group(6) is the RAW escaped file text; the caller's names are the
+            # parser's unescaped display names (#312/#264 escaping family --
+            # without this, backslash-named nets silently evade the swap).
+            raw_net = match.group(6)
+            matches_net = _unescape_kicad_string(raw_net) == old_net_name
         else:
             seg_net_id = int(match.group(6))
             matches_net = seg_net_id == old_net_id
@@ -682,7 +685,11 @@ def swap_segment_nets_at_positions(content: str, positions: set,
             if layer is None or seg_layer == layer:
                 count += 1
                 if use_names:
-                    return match.group(0).replace(f'(net "{old_net_name}")', f'(net "{new_net_name}")')
+                    # Replace the raw token as it appears in the file; write the
+                    # new name RE-ESCAPED or a backslash name ships under-escaped.
+                    return match.group(0).replace(
+                        f'(net "{raw_net}")',
+                        f'(net "{_escape_net_name(new_net_name)}")')
                 else:
                     return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)
@@ -883,7 +890,7 @@ def swap_via_nets_at_positions(content: str, positions: set,
     use_names = old_net_name is not None and new_net_name is not None
 
     if use_names:
-        via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+"([^"]*)"\)'
+        via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
     else:
         via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+(\d+)\)'
 
@@ -901,8 +908,10 @@ def swap_via_nets_at_positions(content: str, positions: set,
         via_x, via_y = float(match.group(1)), float(match.group(2))
 
         if use_names:
-            via_net_name = match.group(3)
-            matches_net = via_net_name == old_net_name
+            # Raw escaped file text vs unescaped display name (see the
+            # segment twin above).
+            raw_net = match.group(3)
+            matches_net = _unescape_kicad_string(raw_net) == old_net_name
         else:
             via_net_id = int(match.group(3))
             matches_net = via_net_id == old_net_id
@@ -910,7 +919,9 @@ def swap_via_nets_at_positions(content: str, positions: set,
         if matches_net and is_near_any_position(via_x, via_y, positions, tolerance):
             count += 1
             if use_names:
-                return match.group(0).replace(f'(net "{old_net_name}")', f'(net "{new_net_name}")')
+                return match.group(0).replace(
+                    f'(net "{raw_net}")',
+                    f'(net "{_escape_net_name(new_net_name)}")')
             else:
                 return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)
