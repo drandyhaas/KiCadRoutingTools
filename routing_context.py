@@ -701,6 +701,29 @@ def restore_ripped_net(
     if not ripped_saved:
         return
 
+    # #329 audit: this restore was blind, unlike restore_net (#134). Every
+    # caller restores IMMEDIATELY after its own failed attempt (which commits
+    # no copper), so a collision "cannot happen" -- but a graze/partial result
+    # that ever starts committing copper first would turn the verbatim re-add
+    # into a different-net short. Cheap belt-and-braces: skip the copper
+    # re-add if it would collide, and leave the net for the reroute queue
+    # (unrouted beats shorted); the bookkeeping below still runs so the net
+    # is tracked either way.
+    from rip_up_reroute import _saved_route_collides
+    if _saved_route_collides(ripped_saved, pcb_data, list(ripped_ids), config.clearance):
+        names = [pcb_data.nets[r].name if r in pcb_data.nets else str(r) for r in ripped_ids]
+        print(f"    restore of {'/'.join(names)} would collide with copper routed "
+              f"meanwhile -- leaving unrouted for reroute (#134 guard)")
+        for rid in ripped_ids:
+            if rid in routed_net_ids:
+                routed_net_ids.remove(rid)
+            if rid not in remaining_net_ids:
+                remaining_net_ids.append(rid)
+            routed_results.pop(rid, None)
+        if ripped_saved in results:
+            results.remove(ripped_saved)
+        return
+
     add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
 
     for rid in ripped_ids:

@@ -512,7 +512,7 @@ def restore_failed_reroute_nets(
                                   'layers': v.layers, 'net_id': nid})
 
     if not restored_net_ids:
-        return [], 0
+        return [], 0, 0
 
     # A plane via that lands within (via_r + own_radius + clearance) of restored
     # copper is an electrical short between the signal net and the plane net.

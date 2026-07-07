@@ -959,6 +959,34 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                 if not supported:
                     removed_via_ids.add(id(v))
     if removed_via_ids:
+        # The physical-attach heuristic is a proxy and has dropped a LOAD-
+        # BEARING via before (glasgow Z0, patched by widening reach -- but any
+        # endpoint past _v_reach still trips it). VERIFY per net with the
+        # authoritative connectivity check, exactly like prune_redundant_cycles:
+        # if dropping a net's "unsupported" vias splits it or strands a pad,
+        # keep that net's vias (a floating via is cosmetic; a broken net is
+        # not, #329 audit).
+        from check_connected import check_net_connectivity
+        for net_id, kept in kept_segs_by_net.items():
+            net_vias_all, _seen = [], set()
+            for v in [v for v in pcb_data.vias if v.net_id == net_id] + \
+                     [v for r in results for v in (r.get('new_vias') or []) if v.net_id == net_id]:
+                if id(v) not in _seen:
+                    _seen.add(id(v))
+                    net_vias_all.append(v)
+            drop = [v for v in net_vias_all if id(v) in removed_via_ids]
+            if not drop:
+                continue
+            pads = pcb_data.pads_by_net.get(net_id, [])
+            zones = [z for z in all_zones if z.net_id == net_id]
+            before = check_net_connectivity(net_id, kept, net_vias_all, pads, zones)
+            keep_v = [v for v in net_vias_all if id(v) not in removed_via_ids]
+            after = check_net_connectivity(net_id, kept, keep_v, pads, zones)
+            if (before.get('connected') and not after.get('connected')) or \
+               len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or \
+               (after.get('num_components') or 1) > (before.get('num_components') or 1):
+                for v in drop:
+                    removed_via_ids.discard(id(v))
         for r in results:
             vias = r.get('new_vias')
             if vias:
