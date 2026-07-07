@@ -24,6 +24,7 @@ from stub_layer_switching import (
     STUB_OVERLAP_Y_TOLERANCE, STUB_POSITION_TOLERANCE
 )
 from diff_pair_routing import get_diff_pair_endpoints
+from geometry_utils import point_to_segment_distance
 from connectivity import get_net_endpoints, get_multipoint_net_pads
 
 _DRC_CLEARANCE_MARGIN = 0.05
@@ -85,6 +86,24 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
                 # drills: net-independent (same-net THT pad drill still conflicts)
                 if check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
                     return False, "pad via drill grazes a pad drill (hole-to-hole)"
+        # vs foreign SEGMENTS (#336): a through-via's barrel spans every layer,
+        # so any foreign track within (via_r + w/2 + clearance) is a VIA-SEGMENT
+        # graze -- butterstick's S16 swap via landed 0.10mm from S19's In3
+        # fanout stub because nothing here looked at segments.
+        vr = v.size / 2.0
+        for sg in pcb_data.segments:
+            if sg.net_id == v.net_id:
+                continue
+            need = vr + sg.width / 2.0 + clearance - margin
+            # cheap bbox reject before the exact distance
+            if (v.x < min(sg.start_x, sg.end_x) - need or
+                    v.x > max(sg.start_x, sg.end_x) + need or
+                    v.y < min(sg.start_y, sg.end_y) - need or
+                    v.y > max(sg.start_y, sg.end_y) + need):
+                continue
+            if point_to_segment_distance(v.x, v.y, sg.start_x, sg.start_y,
+                                         sg.end_x, sg.end_y) < need:
+                return False, "pad via grazes a foreign track (via-segment)"
     return True, ""
 
 
