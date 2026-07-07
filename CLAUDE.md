@@ -95,6 +95,17 @@ same change — and vice versa. When adding a flag, grep the
 `kicad_routing_plugin/` call sites for the function you changed and wire it
 through there too.
 
+**Tracking the last-audited commit:** `.gui-parity-checked` (repo root,
+git-committed) holds the SHA of the last commit a full CLI/GUI parity audit
+covered, plus the date and outcome. To bring it up to date: `git log
+--oneline <that-sha>..HEAD` to see what's new, `git diff <that-sha>..HEAD --
+<CLI scripts> kicad_routing_plugin/` to see the engine-side vs GUI-side
+diffs, then check every new engine parameter/flag/results-data key against
+the GUI call sites (per the rule of thumb above). When the audit finds and
+fixes a gap, commit the fix first, note it in the file, then update the file
+to current `HEAD` and commit that too — so the recorded SHA always reflects
+"parity confirmed as of here," not "parity assumed."
+
 ## KiCad Parser Usage
 
 Full user-facing API docs (parser, writer, modification, config, net
