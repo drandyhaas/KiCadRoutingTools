@@ -90,7 +90,8 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
-                        distant_trace_radius=0.0, shared_via_maps=None):
+                        distant_trace_radius=0.0, shared_via_maps=None,
+                        partial_restores=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -160,33 +161,48 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             from plane_blocker_detection import _restored_piece_collides
             new_segs = list(result.segments or [])
             new_vias = [result.via] if result.via else []
+            clr = result.clearance_used or tap_config.clearance
             for blocker, rsegs, rvias in ripped_local:
-                collides = False
+                keep_segs, keep_vias, dropped = [], [], 0
                 for s in rsegs:
                     sd = {'start': (s.start_x, s.start_y),
                           'end': (s.end_x, s.end_y),
                           'width': s.width, 'layer': s.layer}
                     if _restored_piece_collides(sd, None, new_vias, new_segs,
-                                                via_size, result.clearance_used
-                                                or tap_config.clearance):
-                        collides = True
-                        break
-                if not collides:
-                    for v in rvias:
-                        vd = {'x': v.x, 'y': v.y, 'size': v.size}
-                        if _restored_piece_collides(None, vd, new_vias, new_segs,
-                                                    via_size, result.clearance_used
-                                                    or tap_config.clearance):
-                            collides = True
-                            break
-                if collides:
+                                                via_size, clr):
+                        dropped += 1
+                    else:
+                        keep_segs.append(s)
+                for v in rvias:
+                    vd = {'x': v.x, 'y': v.y, 'size': v.size}
+                    if _restored_piece_collides(None, vd, new_vias, new_segs,
+                                                via_size, clr):
+                        dropped += 1
+                    else:
+                        keep_vias.append(v)
+                if not keep_segs and not keep_vias:
+                    # Nothing restorable: honest full rip for the reconnect pass.
                     if blocker not in ripped_net_ids:
                         ripped_net_ids.append(blocker)
-                else:
-                    pcb_data.segments.extend(rsegs)
-                    pcb_data.vias.extend(rvias)
-                    if shared_via_maps is not None:
-                        shared_via_maps.note_net_restored(blocker)
+                    continue
+                pcb_data.segments.extend(keep_segs)
+                pcb_data.vias.extend(keep_vias)
+                if shared_via_maps is not None:
+                    shared_via_maps.note_net_restored(blocker)
+                if dropped:
+                    # Partial: the writer must strip the net's input copper and
+                    # emit the kept pieces (board==file), and the reconnect
+                    # pass closes the small gap instead of re-threading the
+                    # whole net through congestion.
+                    if partial_restores is not None:
+                        partial_restores.append((blocker, keep_segs, keep_vias, dropped))
+                        bn = pcb_data.nets[blocker].name if blocker in pcb_data.nets else blocker
+                        print(f"(partial restore {bn}: -{dropped} piece(s))", end=" ", flush=True)
+                    elif blocker not in ripped_net_ids:
+                        # No partial channel (defensive): fall back to full rip.
+                        pcb_data.segments = [x for x in pcb_data.segments if x not in keep_segs]
+                        pcb_data.vias = [x for x in pcb_data.vias if x not in keep_vias]
+                        ripped_net_ids.append(blocker)
             return result
         failure = result
     # FINAL FAILURE: restore every ripped net's copper (#329).
@@ -491,6 +507,10 @@ def route_planes(
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
     plane_net_ids = set(unique_nets.keys())
     ripped_net_ids: List[int] = []
+    # (net_id, kept_segs, kept_vias, dropped_count) for nets partially
+    # restored by the success-path settle: input copper stripped at write,
+    # kept pieces emitted as new copper (board==file), gap left for reconnect.
+    partial_restores: List = []
     # Trace-to-existing-plane-copper reaches the full via-search radius
     # (max_search_radius, the --max-search-radius CLI value) so a boxed pad whose
     # nearest existing same-net via sits past a smaller cap is still reachable
@@ -553,7 +573,8 @@ def route_planes(
                             max_search_radius, via_size, via_drill, max_rip_nets,
                             plane_net_ids, result, ripped_net_ids, verbose,
                             distant_trace_radius=distant_radius,
-                            shared_via_maps=shared_maps)
+                            shared_via_maps=shared_maps,
+                            partial_restores=partial_restores)
                         if rr is not None:
                             result = rr
                     if result.success:
@@ -853,8 +874,9 @@ def route_planes(
         for _v in pcb_data.vias:
             _vias_now.setdefault(_v.net_id, []).append(_v)
         for _nid in sorted(_pre_connected_293):
-            if _nid in (ripped_net_ids or []):
-                continue
+            if _nid in (ripped_net_ids or []) or \
+               _nid in {pr[0] for pr in partial_restores}:
+                continue  # ripped/partial nets are reported for reconnect separately
             _pads = pcb_data.pads_by_net.get(_nid, [])
             _r = _cnc293(_nid, _segs_now.get(_nid, []), _vias_now.get(_nid, []),
                          _pads, _zones_by_net_293.get(_nid, []))
@@ -891,19 +913,58 @@ def route_planes(
     # The caller deletes the ripped nets' old tracks (leaving them unrouted); the
     # user reconnects them by running the routing tab afterward (#141 reverted - no
     # in-step reroute). No file is written here.
+    # Partial restores: emit kept pieces as new copper and strip the nets'
+    # input copper (replacement semantics -- same as route_planes b2557cd).
+    # A net can be partially restored more than once (re-ripped by a later
+    # pad); only its LATEST kept-set is live in pcb_data -- emitting earlier
+    # sets would duplicate copper (the route_planes stale-emission bug).
+    _latest: Dict[int, tuple] = {}
+    for _entry in partial_restores:
+        _latest[_entry[0]] = _entry
+    # A net re-ripped later and left FULLY ripped must not emit its stale
+    # earlier kept-set: full rip wins (it is in ripped_net_ids, zero copper).
+    for _rid in ripped_net_ids:
+        _latest.pop(_rid, None)
+    partial_ids: List[int] = []
+    for _pid, _ksegs, _kvias, _dropped in _latest.values():
+        if _pid not in partial_ids:
+            partial_ids.append(_pid)
+        for _ks in _ksegs:
+            all_new_segments.append({'start': (_ks.start_x, _ks.start_y),
+                                     'end': (_ks.end_x, _ks.end_y),
+                                     'width': _ks.width, 'layer': _ks.layer,
+                                     'net_id': _pid})
+        for _kv in _kvias:
+            all_new_vias.append({'x': _kv.x, 'y': _kv.y, 'size': _kv.size,
+                                 'drill': _kv.drill, 'layers': _kv.layers,
+                                 'net_id': _pid})
+    if partial_ids:
+        _pnames = [pcb_data.nets[p].name if p in pcb_data.nets else f"net_{p}"
+                   for p in partial_ids]
+        print(f"Note: {len(partial_ids)} net(s) partially preserved (colliding pieces "
+              f"dropped for pad repairs); reconnect them with route.py: "
+              f"{', '.join(_pnames)}")
+
     if return_results:
         if ripped_net_ids:
             _report_unrouted_ripped_nets(pcb_data, ripped_net_ids)
-        return (total_routes, total_regions, all_new_vias, all_new_segments, ripped_net_ids)
+        # The GUI deletes every returned net's old board copper before adding
+        # all_new_*; partial nets' kept pieces ride the emissions, so include
+        # them in the deletion set (strip-and-replace parity).
+        return (total_routes, total_regions, all_new_vias, all_new_segments,
+                ripped_net_ids + partial_ids)
 
     if dry_run:
         print("\nDry run - no output file written")
-    elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids:
+    elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids or partial_ids:
         print(f"\nWriting output to {output_file}...")
         # Strip the ripped signal nets' copper from the output - they are left
         # unrouted for a subsequent route.py pass to reconnect (#141 reverted).
+        # Partially-restored nets are stripped too; their kept pieces are in
+        # all_new_segments/all_new_vias (replacement).
         _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines,
-                      net_id_to_name=kv10_names, exclude_net_ids=ripped_net_ids)
+                      net_id_to_name=kv10_names,
+                      exclude_net_ids=ripped_net_ids + partial_ids)
         print(f"Output written to {output_file}")
         print("Note: Open in KiCad and press 'B' to refill zones")
     else:
