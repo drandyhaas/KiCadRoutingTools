@@ -105,11 +105,31 @@ class SpatialIndex:
         cell = self._get_cell(via.x, via.y)
         self.all_layer_cells[cell].append((via, net_id))
 
-    def add_pad(self, pad: Pad, net_id: int, expanded_layers: List[str]):
-        """Add a pad to the index."""
-        # Pad covers a rectangular area
+    @staticmethod
+    def _pad_half_extents(pad: Pad) -> Tuple[float, float]:
+        """Axis-aligned half-extents of the pad's REAL copper. A rotated pad's
+        corners protrude past the unrotated size_x/size_y bbox (a long pad at
+        30 deg bulges by up to half its length), and a custom pad's polygons can
+        extend past the anchor size -- under-indexing either lets copper sit in
+        cells the broad phase never registered, so a real violation is missed
+        (false clean)."""
         half_x = pad.size_x / 2
         half_y = pad.size_y / 2
+        rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+        if rr:
+            rad = math.radians(rr)
+            c, s = abs(math.cos(rad)), abs(math.sin(rad))
+            half_x, half_y = half_x * c + half_y * s, half_x * s + half_y * c
+        for poly in (getattr(pad, 'polygons', None) or []):
+            for px, py in poly:
+                half_x = max(half_x, abs(px))
+                half_y = max(half_y, abs(py))
+        return half_x, half_y
+
+    def add_pad(self, pad: Pad, net_id: int, expanded_layers: List[str]):
+        """Add a pad to the index."""
+        # Pad covers a rectangular area (rotation/polygon-aware)
+        half_x, half_y = self._pad_half_extents(pad)
         min_cell = self._get_cell(pad.global_x - half_x, pad.global_y - half_y)
         max_cell = self._get_cell(pad.global_x + half_x, pad.global_y + half_y)
 
@@ -185,8 +205,7 @@ class SpatialIndex:
         keys off a single point), this scans every cell the query pad spans plus
         a one-cell margin, so a large pad does not miss a neighbour sitting near
         its edge rather than its center (pad-pad check, #234)."""
-        half_x = pad.size_x / 2
-        half_y = pad.size_y / 2
+        half_x, half_y = self._pad_half_extents(pad)
         min_cell = self._get_cell(pad.global_x - half_x, pad.global_y - half_y)
         max_cell = self._get_cell(pad.global_x + half_x, pad.global_y + half_y)
         layer_cells = self.cells_by_layer[layer]
@@ -198,6 +217,24 @@ class SpatialIndex:
                     if isinstance(obj, Pad) and id(obj) not in seen:
                         seen.add(id(obj))
                         result.append((obj, net_id))
+        return result
+
+    def get_nearby_pads_for_segment(self, seg: Segment) -> List[Tuple[Pad, int]]:
+        """Get pads near ANY point of a segment (its layer), not just its
+        endpoints. The pad-segment check used to query around the two endpoints
+        only, so a long straight segment grazing a pad mid-run (a few mm from
+        both ends) never saw that pad as a candidate -- a missed violation
+        (false clean)."""
+        layer_cells = self.cells_by_layer[seg.layer]
+        seen = set()
+        result = []
+        for (cx, cy) in self._get_segment_cells(seg):
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for obj, net_id in layer_cells.get((cx + dx, cy + dy), []):
+                        if isinstance(obj, Pad) and id(obj) not in seen:
+                            seen.add(id(obj))
+                            result.append((obj, net_id))
         return result
 
 
@@ -1534,37 +1571,37 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         seg_net = seg.net_id
         seg_net_matches = matching_net_ids is None or seg_net in matching_net_ids
 
-        # Get pads near the segment endpoints
-        for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
-            for pad, pad_net in spatial_idx.get_nearby_pads(x, y, seg.layer):
-                if pad_net == seg_net:
-                    continue  # Same net
-                if _pad_has_no_copper(pad):
-                    continue  # NPTH hole: covered by the copper-to-hole check
+        # Get pads near ANY cell the segment passes through (endpoint-only
+        # queries missed a pad grazed mid-run on a long segment -- false clean)
+        for pad, pad_net in spatial_idx.get_nearby_pads_for_segment(seg):
+            if pad_net == seg_net:
+                continue  # Same net
+            if _pad_has_no_copper(pad):
+                continue  # NPTH hole: covered by the copper-to-hole check
 
-                pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
-                if not seg_net_matches and not pad_net_matches:
-                    continue
+            pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
+            if not seg_net_matches and not pad_net_matches:
+                continue
 
-                has_violation, overlap, closest_pt = check_pad_segment_overlap(
-                    pad, seg, clearance, routing_layers, clearance_margin
-                )
-                if has_violation:
-                    pad_net_name = pcb_data.nets.get(pad_net, None)
-                    seg_net_name = pcb_data.nets.get(seg_net, None)
-                    pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
-                    seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                    violations.append({
-                        'type': 'pad-segment',
-                        'net1': pad_net_str,
-                        'net2': seg_net_str,
-                        'layer': seg.layer,
-                        'overlap_mm': overlap,
-                        'pad_loc': (pad.global_x, pad.global_y),
-                        'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
-                        'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                        'closest_pt': closest_pt,
-                    })
+            has_violation, overlap, closest_pt = check_pad_segment_overlap(
+                pad, seg, clearance, routing_layers, clearance_margin
+            )
+            if has_violation:
+                pad_net_name = pcb_data.nets.get(pad_net, None)
+                seg_net_name = pcb_data.nets.get(seg_net, None)
+                pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
+                seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
+                violations.append({
+                    'type': 'pad-segment',
+                    'net1': pad_net_str,
+                    'net2': seg_net_str,
+                    'layer': seg.layer,
+                    'overlap_mm': overlap,
+                    'pad_loc': (pad.global_x, pad.global_y),
+                    'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                    'closest_pt': closest_pt,
+                })
 
     # Check pad-to-via violations using spatial index
     if not quiet:
