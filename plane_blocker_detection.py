@@ -342,6 +342,19 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
         for pv in plane_vias:
             if (via['x'] - pv['x']) ** 2 + (via['y'] - pv['y']) ** 2 < thresh_sq:
                 return True
+        # Restored via vs plane SEGMENTS (the barrel spans all layers, so a
+        # segment on any layer counts). The original #88.1 call sites only
+        # restored against stitching VIAS so this was never needed; the #329
+        # tap restore also checks against the tap's new TRACE copper --
+        # without this, a restored via sat on 13 fresh +3V3 trace segments
+        # (glasgow /IO_Banks/DA2, 0707b wave set1).
+        for ps in plane_segments:
+            ps_half_w = ps.get('width', 0.2) / 2.0
+            v_thresh = vr + ps_half_w + clearance
+            if _point_to_segment_dist_sq(via['x'], via['y'],
+                                         ps['start'][0], ps['start'][1],
+                                         ps['end'][0], ps['end'][1]) < v_thresh * v_thresh:
+                return True
         return False
 
     if seg is not None:
@@ -362,14 +375,19 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
             ps_half_w = ps.get('width', 0.2) / 2.0
             s_thresh = half_w + ps_half_w + clearance
             s_thresh_sq = s_thresh * s_thresh
-            # Sample endpoints of each segment against the other (cheap, and
-            # sufficient for the short axis-overlap case we are guarding).
+            # Endpoint sampling covers the short axis-overlap case; an X
+            # CROSSING has all four endpoints far apart, so also test true
+            # intersection (#329 restore checks restored signal traces
+            # against the tap's new trace copper, where crossings happen).
             px0, py0 = ps['start'][0], ps['start'][1]
             px1, py1 = ps['end'][0], ps['end'][1]
             if (_point_to_segment_dist_sq(px0, py0, sx0, sy0, sx1, sy1) < s_thresh_sq or
                     _point_to_segment_dist_sq(px1, py1, sx0, sy0, sx1, sy1) < s_thresh_sq or
                     _point_to_segment_dist_sq(sx0, sy0, px0, py0, px1, py1) < s_thresh_sq or
                     _point_to_segment_dist_sq(sx1, sy1, px0, py0, px1, py1) < s_thresh_sq):
+                return True
+            from geometry_utils import segments_intersect_2d
+            if segments_intersect_2d((sx0, sy0), (sx1, sy1), (px0, py0), (px1, py1)):
                 return True
         return False
 
