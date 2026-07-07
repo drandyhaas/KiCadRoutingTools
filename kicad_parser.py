@@ -556,6 +556,27 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                              (ex - px * hw, ey - py * hw), (sx - px * hw, sy - py * hw)]
         if local:
             polys.append(to_global(local))
+
+    # A custom pad's copper is the ANCHOR SHAPE union the primitives (#337).
+    # Modeling primitives alone under-covers: urchin's router drilled a via
+    # inside D31.2's 0.95x2.29 anchor rect because only the small finger
+    # primitive was in the polygon set, and check_drc graded the real contact
+    # clean for the same reason. KiCad's default anchor is a circle; the file
+    # writes (options ... (anchor rect)) when it is a rectangle.
+    sm = re.search(r'\(size\s+(-?[\d.]+)\s+(-?[\d.]+)\)', pad_text)
+    if sm:
+        ax, ay = float(sm.group(1)), float(sm.group(2))
+        if ax > 0 and ay > 0:
+            am = re.search(r'\(anchor\s+(\w+)\)', pad_text)
+            akind = am.group(1) if am else 'circle'
+            if akind == 'rect':
+                anchor_local = [(-ax / 2, -ay / 2), (ax / 2, -ay / 2),
+                                (ax / 2, ay / 2), (-ax / 2, ay / 2)]
+            else:
+                r = min(ax, ay) / 2.0
+                anchor_local = [(r * math.cos(i * math.pi / 8),
+                                 r * math.sin(i * math.pi / 8)) for i in range(16)]
+            polys.append(to_global(anchor_local))
     return polys or None
 
 

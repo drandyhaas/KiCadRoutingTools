@@ -519,6 +519,113 @@ def _segment_to_polys_distance(x1: float, y1: float, x2: float, y2: float, polys
     return best, best_pt
 
 
+_GRAPHIC_EFFECTIVE_NETS = None  # set per check run by _build_graphic_unification
+
+
+def _build_graphic_unification(pcb_data):
+    """KiCad derives a copper GRAPHIC's net from CONNECTIVITY, unifying every
+    net whose copper physically touches the art (#337). Cluster touching
+    graphics (flood over edge-contact), then record each cluster's EFFECTIVE
+    net set = the file attributes plus every net whose segment/via/pad touches
+    the cluster. Pair checks treat a graphic as same-net with any effective
+    net -- eurorack's jack art carries a stale +12V attribute yet is soldered
+    into the OUT nets, so its 68um "grazes" are internal spacing of one
+    electrical net, which KiCad correctly ignores."""
+    import math as _m
+    global _GRAPHIC_EFFECTIVE_NETS
+    _GRAPHIC_EFFECTIVE_NETS = {}
+    graphics = [sg for sg in pcb_data.segments if getattr(sg, 'graphic', False)]
+    if not graphics:
+        return
+
+    def seg_seg_touch(a, b):
+        if a.layer != b.layer:
+            return False
+        lim = a.width / 2.0 + b.width / 2.0 + 1e-6
+        return _seg_seg_distance(a, b) <= lim
+
+    def _seg_seg_distance(a, b):
+        best = float('inf')
+        for (px, py) in ((a.start_x, a.start_y), (a.end_x, a.end_y)):
+            best = min(best, _pt_seg_d(px, py, b))
+        for (px, py) in ((b.start_x, b.start_y), (b.end_x, b.end_y)):
+            best = min(best, _pt_seg_d(px, py, a))
+        return best
+
+    def _pt_seg_d(px, py, sgm):
+        x1, y1, x2, y2 = sgm.start_x, sgm.start_y, sgm.end_x, sgm.end_y
+        dx, dy = x2 - x1, y2 - y1
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
+        return _m.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+    # union-find over graphics by physical contact
+    parent = list(range(len(graphics)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(graphics)):
+        for j in range(i + 1, len(graphics)):
+            if seg_seg_touch(graphics[i], graphics[j]):
+                parent[find(i)] = find(j)
+
+    clusters = {}
+    for i, g in enumerate(graphics):
+        clusters.setdefault(find(i), []).append(g)
+
+    for root, members in clusters.items():
+        eff = {g.net_id for g in members}
+        for g in members:
+            hw = g.width / 2.0
+            # touching routed/input segments
+            for sg in pcb_data.segments:
+                if getattr(sg, 'graphic', False) or sg.layer != g.layer:
+                    continue
+                if _seg_seg_distance(g, sg) <= hw + sg.width / 2.0 + 1e-6:
+                    eff.add(sg.net_id)
+            # touching vias (barrel spans all layers)
+            for v in pcb_data.vias:
+                if _pt_seg_d(v.x, v.y, g) <= hw + (v.size or 0.5) / 2.0 + 1e-6:
+                    eff.add(v.net_id)
+            # touching pads (on the graphic's layer)
+            for pads in pcb_data.pads_by_net.values():
+                for pd in pads:
+                    lys = pd.layers or []
+                    if g.layer not in lys and '*.Cu' not in lys:
+                        continue
+                    mid_d = min(point_to_pad_distance(g.start_x, g.start_y, pd),
+                                point_to_pad_distance(g.end_x, g.end_y, pd))
+                    if mid_d <= hw + 1e-6:
+                        eff.add(pd.net_id)
+        for g in members:
+            _GRAPHIC_EFFECTIVE_NETS[id(g)] = eff
+
+
+def _graphic_pair_is_same_net(seg_a, seg_b, net_a, net_b):
+    """True when a pair involving copper GRAPHICS is the same electrical net
+    under connectivity unification (see _build_graphic_unification). For a
+    graphic-vs-graphic pair, two clusters sharing ANY effective net are one
+    electrical net (eurorack's two jack arts both solder into the OUT nets)."""
+    if _GRAPHIC_EFFECTIVE_NETS is None:
+        return False
+    ga = seg_a is not None and getattr(seg_a, 'graphic', False)
+    gb = seg_b is not None and getattr(seg_b, 'graphic', False)
+    if ga and gb:
+        ea = _GRAPHIC_EFFECTIVE_NETS.get(id(seg_a)) or set()
+        eb = _GRAPHIC_EFFECTIVE_NETS.get(id(seg_b)) or set()
+        return bool(ea & eb)
+    for g, flag, other_net in ((seg_a, ga, net_b), (seg_b, gb, net_a)):
+        if flag:
+            eff = _GRAPHIC_EFFECTIVE_NETS.get(id(g))
+            if eff is not None and other_net in eff:
+                return True
+    return False
+
+
 def point_to_pad_distance(px: float, py: float, pad: Pad) -> float:
     """Edge-to-edge distance from a point to a pad's copper (0 if inside the
     copper). Handles custom-polygon pads, rounded/rect/circle/oval shapes, and
@@ -1260,6 +1367,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         print(f"Loading {pcb_file}...")
 
     pcb_data = parse_kicad_pcb(pcb_file)
+    # #337: unify copper-graphic nets by connectivity before pair checks
+    _build_graphic_unification(pcb_data)
 
     if not quiet:
         print(f"Found {len(pcb_data.segments)} segments and {len(pcb_data.vias)} vias")
@@ -1372,6 +1481,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             checked_pairs.add(pair_key)
 
             has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance, clearance_margin)
+            if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
+                has_violation = False
             if has_violation:
                 net1_name = pcb_data.nets.get(net1, None)
                 net2_name = pcb_data.nets.get(net2, None)
@@ -1516,6 +1627,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue
 
                 has_violation, overlap = check_via_segment_overlap(via, seg, clearance, clearance_margin)
+                if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, via_net):
+                    has_violation = False
                 if has_violation:
                     via_net_name = pcb_data.nets.get(via_net, None)
                     seg_net_name = pcb_data.nets.get(seg_net, None)
@@ -1591,6 +1704,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             has_violation, overlap, closest_pt = check_pad_segment_overlap(
                 pad, seg, clearance, routing_layers, clearance_margin
             )
+            if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, pad_net):
+                has_violation = False
             if has_violation:
                 pad_net_name = pcb_data.nets.get(pad_net, None)
                 seg_net_name = pcb_data.nets.get(seg_net, None)
