@@ -888,6 +888,42 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"to avoid a short: {', '.join(recover)}")
             run_reroute_loop(state, route_index_start=route_index,
                              cancel_check=cancel_check)
+        # Last resort (parity with the plane tools' piece-level settle,
+        # 72ca5f9): a refused net whose clean reroute ALSO failed ships at
+        # zero copper -- restore the saved route's non-colliding pieces
+        # instead, leaving a small gap for a later pass rather than a
+        # destroyed net. Piece-wise _saved_route_collides against the settled
+        # board, so nothing restored can short copper routed meanwhile.
+        _stash_134 = getattr(pcb_data, '_refused_saved_134', {}) or {}
+        for nid in sorted(state.collision_refused_net_ids):
+            if nid in routed_results or nid not in _stash_134:
+                continue
+            saved = _stash_134[nid]
+            from rip_up_reroute import _saved_route_collides
+            from routing_context import add_route_to_pcb_data
+            keep_segs = [sg for sg in (saved.get('new_segments') or [])
+                         if not _saved_route_collides(
+                             {'new_segments': [sg], 'new_vias': []},
+                             pcb_data, [nid], config.clearance)]
+            keep_vias = [v for v in (saved.get('new_vias') or [])
+                         if not _saved_route_collides(
+                             {'new_segments': [], 'new_vias': [v]},
+                             pcb_data, [nid], config.clearance)]
+            if not keep_segs and not keep_vias:
+                continue
+            dropped = (len(saved.get('new_segments') or []) - len(keep_segs)
+                       + len(saved.get('new_vias') or []) - len(keep_vias))
+            pruned = dict(saved)
+            pruned['new_segments'] = keep_segs
+            pruned['new_vias'] = keep_vias
+            pruned['partial_restore_134'] = True
+            add_route_to_pcb_data(pcb_data, pruned, debug_lines=config.debug_lines)
+            results.append(pruned)
+            nm = pcb_data.nets[nid].name if nid in pcb_data.nets else nid
+            print(f"Issue #134 last resort: {nm} reroute failed; restored "
+                  f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of its "
+                  f"pre-rip route (dropped {dropped} colliding piece(s)); "
+                  f"net remains PARTIAL for a later reconnect pass")
 
     # Final progress update
     if progress_callback:
