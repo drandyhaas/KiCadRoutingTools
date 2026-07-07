@@ -907,6 +907,24 @@ def route_planes(
     if debug_lines and all_debug_lines:
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
+    # Close soft joints in this run's copper (#334) -- see route_planes;
+    # repair/reroute copper never passed through the cleanup pipeline.
+    try:
+        from pcb_modification import close_soft_joints
+        _bridge_results: List[Dict] = []
+        _nb = close_soft_joints(_bridge_results, pcb_data, None, config)
+        if _nb:
+            for _br in _bridge_results:
+                for _bs in _br.get('new_segments', []):
+                    all_new_segments.append({
+                        'start': (_bs.start_x, _bs.start_y),
+                        'end': (_bs.end_x, _bs.end_y),
+                        'width': _bs.width, 'layer': _bs.layer,
+                        'net_id': _bs.net_id})
+            print(f"  Closed {_nb} soft joint(s) in repair copper")
+    except Exception as _e:
+        print(f"  (soft-joint close skipped: {_e})")
+
     kv10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
 
     # GUI (return_results): hand the plane/repair copper + the ripped net ids back.

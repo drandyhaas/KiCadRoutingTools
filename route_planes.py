@@ -1688,6 +1688,32 @@ def _write_output_and_reroute(
         if _gz_swept:
             print(f"  Dead-end sweep: trimmed {_gz_swept} orphaned tap segment(s)")
 
+    # Close soft joints (#334): plane copper never passed through the cleanup
+    # pipeline, so 10-100um same-net endpoint gaps (tap snaps, piece-level
+    # restore drops) rode to the final board unbridged (orangecrab ECP5_VREF).
+    # Must run AFTER the graze prune / dead-end sweep above -- those passes
+    # finalize the endpoint picture (an early call sees since-trimmed copper
+    # as extra endpoints and misses the dangle). Bridges go through
+    # all_new_segments so board == file, GUI included.
+    try:
+        from pcb_modification import close_soft_joints
+        _bridge_results = []
+        _cfg_sj = GridRouteConfig(track_width=track_width, clearance=clearance,
+                                  grid_step=grid_step, via_size=via_size,
+                                  via_drill=via_drill, layers=all_layers)
+        _nb = close_soft_joints(_bridge_results, pcb_data, None, _cfg_sj)
+        if _nb:
+            for _br in _bridge_results:
+                for _bs in _br.get('new_segments', []):
+                    all_new_segments.append({
+                        'start': (_bs.start_x, _bs.start_y),
+                        'end': (_bs.end_x, _bs.end_y),
+                        'width': _bs.width, 'layer': _bs.layer,
+                        'net_id': _bs.net_id, 'from_restore': True})
+            print(f"  Closed {_nb} soft joint(s) in plane/restored copper")
+    except Exception as _e:
+        print(f"  (soft-joint close skipped: {_e})")
+
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
                               exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace,
