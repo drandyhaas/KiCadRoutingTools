@@ -38,7 +38,8 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Set, Tuple
 
-from kicad_parser import PCBData, find_components_by_type
+from kicad_parser import PCBData, Segment, find_components_by_type
+import routing_defaults as defaults
 from bga_fanout.grid import analyze_bga_grid
 from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
@@ -850,6 +851,19 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                   if st.graze_penalty(r, st.caps[r], st.caps[r].x,
                                       st.caps[r].y, st.caps[r].rot) > EPS]
 
+    # Last resort (#313): a cap still grazing at the displacement cap is
+    # usually BOXED (no clear cap position exists) -- move the offending
+    # fanout via instead, dragging its attached escape-segment ends.
+    via_moves, new_segs = ([], [])
+    if unresolved:
+        via_moves, new_segs = nudge_vias_for_unresolved(st, pcb_data, clearance)
+        if via_moves:
+            # refresh the per-cap pruned via lists before re-grading
+            st.cap_vias = {r: st.vias for r in st.caps}
+            unresolved = [r for r in st.caps
+                          if st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                              st.caps[r].y, st.caps[r].rot) > EPS]
+
     print(f"Moved {len(placements)} cap(s); resolved {len(resolved)}/"
           f"{len(violators0)} initial violations; "
           f"{len(unresolved)} unresolved.")
@@ -857,4 +871,196 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
         print(f"  Unresolved (need manual attention): {', '.join(sorted(unresolved))}")
 
     return {'placements': placements, 'resolved': resolved,
-            'unresolved': unresolved, 'bga_refs': st.bga_refs}
+            'unresolved': unresolved, 'bga_refs': st.bga_refs,
+            'via_moves': via_moves, 'new_segments': new_segs}
+
+
+def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
+                              max_shift: float = 0.6):
+    """Last resort for caps still grazing at the displacement cap (#313): the
+    cap is boxed (glasgow C77: no clear cap position exists within 2mm), so
+    move the OFFENDING fanout via a fraction of a millimetre instead. The
+    original attached segments are NOT touched; electrical continuity is
+    restored by NEW short connector segments from the via's new position back
+    to the fanout stub start (the via's old position) on every layer that had
+    same-net copper terminating there (plus the pad's copper layer for a
+    via-in-pad). mm-exact validation throughout. Returns
+    (via_moves, new_segments) for the writer:
+      via_moves    = [(old_x, old_y, via_dict_at_new_pos)]
+      new_segments = [segment dicts {'start','end','width','layer','net_id'}]
+    """
+    H2H_VIA = 0.2    # JLC via-hole to via-hole floor
+    H2H_PAD = 0.45   # JLC via-hole to pad-hole floor
+    via_moves, new_segments = [], []
+
+    unresolved = [r for r in st.caps
+                  if st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                      st.caps[r].y, st.caps[r].rot) > EPS]
+    if not unresolved:
+        return via_moves, new_segments
+
+    # (rect, net, cap_layer): cap pads exist only on the cap's own copper
+    # side -- connector segments on OTHER layers cannot graze them (the
+    # missing layer gate rejected every candidate: the connector necessarily
+    # starts at the old via position, inside the grazed cap's keep-out, but
+    # only the VIA barrel -- not an inner-layer connector -- conflicts there).
+    all_cap_rects = []
+    for ref, cap in st.caps.items():
+        fp = pcb_data.footprints.get(ref)
+        cl = getattr(fp, 'layer', 'F.Cu') if fp is not None else 'F.Cu'
+        for (bx0, by0, bx1, by1, net) in cap.pad_rects(cap.x, cap.y, cap.rot):
+            all_cap_rects.append((bx0, by0, bx1, by1, net, cl))
+
+    def valid_via_pos(v, nx, ny):
+        vr = (v.size or 0.5) / 2.0
+        for (bx0, by0, bx1, by1, net, _cl) in all_cap_rects:
+            # via barrel spans all layers: no layer gate here
+            if net != v.net_id and _point_to_rect_dist(
+                    nx, ny, (bx0, by0, bx1, by1)) < vr + clearance:
+                return False
+        for pads in pcb_data.pads_by_net.values():
+            for p in pads:
+                if getattr(p, 'component_ref', None) in st.caps:
+                    continue  # movable caps handled by final rects above
+                hw, hh = p.size_x / 2.0, p.size_y / 2.0
+                d = _point_to_rect_dist(nx, ny, (p.global_x - hw, p.global_y - hh,
+                                                 p.global_x + hw, p.global_y + hh))
+                if p.net_id != v.net_id and d < vr + clearance:
+                    return False
+                if p.drill and p.drill > 0:
+                    hx = getattr(p, 'hole_x', None)
+                    hy = getattr(p, 'hole_y', None)
+                    cx = hx if hx is not None else p.global_x
+                    cy = hy if hy is not None else p.global_y
+                    if math.hypot(nx - cx, ny - cy) <                             (v.drill or 0.3) / 2.0 + p.drill / 2.0 + H2H_PAD:
+                        return False
+        for ov in pcb_data.vias:
+            if ov is v:
+                continue
+            d = math.hypot(nx - ov.x, ny - ov.y)
+            if ov.net_id != v.net_id and d < vr + (ov.size or 0.5) / 2.0 + clearance:
+                return False
+            if d < (v.drill or 0.3) / 2.0 + (ov.drill or 0.3) / 2.0 + H2H_VIA:
+                return False
+        for s in pcb_data.segments:
+            if s.net_id == v.net_id:
+                continue
+            if _point_to_seg_dist(nx, ny, s.start_x, s.start_y,
+                                  s.end_x, s.end_y) < vr + s.width / 2.0 + clearance:
+                return False
+        return True
+
+    def connector_clear(net_id, layer, width, sx, sy, ex, ey):
+        hw = width / 2.0
+        for (bx0, by0, bx1, by1, net, cl) in all_cap_rects:
+            if cl != layer:
+                continue  # cap pads only exist on the cap's own side
+            if net != net_id and _seg_to_rect_dist(
+                    sx, sy, ex, ey, (bx0, by0, bx1, by1)) < hw + clearance:
+                return False
+        for pads in pcb_data.pads_by_net.values():
+            for p in pads:
+                if getattr(p, 'component_ref', None) in st.caps or p.net_id == net_id:
+                    continue
+                if not _pad_on_layer(p, layer):
+                    continue
+                phw, phh = p.size_x / 2.0, p.size_y / 2.0
+                if _seg_to_rect_dist(sx, sy, ex, ey,
+                                     (p.global_x - phw, p.global_y - phh,
+                                      p.global_x + phw, p.global_y + phh)) < hw + clearance:
+                    return False
+        for ov in pcb_data.vias:
+            if ov.net_id != net_id and _point_to_seg_dist(
+                    ov.x, ov.y, sx, sy, ex, ey) < (ov.size or 0.5) / 2.0 + hw + clearance:
+                return False
+        for s2 in pcb_data.segments:
+            if s2.net_id == net_id or s2.layer != layer:
+                continue
+            if _segs_cross(sx, sy, ex, ey, s2.start_x, s2.start_y,
+                           s2.end_x, s2.end_y):
+                return False
+            d = min(_point_to_seg_dist(sx, sy, s2.start_x, s2.start_y, s2.end_x, s2.end_y),
+                    _point_to_seg_dist(ex, ey, s2.start_x, s2.start_y, s2.end_x, s2.end_y),
+                    _point_to_seg_dist(s2.start_x, s2.start_y, sx, sy, ex, ey),
+                    _point_to_seg_dist(s2.end_x, s2.end_y, sx, sy, ex, ey))
+            if d < hw + s2.width / 2.0 + clearance:
+                return False
+        return True
+
+    for ref in sorted(unresolved):
+        cap = st.caps[ref]
+        rects = cap.pad_rects(cap.x, cap.y, cap.rot)
+        offenders = []
+        for v in pcb_data.vias:
+            vr = (v.size or 0.5) / 2.0
+            for (bx0, by0, bx1, by1, net) in rects:
+                if v.net_id != net and _point_to_rect_dist(
+                        v.x, v.y, (bx0, by0, bx1, by1)) < vr + clearance - EPS:
+                    offenders.append(v)
+                    break
+        for v in offenders:
+            # Layers needing a connector back to the stub start: every layer
+            # with same-net copper terminating at the old via position, plus
+            # the copper layer of a same-net pad the via sits inside
+            # (via-in-pad -- the pad connection must follow the via).
+            conn_layers = {}
+            for s in pcb_data.segments:
+                if s.net_id != v.net_id:
+                    continue
+                if (math.hypot(s.start_x - v.x, s.start_y - v.y) < 1e-3
+                        or math.hypot(s.end_x - v.x, s.end_y - v.y) < 1e-3):
+                    w = conn_layers.get(s.layer)
+                    conn_layers[s.layer] = min(w, s.width) if w else s.width
+            for p in pcb_data.pads_by_net.get(v.net_id, []):
+                hw, hh = p.size_x / 2.0, p.size_y / 2.0
+                if (p.global_x - hw <= v.x <= p.global_x + hw and
+                        p.global_y - hh <= v.y <= p.global_y + hh):
+                    pl = next((l for l in (p.layers or []) if l.endswith('.Cu')
+                               and not l.startswith('*')), None)
+                    if pl and pl not in conn_layers:
+                        fallback = min(conn_layers.values()) if conn_layers                             else defaults.TRACK_WIDTH
+                        conn_layers[pl] = fallback
+            found = None
+            r = 0.05
+            while found is None and r <= max_shift + 1e-9:
+                for k in range(16):
+                    ang = k * math.pi / 8
+                    nx = round(v.x + r * math.cos(ang), 4)
+                    ny = round(v.y + r * math.sin(ang), 4)
+                    if not valid_via_pos(v, nx, ny):
+                        continue
+                    if all(connector_clear(v.net_id, layer, w, v.x, v.y, nx, ny)
+                           for layer, w in conn_layers.items()):
+                        found = (nx, ny)
+                        break
+                r += 0.05
+            if found is None:
+                print(f"  via-nudge: no clear spot for {ref}'s offending via "
+                      f"at ({v.x:.2f}, {v.y:.2f}) within {max_shift}mm")
+                continue
+            nx, ny = found
+            old = (v.x, v.y)
+            for layer, w in conn_layers.items():
+                sd = {'start': (old[0], old[1]), 'end': (nx, ny),
+                      'width': w, 'layer': layer, 'net_id': v.net_id}
+                new_segments.append(sd)
+                pcb_data.segments.append(Segment(
+                    start_x=old[0], start_y=old[1], end_x=nx, end_y=ny,
+                    width=w, layer=layer, net_id=v.net_id))
+            v.x, v.y = nx, ny
+            st.vias = [(nx, ny, w2[2], w2[3]) if (abs(w2[0] - old[0]) < 1e-6 and
+                                                  abs(w2[1] - old[1]) < 1e-6) else w2
+                       for w2 in st.vias]
+            via_moves.append((old[0], old[1],
+                              {'x': nx, 'y': ny, 'size': v.size, 'drill': v.drill,
+                               'layers': v.layers, 'net_id': v.net_id}))
+            nm = pcb_data.nets[v.net_id].name if v.net_id in pcb_data.nets else v.net_id
+            print(f"  via-nudge: moved {nm} via ({old[0]:.3f},{old[1]:.3f}) -> "
+                  f"({nx:.3f},{ny:.3f}) to free {ref}; {len(conn_layers)} "
+                  f"connector segment(s) back to the stub start")
+    return via_moves, new_segments
+
+
+def _pad_on_layer(pad, layer):
+    layers = getattr(pad, 'layers', None) or []
+    return layer in layers or '*.Cu' in layers

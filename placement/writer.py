@@ -29,7 +29,10 @@ def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
 
 
 def write_placed_output(input_file: str, output_file: str,
-                        placements: List[Dict]) -> bool:
+                        placements: List[Dict],
+                        via_moves: List = None,
+                        new_segments: List = None,
+                        pcb_data=None) -> bool:
     """
     Write a placed PCB file by modifying footprint positions.
 
@@ -112,6 +115,32 @@ def write_placed_output(input_file: str, output_file: str,
 
         content = content[:start] + new_fp_text + content[end:]
         modified_count += 1
+
+    # Via-nudge rewrites (#313): remove each moved via from the input text and
+    # append it at its new position, plus the new connector segments back to
+    # the fanout stub start. Attached segments are untouched by design.
+    if via_moves or new_segments:
+        from plane_io import _remove_vias_at_positions
+        from kicad_writer import generate_via_sexpr, generate_segment_sexpr
+        n2n = getattr(pcb_data, 'net_id_to_name', None) if pcb_data is not None else None
+        elements = []
+        if via_moves:
+            content, _ = _remove_vias_at_positions(
+                content, [(m[0], m[1]) for m in via_moves])
+            for m in via_moves:
+                v = m[2]
+                nm = n2n.get(v['net_id']) if n2n else None
+                elements.append(generate_via_sexpr(v['x'], v['y'], v['size'],
+                                                   v['drill'], v['layers'],
+                                                   v['net_id'], net_name=nm))
+        for nsd in (new_segments or []):
+            nm = n2n.get(nsd['net_id']) if n2n else None
+            elements.append(generate_segment_sexpr(
+                nsd['start'], nsd['end'], nsd['width'], nsd['layer'],
+                nsd['net_id'], net_name=nm))
+        if elements:
+            close = content.rindex(')')
+            content = content[:close] + '\n'.join(elements) + '\n)' + content[close+1:]
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(content)

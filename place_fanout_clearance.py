@@ -118,9 +118,12 @@ Examples:
         verbose=args.verbose,
     )
 
-    if result['placements']:
+    if result['placements'] or result.get('via_moves') or result.get('new_segments'):
         write_placed_output(args.input_file, args.output_file,
-                            result['placements'])
+                            result['placements'],
+                            via_moves=result.get('via_moves'),
+                            new_segments=result.get('new_segments'),
+                            pcb_data=pcb_data)
         print(f"Wrote {args.output_file}")
     else:
         print("No caps moved; not writing output.")
