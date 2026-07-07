@@ -150,6 +150,7 @@ def match(kicad_items, cd_items):
 
 
 def _staged_copy(board: str, clearance: float):
+    clearance = float(clearance)
     """Copy board + sibling .kicad_pro into a temp dir with the Default
     net-class clearance forced to `clearance`, so KiCad grades at the SAME
     constraint check_drc uses (the routed clearance) instead of the board's
@@ -165,17 +166,22 @@ def _staged_copy(board: str, clearance: float):
         cfg = json.load(open(pro)) if os.path.exists(pro) else {}
     except Exception:
         cfg = {}
+    def _f(x, dflt):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return dflt
     for c in cfg.setdefault("net_settings", {}).setdefault("classes", []) or []:
         if "clearance" in c:
-            c["clearance"] = min(c.get("clearance", clearance), clearance)
+            c["clearance"] = min(_f(c.get("clearance"), clearance), clearance)
     rules = cfg.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})
-    rules["min_clearance"] = min(rules.get("min_clearance", clearance) or clearance, clearance)
+    rules["min_clearance"] = min(_f(rules.get("min_clearance"), clearance) or clearance, clearance)
     # Hole floor (#327): equalize min_hole_clearance to the routed copper
     # clearance too -- our stack guarantees the NPTH fab floor (0.2, #308) and
     # copper clearance, not a board's stricter DESIGN hole rule; grading holes
     # stricter than the routing was told manufactures config-mismatch items.
     # (Footprint-LEVEL clearance overrides remain and are a real gap: #326.)
-    mhc = rules.get("min_hole_clearance")
+    mhc = _f(rules.get("min_hole_clearance"), None)
     if mhc and mhc > clearance:
         rules["min_hole_clearance"] = clearance
     # Silk checks are OUT OF SCOPE (results are filtered to copper classes)
