@@ -153,6 +153,11 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pad.shape` - 'circle', 'oval', 'rect', etc.
 - `pad.layers` - List of layer names
 - `pad.drill` - Drill diameter (0 for SMD, >0 for through-hole)
+- `pad.hole_x`, `pad.hole_y` - Drill/hole position when the pad copper is
+  OFFSET from it (`(drill (offset x y))`, castellated-module paddles);
+  `None` = hole at `global_x/global_y`. `global_x/global_y` is always the
+  COPPER center (clearance/DRC/obstacle consumers use it directly); drill
+  geometry must use `pad_drill_capsule`/`pad_drill_circles` or hole_x/y.
 - `pad.pad_type` - 'smd', 'thru_hole', 'np_thru_hole', 'connect'. NPTH pads have
   NO copper even when `layers` lists `*.Cu` (size = mask opening only): skip them
   in copper-clearance logic, only their drill hole matters

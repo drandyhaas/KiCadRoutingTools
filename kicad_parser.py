@@ -68,6 +68,12 @@ class Pad:
                          # slot's long axis); use pad_drill_capsule()/
                          # pad_drill_circles() for the real slot geometry.
     drill_w: float = 0.0  # Oval/slot drill x-size in the PAD frame (0 = round)
+    # Hole position (#324/#325): pads with a copper offset ((drill (offset ..)))
+    # have global_x/global_y at the COPPER CENTER (what every clearance/DRC/
+    # obstacle consumer wants) while the drill stays at the anchor. None =
+    # hole coincides with global_x/global_y (the overwhelmingly common case).
+    hole_x: object = None
+    hole_y: object = None
     drill_h: float = 0.0  # Oval/slot drill y-size in the PAD frame (0 = round)
     pintype: str = ""
     pad_type: str = ""  # KiCad pad kind: 'smd', 'thru_hole', 'np_thru_hole',
@@ -562,8 +568,14 @@ def pad_drill_capsule(pad) -> Tuple[Tuple[float, float], Tuple[float, float], fl
     """
     w = getattr(pad, 'drill_w', 0.0) or 0.0
     h = getattr(pad, 'drill_h', 0.0) or 0.0
+    # Offset pads (#325): the DRILL stays at the anchor (hole_x/hole_y) while
+    # global_x/global_y is the copper centre.
+    hx = getattr(pad, 'hole_x', None)
+    hy = getattr(pad, 'hole_y', None)
+    px = hx if hx is not None else pad.global_x
+    py = hy if hy is not None else pad.global_y
     if w <= 0 or h <= 0 or abs(w - h) < 1e-9:
-        centre = (pad.global_x, pad.global_y)
+        centre = (px, py)
         return centre, centre, (pad.drill or max(w, h)) / 2.0
     radius = min(w, h) / 2.0
     half_span = (max(w, h) - min(w, h)) / 2.0
@@ -574,8 +586,8 @@ def pad_drill_capsule(pad) -> Tuple[Tuple[float, float], Tuple[float, float], fl
         ux, uy = cos_r, sin_r          # local (1, 0)
     else:
         ux, uy = -sin_r, cos_r         # local (0, 1)
-    p1 = (pad.global_x - ux * half_span, pad.global_y - uy * half_span)
-    p2 = (pad.global_x + ux * half_span, pad.global_y + uy * half_span)
+    p1 = (px - ux * half_span, py - uy * half_span)
+    p2 = (px + ux * half_span, py + uy * half_span)
     return p1, p2, radius
 
 
@@ -594,7 +606,7 @@ def pad_drill_circles(pad, step: float = 0.0) -> List[Tuple[float, float, float]
     dx, dy = p2[0] - p1[0], p2[1] - p1[1]
     span = math.hypot(dx, dy)
     if span < 1e-9:
-        return [(pad.global_x, pad.global_y, 2.0 * r)]
+        return [(p1[0], p1[1], 2.0 * r)]
     if step <= 0:
         step = r / 2.0
     n = max(1, int(math.ceil(span / step)))
@@ -1838,15 +1850,20 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
 
-            # Fold the copper offset into the pad position for SMD pads (#324):
-            # with no hole, the shifted copper IS the pad, so every geometry
-            # consumer (obstacles, DRC, connectivity) gets it for free. The
-            # offset rotates with the pad's ABSOLUTE angle (the file's (at)
-            # angle; same negate convention as local_to_global). Drilled pads
-            # with an offset keep the anchor at the HOLE (drill checks need
-            # it); their copper stays approximated at the anchor -- rare, and
-            # a mis-modelled hole would be worse than mis-modelled copper.
-            if (pad_offset_x or pad_offset_y) and drill_size == 0:
+            # Fold the copper offset into the pad position (#324/#325): the
+            # shifted rect IS the pad copper, so every clearance/DRC/obstacle
+            # consumer gets it for free. The offset rotates with the pad's
+            # ABSOLUTE angle (the file's (at) angle; same negate convention as
+            # local_to_global). For drilled pads the HOLE stays at the anchor:
+            # recorded in hole_x/hole_y for the drill-geometry consumers
+            # (pad_drill_capsule / through-hole cells). caravel U8 proved the
+            # drilled case is not rare: its THT pins carry a 0.3mm copper
+            # offset, and modelling the copper at the hole shipped 89 real
+            # cross-net shorts that check_drc graded clean.
+            pad_hole_x = pad_hole_y = None
+            if pad_offset_x or pad_offset_y:
+                if drill_size > 0:
+                    pad_hole_x, pad_hole_y = global_x, global_y
                 _orad = math.radians(-pad_rotation)
                 global_x += pad_offset_x * math.cos(_orad) - pad_offset_y * math.sin(_orad)
                 global_y += pad_offset_x * math.sin(_orad) + pad_offset_y * math.cos(_orad)
@@ -1883,7 +1900,9 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
                 local_clearance=local_clearance,
-                polygons=pad_polygons
+                polygons=pad_polygons,
+                hole_x=pad_hole_x,
+                hole_y=pad_hole_y
             )
 
             footprint.pads.append(pad)
@@ -2620,14 +2639,18 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             global_x = to_mm(pad_pos.x)
             global_y = to_mm(pad_pos.y)
 
-            # Pad copper offset (#324), parity with the text parser: for SMD
-            # pads fold the (rotated) copper offset into the position. pcbnew's
+            # Pad copper offset (#324/#325), parity with the text parser:
+            # fold the (rotated) copper offset into the position for ALL pads;
+            # drilled pads record the hole (anchor) in hole_x/hole_y. pcbnew's
             # GetPosition() is the anchor/hole; GetOffset() is the copper
             # displacement in the pad frame, rotated by the pad's absolute
             # orientation.
+            pcb_hole_x = pcb_hole_y = None
             try:
                 _off = pad.GetOffset()
-                if (_off.x or _off.y) and not pad.GetDrillSize().x:
+                if _off.x or _off.y:
+                    if pad.GetDrillSize().x:
+                        pcb_hole_x, pcb_hole_y = global_x, global_y
                     _oa = math.radians(-pad.GetOrientationDegrees())
                     _ox, _oy = to_mm(_off.x), to_mm(_off.y)
                     global_x += _ox * math.cos(_oa) - _oy * math.sin(_oa)
@@ -2786,7 +2809,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
                 local_clearance=local_clearance,
-                polygons=pad_polygons
+                polygons=pad_polygons,
+                hole_x=pcb_hole_x,
+                hole_y=pcb_hole_y
             )
 
             footprint.pads.append(pad_obj)

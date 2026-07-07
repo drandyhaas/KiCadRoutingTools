@@ -1397,7 +1397,12 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
     pads = pcb_data.pads_by_net.get(net_id, [])
     for pad in pads:
         if pad.drill and pad.drill > 0:
-            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            # Offset pads (#325): the reusable BARREL is at the hole anchor,
+            # not the (possibly offset) copper centre.
+            hx = getattr(pad, 'hole_x', None)
+            hy = getattr(pad, 'hole_y', None)
+            gx, gy = coord.to_grid(hx if hx is not None else pad.global_x,
+                                   hy if hy is not None else pad.global_y)
             positions.add((gx, gy))
 
     # Existing same-net vias are reusable holes too (see free-via reuse). Without

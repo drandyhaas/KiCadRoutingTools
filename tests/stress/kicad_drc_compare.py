@@ -189,16 +189,27 @@ def compare_board(board: str, label: str = None, clearance: float = None):
         return None
     cd = run_check_drc(board, clearance)
     matched, kicad_only, cd_only = match(kicad, cd)
-    verdict = "CONSISTENT" if not kicad_only and not cd_only else "DIVERGED"
+    # NET-PAIR agreement: the engines report at different granularities
+    # (check_drc: one violation per offending segment; kicad: grouped item
+    # pairs), so the honest consistency metric is the SET of net pairs each
+    # engine implicates. Instance-level diffs then refine within agreed pairs.
+    kpairs = {v["nets"] for v in kicad if len(v["nets"]) == 2}
+    cpairs = {v["nets"] for v in cd if len(v["nets"]) == 2}
+    pk_only, pc_only = kpairs - cpairs, cpairs - kpairs
+    verdict = ("CONSISTENT" if not kicad_only and not cd_only else
+               "PAIR-CONSISTENT" if not pk_only and not pc_only else "DIVERGED")
     print(f"{label}: kicad={len(kicad)} check_drc={len(cd)} matched={len(matched)} "
-          f"kicad_only={len(kicad_only)} checkdrc_only={len(cd_only)}  {verdict}")
+          f"kicad_only={len(kicad_only)} checkdrc_only={len(cd_only)} | "
+          f"net-pairs: both={len(kpairs & cpairs)} kicad_only={len(pk_only)} "
+          f"checkdrc_only={len(pc_only)}  {verdict}")
     for kv in kicad_only:
         print(f"    KICAD-ONLY  {kv['type']:16s} {sorted(kv['nets'])} @ {kv['pos']}  {kv['desc'][:60]}")
     for cv in cd_only:
         print(f"    CHECKDRC-ONLY {cv['type']:16s} {sorted(cv['nets'])} @ {cv['pos']}")
     return {"board": label, "kicad": len(kicad), "check_drc": len(cd),
             "matched": len(matched), "kicad_only": len(kicad_only),
-            "checkdrc_only": len(cd_only)}
+            "checkdrc_only": len(cd_only),
+            "pairs_kicad_only": len(pk_only), "pairs_checkdrc_only": len(pc_only)}
 
 
 def main():
