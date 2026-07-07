@@ -997,6 +997,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # without this key the GUI kept them on the live board (parity gap
             # found in the #319 restructure audit).
             'segments_to_remove': cleanup_input_strip,
+            # successful/failed only count pairs that were coupled-routed or
+            # outright failed -- electrically-short pairs deferred to the
+            # single-ended pass, and pairs skipped for self-overlapping fanout,
+            # land in neither bucket. Without these the GUI's "0 routed, 0
+            # failed" result looks like nothing happened.
+            'single_ended_diff_pairs': single_ended_diff_pairs,
+            'skipped_bad_fanout': sorted(skipped_bad_fanout),
         }
     else:
         wrote = write_routed_output(

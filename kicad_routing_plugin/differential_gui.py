@@ -992,17 +992,28 @@ class DifferentialTab(wx.Panel):
         results_data = result.get('results_data', {})
 
         # Apply results to the board
-        tracks_added, vias_added = self._apply_results_to_board(results_data)
+        tracks_added, vias_added, tracks_removed = self._apply_results_to_board(results_data)
 
         self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {total_time:.1f}s")
+
+        single_ended_pairs = results_data.get('single_ended_diff_pairs', [])
+        skipped_bad_fanout = results_data.get('skipped_bad_fanout', [])
 
         msg = f"Differential pair routing complete!\n\n"
         msg += f"Routed: {successful}\n"
         msg += f"Failed: {failed}\n"
+        if single_ended_pairs:
+            msg += (f"Deferred to single-ended: {len(single_ended_pairs)} "
+                    f"(electrically short - route these single-ended next)\n")
+        if skipped_bad_fanout:
+            msg += (f"Skipped: {len(skipped_bad_fanout)} "
+                    f"(fanout stubs self-overlap - fix the fanout first)\n")
         msg += f"Time: {total_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
+        if tracks_removed > 0:
+            msg += f"  {tracks_removed} stale segment(s) removed\n"
         if failed > 0:
             try:
                 from routing_diagnostics import (
@@ -1025,13 +1036,14 @@ class DifferentialTab(wx.Panel):
     def _apply_results_to_board(self, results_data):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
+        from kicad_parser import POSITION_DECIMALS
         from .swig_gui import _build_layer_mappings
         from .board_swaps import apply_swaps_to_board
 
         board = pcbnew.GetBoard()
         if board is None:
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
-            return 0, 0
+            return 0, 0, 0
 
         # Apply pad/stub net swaps (polarity fixes, target swaps) and stub layer
         # modifications BEFORE adding new tracks - the routes were created
@@ -1040,12 +1052,37 @@ class DifferentialTab(wx.Panel):
 
         tracks_added = 0
         vias_added = 0
+        tracks_removed = 0
 
         # Get layer mappings
         name_to_id, _ = _build_layer_mappings()
 
         def get_layer_id(layer_name):
             return name_to_id.get(layer_name, pcbnew.F_Cu)
+
+        # Remove original-board copper the cleanup pipeline flagged (dead-end
+        # sweep / cycle prune / graze prune), mirroring the CLI writer's strip
+        # and swig_gui.py's single-ended apply path -- otherwise stale copper
+        # from a prior routing pass stays on the live board.
+        segs_to_remove = results_data.get('segments_to_remove') or []
+        if segs_to_remove:
+            remove_keys = set()
+            for s in segs_to_remove:
+                a = (round(s.start_x, POSITION_DECIMALS), round(s.start_y, POSITION_DECIMALS))
+                b = (round(s.end_x, POSITION_DECIMALS), round(s.end_y, POSITION_DECIMALS))
+                remove_keys.add((frozenset((a, b)), s.layer, s.net_id))
+            for track in list(board.GetTracks()):
+                if track.Type() != pcbnew.PCB_TRACE_T:
+                    continue  # skip vias / arcs
+                a = (round(pcbnew.ToMM(track.GetStart().x), POSITION_DECIMALS),
+                     round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
+                b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
+                     round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
+                key = (frozenset((a, b)), board.GetLayerName(track.GetLayer()),
+                       track.GetNetCode())
+                if key in remove_keys:
+                    board.Remove(track)
+                    tracks_removed += 1
 
         # Add segments from routing results
         for result in results_data.get('results', []):
@@ -1117,7 +1154,7 @@ class DifferentialTab(wx.Panel):
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 
-        return tracks_added, vias_added
+        return tracks_added, vias_added, tracks_removed
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""
