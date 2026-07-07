@@ -232,6 +232,84 @@ def compute_prune_keep(cmds):
                   "dropped": dropped, "chain_holes": holes}
 
 
+def compute_contamination(cmds):
+    """Which outputs of a replay carry STALE original-run copper (issue #315
+    post-mortem: zynq's step5d read `final_board.kicad_pcb`, a file the worker
+    cp'd mid-run that no manifest command regenerates, so a --verbatim replay
+    silently grafted the ORIGINAL run's copper into every later step and the
+    'fix still broken at step5e' verdict was contamination, not code).
+
+    A command is TAINTED if it reads a chain-hole file (a .kicad_pcb no command
+    produces, other than the first command's seed inputs) or reads a board whose
+    latest producer is tainted. Returns (holes, tainted_outputs, last_clean_out):
+    the hole files, every tainted output board, and the last board written by a
+    clean command -- the artifact a grader should use."""
+    produced_any = set()
+    for _cwd, argv in cmds:
+        if not is_check_cmd(argv):
+            _ins, out = board_io(argv)
+            if out:
+                produced_any.add(out)
+
+    holes = set()
+    tainted_boards = set()
+    tainted_outputs = []
+    last_clean_out = None
+    seen_output = False
+    seed_ok = set()
+    for _cwd, argv in cmds:
+        if is_check_cmd(argv):
+            continue
+        ins, out = board_io(argv)
+        # An unproduced input is a legit external seed when it's an absolute
+        # path (corpus source board -- identical in both runs) or when it is
+        # first read before ANY output exists (a hand-copied `*_input` seed).
+        # Only an unproduced RELATIVE input first read mid-chain is original-
+        # run copper the replay can't regenerate.
+        cmd_holes = set()
+        for b in ins:
+            if not str(b).endswith('.kicad_pcb') or b in produced_any or b in seed_ok:
+                continue
+            if os.path.isabs(str(b)) or not seen_output:
+                seed_ok.add(b)
+            else:
+                cmd_holes.add(b)
+        holes |= cmd_holes
+        tainted = bool(cmd_holes) or any(b in tainted_boards for b in ins)
+        if out:
+            seen_output = True
+            if tainted:
+                tainted_boards.add(out)
+                tainted_outputs.append(out)
+            else:
+                tainted_boards.discard(out)  # a clean rewrite launders the name
+                last_clean_out = out
+    return sorted(holes), tainted_outputs, last_clean_out
+
+
+def warn_contamination(cmds):
+    """Print the replay-contamination warning (both pruned and verbatim modes).
+    Returns True if any contamination was found."""
+    holes, tainted, last_clean = compute_contamination(cmds)
+    if not holes:
+        return False
+    print("\n" + "!" * 70)
+    print("WARNING: REPLAY CONTAMINATION -- these input board(s) are produced by")
+    print("NO recorded command (the agent cp/mv'd them mid-run), so the replay")
+    print("seeds them from the ORIGINAL run dir with the ORIGINAL code's copper:")
+    for h in holes:
+        print(f"    {h}")
+    if tainted:
+        print("Every output downstream of them is part original-run copper -- do NOT")
+        print("grade these to judge current code:")
+        for t in tainted:
+            print(f"    {t}")
+    if last_clean:
+        print(f"Last output with fully current-code ancestry (grade THIS): {last_clean}")
+    print("!" * 70 + "\n")
+    return True
+
+
 def seed_input_boards(manifest, cmds, dest_dir):
     """Copy 'input-only' relative .kicad_pcb files into the replay dest dir.
 
@@ -350,21 +428,16 @@ def main():
         print(f"Pruning to file-dependency chain: running {len(prune_keep)} of "
               f"{len(cmds)} command(s), dropping {len(dropped)} superseded/dead-end "
               f"non-check command(s). Final board: {info['final_board']}")
-        if info.get("chain_holes"):
-            print("\n" + "!" * 70)
-            print("WARNING: CHAIN HOLE -- the kept chain reads board file(s) that no")
-            print("recorded command produces (the agent hand-copied them mid-run):")
-            for h in info["chain_holes"]:
-                print(f"    {h}")
-            print("The replay will seed these from the ORIGINAL run dir, so pruned")
-            print("results reflect STALE copper, not the current code. For a true")
-            print("A/B re-run use --verbatim (and grade the last fully-chained")
-            print("output before the hole).")
-            print("!" * 70 + "\n")
+        warn_contamination(cmds)
         for i in dropped:
             _ins, out = board_io(cmds[i][1])
             tool = next((os.path.basename(a) for a in cmds[i][1] if a.endswith(".py")), "?")
             print(f"    drop [{i+1}] {tool} -> {out}")
+    else:
+        # Verbatim replays inherit hole files just the same -- the zynq #315
+        # "still broken" verdict came from grading a verbatim replay's tail
+        # that descended from a recorded artifact. Warn here too.
+        warn_contamination(cmds)
 
     # Seed input-only relative boards (e.g. <board>_input.kicad_pcb) into the dest
     # so the first command finds them -- without this the chain breaks (issue: a
