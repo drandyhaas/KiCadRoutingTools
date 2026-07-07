@@ -66,7 +66,7 @@ def render_board_png(board_path, out_png=None, layers=DEFAULT_LAYERS, size=2000,
     out_svg = os.path.splitext(out_png)[0] + '.svg'
     r = subprocess.run(
         [kc, 'pcb', 'export', 'svg', '--mode-single', '--page-size-mode', '2',
-         '-l', layers, '-o', out_svg, board_path],
+         '--exclude-drawing-sheet', '-l', layers, '-o', out_svg, board_path],
         capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out_svg):
         if not quiet:
@@ -90,13 +90,63 @@ def render_board_png(board_path, out_png=None, layers=DEFAULT_LAYERS, size=2000,
     return out_svg
 
 
+def render_layer_pngs(board_path, out_dir=None, size=2000, quiet=False):
+    """One PNG per copper layer (Edge.Cuts overlaid on each for context).
+    Returns list of paths written."""
+    kc = find_kicad_cli()
+    if kc is None:
+        if not quiet:
+            print("board_image: kicad-cli not found, skipping render")
+        return []
+    board_path = os.path.abspath(board_path)
+    if out_dir is None:
+        out_dir = os.path.splitext(board_path)[0] + '_layers'
+    os.makedirs(out_dir, exist_ok=True)
+    cu = board_copper_layers(board_path) or ['F.Cu', 'B.Cu']
+    r = subprocess.run(
+        [kc, 'pcb', 'export', 'svg', '--mode-multi', '--page-size-mode', '2',
+         '--exclude-drawing-sheet', '-l', ','.join(cu),
+         '--cl', 'Edge.Cuts', '-o', out_dir, board_path],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        if not quiet:
+            print(f"board_image: per-layer export failed: {(r.stderr or r.stdout).strip()[:200]}")
+        return []
+    written = []
+    have_ql = shutil.which('qlmanage')
+    for fn in sorted(os.listdir(out_dir)):
+        if not fn.endswith('.svg'):
+            continue
+        svg = os.path.join(out_dir, fn)
+        if have_ql:
+            with tempfile.TemporaryDirectory() as td:
+                q = subprocess.run(['qlmanage', '-t', '-s', str(size), '-o', td, svg],
+                                   capture_output=True, text=True)
+                thumb = os.path.join(td, fn + '.png')
+                if q.returncode == 0 and os.path.exists(thumb):
+                    png = os.path.join(out_dir, fn[:-4] + '.png')
+                    shutil.move(thumb, png)
+                    os.remove(svg)
+                    written.append(png)
+                    continue
+        written.append(svg)
+    if not quiet:
+        print(f"board_image: wrote {len(written)} layer image(s) in {out_dir}")
+    return written
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('board')
     ap.add_argument('-o', '--output', default=None, help='output PNG path (default: alongside board)')
     ap.add_argument('--layers', default=DEFAULT_LAYERS)
     ap.add_argument('--size', type=int, default=2000, help='max thumbnail dimension px')
+    ap.add_argument('--per-layer', action='store_true',
+                    help='one PNG per copper layer (into <board>_layers/) instead of one composite')
     args = ap.parse_args()
+    if args.per_layer:
+        out = render_layer_pngs(args.board, args.output, args.size)
+        return 0 if out else 1
     out = render_board_png(args.board, args.output, args.layers, args.size)
     return 0 if out else 1
 
