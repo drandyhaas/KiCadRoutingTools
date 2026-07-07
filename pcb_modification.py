@@ -947,7 +947,14 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
             for v in r.get('new_vias') or []:
                 if v.net_id != net_id or id(v) in removed_via_ids:
                     continue
-                supported = any(math.hypot(v.x - ex, v.y - ey) < tol for ex, ey in endpoints) \
+                # PHYSICAL-attach test, not endpoint coincidence (#320): a
+                # segment lands on a via when its endpoint is inside the via
+                # barrel copper (radius), same as the pad test below uses the
+                # pad size. Grading this at the 0.02 chaining tol trimmed a
+                # LOAD-BEARING via whose track endpoint sat ~30um off-center
+                # (glasgow Z0: via + 7 segs dropped, pad stranded).
+                _v_reach = max(getattr(v, 'size', 0.0) / 2.0, 0.05)
+                supported = any(math.hypot(v.x - ex, v.y - ey) < _v_reach for ex, ey in endpoints) \
                     or any(math.hypot(v.x - px, v.y - py) < ps / 2 + 0.05 for px, py, ps in pad_pts)
                 if not supported:
                     removed_via_ids.add(id(v))
