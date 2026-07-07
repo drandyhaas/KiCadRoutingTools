@@ -841,15 +841,19 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     drill_holes = []   # every drill -> via (hole-to-hole) keep-out
     npth_holes = []    # no-copper holes only -> track keep-out
 
-    # Add via drills (excluding nets being routed)
+    # Via drills. The hole-to-hole keep-out is NET-INDEPENDENT (#335): a drill
+    # does not care about net membership, and the old own-net exemption let the
+    # router drill a new via within h2h of its own fanout via (cparti SPIm_SCK/
+    # MOSI, zynq). Ref-count safe: drill keep-outs live only in the static base
+    # map -- per-net caches (precompute_net_obstacles) never stamp or remove
+    # them. The exemption survives ONLY for the track keep-out below, which is
+    # what "reach your own through-holes" actually needs.
     for via in pcb_data.vias:
-        if via.net_id not in nets_to_route_set and via.drill > 0:
+        if via.drill > 0:
             drill_holes.append((via.x, via.y, via.drill))
 
     # Add pad drills (through-hole AND NPTH mounting pads carry drills)
     for net_id, pads in pcb_data.pads_by_net.items():
-        if net_id in nets_to_route_set:
-            continue
         for pad in pads:
             if pad.drill > 0:
                 # Slot drills expand to circles along the slot axis (short-
@@ -858,6 +862,10 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                 circles = pad_drill_circles(pad)
                 drill_holes.extend(circles)
                 if not _pad_has_copper(pad):
+                    # NPTH holes have no copper: the track keep-out applies to
+                    # every net -- including the pad's own nominal net (#328
+                    # net-tied mounting holes; copper across one's "own" NPTH
+                    # hole is just as cut by the drill).
                     npth_holes.extend(circles)
 
     # Track keep-out for NPTH holes on every copper layer (issue #233). The
@@ -1398,15 +1406,26 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
     positions = set()
 
     pads = pcb_data.pads_by_net.get(net_id, [])
+    from kicad_parser import pad_is_plated_through
     for pad in pads:
-        if pad.drill and pad.drill > 0:
+        # pad_is_plated_through, NOT bare drill>0 (#328): a net-tied NPTH
+        # mounting hole has no barrel -- suppressing a via there would ship a
+        # broken layer transition.
+        if pad_is_plated_through(pad):
             # Offset pads (#325): the reusable BARREL is at the hole anchor,
             # not the (possibly offset) copper centre.
             hx = getattr(pad, 'hole_x', None)
             hy = getattr(pad, 'hole_y', None)
-            gx, gy = coord.to_grid(hx if hx is not None else pad.global_x,
-                                   hy if hy is not None else pad.global_y)
-            positions.add((gx, gy))
+            positions.add(coord.to_grid(hx if hx is not None else pad.global_x,
+                                        hy if hy is not None else pad.global_y))
+            # The COPPER-centre cell suppresses too (#335): endpoints -- and
+            # therefore the router's layer transitions -- land on the copper
+            # centre, and a plated pad's copper spans every layer, so a
+            # transition there needs no via. For offset-drill pads the two
+            # cells differ, and suppressing only the hole cell let the router
+            # emit a via ON the pad copper within hole-to-hole of the offset
+            # barrel (caravel U8.45 vdda / U8.36 UART8_RX).
+            positions.add(coord.to_grid(pad.global_x, pad.global_y))
 
     # Existing same-net vias are reusable holes too (see free-via reuse). Without
     # this, only the multipoint tap path augmented the set, so the Phase-1 main edge

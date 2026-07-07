@@ -79,10 +79,12 @@ def run():
     pgx, pgy = coord.to_grid(pth.global_x, pth.global_y)
     check("PTH not track-blocked by drill path", not obs2.is_blocked(pgx, pgy, 0))
 
-    # A hole on the net being routed is NOT blocked (the net must reach it).
+    # #335/#328: drill keep-outs are NET-INDEPENDENT. An NPTH hole has no
+    # copper to "reach" -- a track crossing it is cut by the drill regardless
+    # of net membership, so the own-net exemption no longer applies.
     obs3 = GridObstacleMap(len(cfg.layers))
-    add_drill_hole_obstacles(obs3, pcb, cfg, {0})  # exclude net 0
-    check("own-net hole not blocked", not obs3.is_blocked(gx, gy, 0))
+    add_drill_hole_obstacles(obs3, pcb, cfg, {0})  # net 0 "being routed"
+    check("own-net NPTH hole still blocked", obs3.is_blocked(gx, gy, 0))
 
     print("=" * 60)
     if fails:
