@@ -2434,6 +2434,47 @@ def create_plane(
                     clearance=clearance,
                 )
 
+                # Collision-checked restore (#329 route_planes side): every
+                # ripped net's kept copper must ALSO be re-emitted as new
+                # copper with the net's input copper stripped -- the writer
+                # works from the input file, so a pcb_data-only restore would
+                # resurrect the dropped (colliding) pieces (#319 board==file).
+                # A net left STILL-RIPPED after settle (its restore collided)
+                # may have a stale emission from an earlier rip's restore --
+                # purge it or the writer ships copper that pcb_data and the
+                # obstacle maps no longer track (H9 drilled a via on +1V1's
+                # stale-emitted trunk).
+                for rid in (result.ripped_net_ids or []):
+                    new_segments[:] = [x for x in new_segments if x.get('net_id') != rid]
+                    new_vias[:] = [x for x in new_vias if x.get('net_id') != rid]
+                    all_new_segments[:] = [x for x in all_new_segments if x.get('net_id') != rid]
+                    all_new_vias[:] = [x for x in all_new_vias if x.get('net_id') != rid]
+                for rid, ksegs, kvias, _dropped in (result.restored_nets or []):
+                    if rid not in ripped_net_ids:
+                        ripped_net_ids.append(rid)
+                    # A net can be ripped AGAIN by a later pad (its restored
+                    # copper is back in pcb_data); purge any earlier emission
+                    # of this net or the stale set resurrects pieces the newer
+                    # settle dropped (+1V1 ripped at C98.2 then U1.J9: 6 GND
+                    # vias landed on a stale-emitted trunk segment).
+                    new_segments[:] = [x for x in new_segments if x.get('net_id') != rid]
+                    new_vias[:] = [x for x in new_vias if x.get('net_id') != rid]
+                    all_new_segments[:] = [x for x in all_new_segments if x.get('net_id') != rid]
+                    all_new_vias[:] = [x for x in all_new_vias if x.get('net_id') != rid]
+                    # from_restore: settle already put these OBJECTS back in
+                    # pcb_data; the net-end sync must not add them again or
+                    # every re-rip doubles the net's copper (dup drill pairs).
+                    for ks in ksegs:
+                        new_segments.append({
+                            'start': (ks.start_x, ks.start_y),
+                            'end': (ks.end_x, ks.end_y),
+                            'width': ks.width, 'layer': ks.layer, 'net_id': rid,
+                            'from_restore': True})
+                    for kv in kvias:
+                        new_vias.append({
+                            'x': kv.x, 'y': kv.y, 'size': kv.size,
+                            'drill': kv.drill, 'layers': kv.layers, 'net_id': rid,
+                            'from_restore': True})
                 if result.success:
                     # Track ripped nets and remove their vias/segments from all_new_* lists
                     for rid in result.ripped_net_ids:
@@ -2661,6 +2702,24 @@ def create_plane(
         if failed_pads > 0:
             print(f"  Failed pads: {failed_pads}")
 
+        # KICAD_PLANE_MAP_PARITY=1: verify the incremental via map still
+        # BLOCKS every restored net's live copper (under-blocking here is the
+        # via-drilled-on-restored-track class; over-blocking is by-design
+        # conservative for dropped pieces). Fresh-recompute each restored
+        # net's footprint from CURRENT pcb_data and probe the map.
+        if os.environ.get('KICAD_PLANE_MAP_PARITY') and ripped_net_ids:
+            from obstacle_cache import precompute_via_placement_obstacles as _pv
+            for _rid in ripped_net_ids:
+                if not any(v.net_id == _rid for v in pcb_data.vias) and \
+                   not any(sg.net_id == _rid for sg in pcb_data.segments):
+                    continue  # fully ripped, nothing live to verify
+                _fresh = _pv(pcb_data, _rid, config, all_layers)
+                _miss = sum(1 for (gx, gy) in map(tuple, _fresh.blocked_vias)
+                            if not obstacles.is_via_blocked(int(gx), int(gy)))
+                _nm = pcb_data.nets[_rid].name if _rid in pcb_data.nets else _rid
+                status = 'OK' if _miss == 0 else f'UNDER-BLOCKED {_miss} cells'
+                print(f"  MAP-PARITY {_nm}: {len(_fresh.blocked_vias)} live cells, {status}")
+
         # Accumulate results
         all_new_vias.extend(new_vias)
         all_new_segments.extend(new_segments)
@@ -2672,13 +2731,19 @@ def create_plane(
             if rid not in all_ripped_net_ids:
                 all_ripped_net_ids.append(rid)
 
-        # Add new vias/segments to pcb_data so subsequent nets will avoid them
+        # Add new vias/segments to pcb_data so subsequent nets will avoid them.
+        # Restored-net emissions are skipped: their copper OBJECTS are already
+        # in pcb_data (settle's restore) -- re-adding doubles the net's copper.
         for v in new_vias:
+            if v.get('from_restore'):
+                continue
             pcb_data.vias.append(Via(
                 x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                 layers=v['layers'], net_id=v['net_id']
             ))
         for s in new_segments:
+            if s.get('from_restore'):
+                continue
             start = s['start']
             end = s['end']
             pcb_data.segments.append(Segment(
@@ -2744,6 +2809,11 @@ def create_plane(
     if dry_run:
         print("\nDry run - no output file written")
     else:
+        if os.environ.get('KICAD_SETTLE_DEBUG'):
+            from collections import Counter as _C
+            _dups = {k: n for k, n in _C((v.get('net_id'), round(v['x'], 3), round(v['y'], 3))
+                                          for v in all_new_vias).items() if n > 1}
+            print(f"\n  WRITE-DEBUG: duplicate new_vias: {_dups}")
         _write_output_and_reroute(
             input_file=input_file,
             output_file=output_file,
