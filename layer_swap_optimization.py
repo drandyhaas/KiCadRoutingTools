@@ -413,8 +413,14 @@ def apply_diff_pair_layer_swaps(
             vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
             vias3, mods3 = apply_stub_layer_switch(pcb_data, other_src_p_stub, src_layer, config, debug=False)
             vias4, mods4 = apply_stub_layer_switch(pcb_data, other_src_n_stub, src_layer, config, debug=False)
-            all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
             all_vias = vias1 + vias2 + vias3 + vias4
+            # #277/#299 audit: the four pad vias can collide at a tight pad
+            # pitch; shrink to the fab floor or revert the whole paired swap.
+            if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                revert_stub_layer_switch(pcb_data, mods1 + mods2 + mods3 + mods4, all_vias)
+                print(f"    Paired source swap skipped for {pair_name}: pad vias overlap, can't shrink to fab floor")
+                continue
+            all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
             all_swap_vias.extend(all_vias)
 
             # Update all_stubs_by_layer to reflect the layer changes
@@ -672,8 +678,13 @@ def apply_diff_pair_layer_swaps(
             vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
             vias3, mods3 = apply_stub_layer_switch(pcb_data, other_tgt_p_stub, tgt_layer, config, debug=False)
             vias4, mods4 = apply_stub_layer_switch(pcb_data, other_tgt_n_stub, tgt_layer, config, debug=False)
-            all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
             all_vias = vias1 + vias2 + vias3 + vias4
+            # #277/#299 audit: shrink colliding pad vias or revert the paired swap.
+            if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                revert_stub_layer_switch(pcb_data, mods1 + mods2 + mods3 + mods4, all_vias)
+                print(f"    Paired target swap skipped for {pair_name}: pad vias overlap, can't shrink to fab floor")
+                continue
+            all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
             all_swap_vias.extend(all_vias)
 
             # Update stub_endpoints_by_layer for both pairs
@@ -952,8 +963,14 @@ def apply_diff_pair_layer_swaps(
                 if valid:
                     vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
                     vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
-                    all_segment_modifications.extend(mods1 + mods2)
                     all_vias = vias1 + vias2
+                    # #277/#299 audit: same guard as the first-round solo switch
+                    # (the retry round had omitted it).
+                    if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                        revert_stub_layer_switch(pcb_data, mods1 + mods2, all_vias)
+                        print(f"    Solo source switch (round {retry_round}) skipped for {pair_name}: pad vias overlap")
+                        continue
+                    all_segment_modifications.extend(mods1 + mods2)
                     all_swap_vias.extend(all_vias)
                     if src_layer in all_stubs_by_layer:
                         all_stubs_by_layer[src_layer] = [s for s in all_stubs_by_layer[src_layer] if s[0] != pair_name]
@@ -994,8 +1011,13 @@ def apply_diff_pair_layer_swaps(
                 if valid:
                     vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
                     vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
-                    all_segment_modifications.extend(mods1 + mods2)
                     all_vias = vias1 + vias2
+                    # #277/#299 audit: same guard as the first-round solo switch.
+                    if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                        revert_stub_layer_switch(pcb_data, mods1 + mods2, all_vias)
+                        print(f"    Solo target switch (round {retry_round}) skipped for {pair_name}: pad vias overlap")
+                        continue
+                    all_segment_modifications.extend(mods1 + mods2)
                     all_swap_vias.extend(all_vias)
                     if tgt_layer in all_stubs_by_layer:
                         all_stubs_by_layer[tgt_layer] = [s for s in all_stubs_by_layer[tgt_layer] if s[0] != pair_name]
@@ -1110,11 +1132,19 @@ def apply_diff_pair_layer_swaps(
                         print(f"    Two-pair {swap_type} swap validation failed for {pair_name}: {reason}")
                         # Don't break - continue to try fallback target swap
                     else:
-                        # Apply swaps
-                        _, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
-                        _, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
-                        _, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
-                        _, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
+                        # Apply swaps. Vias were previously DISCARDED here (never
+                        # fit-checked or added to all_swap_vias even though apply
+                        # puts them on the board) -- #299 audit.
+                        vias1, mods1 = apply_stub_layer_switch(pcb_data, our_stubs[0], our_new_layer, config, debug=False)
+                        vias2, mods2 = apply_stub_layer_switch(pcb_data, our_stubs[1], our_new_layer, config, debug=False)
+                        vias3, mods3 = apply_stub_layer_switch(pcb_data, their_stubs[0], their_new_layer, config, debug=False)
+                        vias4, mods4 = apply_stub_layer_switch(pcb_data, their_stubs[1], their_new_layer, config, debug=False)
+                        all_vias = vias1 + vias2 + vias3 + vias4
+                        if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                            revert_stub_layer_switch(pcb_data, mods1 + mods2 + mods3 + mods4, all_vias)
+                            print(f"    Two-pair {swap_type} swap skipped for {pair_name}: pad vias overlap, can't shrink to fab floor")
+                            continue  # next partner; later solo/retry phases can still swap this pair
+                        all_swap_vias.extend(all_vias)
                         all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
 
                         # Update stub_endpoints_by_layer for both pairs
@@ -1195,10 +1225,17 @@ def apply_diff_pair_layer_swaps(
                                 reason = our_reason if not our_valid else their_reason
                                 print(f"    Fallback target swap validation failed for {pair_name}: {reason}")
                             else:
-                                _, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
-                                _, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
-                                _, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
-                                _, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
+                                # Vias were previously discarded/untracked here (#299 audit).
+                                vias1, mods1 = apply_stub_layer_switch(pcb_data, p_stub, src_layer, config, debug=False)
+                                vias2, mods2 = apply_stub_layer_switch(pcb_data, n_stub, src_layer, config, debug=False)
+                                vias3, mods3 = apply_stub_layer_switch(pcb_data, other_p_stub, tgt_layer, config, debug=False)
+                                vias4, mods4 = apply_stub_layer_switch(pcb_data, other_n_stub, tgt_layer, config, debug=False)
+                                all_vias = vias1 + vias2 + vias3 + vias4
+                                if not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                                    revert_stub_layer_switch(pcb_data, mods1 + mods2 + mods3 + mods4, all_vias)
+                                    print(f"    Fallback target swap skipped for {pair_name}: pad vias overlap, can't shrink to fab floor")
+                                    continue  # next partner; later phases can still swap this pair
+                                all_swap_vias.extend(all_vias)
                                 all_segment_modifications.extend(mods1 + mods2 + mods3 + mods4)
 
                                 # Update stub_endpoints_by_layer for both pairs
@@ -1302,12 +1339,19 @@ def apply_diff_pair_layer_swaps(
                     )
 
                     if valid:
-                        # Commit the single-ended blocker move now that it stuck
-                        all_segment_modifications.extend(se_mods)
-                        all_swap_vias.extend(se_vias)
                         # Apply diff pair source switch
                         vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
                         vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
+                        # #299 audit: fit-check the moved blocker's via and the
+                        # pair's pad vias together; on failure undo BOTH swaps.
+                        if not _swap_vias_fit_or_shrink(pcb_data, se_vias + vias1 + vias2, config):
+                            revert_stub_layer_switch(pcb_data, mods1 + mods2, vias1 + vias2)
+                            revert_stub_layer_switch(pcb_data, se_mods, se_vias)
+                            print(f"    Solo source switch (blocker move) skipped for {pair_name}: pad vias overlap")
+                            continue
+                        # Commit the single-ended blocker move now that it stuck
+                        all_segment_modifications.extend(se_mods)
+                        all_swap_vias.extend(se_vias)
                         all_segment_modifications.extend(mods1 + mods2)
                         all_swap_vias.extend(vias1 + vias2)
 
@@ -1388,10 +1432,16 @@ def apply_diff_pair_layer_swaps(
                         )
 
                         if valid:
-                            all_segment_modifications.extend(se_mods)
-                            all_swap_vias.extend(se_vias)
                             vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
                             vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
+                            # #299 audit: fit-check blocker + pair vias together.
+                            if not _swap_vias_fit_or_shrink(pcb_data, se_vias + vias1 + vias2, config):
+                                revert_stub_layer_switch(pcb_data, mods1 + mods2, vias1 + vias2)
+                                revert_stub_layer_switch(pcb_data, se_mods, se_vias)
+                                print(f"    Solo target switch (blocker move) skipped for {pair_name}: pad vias overlap")
+                                continue
+                            all_segment_modifications.extend(se_mods)
+                            all_swap_vias.extend(se_vias)
                             all_segment_modifications.extend(mods1 + mods2)
                             all_swap_vias.extend(vias1 + vias2)
 
@@ -1618,6 +1668,14 @@ def apply_single_ended_layer_swaps(
                         # Apply both swaps
                         vias1, mods1 = apply_stub_layer_switch(pcb_data, stub1, dest1, config, debug=False)
                         vias2, mods2 = apply_stub_layer_switch(pcb_data, stub2, dest2, config, debug=False)
+                        # #299 audit: each net's validation excludes its swap
+                        # partner and runs before the partner's via exists, so
+                        # the two new pad vias were never checked against EACH
+                        # OTHER (adjacent connector pins collide).
+                        if not _swap_vias_fit_or_shrink(pcb_data, vias1 + vias2, config):
+                            revert_stub_layer_switch(pcb_data, mods1 + mods2, vias1 + vias2)
+                            print(f"    Swap pair skipped for {net1_name} <-> {net2_name}: pad vias overlap")
+                            continue  # try the next swap option
                         all_swap_vias.extend(vias1 + vias2)
                         all_segment_modifications.extend(mods1 + mods2)
                         applied_single_swaps.add(net1_name)

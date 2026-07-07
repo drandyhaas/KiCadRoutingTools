@@ -438,8 +438,10 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
     The via legitimately sits on its own relocated pad and connects to its own-net
     stub, so own-net pads/segments are excluded."""
     from check_drc import (check_via_via_overlap, check_pad_via_overlap,
-                           check_via_segment_overlap)
+                           check_via_segment_overlap, check_via_drill_overlap,
+                           check_pad_drill_via_overlap)
     clearance = config.clearance
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
     margin = _DRC_CLEARANCE_MARGIN
     # A fan entry's via is None when apply_bare_pad_target_via REUSED an existing
     # same-net via (#282) instead of drilling a new one - there is no new via to
@@ -454,14 +456,25 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
         for w in fan_vias[i + 1:]:
             if check_via_via_overlap(v, w, clearance, margin)[0]:
                 return False
+            if h2h and check_via_drill_overlap(v, w, h2h, margin)[0]:
+                return False
+        # Drill hole-to-hole is net-INDEPENDENT at the fab (#282), so unlike the
+        # body checks the drill pass excludes nothing (mirrors
+        # _bare_pad_pair_vias_fit, which this gate previously omitted).
         for ev in pcb_data.vias:
-            if id(ev) not in fan_ids and check_via_via_overlap(v, ev, clearance, margin)[0]:
+            if id(ev) in fan_ids:
+                continue
+            if check_via_via_overlap(v, ev, clearance, margin)[0]:
+                return False
+            if h2h and check_via_drill_overlap(v, ev, h2h, margin)[0]:
                 return False
         for pads in pcb_data.pads_by_net.values():
             for pad in pads:
                 if id(pad) in reloc_ids:
-                    continue
+                    continue  # the via legitimately sits on its own relocated pad
                 if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
+                    return False
+                if h2h and check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
                     return False
         for seg in pcb_data.segments:
             if seg.net_id == v.net_id:

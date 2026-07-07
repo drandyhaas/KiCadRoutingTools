@@ -43,13 +43,14 @@ def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
 
 def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
                          pads) -> bool:
-    """True if a through via at (x, y) clears every pad in `pads` (bbox model)
-    by `clearance` edge-to-edge. Vias span all copper layers, so the pads'
-    own layers are irrelevant."""
+    """True if a through via at (x, y) clears every pad in `pads` (rect model,
+    rect_rotation-aware) by `clearance` edge-to-edge. Vias span all copper
+    layers, so the pads' own layers are irrelevant. The previous axis-aligned
+    bbox under-covered a ROTATED pad's protruding corners, passing via sites
+    whose ring grazed the real copper."""
+    from routing_utils import point_to_pad_rect_dist
     for p in pads:
-        ddx = max(0.0, abs(x - p.global_x) - p.size_x / 2.0)
-        ddy = max(0.0, abs(y - p.global_y) - p.size_y / 2.0)
-        if math.hypot(ddx, ddy) < v_half + clearance - 1e-9:
+        if point_to_pad_rect_dist(x, y, p) < v_half + clearance - 1e-9:
             return False
     return True
 

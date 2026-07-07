@@ -135,6 +135,18 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
             if dist < tolerance:
                 has_pad_via = True
                 break
+    if not has_pad_via:
+        # A through-hole pad's own barrel already ties every copper layer --
+        # treat it like a pad via, or needs_pad_via_for_switch drills a NEW
+        # via coincident with the pin's hole on a layer switch (a hole-to-hole
+        # DRC bust on top of a connector pin, #289 audit). NPTH has no copper.
+        for pad in net_pads:
+            if ((getattr(pad, 'drill', 0.0) or 0.0) > 0
+                    and getattr(pad, 'pad_type', '') != 'np_thru_hole'
+                    and abs(pad.global_x - pad_x) < tolerance
+                    and abs(pad.global_y - pad_y) < tolerance):
+                has_pad_via = True
+                break
 
     return StubInfo(
         net_id=net_id,

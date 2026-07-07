@@ -15,7 +15,7 @@ from routing_config import GridRouteConfig, DiffPairNet
 from net_queries import MPSResult
 from stub_layer_switching import (
     get_stub_info, apply_stub_layer_switch, validate_swap, validate_single_swap,
-    StubInfo
+    revert_stub_layer_switch, StubInfo
 )
 from diff_pair_routing import get_diff_pair_endpoints
 from connectivity import get_net_endpoints
@@ -106,6 +106,17 @@ def _get_unit_stub_info(
                                  targets[0][3], targets[0][4], layer)
 
         return stub, None, layer, False
+
+
+def _mps_swap_vias_fit(pcb_data, new_vias, config) -> bool:
+    """#277/#299 fit gate for MPS-swap pad vias: shrink toward the fab floor
+    until they clear each other and neighbouring pads/vias/drills; False (with
+    original sizes restored) if even the floor via overlaps -- the caller then
+    reverts the swap. Thin wrapper so this module doesn't import the private
+    helper at module load (layer_swap_optimization imports from here indirectly
+    via route ordering)."""
+    from layer_swap_optimization import _swap_vias_fit_or_shrink
+    return _swap_vias_fit_or_shrink(pcb_data, new_vias, config)
 
 
 def _find_alternative_layers(
@@ -416,59 +427,38 @@ def try_mps_aware_layer_swaps(
                                     print(f"      -> {target_layer}: invalid - {reason}")
                                 continue
 
-                            # Apply the swap(s)
+                            # Apply the swap(s). Collect vias+mods locally first:
+                            # the pad vias must pass the #277/#299 fit gate (two
+                            # F.Cu escapes at a tight pad pitch collide) before
+                            # anything is committed; this engine had no guard.
                             total_vias = []
+                            total_mods = []
+                            stubs_to_switch = []
                             if stub_type == 'both':
-                                # Apply source swap
-                                new_vias, seg_mods = apply_stub_layer_switch(
-                                    pcb_data, src_stub_p, target_layer, config, debug=verbose
-                                )
-                                all_swap_vias.extend(new_vias)
-                                all_segment_modifications.extend(seg_mods)
-                                total_vias.extend(new_vias)
-
+                                stubs_to_switch = [src_stub_p]
                                 if is_diff_pair and src_stub_n:
-                                    new_vias_n, seg_mods_n = apply_stub_layer_switch(
-                                        pcb_data, src_stub_n, target_layer, config, debug=verbose
-                                    )
-                                    all_swap_vias.extend(new_vias_n)
-                                    all_segment_modifications.extend(seg_mods_n)
-                                    total_vias.extend(new_vias_n)
-
-                                # Apply target swap
-                                new_vias_t, seg_mods_t = apply_stub_layer_switch(
-                                    pcb_data, tgt_stub_p, target_layer, config, debug=verbose
-                                )
-                                all_swap_vias.extend(new_vias_t)
-                                all_segment_modifications.extend(seg_mods_t)
-                                total_vias.extend(new_vias_t)
-
+                                    stubs_to_switch.append(src_stub_n)
+                                stubs_to_switch.append(tgt_stub_p)
                                 if is_diff_pair and tgt_stub_n:
-                                    new_vias_tn, seg_mods_tn = apply_stub_layer_switch(
-                                        pcb_data, tgt_stub_n, target_layer, config, debug=verbose
-                                    )
-                                    all_swap_vias.extend(new_vias_tn)
-                                    all_segment_modifications.extend(seg_mods_tn)
-                                    total_vias.extend(new_vias_tn)
-
-                                swaps_applied += 2  # Count as 2 swaps (source + target)
+                                    stubs_to_switch.append(tgt_stub_n)
                             else:
-                                new_vias, seg_mods = apply_stub_layer_switch(
-                                    pcb_data, stub_p, target_layer, config, debug=verbose
-                                )
-                                all_swap_vias.extend(new_vias)
-                                all_segment_modifications.extend(seg_mods)
-                                total_vias.extend(new_vias)
-
+                                stubs_to_switch = [stub_p]
                                 if is_diff_pair and stub_n:
-                                    new_vias_n, seg_mods_n = apply_stub_layer_switch(
-                                        pcb_data, stub_n, target_layer, config, debug=verbose
-                                    )
-                                    all_swap_vias.extend(new_vias_n)
-                                    all_segment_modifications.extend(seg_mods_n)
-                                    total_vias.extend(new_vias_n)
-
-                                swaps_applied += 1
+                                    stubs_to_switch.append(stub_n)
+                            for _stub in stubs_to_switch:
+                                new_vias, seg_mods = apply_stub_layer_switch(
+                                    pcb_data, _stub, target_layer, config, debug=verbose
+                                )
+                                total_vias.extend(new_vias)
+                                total_mods.extend(seg_mods)
+                            if not _mps_swap_vias_fit(pcb_data, total_vias, config):
+                                revert_stub_layer_switch(pcb_data, total_mods, total_vias)
+                                if verbose:
+                                    print(f"      -> {target_layer}: pad vias overlap, swap reverted")
+                                continue
+                            all_swap_vias.extend(total_vias)
+                            all_segment_modifications.extend(total_mods)
+                            swaps_applied += 2 if stub_type == 'both' else 1
 
                             # Update tracking
                             nets_swapped.update(mps_result.unit_to_nets.get(swap_unit_id, [swap_unit_id]))
