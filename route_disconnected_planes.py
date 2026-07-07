@@ -45,10 +45,13 @@ import re
 def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
     """Remove a net's segments and vias from pcb_data so a blocked repair can
     re-attempt through the freed space. Returns (segments, vias) removed."""
-    rsegs = [s for s in pcb_data.segments if s.net_id == rip_net_id]
+    # graphic=True copper is immutable input art (#337): never ripped.
+    rsegs = [s for s in pcb_data.segments
+             if s.net_id == rip_net_id and not getattr(s, 'graphic', False)]
     rvias = [v for v in pcb_data.vias if v.net_id == rip_net_id]
     if rsegs:
-        pcb_data.segments = [s for s in pcb_data.segments if s.net_id != rip_net_id]
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if s.net_id != rip_net_id or getattr(s, 'graphic', False)]
     if rvias:
         pcb_data.vias = [v for v in pcb_data.vias if v.net_id != rip_net_id]
     return rsegs, rvias

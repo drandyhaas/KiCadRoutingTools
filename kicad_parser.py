@@ -125,6 +125,11 @@ class Segment:
     start_y_str: str = ""
     end_x_str: str = ""
     end_y_str: str = ""
+    # True for copper derived from a gr_line/gr_arc GRAPHIC on a copper layer
+    # (#337): real copper for DRC/obstacles, but NOT a track -- cleanup passes
+    # must never prune it and writers cannot strip it (there is no (segment)
+    # block to match).
+    graphic: bool = False
 
 
 @dataclass
@@ -2074,6 +2079,64 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                         float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
                         name_to_id.get(m.group(9), 0), m.group(10))
 
+    # Net-tied copper GRAPHICS (#337): KiCad renders gr_line / gr_arc drawn on
+    # a copper layer as real copper (optionally carrying a (net ...)). They are
+    # invisible as (segment) records, so without this pass both check_drc and
+    # the router's obstacle model were blind to them -- openstint's router
+    # placed a via 62um from a hand-drawn GND gr_line it could not see, and
+    # kicad-cli flagged dozens of such contacts we graded clean. Parse them
+    # into Segments tagged graphic=True (obstacle/DRC-real, never prunable).
+    def _resolve_net(tok):
+        if tok is None:
+            return 0
+        tok = tok.strip()
+        if tok.startswith('"'):
+            return name_to_id.get(tok[1:-1], 0) if name_to_id else 0
+        try:
+            return int(tok)
+        except ValueError:
+            return 0
+
+    gr_line_re = re.compile(
+        r'\(gr_line\s*\(start\s+([-\d.]+)\s+([-\d.]+)\)\s*'
+        r'\(end\s+([-\d.]+)\s+([-\d.]+)\)\s*'
+        r'\(stroke\s*\(width\s+([-\d.]+)\)[^()]*(?:\([^()]*\))?[^()]*\)\s*'
+        r'\(layer\s+"([^"]+)"\)\s*'
+        r'(?:\(net\s+("[^"]*"|\d+)\)\s*)?'
+        r'\(uuid\s+"([^"]+)"\)', re.DOTALL)
+    gr_arc_re = re.compile(
+        r'\(gr_arc\s*\(start\s+([-\d.]+)\s+([-\d.]+)\)\s*'
+        r'\(mid\s+([-\d.]+)\s+([-\d.]+)\)\s*'
+        r'\(end\s+([-\d.]+)\s+([-\d.]+)\)\s*'
+        r'\(stroke\s*\(width\s+([-\d.]+)\)[^()]*(?:\([^()]*\))?[^()]*\)\s*'
+        r'\(layer\s+"([^"]+)"\)\s*'
+        r'(?:\(net\s+("[^"]*"|\d+)\)\s*)?'
+        r'\(uuid\s+"([^"]+)"\)', re.DOTALL)
+    for m in gr_line_re.finditer(content):
+        layer = m.group(6)
+        w = float(m.group(5))
+        if not layer.endswith('.Cu') or w <= 0:
+            continue
+        segments.append(Segment(
+            start_x=float(m.group(1)), start_y=float(m.group(2)),
+            end_x=float(m.group(3)), end_y=float(m.group(4)),
+            width=w, layer=layer, net_id=_resolve_net(m.group(7)),
+            uuid=m.group(8), graphic=True))
+    for m in gr_arc_re.finditer(content):
+        layer = m.group(8)
+        w = float(m.group(7))
+        if not layer.endswith('.Cu') or w <= 0:
+            continue
+        nid = _resolve_net(m.group(9))
+        for (p0, p1) in _arc_to_segments(
+                (float(m.group(1)), float(m.group(2))),
+                (float(m.group(3)), float(m.group(4))),
+                (float(m.group(5)), float(m.group(6)))):
+            segments.append(Segment(
+                start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                width=w, layer=layer, net_id=nid,
+                uuid=m.group(10), graphic=True))
+
     return segments
 
 
@@ -2889,6 +2952,45 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     zones = _extract_zones_from_pcbnew(board, to_mm, get_layer_name)
 
     # --- Extract user-layer guide corridors (issue #7) ---
+    # --- Net-tied copper GRAPHICS (#337), builder side ---
+    # Parity with the text parser's gr_line/gr_arc pass: PCB_SHAPE lines/arcs
+    # on copper layers render as real copper (obstacles + DRC), tagged
+    # graphic=True (immutable input art -- never ripped/pruned/stripped).
+    try:
+        import pcbnew as _pcbnew_g
+        for _d in board.GetDrawings():
+            if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
+                continue
+            _ln = get_layer_name(_d.GetLayer())
+            if not (_ln or '').endswith('.Cu'):
+                continue
+            try:
+                _shape = _d.GetShape()
+                _w = to_mm(_d.GetWidth())
+            except Exception:
+                continue
+            if _w <= 0:
+                continue
+            _nid = _d.GetNetCode() if hasattr(_d, 'GetNetCode') else 0
+            if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
+                segments.append(Segment(
+                    start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
+                    end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
+                    width=_w, layer=_ln, net_id=_nid, graphic=True))
+            elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
+                try:
+                    _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
+                    _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
+                    _e0 = (to_mm(_d.GetEnd().x), to_mm(_d.GetEnd().y))
+                except Exception:
+                    continue
+                for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
+                    segments.append(Segment(
+                        start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
+                        width=_w, layer=_ln, net_id=_nid, graphic=True))
+    except Exception:
+        pass  # older pcbnew APIs: best-effort
+
     guide_paths = extract_guide_paths_from_board(board, guide_layer)
 
     # --- Extract user-layer keepout polygons (issue #27) ---
@@ -3316,9 +3418,38 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     def _q(v):
         return round(v, 3)
 
-    def _seg_sig(s):
-        ends = tuple(sorted([(_q(s.start_x), _q(s.start_y)), (_q(s.end_x), _q(s.end_y))]))
-        return (ends, _q(s.width), s.layer, s.net_id)
+    def _net_label(pcb, nid):
+        # Compare by NAME, not raw id: for nets carried only by copper
+        # GRAPHICS (#337, no pads/tracks anchor them), pcbnew's renumbered
+        # code and the file's net-table id legitimately differ (openstint
+        # /A-: board 3 vs file 14) while naming the same net.
+        n = pcb.nets.get(nid)
+        return n.name if n is not None else nid
+
+    def _seg_sig_for(pcb):
+        def _seg_sig(s):
+            ends = tuple(sorted([(_q(s.start_x), _q(s.start_y)), (_q(s.end_x), _q(s.end_y))]))
+            if getattr(s, 'graphic', False):
+                # KiCad RECOMPUTES a copper graphic's net from connectivity on
+                # load (openstint: file attribute /A-, pcbnew says GND for the
+                # same art). Same copper either way -- compare geometry only.
+                return (ends, _q(s.width), s.layer, '<graphic>')
+            return (ends, _q(s.width), s.layer, _net_label(pcb, s.net_id))
+        return _seg_sig
+
+    def _multiset_diff_2sig(board_items, file_items, sig_b, sig_f, label, fmt):
+        from collections import Counter
+        cb = Counter(sig_b(x) for x in board_items)
+        cf = Counter(sig_f(x) for x in file_items)
+        only_board = list((cb - cf).elements())
+        only_file = list((cf - cb).elements())
+        if only_board or only_file:
+            diffs.append(f"{label} count: board={len(board_items)} file={len(file_items)}; "
+                         f"{len(only_board)} only in board, {len(only_file)} only in file")
+            for s in only_board[:5]:
+                diffs.append(f"  {label} only in board: {fmt(s)}")
+            for s in only_file[:5]:
+                diffs.append(f"  {label} only in file: {fmt(s)}")
 
     def _multiset_diff(board_items, file_items, sig, label, fmt):
         from collections import Counter
@@ -3334,8 +3465,9 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
             for s in only_file[:5]:
                 diffs.append(f"  {label} only in file: {fmt(s)}")
 
-    _multiset_diff(from_board.segments, from_file.segments, _seg_sig, "Segment",
-                   lambda s: f"ends={s[0]} w={s[1]} layer={s[2]} net={s[3]}")
+    _multiset_diff_2sig(from_board.segments, from_file.segments,
+                        _seg_sig_for(from_board), _seg_sig_for(from_file), "Segment",
+                        lambda s: f"ends={s[0]} w={s[1]} layer={s[2]} net={s[3]}")
 
     # --- Compare vias (geometry, not just count) ---
     def _via_sig(v):

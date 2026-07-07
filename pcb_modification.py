@@ -915,6 +915,14 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                                         aggressive=True, tol=tol)
         # #319: never delete a coincident bridge and leave a soft joint.
         kept, removed = _restore_soft_joint_bridges(kept, removed, vias, pads)
+        # Copper graphics (#337) participate in the connectivity ANALYSIS above
+        # (a routed stub may genuinely continue through one) but are immutable
+        # input art: force-keep any the pruner selected (the writer has no
+        # (segment) block to strip anyway).
+        g = [x for x in removed if getattr(x, 'graphic', False)]
+        if g:
+            kept = list(kept) + g
+            removed = [x for x in removed if not getattr(x, 'graphic', False)]
         kept_segs_by_net[net_id] = kept
         for s in removed:
             if id(s) in routed_seg_ids:
@@ -1334,6 +1342,8 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     segs_by_net = defaultdict(list)
     for s in pcb_data.segments:
         if scope_net_ids is None or s.net_id in scope_net_ids:
+            if getattr(s, 'graphic', False):
+                continue  # copper graphics are immutable input art (#337)
             segs_by_net[s.net_id].append(s)
 
     removed_routed_ids = set()
@@ -2897,10 +2907,15 @@ def remove_net_from_pcb_data(pcb_data: PCBData, net_id: int) -> Tuple[List[Segme
     Returns:
         (removed_segments, removed_vias) - the removed elements for potential restoration
     """
-    removed_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    # Copper GRAPHICS (#337) are immutable input copper: the writer cannot
+    # strip a gr_line from the file, so ripping them from pcb_data would break
+    # board==file and a later restore would DUPLICATE them as (segment) copies.
+    removed_segments = [s for s in pcb_data.segments
+                        if s.net_id == net_id and not getattr(s, 'graphic', False)]
     removed_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
-    pcb_data.segments = [s for s in pcb_data.segments if s.net_id != net_id]
+    pcb_data.segments = [s for s in pcb_data.segments
+                         if s.net_id != net_id or getattr(s, 'graphic', False)]
     pcb_data.vias = [v for v in pcb_data.vias if v.net_id != net_id]
 
     return removed_segments, removed_vias
