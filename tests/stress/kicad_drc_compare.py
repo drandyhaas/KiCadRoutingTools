@@ -170,6 +170,14 @@ def _staged_copy(board: str, clearance: float):
             c["clearance"] = min(c.get("clearance", clearance), clearance)
     rules = cfg.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})
     rules["min_clearance"] = min(rules.get("min_clearance", clearance) or clearance, clearance)
+    # Hole floor (#327): equalize min_hole_clearance to the routed copper
+    # clearance too -- our stack guarantees the NPTH fab floor (0.2, #308) and
+    # copper clearance, not a board's stricter DESIGN hole rule; grading holes
+    # stricter than the routing was told manufactures config-mismatch items.
+    # (Footprint-LEVEL clearance overrides remain and are a real gap: #326.)
+    mhc = rules.get("min_hole_clearance")
+    if mhc and mhc > clearance:
+        rules["min_hole_clearance"] = clearance
     json.dump(cfg, open(pro2, "w"))
     return d, b2
 
