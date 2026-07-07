@@ -91,7 +91,8 @@ def find_via_position_blocker(
     pcb_data: PCBData,
     config: GridRouteConfig,
     exclude_net_id: int,
-    protected_net_ids: Optional[Set[int]] = None
+    protected_net_ids: Optional[Set[int]] = None,
+    quiet: bool = False
 ) -> Optional[int]:
     """
     Find the net that is blocking via placement at a specific position.
@@ -148,7 +149,8 @@ def find_via_position_blocker(
                 best_blocker = via.net_id
 
     # Report protected blocker if it's closer than any non-protected blocker
-    if best_protected_blocker is not None and best_protected_dist_sq < best_dist_sq:
+    if (not quiet and best_protected_blocker is not None
+            and best_protected_dist_sq < best_dist_sq):
         net = pcb_data.nets.get(best_protected_blocker)
         blocker_name = net.name if net else f"net_{best_protected_blocker}"
         print(f"blocked by {blocker_name} (protected, cannot rip)...", end=" ")

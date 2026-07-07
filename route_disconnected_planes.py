@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 import os
+import math
 import argparse
 from dataclasses import replace
 from typing import List, Tuple, Dict, Optional, Set
@@ -53,6 +54,39 @@ def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
     return rsegs, rvias
 
 
+def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
+                                protected_net_ids, exclude_net_ids,
+                                max_search_radius):
+    """The net most often blocking CANDIDATE VIA SITES around the pad (#329).
+
+    The frontier blocker only names whoever stopped the failed ROUTE attempt;
+    on ottercast the C69.2 tap ripped three frontier nets while the net whose
+    trace actually denied every good via site (Net-(C63-Pad1), 0.325mm from
+    the best spot) was never identified. Vote find_via_position_blocker over a
+    coarse ring of sites within the search radius and return the most common
+    non-protected, not-yet-ripped net."""
+    from collections import Counter
+    votes = Counter()
+    step = max(blocker_config.grid_step * 4, 0.2)
+    # Vote only the NEAR band: distant sites belong to other neighborhoods and
+    # dilute the vote toward whatever net dominates the region at large
+    # (ottercast: a full-radius vote elected C64 while C63 held every site the
+    # pad could actually use). Closer sites also count for more.
+    r = min(1.2, max_search_radius) if max_search_radius > 0 else 1.2
+    n = max(3, int(r / step))
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            d = math.hypot(i, j) * step
+            if d < 0.2 or d > r:
+                continue
+            b = find_via_position_blocker(
+                pad.global_x + i * step, pad.global_y + j * step,
+                pcb_data, blocker_config, net_id, protected_net_ids, quiet=True)
+            if b is not None and b not in protected_net_ids and b not in exclude_net_ids:
+                votes[b] += 1.0 / (0.3 + d)
+    return votes.most_common(1)[0][0] if votes else None
+
+
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
@@ -60,19 +94,40 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
-    route's frontier (or the via site for a via-placement block), never ripping a
-    protected (plane) net. Ripped net ids are appended to ripped_net_ids for
-    re-routing. Returns a successful TapResult, or None if no rip-up unblocked it."""
+    route's frontier (or, when that repeats/runs dry, the consensus net denying
+    the candidate via sites, #329), never ripping a protected (plane) net.
+
+    On SUCCESS the ripped net ids are appended to ripped_net_ids for the later
+    route.py reconnect pass. On FAILURE every ripped net's copper is RESTORED
+    (#329): nothing else routed while this pad's tap retried (a failed tap adds
+    no copper), so an immediate restore cannot create the #141 restore-shorts --
+    while shipping the rips destroyed whole nets the reconnect pass then could
+    not reroute (ottercast MIPI_SDA + Net-(C61-Pad1) ended at ZERO copper).
+    Returns a successful TapResult, or None."""
     failure = first_failure
-    for _ in range(max_rip_nets):
-        if failure.blocked_cells:
-            blocker = find_route_blocker_from_frontier(
-                failure.blocked_cells, pcb_data, blocker_config, net_id, protected_net_ids)
-        else:
-            blocker = find_via_position_blocker(
-                pad.global_x, pad.global_y, pcb_data, blocker_config, net_id, protected_net_ids)
+    ripped_local = []  # (net_id, segments, vias) in rip order
+    ripped_ids_local = set()
+    for attempt in range(max_rip_nets):
+        blocker = None
+        # The frontier blocker names whoever stopped the failed ROUTE; the net
+        # denying the via SITES can be a different one that the frontier never
+        # reaches (ottercast C69.2 ripped 3 fresh frontier nets while C63 held
+        # every good site). Spend the LAST rip on the site-consensus net.
+        if attempt < max_rip_nets - 1:
+            if failure.blocked_cells:
+                blocker = find_route_blocker_from_frontier(
+                    failure.blocked_cells, pcb_data, blocker_config, net_id, protected_net_ids)
+            else:
+                blocker = find_via_position_blocker(
+                    pad.global_x, pad.global_y, pcb_data, blocker_config, net_id, protected_net_ids)
+            if blocker in ripped_ids_local:
+                blocker = None  # frontier keeps naming an already-ripped net
         if blocker is None or blocker in protected_net_ids:
-            return None
+            blocker = _via_site_consensus_blocker(
+                pad, pcb_data, blocker_config, net_id, protected_net_ids,
+                ripped_ids_local, max_search_radius)
+        if blocker is None or blocker in protected_net_ids:
+            break
         bname = pcb_data.nets[blocker].name if blocker in pcb_data.nets else f"net_{blocker}"
         print(f"{RED}blocked by {bname} - ripping{RESET}...", end=" ", flush=True)
         if shared_via_maps is not None:
@@ -80,23 +135,68 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             # copper leaves pcb_data (the stamps are computed from it), then
             # resync the copper counts after the rip (#263).
             shared_via_maps.note_net_ripped(blocker)
-        _rip_net_from_pcb(pcb_data, blocker)
+        rsegs, rvias = _rip_net_from_pcb(pcb_data, blocker)
+        ripped_local.append((blocker, rsegs, rvias))
+        ripped_ids_local.add(blocker)
         if shared_via_maps is not None:
             shared_via_maps.resync()
             if plane_pad_tap._TAP_MAP_VERIFY:
                 # Rips are the #208-risk removal path: assert the incrementally
                 # updated maps match a fresh rebuild of the post-rip board.
                 shared_via_maps.verify_maps_full()
-        if blocker not in ripped_net_ids:
-            ripped_net_ids.append(blocker)
         result = tap_pad_with_escalation(
             pad, pad_layer, net_id, pcb_data, tap_config,
             max_search_radius=max_search_radius, via_size=via_size, via_drill=via_drill,
             verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius,
             shared_via_maps=shared_via_maps)
         if result.success:
+            # Collision-checked restore on SUCCESS too (#329): give back every
+            # ripped net whose copper does not conflict with the NEW tap
+            # copper. Only genuinely conflicting nets stay ripped for the
+            # route.py reconnect pass -- shipping every rip gambled N routed
+            # nets on that pass (which the recorded chains often run with
+            # --max-ripup 0): ottercast ended with 5 zero-copper nets when
+            # only the true corridor nets actually conflicted.
+            from plane_blocker_detection import _restored_piece_collides
+            new_segs = list(result.segments or [])
+            new_vias = [result.via] if result.via else []
+            for blocker, rsegs, rvias in ripped_local:
+                collides = False
+                for s in rsegs:
+                    sd = {'start': (s.start_x, s.start_y),
+                          'end': (s.end_x, s.end_y),
+                          'width': s.width, 'layer': s.layer}
+                    if _restored_piece_collides(sd, None, new_vias, new_segs,
+                                                via_size, result.clearance_used
+                                                or tap_config.clearance):
+                        collides = True
+                        break
+                if not collides:
+                    for v in rvias:
+                        vd = {'x': v.x, 'y': v.y, 'size': v.size}
+                        if _restored_piece_collides(None, vd, new_vias, new_segs,
+                                                    via_size, result.clearance_used
+                                                    or tap_config.clearance):
+                            collides = True
+                            break
+                if collides:
+                    if blocker not in ripped_net_ids:
+                        ripped_net_ids.append(blocker)
+                else:
+                    pcb_data.segments.extend(rsegs)
+                    pcb_data.vias.extend(rvias)
+                    if shared_via_maps is not None:
+                        shared_via_maps.note_net_restored(blocker)
             return result
         failure = result
+    # FINAL FAILURE: restore every ripped net's copper (#329).
+    if ripped_local:
+        for blocker, rsegs, rvias in reversed(ripped_local):
+            pcb_data.segments.extend(rsegs)
+            pcb_data.vias.extend(rvias)
+            if shared_via_maps is not None:
+                shared_via_maps.note_net_restored(blocker)
+        print(f"(restored {len(ripped_local)} ripped net(s))", end=" ", flush=True)
     return None
 
 

@@ -510,6 +510,20 @@ class SharedViaMaps:
             if len(d.blocked_vias):
                 entry[2].remove_blocked_vias_batch(d.blocked_vias)
 
+    def note_net_restored(self, net_id: int):
+        """Inverse of note_net_ripped for a failed rip-up that put the net's
+        copper back (#329). Must run AFTER the copper is restored to pcb_data
+        (the stamps are computed from it); calls resync() itself."""
+        from obstacle_cache import precompute_via_placement_obstacles
+        for entry in self._maps.values():
+            d = precompute_via_placement_obstacles(self.pcb_data, net_id,
+                                                   entry[0], [])
+            if len(d.blocked_vias):
+                entry[2].add_blocked_vias_batch(d.blocked_vias)
+        self.resync()
+        if _TAP_MAP_VERIFY:
+            self.verify_maps_full()
+
 
 def _verify_shared_via_map(shared_obs, local, config, net_id,
                            same_net_pad_clearance, pad, max_search_radius,
