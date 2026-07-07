@@ -511,32 +511,58 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad],
     if not segments:
         return []
 
-    # Cluster endpoints with the ONE shared coincidence primitive (#320);
-    # an endpoint alone in its cluster is a candidate free end.
+    # Cluster endpoints with the ONE shared coincidence primitive (#320), then
+    # count SEGMENT INCIDENCES per cluster -- not raw endpoint multiplicity. A
+    # segment SHORTER than the tolerance contributes BOTH endpoints to one
+    # cluster; raw counting made such a stub tip read "not alone" and the
+    # whole stub lost its free end (lumenpnp PD7: fanout sub-grid jog, tip
+    # 15um from its junction -> stub invisible to routing -> MPS reorder ->
+    # board-wide re-roll). Degree of a cluster = segments with exactly ONE
+    # endpoint in it; degree 1 = a chain tip (report the member farthest from
+    # the incident segment's far end -- the true tip); degree 2+ = a joint.
     points = []
     for seg in segments:
         points.append((seg.start_x, seg.start_y, seg.layer))
         points.append((seg.end_x, seg.end_y, seg.layer))
     roots = cluster_coincident_points(points, coincidence_tol)
-    cluster_size: Dict[int, int] = {}
-    for r in roots:
-        cluster_size[r] = cluster_size.get(r, 0) + 1
+    from collections import defaultdict
+    members: Dict[int, List[int]] = defaultdict(list)
+    for pi, r in enumerate(roots):
+        members[r].append(pi)
 
-    # Get pad positions
     pad_positions = [(p.global_x, p.global_y) for p in pads]
 
-    # Free ends are endpoints alone in their cluster AND not near a pad
+    def _near_pad(x, y):
+        return any(abs(x - px) < tolerance and abs(y - py) < tolerance
+                   for px, py in pad_positions)
+
     free_ends = []
-    for pi, (x, y, layer) in enumerate(points):
-        if cluster_size[roots[pi]] != 1:
-            continue
-        near_pad = False
-        for px, py in pad_positions:
-            if abs(x - px) < tolerance and abs(y - py) < tolerance:
-                near_pad = True
-                break
-        if not near_pad:
-            free_ends.append((round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS), layer))
+    for r, pis in members.items():
+        seg_hits: Dict[int, int] = defaultdict(int)
+        for pi in pis:
+            seg_hits[pi // 2] += 1
+        open_segs = [si for si, c in seg_hits.items() if c == 1]
+        if len(open_segs) == 1:
+            si = open_segs[0]
+            seg = segments[si]
+            in_cluster = next(pi for pi in pis if pi // 2 == si)
+            far = ((seg.end_x, seg.end_y) if in_cluster % 2 == 0
+                   else (seg.start_x, seg.start_y))
+            x, y, layer = max((points[pi] for pi in pis),
+                              key=lambda p: (p[0]-far[0])**2 + (p[1]-far[1])**2)
+            if not _near_pad(x, y):
+                free_ends.append((round(x, POSITION_DECIMALS),
+                                  round(y, POSITION_DECIMALS), layer))
+        elif not open_segs and len(members) == 1:
+            # The whole group is one sub-tolerance blob: report its raw
+            # endpoints (old semantics) rather than nothing.
+            seen = set()
+            for pi in pis:
+                x, y, layer = points[pi]
+                key = (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS), layer)
+                if key not in seen and not _near_pad(x, y):
+                    seen.add(key)
+                    free_ends.append(key)
 
     return free_ends
 
