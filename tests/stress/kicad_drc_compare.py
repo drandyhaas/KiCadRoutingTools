@@ -178,6 +178,14 @@ def _staged_copy(board: str, clearance: float):
     mhc = rules.get("min_hole_clearance")
     if mhc and mhc > clearance:
         rules["min_hole_clearance"] = clearance
+    # Silk checks are OUT OF SCOPE (results are filtered to copper classes)
+    # but DRC_TEST_PROVIDER_SILK_CLEARANCE dominates wall time on art-heavy
+    # boards -- lily58's keyboard legends made kicad-cli spin >10 MINUTES at
+    # 100% CPU in that one provider (#333, confirmed by sampling). Severity
+    # "ignore" makes the DRC engine skip the provider entirely.
+    sev = cfg["board"]["design_settings"].setdefault("rule_severities", {})
+    for k in ("silk_over_copper", "silk_overlap", "silk_edge_clearance"):
+        sev[k] = "ignore"
     json.dump(cfg, open(pro2, "w"))
     return d, b2
 
