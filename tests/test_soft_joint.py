@@ -40,10 +40,12 @@ def _run(body):
     try:
         r = subprocess.run([sys.executable, 'check_drc.py', path, '-c', '0.1'],
                            capture_output=True, text=True, cwd=REPO)
-        # #320 step 3: soft joints are COUNTED violations now, reported under
-        # the per-type violation header (previously a warning line).
-        m = re.search(r'SEGMENT-ENDPOINT-GAP violations \((\d+)\)', r.stdout + r.stderr)
-        return int(m.group(1)) if m else 0
+        out = r.stdout + r.stderr
+        # #320 step 3: soft joints are COUNTED violations (per-type header),
+        # EXCEPT the sub-coincidence band (<= COINCIDENCE_TOL) -> warning line.
+        m = re.search(r'SEGMENT-ENDPOINT-GAP violations \((\d+)\)', out)
+        w = re.search(r'sub-coincidence endpoint gap: (\d+)', out)
+        return (int(m.group(1)) if m else 0), (int(w.group(1)) if w else 0)
     finally:
         os.unlink(path)
 
@@ -62,24 +64,32 @@ def run():
 
     # 1. DANGLING soft joint: two free ends 0.07mm apart, caps (0.1) overlap.
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.05, 0.05, 2.0, 0.05)
-    n = _run(body)
+    n, _w = _run(body)
     check("dangling free ends bridged by overlap -> flagged", n == 1, f"got {n}")
 
     # 2. Clean COINCIDENT joint (a bend): shared vertex -> NOT flagged.
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.0, 0.0, 1.5, 0.5)
-    n = _run(body)
+    n, _w = _run(body)
     check("coincident vertex (bend) -> not flagged", n == 0, f"got {n}")
 
     # 3. Free ends anchored at a VIA -> NOT flagged (legitimate terminus).
     via = generate_via_sexpr(1.02, 0.02, 0.3, 0.2, ['F.Cu', 'B.Cu'], 1)
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.05, 0.05, 2.0, 0.05) + via
-    n = _run(body)
+    n, _w = _run(body)
     check("free ends on a via -> not flagged", n == 0, f"got {n}")
 
     # 4. Far apart (no overlap) -> NOT flagged (genuine disconnection, not a soft joint).
     body = _seg(0, 0, 1.0, 0.0) + _seg(1.5, 0.0, 2.5, 0.0)
-    n = _run(body)
+    n, _w = _run(body)
     check("free ends beyond cap overlap -> not flagged", n == 0, f"got {n}")
+
+    # 5. SUB-COINCIDENCE band: gap <= COINCIDENCE_TOL (0.02) is quantization-
+    # level contact every gate/cleanup treats as connected -> reported as a
+    # WARNING, never a counted violation (kuchen /USBH_DN).
+    body = _seg(0, 0, 1.0, 0.0) + _seg(1.015, 0.0, 2.0, 0.0)
+    n, w = _run(body)
+    check("sub-coincidence gap (15um) -> not a counted violation", n == 0, f"got {n}")
+    check("sub-coincidence gap (15um) -> warning line", w == 1, f"got {w}")
 
     # --- close_soft_joints repair pass ---
     from kicad_parser import Segment, Net, PCBData, BoardInfo

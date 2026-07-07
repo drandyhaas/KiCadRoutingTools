@@ -2017,15 +2017,32 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # repair pipeline (close_soft_joints + the neck/strict gates) now prevents
     # or bridges every corpus instance, so a surviving one is a real defect
     # the run must fail on.
+    #
+    # EXCEPT the sub-coincidence band: a gap at or below COINCIDENCE_TOL
+    # (0.02mm, connectivity.py -- THE strict tolerance) is quantization-level
+    # contact that every gate and cleanup pass deliberately treats as
+    # CONNECTED (so nothing will ever "fix" it), and the caps overlap by far
+    # more than any etch tolerance. Counting those would fail boards on gaps
+    # the pipeline defines as joined; report them as a warning instead
+    # (kuchen /USBH_DN: 0.010mm gap, 0.102mm cap overlap).
+    from connectivity import COINCIDENCE_TOL as _COINC_TOL
     _samenet_copper = ('segment-crossing-same-net', 'via-via-same-net')
     seg_warns = [v for v in violations if v['type'] == 'segment-crossing-same-net']
     viavia_warns = [v for v in violations if v['type'] == 'via-via-same-net']
-    warnings = [v for v in violations if v['type'] in _samenet_copper]
-    violations = [v for v in violations if v['type'] not in _samenet_copper]
+    subcoinc_warns = [v for v in violations if v['type'] == 'segment-endpoint-gap'
+                      and v.get('gap_mm', 1.0) <= _COINC_TOL + 1e-9]
+    warnings = ([v for v in violations if v['type'] in _samenet_copper]
+                + subcoinc_warns)
+    _warn_ids = {id(v) for v in warnings}
+    violations = [v for v in violations if id(v) not in _warn_ids]
 
     def _warn_note():
         if warnings:
             print(f"\nWARNINGS ({len(warnings)}, not DRC failures):")
+            if subcoinc_warns:
+                print(f"  sub-coincidence endpoint gap: {len(subcoinc_warns)} "
+                      f"(<= {_COINC_TOL}mm -- quantization-level; treated as "
+                      f"connected by routing and cleanup)")
             if seg_warns:
                 print(f"  same-net self-crossing: {len(seg_warns)} (same-net copper overlap; "
                       f"permitted by KiCad DRC)")
