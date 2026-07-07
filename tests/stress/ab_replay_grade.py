@@ -138,6 +138,34 @@ def _diff_pair_stats(log_text):
             "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
 
 
+def _kicad_grade(pcb, clearance):
+    """KiCad's own DRC verdict on the final board (#316): copper-class
+    violation count + the two-sided diff vs check_drc, graded with the
+    netclass clearance equalized to the routed clearance (kicad_drc_compare's
+    staging). Returns Nones when kicad-cli is unavailable so replay grading
+    still works everywhere."""
+    try:
+        sys.path.insert(0, str(REPO / "tests" / "stress"))
+        from kicad_drc_compare import (KICAD_CLI, _staged_copy, run_kicad_drc,
+                                       run_check_drc, match)
+        if not os.path.exists(KICAD_CLI):
+            return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
+        tmpd, staged = _staged_copy(pcb, float(clearance))
+        try:
+            kicad, err = run_kicad_drc(staged)
+        finally:
+            import shutil
+            shutil.rmtree(tmpd, ignore_errors=True)
+        if err:
+            return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
+        cd = run_check_drc(pcb, float(clearance))
+        _, kicad_only, cd_only = match(kicad, cd)
+        return {"kicad_drc": len(kicad), "kicad_only": len(kicad_only),
+                "checkdrc_only": len(cd_only)}
+    except Exception:
+        return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
+
+
 def grade(pcb, clearance):
     drc = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb,
                           "-c", clearance, "--quiet"], capture_output=True, text=True)
@@ -148,8 +176,10 @@ def grade(pcb, clearance):
                           capture_output=True, text=True)
     ctext = conn.stdout + conn.stderr
     total, incomplete, pct = _completion(ctext)
-    return {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
-            "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
+    out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
+           "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
+    out.update(_kicad_grade(pcb, clearance))
+    return out
 
 
 def do_board(set_dir, out_dir, label, board):
@@ -198,7 +228,7 @@ def do_board(set_dir, out_dir, label, board):
         res.update(grade(final, clr))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
-          f"drc={res['drc']} conn={res['conn']} compl={res['completion_pct']}% "
+          f"drc={res['drc']} kdrc={res.get('kicad_drc')} conn={res['conn']} compl={res['completion_pct']}% "
           f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB final={res['final']}", flush=True)
     return res
 

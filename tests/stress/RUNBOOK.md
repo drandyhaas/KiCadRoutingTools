@@ -330,14 +330,21 @@ harmless.
    not 0 — is the achievable floor under our DRC model (the originals carry a few
    clearance-independent hole-to-hole/pad violations: e.g. megadesk 1, piantor 6).
    Judge our routing's DRC against the ORIGINAL's count at the same floor, not against 0.
-   KICAD-CLI CROSS-CHECK (one-directional, #260): a borderline check_drc *near-miss*
-   (sub-clearance gap > 0) can be validated with
-   `kicad-cli pcb drc --format json --severity-error --refill-zones -o out.json <final>.kicad_pcb`
-   (it reads the sibling `.kicad_pro`; needs `--refill-zones` since finals ship
-   zones unfilled). But a kicad-cli "0" does NOT clear an *overlap/short* finding:
-   KiCad 10 net-unifies touching copper on load, so overlapping foreign-net
-   tracks/pads produce no violation at any severity (verified minimal repro,
-   #260/#264). check_drc stays authoritative for touching-copper overlaps.
+   KICAD-CLI CROSS-CHECK (MANDATORY on the final board, #316): run
+   `python3 tests/stress/kicad_drc_compare.py <final>.kicad_pcb` -- it stages a
+   copy with the netclass clearance equalized to the routed clearance (raw
+   kicad-cli grades at the DESIGN netclass and storms phantoms), runs
+   `kicad-cli pcb drc` on the copper classes, and diffs against check_drc.
+   Record the kicad count and any KICAD-ONLY items in the results JSON
+   (`drc.kicad_violations`, `drc.kicad_only`); KICAD-ONLY shorting_items are a
+   red-alert finding (check_drc false negative -- the #324 offset-pad class
+   shipped real shorts on boards check_drc graded clean). Two caveats: a
+   kicad-cli "0" does NOT clear an *overlap/short* finding (KiCad 10
+   net-unifies touching copper on load -- verified minimal repro, #260/#264;
+   check_drc stays authoritative for touching-copper overlaps), and
+   copper_edge_clearance on edge-connector fingers is design intent, not a
+   routing defect. The no-LLM replay grader (ab_replay_grade.py) now records
+   the same fields automatically.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
    now chunked; DEFAULT grids should stay well under the 4 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
