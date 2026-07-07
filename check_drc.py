@@ -120,10 +120,15 @@ class SpatialIndex:
             rad = math.radians(rr)
             c, s = abs(math.cos(rad)), abs(math.sin(rad))
             half_x, half_y = half_x * c + half_y * s, half_x * s + half_y * c
+        # pad.polygons are ABSOLUTE board coordinates (the exact checks feed
+        # board-space query points straight into _point_to_polys_distance) --
+        # measure their extent from the pad centre. Treating them as pad-local
+        # offsets gave ~board-sized half-extents and indexed every custom pad
+        # into every cell (sofle_pico: 266 custom pads -> a 40-minute grade).
         for poly in (getattr(pad, 'polygons', None) or []):
             for px, py in poly:
-                half_x = max(half_x, abs(px))
-                half_y = max(half_y, abs(py))
+                half_x = max(half_x, abs(px - pad.global_x))
+                half_y = max(half_y, abs(py - pad.global_y))
         return half_x, half_y
 
     def add_pad(self, pad: Pad, net_id: int, expanded_layers: List[str]):
