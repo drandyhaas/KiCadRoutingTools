@@ -2010,26 +2010,22 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # status. (Same-net DRILL hole-to-hole checks -- 'via-drill-hole',
     # 'pad-drill-via-drill-same-net' -- stay violations: drill spacing is a real
     # fab constraint independent of net.)
-    # Same-net SOFT JOINTS ('segment-endpoint-gap') are a real quality defect (a
-    # fragile near-open), but they are reported as a WARNING for now, NOT counted
-    # toward the failure/exit status: the repair pass (close_soft_joints) cannot
-    # yet bridge every case -- a tiny bridge across a diff pair's own-net gap would
-    # graze the partner polarity -- so counting them would break grading before the
-    # sources are fixed. Promote to a hard violation once close_soft_joints (+ the
-    # multipoint/tap source fixes) drive them to ~0 corpus-wide.
-    _samenet_copper = ('segment-crossing-same-net', 'via-via-same-net', 'segment-endpoint-gap')
+    # Same-net SOFT JOINTS ('segment-endpoint-gap') are a COUNTED violation
+    # (#320 step 3, promoted after #318/#322 drove the corpus to zero): a
+    # dangling free end held only by cap overlap is a fragile near-open --
+    # electrically connected today, an open after etch tolerance/rework. The
+    # repair pipeline (close_soft_joints + the neck/strict gates) now prevents
+    # or bridges every corpus instance, so a surviving one is a real defect
+    # the run must fail on.
+    _samenet_copper = ('segment-crossing-same-net', 'via-via-same-net')
     seg_warns = [v for v in violations if v['type'] == 'segment-crossing-same-net']
     viavia_warns = [v for v in violations if v['type'] == 'via-via-same-net']
-    softjoint_warns = [v for v in violations if v['type'] == 'segment-endpoint-gap']
     warnings = [v for v in violations if v['type'] in _samenet_copper]
     violations = [v for v in violations if v['type'] not in _samenet_copper]
 
     def _warn_note():
         if warnings:
             print(f"\nWARNINGS ({len(warnings)}, not DRC failures):")
-            if softjoint_warns:
-                print(f"  same-net soft joint: {len(softjoint_warns)} (dangling free end "
-                      f"held only by cap overlap -- fragile near-open, should be bridged)")
             if seg_warns:
                 print(f"  same-net self-crossing: {len(seg_warns)} (same-net copper overlap; "
                       f"permitted by KiCad DRC)")

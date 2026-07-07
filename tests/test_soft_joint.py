@@ -40,7 +40,9 @@ def _run(body):
     try:
         r = subprocess.run([sys.executable, 'check_drc.py', path, '-c', '0.1'],
                            capture_output=True, text=True, cwd=REPO)
-        m = re.search(r'same-net soft joint: (\d+)', r.stdout + r.stderr)
+        # #320 step 3: soft joints are COUNTED violations now, reported under
+        # the per-type violation header (previously a warning line).
+        m = re.search(r'SEGMENT-ENDPOINT-GAP violations \((\d+)\)', r.stdout + r.stderr)
         return int(m.group(1)) if m else 0
     finally:
         os.unlink(path)
