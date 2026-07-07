@@ -870,21 +870,24 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     # #168). Only the stub's OWN net and any swap-partner pair are exempt; the
     # coupled body itself is segments, not pads, so legitimate parallel running
     # is unaffected.
+    # Both checks validate the WHOLE connected source-side trace, not just the
+    # pad nub get_stub_info returns -- the switch drags that whole trace onto
+    # dest_layer (issues #238, #315).
     partner_excl = set(swap_partner_net_ids or set())
-    for stub in (stub_p, stub_n):
-        pad_clear, pad_reason = stub_clear_of_foreign_pads(
-            stub.segments, dest_layer, stub.net_id, pcb_data, config,
-            partner_excl | {stub.net_id})
-        if not pad_clear:
-            return False, pad_reason
-
-    # Check 6: the moved stub body must also clear other-net routed TRACKS/VIAS
-    # already on dest_layer (issue #238). The coupled partner's segments are
-    # exempt (legitimate parallel running); only foreign routed copper bites.
     pair_excl = partner_excl | {stub_p.net_id, stub_n.net_id}
     for stub in (stub_p, stub_n):
         moved_segs = connected_stub_segments_on_layer(
             pcb_data, stub.net_id, stub.layer, stub.segments)
+        pad_clear, pad_reason = stub_clear_of_foreign_pads(
+            moved_segs, dest_layer, stub.net_id, pcb_data, config,
+            partner_excl | {stub.net_id})
+        if not pad_clear:
+            return False, pad_reason
+
+        # Check 6: the moved stub body must also clear other-net routed
+        # TRACKS/VIAS already on dest_layer (issue #238). The coupled partner's
+        # segments are exempt (legitimate parallel running); only foreign
+        # routed copper bites.
         track_clear, track_reason = stub_clear_of_foreign_tracks(
             moved_segs, dest_layer, stub.net_id, pcb_data, config, pair_excl)
         if not track_clear:
@@ -1165,10 +1168,19 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
         if not via_clear:
             return False, via_reason
 
+    # Checks 4+5 validate the WHOLE connected source-side trace, not just the
+    # pad nub get_stub_info returns -- a source switch re-routes that whole
+    # trace onto dest_layer.
+    moved_segs = connected_stub_segments_on_layer(
+        pcb_data, stub.net_id, stub.layer, stub.segments)
+
     # Check 4: stub copper moved onto dest_layer must clear other-net pads on
-    # that layer (issue #123: escape stub swapped onto a cap pad's layer).
+    # that layer (issue #123: escape stub swapped onto a cap pad's layer;
+    # issue #315: a BGA fanout stub legally running under the pad row on an
+    # inner layer swapped onto F.Cu straight through foreign pad copper --
+    # the nub-only check couldn't see it).
     pad_clear, pad_reason = stub_clear_of_foreign_pads(
-        stub.segments, dest_layer, stub.net_id, pcb_data, config,
+        moved_segs, dest_layer, stub.net_id, pcb_data, config,
         set(swap_partner_net_ids or set()))
     if not pad_clear:
         return False, pad_reason
@@ -1176,11 +1188,6 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     # Check 5: the moved stub body must also clear other-net routed TRACKS/VIAS
     # already on dest_layer (issue #238: swapping onto a busy layer crossed a
     # finished foreign trace -- foreign pads/swap-stubs/setback don't cover this).
-    # Validate the WHOLE connected source-side trace, not just the pad nub
-    # get_stub_info returns -- a source switch re-routes that whole trace onto
-    # dest_layer.
-    moved_segs = connected_stub_segments_on_layer(
-        pcb_data, stub.net_id, stub.layer, stub.segments)
     track_clear, track_reason = stub_clear_of_foreign_tracks(
         moved_segs, dest_layer, stub.net_id, pcb_data, config,
         set(swap_partner_net_ids or set()))
