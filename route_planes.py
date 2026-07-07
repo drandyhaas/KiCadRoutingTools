@@ -1774,11 +1774,20 @@ def _write_output_and_reroute(
                             input_file=input_file,
                             output_file=output_file,
                             broken_net_ids=still_broken,
-                            plane_vias=all_new_vias,
+                            # plane copper only: restored signal emissions are
+                            # not plane copper and must not be removed-on-collision
+                            plane_vias=[x for x in all_new_vias
+                                        if not x.get('from_restore')],
                             net_id_to_name=kicad_v10_names,
                             via_size=via_size,
                             clearance=clearance,
-                            plane_segments=all_new_segments,
+                            plane_segments=[x for x in all_new_segments
+                                            if not x.get('from_restore')],
+                            # partial-restore emissions already in the output
+                            # must be stripped before the full-original restore
+                            partial_copper=(
+                                [x for x in all_new_segments if x.get('from_restore')],
+                                [x for x in all_new_vias if x.get('from_restore')]),
                         )
                         if restored_ids:
                             names = [pcb_data.nets[r].name if r in pcb_data.nets
@@ -2857,8 +2866,15 @@ def create_plane(
                       f"(see per-net breakdown above).")
 
     if return_results:
+        # all_ripped_net_ids LAST for backward compatibility: the GUI must
+        # delete these nets' existing board copper before applying new_vias/
+        # new_segments (which include the from_restore replacement pieces) --
+        # the CLI writer's exclude_net_ids strip has no pcbnew equivalent, so
+        # without this the live board keeps the originals AND gains the
+        # emitted copies (duplicated restored copper).
         return (total_vias_placed, total_traces_added, total_pads_needing_vias,
-                all_new_vias, all_new_segments, all_zone_data, total_failed_pads)
+                all_new_vias, all_new_segments, all_zone_data, total_failed_pads,
+                all_ripped_net_ids)
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 

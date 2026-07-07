@@ -853,8 +853,10 @@ class PlanesTab(wx.Panel):
 
     def _run_create_planes(self, config):
         """Run plane creation."""
-        # The pour doesn't delete ripped tracks via pcbnew; clear any stale set
-        # from a prior repair run so the apply step doesn't remove copper.
+        # Cleared here; repopulated from create_plane's returned ripped set
+        # below (rip_blocker_nets rips signal nets whose original copper must
+        # be deleted from the live board before the new/restored copper is
+        # applied -- CLI strip-and-replace parity, b2557cd).
         self._ripped_net_ids = []
         # Remember the routed floors so _apply_results_to_board can make the live
         # board's DRC constraints consistent with them (issue #160).
@@ -910,7 +912,7 @@ class PlanesTab(wx.Panel):
         failed_pads = 0
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
-             failed_pads) = create_plane(
+             failed_pads, ripped_net_ids) = create_plane(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=expanded_nets,
@@ -949,6 +951,7 @@ class PlanesTab(wx.Panel):
             self._new_vias = new_vias
             self._new_segments = new_segments
             self._new_zones = new_zones
+            self._ripped_net_ids = ripped_net_ids
 
             # Add GND return vias if enabled
             if config.get('add_gnd_vias', False):

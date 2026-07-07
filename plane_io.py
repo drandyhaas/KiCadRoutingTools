@@ -480,6 +480,7 @@ def restore_failed_reroute_nets(
     via_size: float,
     clearance: float,
     plane_segments: Optional[List[Dict]] = None,
+    partial_copper: Optional[Tuple[List[Dict], List[Dict]]] = None,
 ) -> Tuple[List[int], int, int]:
     """Issue #88: restore the ORIGINAL trace of ripped nets that failed to
     re-route, so they are never left disconnected (strictly worse than the
@@ -568,6 +569,21 @@ def restore_failed_reroute_nets(
 
     with open(output_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # A PARTIALLY-restored net (b2557cd settle) already has its kept pieces in
+    # the output as emitted copper; restoring the full original on top would
+    # duplicate every piece at identical coordinates and resurrect the dropped
+    # colliding ones. Strip the net's emitted partial copper first -- the full
+    # original restore replaces it.
+    if partial_copper is not None:
+        p_segs, p_vias = partial_copper
+        p_segs = [x for x in p_segs if x.get('net_id') in restored_net_ids]
+        p_vias = [x for x in p_vias if x.get('net_id') in restored_net_ids]
+        if p_vias:
+            content, _n = _remove_vias_at_positions(
+                content, [(v['x'], v['y']) for v in p_vias])
+        if p_segs:
+            content, _n = _remove_segments_at(content, p_segs)
 
     content, vias_removed = _remove_vias_at_positions(content, remove_positions)
     content, segs_removed = _remove_segments_at(content, remove_segs)
