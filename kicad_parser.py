@@ -1815,6 +1815,16 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
                 drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
+            # Pad copper offset (#324): (drill (offset x y)) displaces the
+            # pad COPPER relative to the pad anchor/hole (castellated module
+            # paddles: RPi_Pico's 3.5x1.7 SMD pads carry (offset 0.9 0)).
+            # Ignoring it modelled the copper up to its full offset away from
+            # reality -- the router laid tracks THROUGH real pad copper and
+            # check_drc graded the shorts clean (piantor).
+            offset_match = re.search(r'\(offset\s+([-\d.]+)\s+([-\d.]+)\)', pad_text)
+            pad_offset_x = float(offset_match.group(1)) if offset_match else 0.0
+            pad_offset_y = float(offset_match.group(2)) if offset_match else 0.0
+
             # Extract roundrect_rratio for roundrect pads
             rratio_match = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', pad_text)
             roundrect_rratio = float(rratio_match.group(1)) if rratio_match else 0.0
@@ -1827,6 +1837,19 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
+
+            # Fold the copper offset into the pad position for SMD pads (#324):
+            # with no hole, the shifted copper IS the pad, so every geometry
+            # consumer (obstacles, DRC, connectivity) gets it for free. The
+            # offset rotates with the pad's ABSOLUTE angle (the file's (at)
+            # angle; same negate convention as local_to_global). Drilled pads
+            # with an offset keep the anchor at the HOLE (drill checks need
+            # it); their copper stays approximated at the anchor -- rare, and
+            # a mis-modelled hole would be worse than mis-modelled copper.
+            if (pad_offset_x or pad_offset_y) and drill_size == 0:
+                _orad = math.radians(-pad_rotation)
+                global_x += pad_offset_x * math.cos(_orad) - pad_offset_y * math.sin(_orad)
+                global_y += pad_offset_x * math.sin(_orad) + pad_offset_y * math.cos(_orad)
 
             # Custom comb/finger pads: carry the real copper polygon(s) so the
             # obstacle map / DRC model the notches instead of the bounding box
@@ -2596,6 +2619,21 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             pad_pos = pad.GetPosition()
             global_x = to_mm(pad_pos.x)
             global_y = to_mm(pad_pos.y)
+
+            # Pad copper offset (#324), parity with the text parser: for SMD
+            # pads fold the (rotated) copper offset into the position. pcbnew's
+            # GetPosition() is the anchor/hole; GetOffset() is the copper
+            # displacement in the pad frame, rotated by the pad's absolute
+            # orientation.
+            try:
+                _off = pad.GetOffset()
+                if (_off.x or _off.y) and not pad.GetDrillSize().x:
+                    _oa = math.radians(-pad.GetOrientationDegrees())
+                    _ox, _oy = to_mm(_off.x), to_mm(_off.y)
+                    global_x += _ox * math.cos(_oa) - _oy * math.sin(_oa)
+                    global_y += _ox * math.sin(_oa) + _oy * math.cos(_oa)
+            except Exception:
+                pass
 
             # Local position (relative to footprint, before footprint rotation)
             try:

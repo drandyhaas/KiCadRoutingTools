@@ -132,7 +132,13 @@ def match(kicad_items, cd_items):
             if kv["nets"] and cv["nets"] and not (kv["nets"] & cv["nets"]):
                 continue
             d = math.hypot(kv["pos"][0] - cv["pos"][0], kv["pos"][1] - cv["pos"][1])
-            if d <= MATCH_RADIUS_MM and (best is None or d < best[0]):
+            # The two engines anchor a violation at different reference points
+            # (check_drc: pad copper centre; kicad: item anchor / track vertex),
+            # which for big module pads differ by mm. When BOTH nets agree the
+            # identity is unambiguous -- allow a generous radius; the tight
+            # radius only arbitrates single-net/partial matches.
+            radius = 3.0 if (kv["nets"] and kv["nets"] == cv["nets"]) else MATCH_RADIUS_MM
+            if d <= radius and (best is None or d < best[0]):
                 best = (d, i)
         if best is not None:
             used.add(best[1])
