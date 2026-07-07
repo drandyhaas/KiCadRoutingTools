@@ -154,6 +154,29 @@ def main():
     check("no reusable via -> new via at the pad",
           via8 is not None and (via8.x, via8.y) == (0.0, 0.0))
 
+    # 9) (#299) _swap_vias_fit_or_shrink SHRINKS colliding pad vias to fit
+    #    instead of rejecting: the kria/hackrf fallback-swap case (0.45-0.5mm
+    #    vias on 0.5mm-pitch P/N pads). At clearance 0.1 a 0.5 pitch fits a
+    #    0.4 body (gap == clearance), so the shrink must land there.
+    via_p9 = _via(0.0, 0.0, P_NET, cfg)
+    via_n9 = _via(0.5, 0.0, N_NET, cfg)
+    pcb9 = _pcb(vias=[via_p9, via_n9])
+    ok9 = lso._swap_vias_fit_or_shrink(pcb9, [via_p9, via_n9], cfg)
+    check("0.5mm-pitch pad vias shrink to fit (#299)",
+          ok9 and via_p9.size <= 0.4 and via_n9.size <= 0.4
+          and via_p9.size >= 0.25)
+
+    # 10) (#299) an impossible pitch (vias nearly stacked) can't be shrunk to
+    #     the fab floor -> returns False with the ORIGINAL sizes restored, so
+    #     the caller can revert the swap cleanly.
+    via_p10 = _via(0.0, 0.0, P_NET, cfg)
+    via_n10 = _via(0.2, 0.0, N_NET, cfg)
+    pcb10 = _pcb(vias=[via_p10, via_n10])
+    ok10 = lso._swap_vias_fit_or_shrink(pcb10, [via_p10, via_n10], cfg)
+    check("un-shrinkable pitch rejected with sizes restored (#299)",
+          (not ok10) and via_p10.size == cfg.via_size
+          and via_n10.size == cfg.via_size)
+
     passed = sum(1 for _, c in checks if c)
     print("=" * 60)
     print(f"{passed}/{len(checks)} checks passed")
