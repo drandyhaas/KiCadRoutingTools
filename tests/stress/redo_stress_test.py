@@ -215,7 +215,21 @@ def compute_prune_keep(cmds):
             keep.add(i)
 
     dropped = [i for i in range(n) if i not in keep and not is_check_cmd(cmds[i][1])]
-    return keep, {"final_index": final, "final_board": out_of[final], "dropped": dropped}
+
+    # CHAIN-HOLE detection (zynq final_board lesson): a kept command reading a
+    # board that NO recorded command produces is normally just the seed input
+    # (first command). Any OTHER unproduced input means the agent hand-created
+    # a board mid-run (cp/mv is not recorded), so the pruner cannot see past
+    # it -- the replay would silently run current code on STALE original-run
+    # copper and the A/B verdict is contaminated. Callers must warn loudly.
+    first_nc = next((i for i in range(n) if not is_check_cmd(cmds[i][1])), None)
+    seed_ok = set(in_of[first_nc]) if first_nc is not None else set()
+    holes = sorted({b for i in keep if not is_check_cmd(cmds[i][1])
+                    for b in in_of[i]
+                    if b not in produced_any and b not in seed_ok
+                    and str(b).endswith('.kicad_pcb')})
+    return keep, {"final_index": final, "final_board": out_of[final],
+                  "dropped": dropped, "chain_holes": holes}
 
 
 def seed_input_boards(manifest, cmds, dest_dir):
@@ -336,6 +350,17 @@ def main():
         print(f"Pruning to file-dependency chain: running {len(prune_keep)} of "
               f"{len(cmds)} command(s), dropping {len(dropped)} superseded/dead-end "
               f"non-check command(s). Final board: {info['final_board']}")
+        if info.get("chain_holes"):
+            print("\n" + "!" * 70)
+            print("WARNING: CHAIN HOLE -- the kept chain reads board file(s) that no")
+            print("recorded command produces (the agent hand-copied them mid-run):")
+            for h in info["chain_holes"]:
+                print(f"    {h}")
+            print("The replay will seed these from the ORIGINAL run dir, so pruned")
+            print("results reflect STALE copper, not the current code. For a true")
+            print("A/B re-run use --verbatim (and grade the last fully-chained")
+            print("output before the hole).")
+            print("!" * 70 + "\n")
         for i in dropped:
             _ins, out = board_io(cmds[i][1])
             tool = next((os.path.basename(a) for a in cmds[i][1] if a.endswith(".py")), "?")

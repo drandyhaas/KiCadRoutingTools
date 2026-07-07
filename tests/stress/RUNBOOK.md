@@ -156,13 +156,19 @@ harmless.
    default `--max-iterations`, no retry round, or fewer nets); if that also
    blows the cap, mark the step as OOM and move on.
 1a. PROJECT FILE TRAVELS WITH THE BOARD (#295): every board-mutating tool
-   writes/updates a sibling `.kicad_pro` carrying the routed DRC floors. If
-   you `cp`/rename a board to a canonical name (e.g. `final_board.kicad_pcb`),
-   COPY ITS `.kicad_pro` (and `.kicad_prl`) alongside -- a board opened in
-   KiCad without its project gets DEFAULT constraints and storms with
-   hundreds of phantom annular/track/hole-clearance errors. For a board that
-   never had one, `python3 fix_kicad_drc_settings.py <board>` now seeds and
-   fills a correct project file.
+   writes/updates a sibling `.kicad_pro` carrying the routed DRC floors. For a
+   board that never had one, `python3 fix_kicad_drc_settings.py <board>` seeds
+   and fills a correct project file.
+1a'. NEVER `cp`/`mv`/alias BOARD FILES MID-CHAIN (zynq `final_board` lesson):
+   only the recorded tools may create a `.kicad_pcb` in the run dir. A hand
+   copy is invisible to `redo_commands.sh`, so it SEVERS the replay's
+   file-dependency chain -- the pruned replay then silently seeds the copied
+   board from the ORIGINAL run and grades stale copper as if it were current
+   code (redo_stress_test now warns "CHAIN HOLE" when this happened). If you
+   want a canonical final name, make the LAST TOOL STEP write it as its
+   `--output` (e.g. `... final_board.kicad_pcb`); record the final board's
+   name in the results JSON. Every tool step's input must be a previous tool
+   step's output (or the original seed input), chained by name.
 1b. PARSER-PARITY VALIDATION (per board, start AND end): run
    `python3 /Users/andy/Documents/KiCadRoutingTools/validate_pcb_data.py <board>`
    on the input board before any routing step, and again on the final board.
