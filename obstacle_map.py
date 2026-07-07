@@ -64,16 +64,19 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     bga_prox_radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
     obstacles.set_bga_proximity_radius(bga_prox_radius_grid)
 
-    # Set BGA exclusion zones - block vias AND tracks on ALL layers
+    # Set BGA exclusion zones - block vias AND tracks on ALL layers.
+    # set_bga_zone alone enforces this in Rust (is_blocked / is_via_blocked
+    # both block in-zone cells unless in allowed_cells). Do NOT also stamp the
+    # rectangle into blocked_cells: blocked_cells takes precedence over
+    # allowed_cells, so the hard stamp made every allowed-cells window (the
+    # +/-10 endpoint windows, the #189 via-in-pad unblock's +/-5) dead code --
+    # a boxed pad INSIDE a QFN/BGA zone could never be rescued even with a
+    # legally-placed via in it (ottercast Net-(C61-Pad1) under U6).
     for zone in config.bga_exclusion_zones:
         min_x, min_y, max_x, max_y = zone[:4]
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
         obstacles.set_bga_zone(gmin_x, gmin_y, gmax_x, gmax_y)
-        for layer_idx in range(num_layers):
-            for gx in range(gmin_x, gmax_x + 1):
-                for gy in range(gmin_y, gmax_y + 1):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
 
     # Add BGA proximity costs (penalize routing near BGA edges)
     add_bga_proximity_costs(obstacles, config)

@@ -1508,22 +1508,37 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
 
 
 def _net_pad_near(pcb_data, net_id, cells, coord):
-    """The net's SMD pad that grid `cells[0]` sits inside (a boxed endpoint), or
-    None. Tight in-pad test so a tap source on a mid-trace point (not a pad)
-    returns None and never gets a spurious via."""
-    if not cells:
-        return None
-    x, y = coord.to_float(cells[0][0], cells[0][1])
-    best = None
-    for p in pcb_data.pads_by_net.get(net_id, []):
-        if getattr(p, 'drill', 0):
-            continue
-        if (abs(p.global_x - x) <= p.size_x / 2 + 0.05 and
-                abs(p.global_y - y) <= p.size_y / 2 + 0.05):
-            d = abs(p.global_x - x) + abs(p.global_y - y)
-            if best is None or d < best[0]:
-                best = (d, p)
-    return best[1] if best else None
+    """The net's SMD pad that one of the grid `cells` sits inside (a boxed
+    endpoint), or None. Tight in-pad test so a tap source on a mid-trace point
+    (not a pad) returns None and never gets a spurious via.
+
+    Scans EVERY endpoint cell, not just cells[0]: a boxed side often lists a
+    stub tip first (ottercast Net-(C61-Pad1): tip at (114.3, 90.0), 0.1mm
+    OUTSIDE the U6.20 pad), and the cells[0]-only lookup returned None there --
+    so the #189 via-in-pad unblock silently never fired for a pad the
+    placement machinery could in fact tap (a hand-routed 0.45/0.2 via-in-pad
+    connects it trivially)."""
+    pads = _net_pads_near(pcb_data, net_id, cells, coord)
+    return pads[0] if pads else None
+
+
+def _net_pads_near(pcb_data, net_id, cells, coord):
+    """All of the net's SMD pads that some grid cell in `cells` sits inside,
+    nearest-first. The via-in-pad second rung iterates these: the closest pad
+    (e.g. a cap pad crowded by its neighbours) may refuse a via while another
+    endpoint pad of the same side (ottercast C69.1) accepts one."""
+    found = {}
+    for cell in cells:
+        x, y = coord.to_float(cell[0], cell[1])
+        for p in pcb_data.pads_by_net.get(net_id, []):
+            if getattr(p, 'drill', 0):
+                continue
+            if (abs(p.global_x - x) <= p.size_x / 2 + 0.05 and
+                    abs(p.global_y - y) <= p.size_y / 2 + 0.05):
+                d = abs(p.global_x - x) + abs(p.global_y - y)
+                if id(p) not in found or d < found[id(p)][0]:
+                    found[id(p)] = (d, p)
+    return [p for _d, p in sorted(found.values(), key=lambda t: t[0])]
 
 
 def _register_unblock_via(obstacles, vgx, vgy, layer_names):
@@ -1563,13 +1578,20 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     lim = config.max_probe_iterations
     coord = GridCoord(config.grid_step)
 
+    _dbg = os.environ.get('KICAD_UNBLOCK_DEBUG')
     placed = []  # (via, vgx, vgy, pad_layer_idx)
     new_sources, new_targets = sources, targets
     # backward probe (from targets) exhausted -> the TARGET pad is boxed
     if bwd_i and bwd_i < lim:
         pad = _net_pad_near(pcb_data, net_id, targets, coord)
+        if _dbg:
+            print(f"      UNBLOCK: bwd stuck ({bwd_i}<{lim}), target pad="
+                  f"{pad.component_ref}.{pad.pad_number}" if pad else
+                  f"      UNBLOCK: bwd stuck ({bwd_i}<{lim}), NO pad at targets")
         r = (_place_shrunk_via_in_pad(pad, obstacles, config, pcb_data, net_id, coord, layer_names)
              if pad is not None else None)
+        if _dbg and pad is not None:
+            print(f"      UNBLOCK: placement {'OK ' + str(r[0]) if r else 'DECLINED'}")
         if r is not None:
             via, (vgx, vgy), pli = r
             _register_unblock_via(obstacles, vgx, vgy, layer_names)
@@ -1593,10 +1615,57 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     # layer beside it is clear and the route is found within the probe budget;
     # if it isn't, grinding to the full max_iterations (1e6 at grid 0.05) just to
     # fail again is wasted -- fail fast and report the pad honestly.
+    if _dbg:
+        for (via, vgx, vgy, pli, pad) in placed:
+            for li in range(len(layer_names)):
+                nb = sum(1 for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx or dy)
+                         and obstacles.is_blocked(vgx + dx, vgy + dy, li))
+                print(f"      UNBLOCK map: via@({vgx},{vgy}) {layer_names[li]}: "
+                      f"cell_blocked={obstacles.is_blocked(vgx, vgy, li)} neighbors_blocked={nb}/8")
     retry_config = replace(config, max_iterations=config.max_probe_iterations)
     res2 = _route_main_connection(router, obstacles, retry_config, new_sources, new_targets, track_margin,
                                   pcb_data, net_id, print_prefix, direction_labels,
                                   single_direction, waypoints)
+    if res2[0] is None:
+        # Second rung: the stuck side got its via but the retry still failed --
+        # the OTHER side often needs layer access too. Its probe burns the full
+        # budget wandering the walled outer layer ("forward=5000", not stuck),
+        # so it never qualifies above; if it terminates on an SMD pad, via it
+        # as well and retry once at a doubled budget. ottercast Net-(C61-Pad1):
+        # the hand-routed fix is exactly a via in C69.1 AND U6.20 joined on an
+        # inner layer -- one-ended unblock can never find that route.
+        second = []
+        if new_sources is sources:  # source side never got a via
+            side_cells, is_source = sources, True
+        elif new_targets is targets:  # target side never got a via
+            side_cells, is_source = targets, False
+        else:
+            side_cells = None
+        if side_cells is not None:
+            for pad2 in _net_pads_near(pcb_data, net_id, side_cells, coord):
+                r2 = _place_shrunk_via_in_pad(pad2, obstacles, config, pcb_data,
+                                              net_id, coord, layer_names)
+                if _dbg:
+                    print(f"      UNBLOCK rung2: {'source' if is_source else 'target'} "
+                          f"pad {pad2.component_ref}.{pad2.pad_number} -> "
+                          f"{'OK' if r2 else 'DECLINED'}")
+                if r2 is None:
+                    continue
+                via2, (vgx2, vgy2), pli2 = r2
+                _register_unblock_via(obstacles, vgx2, vgy2, layer_names)
+                ext = [(vgx2, vgy2, li) for li in range(len(layer_names))]
+                if is_source:
+                    new_sources = list(side_cells) + ext
+                else:
+                    new_targets = list(side_cells) + ext
+                placed.append((via2, vgx2, vgy2, pli2, pad2))
+                second.append(via2)
+                break
+        if second:
+            retry_config = replace(config, max_iterations=2 * config.max_probe_iterations)
+            res2 = _route_main_connection(router, obstacles, retry_config, new_sources, new_targets,
+                                          track_margin, pcb_data, net_id, print_prefix,
+                                          direction_labels, single_direction, waypoints)
     if res2[0] is None:
         # The via placed but didn't rescue the route. Memoise the pad as failed so
         # route_multipoint_taps' next rip-reroute pass doesn't redo the expensive
