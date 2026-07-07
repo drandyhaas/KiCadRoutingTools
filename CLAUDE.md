@@ -160,7 +160,9 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   geometry must use `pad_drill_capsule`/`pad_drill_circles` or hole_x/y.
 - `pad.pad_type` - 'smd', 'thru_hole', 'np_thru_hole', 'connect'. NPTH pads have
   NO copper even when `layers` lists `*.Cu` (size = mask opening only): skip them
-  in copper-clearance logic, only their drill hole matters
+  in copper-clearance logic, only their drill hole matters. For "does this pad's
+  barrel tie copper layers together", use `pad_is_plated_through(pad)` — never
+  bare `pad.drill > 0` (a net-tied NPTH mounting hole is not a connection, #328)
 - `pad.component_ref` - Parent component reference
 - `pad.pinfunction`, `pad.pintype` - Pin metadata
 

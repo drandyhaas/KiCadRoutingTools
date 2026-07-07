@@ -136,13 +136,13 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
                 has_pad_via = True
                 break
     if not has_pad_via:
-        # A through-hole pad's own barrel already ties every copper layer --
-        # treat it like a pad via, or needs_pad_via_for_switch drills a NEW
-        # via coincident with the pin's hole on a layer switch (a hole-to-hole
-        # DRC bust on top of a connector pin, #289 audit). NPTH has no copper.
+        # A plated through-hole pad's own barrel already ties every copper
+        # layer -- treat it like a pad via, or needs_pad_via_for_switch drills
+        # a NEW via coincident with the pin's hole on a layer switch (a
+        # hole-to-hole DRC bust on top of a connector pin, #289 audit).
+        from kicad_parser import pad_is_plated_through
         for pad in net_pads:
-            if ((getattr(pad, 'drill', 0.0) or 0.0) > 0
-                    and getattr(pad, 'pad_type', '') != 'np_thru_hole'
+            if (pad_is_plated_through(pad)
                     and abs(pad.global_x - pad_x) < tolerance
                     and abs(pad.global_y - pad_y) < tolerance):
                 has_pad_via = True
@@ -592,11 +592,12 @@ def swap_would_orphan_smd_pad(pcb_data: PCBData, stub: StubInfo,
         return False, ""
     if stub.layer == 'F.Cu':
         return False, ""  # apply_stub_layer_switch adds a pad via for F.Cu
+    from kicad_parser import pad_is_plated_through
     for pad in pcb_data.pads_by_net.get(stub.net_id, []):
         if (abs(pad.global_x - stub.pad_x) < STUB_POSITION_TOLERANCE and
                 abs(pad.global_y - stub.pad_y) < STUB_POSITION_TOLERANCE):
-            if pad.drill > 0:
-                return False, ""  # through-hole pad spans all layers
+            if pad_is_plated_through(pad):
+                return False, ""  # plated through-hole spans all layers (#328)
             pad_copper = [l for l in (pad.layers or []) if l.endswith('.Cu')]
             if '*.Cu' in (pad.layers or []):
                 return False, ""

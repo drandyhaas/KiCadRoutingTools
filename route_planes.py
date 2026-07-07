@@ -22,7 +22,7 @@ run_all_checks()
 # These imports are guaranteed to work after startup_checks passes
 import numpy as np
 
-from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION
+from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION, pad_is_plated_through
 from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect, pad_rect_halfspan
@@ -1071,7 +1071,7 @@ def _generate_multinet_layer_zones(
             continue
         pts = []
         for pad in pcb_data.pads_by_net.get(net_id, []):
-            on_layer = (pad.drill and pad.drill > 0) or (layer in pad.layers)
+            on_layer = pad_is_plated_through(pad) or (layer in pad.layers)  # NPTH has no barrel (#328)
             if on_layer:
                 pts.append((pad.global_x, pad.global_y))
         pads_on_layer_by_net[net_id] = pts
@@ -1310,7 +1310,7 @@ def _generate_multinet_layer_zones(
             seen = {(round(x, 3), round(y, 3)) for x, y in seeds}
             anchors = net_anchor_pts.get(nid, [])
             for pad in pcb_data.pads_by_net.get(nid, []):
-                if not (pad.drill and pad.drill > 0):
+                if not pad_is_plated_through(pad):
                     continue
                 px, py = pad.global_x, pad.global_y
                 # Already inside its own net's cell? Then the plane already covers it.

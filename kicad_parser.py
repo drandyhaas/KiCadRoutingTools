@@ -591,6 +591,18 @@ def pad_drill_capsule(pad) -> Tuple[Tuple[float, float], Tuple[float, float], fl
     return p1, p2, radius
 
 
+def pad_is_plated_through(pad) -> bool:
+    """True if the pad's hole has a PLATED copper barrel tying every copper
+    layer together (a real through-hole pin/via-in-pad). `drill > 0` alone is
+    NOT enough: an NPTH pad (`pad_type == 'np_thru_hole'`) has a hole but NO
+    copper, so treating it as an all-layer connection point invents copper
+    that isn't there (issue #328 -- a net-tied mounting hole would seed a
+    plane / offer launch layers on nothing). Use this instead of bare
+    `pad.drill > 0` wherever the question is "does this pad connect layers"."""
+    return ((getattr(pad, 'drill', 0.0) or 0.0) > 0
+            and getattr(pad, 'pad_type', '') != 'np_thru_hole')
+
+
 def pad_drill_circles(pad, step: float = 0.0) -> List[Tuple[float, float, float]]:
     """A pad's drill hole as (x, y, diameter) circles for circle-based hole
     keep-outs (obstacle maps, via hole-to-hole tests).

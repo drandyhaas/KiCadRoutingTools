@@ -21,7 +21,7 @@ import os
 from dataclasses import dataclass, replace, field
 from typing import List, Dict, Optional, Tuple, Set
 
-from kicad_parser import PCBData, Pad, Via, Segment
+from kicad_parser import PCBData, Pad, Via, Segment, pad_is_plated_through
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect
 from plane_obstacle_builder import (
@@ -606,7 +606,7 @@ def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
             continue
         reachable = (pad_layer in opad.layers
                      or any(l.startswith('*') for l in opad.layers)
-                     or opad.drill > 0)  # via reachable on any layer / through-hole
+                     or pad_is_plated_through(opad))  # any-layer / plated barrel (#328)
         if not reachable:
             continue
         d = math.hypot(opad.global_x - px, opad.global_y - py)
@@ -681,7 +681,7 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
         # layer-reachability guard in _try_distant_pad_trace.
         same_layer = (pad_layer in opad.layers
                       or any(l.startswith('*') for l in opad.layers))
-        if opad.drill > 0 or (same_layer and _pad_has_same_net_copper(opad, net_id, local)):
+        if pad_is_plated_through(opad) or (same_layer and _pad_has_same_net_copper(opad, net_id, local)):
             d = math.hypot(opad.global_x - px, opad.global_y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (opad.global_x, opad.global_y)))
@@ -1030,7 +1030,7 @@ def find_unconnected_plane_pads(
         if off_board is not None and off_board(pad.global_x, pad.global_y):
             skipped_off_board += 1
             continue
-        if pad.drill > 0:
+        if pad_is_plated_through(pad):
             continue
         if '*.Cu' in pad.layers or any(zl in pad.layers for zl in zone_layers):
             continue

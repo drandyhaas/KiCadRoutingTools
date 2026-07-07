@@ -26,7 +26,7 @@ from typing import List, Tuple, Dict, Optional, Set
 from startup_checks import run_all_checks
 run_all_checks()
 
-from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION
+from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION, pad_is_plated_through
 from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from plane_io import extract_zones, ZoneInfo
@@ -635,7 +635,10 @@ def route_planes(
                 if pp is None:
                     continue
                 pad, pad_layer = pp
-                if pad_layer is None or pad.drill:   # through-hole already plane-tied by fill
+                # Plated barrels are already plane-tied by the fill; NPTH holes
+                # have no copper at all to connect (#328). Both skip.
+                if (pad_layer is None or pad_is_plated_through(pad)
+                        or getattr(pad, 'pad_type', '') == 'np_thru_hole'):
                     continue
                 name = f"{pad.component_ref}.{pad.pad_number} ({net_name})"
                 if not reported:

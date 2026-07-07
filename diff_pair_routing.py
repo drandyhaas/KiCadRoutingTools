@@ -241,9 +241,11 @@ def _endpoint_launch_layer_indices(pcb_data, net_id, x, y, config, tol=None):
         for lname, ridx in routing_idx.items():
             if lname in cu_index and lo <= cu_index[lname] <= hi:
                 spanned.add(ridx)
-    # Through-hole pads (drill > 0) span every copper layer, like a via barrel.
+    # PLATED through-hole pads span every copper layer, like a via barrel
+    # (NPTH holes have no copper -- #328).
+    from kicad_parser import pad_is_plated_through
     for pad in pcb_data.pads_by_net.get(net_id, []):
-        if getattr(pad, 'drill', 0) and pad.drill > 0 and \
+        if pad_is_plated_through(pad) and \
                 abs(pad.global_x - x) <= tol and abs(pad.global_y - y) <= tol:
             spanned |= _span_all()
             break
@@ -3272,16 +3274,15 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     if best:
         ax, ay, alayer, on_via = best[1], best[2], best[3], True
     else:
-        # A through-hole terminal pad (a connector pin) connects every copper
-        # layer exactly like an own-net via: let the leg start on any layer
-        # (#289 -- ecp5_mini's 1.27mm headers: an F.Cu-only start is boxed in
-        # by the neighbouring pins' clearance, so every hybrid combo failed
-        # even though the pin's own barrel reaches the middle's layer; its
-        # position is already in reuse_holes so no second hole is drilled).
+        # A plated through-hole terminal pad (a connector pin) connects every
+        # copper layer exactly like an own-net via: let the leg start on any
+        # layer (#289 -- ecp5_mini's 1.27mm headers: an F.Cu-only start is
+        # boxed in by the neighbouring pins' clearance, so every hybrid combo
+        # failed even though the pin's own barrel reaches the middle's layer;
+        # its position is already in reuse_holes so no second hole is drilled).
+        from kicad_parser import pad_is_plated_through
         for _pad in (getattr(pcb_data, 'pads_by_net', {}) or {}).get(net_id, []):
-            if (getattr(_pad, 'drill', 0.0) or 0.0) <= 0:
-                continue
-            if getattr(_pad, 'pad_type', '') == 'np_thru_hole':
+            if not pad_is_plated_through(_pad):
                 continue
             if math.hypot(_pad.global_x - term[0], _pad.global_y - term[1]) <= own_tol:
                 on_via = True
