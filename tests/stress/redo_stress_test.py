@@ -443,39 +443,52 @@ def main():
                        "commands": timings}, f, indent=2)
         print(f"Wrote per-command timings to {args.timings_out}")
 
+    # Resolve the FINAL board path (used by the PNG snapshot and validation).
+    fb_path = None
+    try:
+        _keep, _info = compute_prune_keep(cmds)
+        fb = _info.get("final_board")
+    except Exception:
+        fb = None
+    if fb:
+        base = args.workdir or apply_remaps([cmds[-1][0] or "."], remaps)[0]
+        fb_path = fb if os.path.isabs(fb) else os.path.join(base or ".", fb)
+        fb_path = apply_remaps([fb_path], remaps)[0]
+        if not os.path.isfile(fb_path):
+            fb_path = None
+
+    # At-a-glance PNG of the final routed board (#296): all copper layers +
+    # Edge.Cuts, written next to the board file, so a replay's routing can be
+    # eyeballed without opening KiCad. Non-fatal when kicad-cli is missing.
+    if fb_path:
+        try:
+            from board_image import render_board_png
+            render_board_png(fb_path)
+        except Exception as e:
+            print(f"board image skipped ({e})")
+
     # Parser-parity validation of the FINAL board (the headless twin of the
     # GUI's "Validate PCB Data" button): the pcbnew-built PCBData and the text
     # parse must describe the same board, or the CLI and GUI route different
     # worlds. Non-fatal: a FAIL is a parser bug to file, not a replay failure.
-    if not args.skip_validate:
-        fb = None
+    if not args.skip_validate and fb_path:
+        print(f"\nParser-parity validation of final board: {fb_path}")
         try:
-            _keep, _info = compute_prune_keep(cmds)
-            fb = _info.get("final_board")
-        except Exception:
-            pass
-        if fb:
-            base = args.workdir or apply_remaps([cmds[-1][0] or "."], remaps)[0]
-            fb_path = fb if os.path.isabs(fb) else os.path.join(base or ".", fb)
-            fb_path = apply_remaps([fb_path], remaps)[0]
-            if os.path.isfile(fb_path):
-                print(f"\nParser-parity validation of final board: {fb_path}")
-                try:
-                    vp = subprocess.run(
-                        [sys.executable, str(REPO / "validate_pcb_data.py"), fb_path],
-                        capture_output=True, text=True, timeout=900)
-                    lines = [l for l in vp.stdout.splitlines()
-                             if 'assert' not in l and l.strip()]
-                    for l in lines[:25]:
-                        print(f"  {l}")
-                    if len(lines) > 25:
-                        print(f"  ... ({len(lines) - 25} more line(s))")
-                    if vp.returncode != 0:
-                        print("  WARNING: parser-parity validation FAILED -- one of the "
-                              "two parsers mis-models this board; file a parser issue. "
-                              "(Not counted as a replay failure.)")
-                except Exception as e:
-                    print(f"  validation skipped ({e})")
+            vp = subprocess.run(
+                [sys.executable, str(REPO / "validate_pcb_data.py"), fb_path],
+                capture_output=True, text=True, timeout=900)
+            lines = [l for l in vp.stdout.splitlines()
+                     if 'assert' not in l and l.strip()]
+            for l in lines[:25]:
+                print(f"  {l}")
+            if len(lines) > 25:
+                print(f"  ... ({len(lines) - 25} more line(s))")
+            if vp.returncode != 0:
+                print("  WARNING: parser-parity validation FAILED -- one of the "
+                      "two parsers mis-models this board; file a parser issue. "
+                      "(Not counted as a replay failure.)")
+        except Exception as e:
+            print(f"  validation skipped ({e})")
     return 0
 
 
