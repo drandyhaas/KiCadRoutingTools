@@ -2441,17 +2441,22 @@ def _pad_obstacle_segments(pad, layer_names):
     rect the same way a track segment is blocked."""
     cx, cy = pad.global_x, pad.global_y
     sx, sy = pad.size_x, pad.size_y
-    # Segment spans the FULL long axis (+-long/2): a capsule of that length and
-    # width=short side covers the entire pad rectangle (corners included) -- using
-    # length = long-short would round the corners and leave a ~0.1*short graze
-    # (keks /CK_N still 0.046mm into R41.2's corner). The semicircular caps bulge
-    # short/2 past the pad ends, a small, harmless over-block.
+    long_, short = (sx, sy) if sx >= sy else (sy, sx)
+    # Capsule spine is inset by short/2 so the end caps sit FLUSH with the pad
+    # ends. For circle/oval pads that stadium IS the exact copper. For rect/
+    # roundrect the flush caps round the corners off (keks /CK_N grazed 0.046mm
+    # into R41.2's corner), so widen the capsule to short*sqrt(2): the cap
+    # radius then reaches the square corners exactly, at a ~0.21*short bulge.
+    # (The previous full-long-axis capsule bulged short/2 past BOTH ends -- for
+    # a square pad that DOUBLES its footprint, and on ecp5_mini's 1.27mm header
+    # a partner 1.7x1.7 pin pad sealed the only escape corridor, failing every
+    # hybrid leg, #289.)
+    half = max(long_ / 2.0 - short / 2.0, 0.0)
+    w = short if pad.shape in ('circle', 'oval') else short * math.sqrt(2.0)
     if sx >= sy:
-        half = sx / 2.0
-        a = (cx - half, cy, cx + half, cy, sy)
+        a = (cx - half, cy, cx + half, cy, w)
     else:
-        half = sy / 2.0
-        a = (cx, cy - half, cx, cy + half, sx)
+        a = (cx, cy - half, cx, cy + half, w)
     cu = [L for L in (pad.layers or []) if L.endswith('.Cu')]
     if (getattr(pad, 'drill', 0) or 0) > 0 or not cu:
         cu = list(layer_names)  # THT / unknown copper -> block every routing layer
@@ -3266,6 +3271,21 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
             best = (d, v.x, v.y, mid_pt[2])
     if best:
         ax, ay, alayer, on_via = best[1], best[2], best[3], True
+    else:
+        # A through-hole terminal pad (a connector pin) connects every copper
+        # layer exactly like an own-net via: let the leg start on any layer
+        # (#289 -- ecp5_mini's 1.27mm headers: an F.Cu-only start is boxed in
+        # by the neighbouring pins' clearance, so every hybrid combo failed
+        # even though the pin's own barrel reaches the middle's layer; its
+        # position is already in reuse_holes so no second hole is drilled).
+        for _pad in (getattr(pcb_data, 'pads_by_net', {}) or {}).get(net_id, []):
+            if (getattr(_pad, 'drill', 0.0) or 0.0) <= 0:
+                continue
+            if getattr(_pad, 'pad_type', '') == 'np_thru_hole':
+                continue
+            if math.hypot(_pad.global_x - term[0], _pad.global_y - term[1]) <= own_tol:
+                on_via = True
+                break
 
     # Same-net hole-to-hole gate (#300): reuse_holes lets the leg change layers
     # ON an own-net via, but nothing stopped A* from dropping a FRESH transition
@@ -3337,6 +3357,22 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if path is None:
+            import os as _os
+            if _os.environ.get('KICAD_HYBRID_LEG_DEBUG'):
+                print(f"      LEG FAIL net={net_id} term=({term[0]:.2f},{term[1]:.2f},L{term[2]}) "
+                      f"anchor=({ax:.2f},{ay:.2f},L{alayer},via={on_via}) "
+                      f"mid=({mid_pt[0]:.2f},{mid_pt[1]:.2f},L{mid_pt[2]}) "
+                      f"src_cells={sources} tgt_layers={mid_target_layers or [mid_pt[2]]} iters={it}")
+                if _os.environ.get('KICAD_HYBRID_LEG_DEBUG') == '2':
+                    for lyr in range(nlayers):
+                        print(f"        map L{lyr} around term (x: {tgx-20}..{tgx+20}, y: {tgy-10}..{tgy+70}):")
+                        for gy2 in range(tgy - 10, tgy + 71, 2):
+                            row = ''.join(
+                                ('S' if (gx2, gy2) == (tgx, tgy) else
+                                 'T' if (gx2, gy2) == (mgx, mgy) else
+                                 '#' if obstacles.is_blocked(gx2, gy2, lyr) else '.')
+                                for gx2 in range(tgx - 20, tgx + 21))
+                            print(f"          {gy2:5d} {row}")
             return None, None, 0
         ps, pv = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,

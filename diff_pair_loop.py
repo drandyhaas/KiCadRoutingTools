@@ -1056,6 +1056,16 @@ def route_diff_pairs(
                         continue
                 if not polarity_skip:
                     print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
-                failed += 1
+                # #289: a 2-terminal pair that exhausted every coupled path
+                # (rip-up, fallback layer swap, hybrid escape) gets the same
+                # single-ended defer the electrically-short gate uses, instead
+                # of being dropped entirely -- picodvi's DVI_CK/USB_D hard-
+                # failed here while their short siblings deferred gracefully.
+                # A P->P/N->N single-ended route (with route.py's full rip-up
+                # arsenal) beats leaving the nets unrouted; the pair is
+                # reported under single_ended_followup_nets, not failed.
+                print(f"  Deferring {pair_name} to the single-ended follow-up pass")
+                state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
+                state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
 
     return successful, failed, total_time, total_iterations, route_index
