@@ -55,6 +55,14 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
     margin = _DRC_CLEARANCE_MARGIN
     routing_layers = [l for l in config.layers if l.endswith('.Cu')]
     new_ids = {id(v) for v in new_vias}
+    # The pair's own nets (P and N of a coupled diff pair). Used ONLY by the
+    # foreign-SEGMENT check below: a coupled pair's partner stub converges toward
+    # the shared fan point AT the coupling gap, which is intended coupling, not a
+    # foreign graze -- so the segment check must exclude both, mirroring the
+    # _partners exclude set the sibling stub-clearance checks already use. The
+    # pad/via checks deliberately DO include the partner (a P via grazing the
+    # adjacent N PAD is a real short).
+    pair_nets = {v.net_id for v in new_vias}
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
 
     for i, v in enumerate(new_vias):
@@ -93,8 +101,8 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
         # fanout stub because nothing here looked at segments.
         vr = v.size / 2.0
         for sg in pcb_data.segments:
-            if sg.net_id == v.net_id:
-                continue
+            if sg.net_id in pair_nets:
+                continue  # own net OR the coupled partner's converging stub
             # Same tolerance as the other checks in this function (via-via,
             # via-drill, ...): a swap via grazing foreign copper by up to the
             # grading margin is accepted here and cleaned by the post-route
