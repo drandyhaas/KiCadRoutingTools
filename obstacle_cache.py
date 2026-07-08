@@ -74,9 +74,21 @@ def _ledger_site(depth: int = 2, frames: int = 3) -> str:
 
 
 def ledger_set_working_map(obstacles) -> None:
-    """Mark `obstacles` as THE persistent working map the ledger audits."""
+    """Mark `obstacles` as THE persistent working map the ledger audits.
+
+    Also resets the per-run books: a process can host MORE THAN ONE routing
+    run (route.py's end-of-run reconciliation re-invokes batch_route on the
+    written output, #348), and each run has its own working map and cache
+    objects. Without the reset, the second run's ledger report grades the
+    FIRST run's records against the second run's final cache and prints
+    phantom UNBALANCED serials."""
     if _LEDGER is not None:
         _LEDGER["wid"] = id(obstacles)
+        _LEDGER["meta"] = {}
+        _LEDGER["adds"] = {}
+        _LEDGER["removes"] = {}
+        _LEDGER["raw"] = {}
+        _LEDGER["events"] = 0
 
 
 def _ledger_cache_op(op: str, obstacles, cache_data) -> None:

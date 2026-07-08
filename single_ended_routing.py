@@ -2447,6 +2447,53 @@ def route_multipoint_main(
         }
 
     if path is None:
+        # #348 (ottercast RESETn): every main-edge attempt launches from PAD
+        # cells, so a terminal boxed in by static obstacles fails Phase 1
+        # outright even when its ISLAND has open copper (a free inner-layer
+        # stub end) a human routes from in seconds. When existing copper
+        # already joins terminals into fewer groups, don't fail the net:
+        # hand Phase 3 a synthetic empty main result rooted at the LARGEST
+        # copper-joined component -- its tap loop seeds sources from the
+        # island's copper (get_all_segment_tap_points over the existing base
+        # copper, see route_multipoint_taps) and has the orphan-pad fallback.
+        _has_copper = any(s.net_id == net_id for s in pcb_data.segments) or \
+            any(v.net_id == net_id for v in pcb_data.vias)
+        if _has_copper:
+            # Base = the component whose island carries the most existing
+            # copper (RESETn: three 1-terminal components, each its own
+            # island -- terminal count can't break the tie, copper can).
+            # Stub terminals resolve inside the helper.
+            from connectivity import get_terminal_component_info
+            _comps, _copper, _ = get_terminal_component_info(
+                pcb_data, net_id, pad_info)
+            _best = max(range(len(pad_info)),
+                        key=lambda i: _copper.get(_comps.get(i), 0))
+            _best_copper = _copper.get(_comps.get(_best), 0)
+            _base_comp = _comps.get(_best)
+            _base_idx = [i for i in range(len(pad_info))
+                         if _comps.get(i) == _base_comp]
+            if _base_idx and mst_edges and _best_copper > 0:
+                print(f"  Phase 1 exhausted from the pads; deferring "
+                      f"{len(mst_edges)} edge(s) to Phase 3's island-copper "
+                      f"sources (base component: {len(_base_idx)} terminal(s))")
+                _dummy = (_base_idx[0], _base_idx[0], 0.0)
+                return {
+                    'new_segments': [],
+                    'new_vias': [],
+                    'iterations': cumulative_iterations,
+                    'path_length': 0,
+                    'path': [],
+                    'is_multipoint': True,
+                    'multipoint_pad_info': pad_info,
+                    'routed_pad_indices': set(_base_idx),
+                    'pad_components': pad_components,
+                    'original_segments': [],
+                    'mst_edges': [_dummy] + mst_edges,
+                    'waypoint_buckets': waypoint_buckets,
+                    'phase1_exhausted': True,
+                    'tap_edges_routed': 0,
+                    'tap_edges_failed': 0,
+                }
         print(f"  Failed to route a main edge after {cumulative_iterations} iterations "
               f"({max_main_attempts} edge(s) tried)")
         failure = dict(last_failure or {'failed': True})
@@ -2704,6 +2751,42 @@ def _route_multipoint_taps_impl(
     for _v in all_vias:
         _register_inprogress_via(_v)
 
+    # Phase-1-exhausted fallback (#348): the synthetic main result carries NO
+    # new copper, so seed the tap sources from the net's EXISTING copper that
+    # belongs to the routed base component(s) -- the island the terminals in
+    # routed_indices sit on. Sources restricted to the BASE component only:
+    # launching from an unconnected island would join the target to that
+    # island and mark it routed while the base stays split (#189).
+    source_extra_segments: List[Segment] = []
+    source_extra_vias: List = []
+    if main_result.get('phase1_exhausted'):
+        from connectivity import get_terminal_component_info
+        _comps, _copper, _segs_by_comp = get_terminal_component_info(
+            pcb_data, net_id, pad_info)
+        _base_comps = {_comps.get(_i) for _i in routed_indices}
+        _base_ends = []
+        for _c in _base_comps:
+            for _s in _segs_by_comp.get(_c, []):
+                # SOURCE-ONLY list: never into all_segments, whose final value
+                # becomes the result's new_segments (re-emitting existing
+                # copper would duplicate it in the output).
+                source_extra_segments.append(_s)
+                _base_ends.append((_s.start_x, _s.start_y))
+                _base_ends.append((_s.end_x, _s.end_y))
+        _net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        # Existing vias touching the included base copper become tap points
+        # too (no in-progress ring: pcb_data vias already govern same-net via
+        # spacing in the obstacle build).
+        for _v in _net_vias:
+            _vr = (getattr(_v, 'size', 0.5) or 0.5) / 2 + 0.02
+            if any((abs(_v.x - _ex) <= _vr and abs(_v.y - _ey) <= _vr)
+                   for _ex, _ey in _base_ends):
+                source_extra_vias.append(_v)
+        if source_extra_segments or source_extra_vias:
+            print(f"  Seeding tap sources from the base island's existing "
+                  f"copper: {len(source_extra_segments)} segment(s), "
+                  f"{len(source_extra_vias)} via(s)")
+
     # Get remaining MST edges (skip the first one which was routed in Phase 1)
     # MST edges are already sorted longest-first
     remaining_edges = mst_edges[1:] if len(mst_edges) > 1 else []
@@ -2821,7 +2904,9 @@ def _route_multipoint_taps_impl(
         # Get ALL points along existing segments and vias as potential tap sources
         # The router will find the shortest path from ANY of these points
         # Vias are included on ALL layers since they connect all copper layers
-        all_tap_points = get_all_segment_tap_points(all_segments, coord, layer_names, vias=all_vias)
+        all_tap_points = get_all_segment_tap_points(
+            all_segments + source_extra_segments, coord, layer_names,
+            vias=all_vias + source_extra_vias)
 
         # Always include the designated source pad position as a potential source
         # This is critical for zone-connected pads that have no segments to them yet

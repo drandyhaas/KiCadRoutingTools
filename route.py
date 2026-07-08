@@ -1462,46 +1462,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             verify_written_file_parity(output_file, pcb_data, sweep_scope_ids,
                                        label=' route')
 
-    # #348 (glasgow /SCL): END-OF-RUN RECONCILIATION. Mid-run rip churn can
-    # leave a victim net partially connected whose gap is trivially routable
-    # in the FINAL board state -- /SCL shipped with 6 pads open after a rip
-    # victim's re-route failed against an interim board, yet route.py
-    # connects it in 0.25s when asked on the finished board (Andy proved the
-    # corridor by hand-bridging it with one via first). The authoritative
-    # end-of-run check above knows exactly which nets are incomplete; give
-    # them ONE more standard pass against the board as written. Self-invokes
-    # batch_route on the output file (one level -- final_reconcile=False),
-    # mirroring route_disconnected_planes' rip-casualty self-reconnect. The
-    # reconcile pass prints its own summary/JSON_SUMMARY scoped to the
-    # retried nets; the failure lists in that LAST summary are the honest
-    # still-open set. CLI path only (GUI return_results keeps its contract).
-    if (final_reconcile and not return_results and not skip_routing
-            and output_file and (failed_single or failed_multipoint)):
-        _rec_names = list(dict.fromkeys(
-            failed_single + [m['net_name'] for m in failed_multipoint]))
-        print(f"\nFinal reconciliation: retrying {len(_rec_names)} incomplete "
-              f"net(s) against the finished board: {', '.join(_rec_names)}")
-        try:
-            _rok, _rfail, _rt = batch_route(
-                output_file, output_file, _rec_names,
-                layers=layers,
-                track_width=track_width, clearance=clearance,
-                via_size=via_size, via_drill=via_drill,
-                grid_step=grid_step, via_cost=via_cost,
-                max_iterations=max_iterations,
-                hole_to_hole_clearance=hole_to_hole_clearance,
-                layer_costs=layer_costs,
-                power_nets=power_nets, power_nets_widths=power_nets_widths,
-                bga_exclusion_zones=bga_exclusion_zones,
-                disable_bga_zones=disable_bga_zones,
-                max_rip_up_count=max_rip_up_count,
-                final_reconcile=False)
-            if _rok:
-                successful += _rok
-                failed = max(0, failed - _rok)
-        except Exception as _e:
-            print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
-
     # Update schematics with swap info if directory specified
     if schematic_dir and single_ended_target_swap_info:
         # Convert swap info to format for schematic updater
@@ -1542,6 +1502,47 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         from obstacle_cache import run_obstacle_audit
         run_obstacle_audit(base_obstacles, state.working_obstacles,
                            state.net_obstacles_cache)
+
+    # #348 (glasgow /SCL): END-OF-RUN RECONCILIATION. Mid-run rip churn can
+    # leave a victim net partially connected whose gap is trivially routable
+    # in the FINAL board state -- /SCL shipped with 6 pads open after a rip
+    # victim's re-route failed against an interim board, yet route.py
+    # connects it in 0.25s when asked on the finished board (Andy proved the
+    # corridor by hand-bridging it with one via first). The authoritative
+    # end-of-run check above knows exactly which nets are incomplete; give
+    # them ONE more standard pass against the board as written. Self-invokes
+    # batch_route on the output file (one level -- final_reconcile=False),
+    # mirroring route_disconnected_planes' rip-casualty self-reconnect. The
+    # reconcile pass prints its own summary/JSON_SUMMARY scoped to the
+    # retried nets; the failure lists in that LAST summary are the honest
+    # still-open set. CLI path only (GUI return_results keeps its contract).
+    if (final_reconcile and not return_results and not skip_routing
+            and output_file and (failed_single or failed_multipoint)):
+        _rec_names = list(dict.fromkeys(
+            failed_single + [m['net_name'] for m in failed_multipoint]))
+        print(f"\nFinal reconciliation: retrying {len(_rec_names)} incomplete "
+              f"net(s) against the finished board: {', '.join(_rec_names)}")
+        try:
+            _rok, _rfail, _rt = batch_route(
+                output_file, output_file, _rec_names,
+                layers=layers,
+                track_width=track_width, clearance=clearance,
+                via_size=via_size, via_drill=via_drill,
+                grid_step=grid_step, via_cost=via_cost,
+                max_iterations=max_iterations,
+                hole_to_hole_clearance=hole_to_hole_clearance,
+                layer_costs=layer_costs,
+                power_nets=power_nets, power_nets_widths=power_nets_widths,
+                bga_exclusion_zones=bga_exclusion_zones,
+                disable_bga_zones=disable_bga_zones,
+                max_rip_up_count=max_rip_up_count,
+                final_reconcile=False)
+            if _rok:
+                successful += _rok
+                failed = max(0, failed - _rok)
+        except Exception as _e:
+            print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
+
 
     if return_results:
         return successful, failed, total_time, results_data

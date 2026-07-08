@@ -367,6 +367,28 @@ def get_copper_connected_terminal_groups(
     Returns {pad_info index -> component id}. Terminals that cannot be tied
     to any copper/pad point each get a unique (negative) component.
     """
+    components, _copper, _segs = get_terminal_component_info(
+        pcb_data, net_id, pad_info)
+    return components
+
+
+def get_terminal_component_info(
+    pcb_data: PCBData,
+    net_id: int,
+    pad_info: List[Tuple],
+) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[Segment]]]:
+    """get_copper_connected_terminal_groups plus per-component copper (#348).
+
+    Returns (components, copper_count, segs_by_component):
+      components        -- {pad_info index -> component id} (see the wrapper)
+      copper_count      -- {component id -> number of existing net segments}
+      segs_by_component -- {component id -> [existing net Segment, ...]}
+    The phase-1-exhausted fallback uses copper_count to pick the copper-richest
+    base island and segs_by_component to seed tap sources from exactly that
+    island's copper. Stub terminals resolve through the same nearest-endpoint
+    matching as the wrapper, so islands whose terminal is a free end (not a
+    real pad) participate fully.
+    """
     # Local import: check_connected -> net_queries -> connectivity would cycle.
     from check_connected import check_net_connectivity
 
@@ -424,7 +446,14 @@ def get_copper_connected_terminal_groups(
             next_unique -= 1
         else:
             components[i] = uf.find(rep)
-    return components
+
+    copper_count: Dict[int, int] = {}
+    segs_by_component: Dict[int, List[Segment]] = {}
+    for si, seg in enumerate(net_segments):
+        root = uf.find(2 * si)
+        copper_count[root] = copper_count.get(root, 0) + 1
+        segs_by_component.setdefault(root, []).append(seg)
+    return components, copper_count, segs_by_component
 
 
 def compute_component_mst_edges(
