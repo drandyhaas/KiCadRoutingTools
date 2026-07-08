@@ -1562,9 +1562,14 @@ class FanoutTab(wx.Panel):
 
             via_moves = result.get('via_moves', []) or []
             for old_x, old_y, vd in via_moves:
-                # remove the via at its OLD position (match within 1um)
+                # remove the via at its OLD position, matching NET too (parity
+                # with placement/writer._remove_vias_at_positions net_ids, #313):
+                # a position-only match could delete a DIFFERENT net's via sitting
+                # within 1um of the moved via's old spot.
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':
+                        continue
+                    if track.GetNetCode() != vd['net_id']:
                         continue
                     pos = track.GetPosition()
                     if (abs(pcbnew.ToMM(pos.x) - old_x) < 1e-3 and
