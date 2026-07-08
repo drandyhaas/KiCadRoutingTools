@@ -166,6 +166,27 @@ def _cluster_points(pcb_data, net_id, x, y, layer, comps, tol=0.06):
             or ([(x, y, layer)] if layer else [(x, y)])), root
 
 
+def _merge_collinear(route_points):
+    """Collapse same-layer collinear runs of raw grid steps into single
+    long segments, matching how other tracks are written."""
+    if len(route_points) < 3:
+        return route_points
+    out = [route_points[0]]
+    for p in route_points[1:]:
+        if len(out) >= 2:
+            x1, y1, l1 = out[-2]
+            x2, y2, l2 = out[-1]
+            x3, y3, l3 = p
+            if l1 == l2 == l3:
+                cross = (x2 - x1) * (y3 - y2) - (y2 - y1) * (x3 - x2)
+                dot = (x2 - x1) * (x3 - x2) + (y2 - y1) * (y3 - y2)
+                if abs(cross) < 1e-9 and dot >= 0:
+                    out[-1] = p
+                    continue
+        out.append(p)
+    return out
+
+
 def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     """Sample points (x, y, layer) on the net's largest track+via copper
     component, graded WITHOUT any zone-fill credit. The biggest genuine
@@ -334,12 +355,39 @@ def oracle_reconnect(board_file: str, net_names, config,
                 if result:
                     used_via_size, used_via_drill = vs, vd
                     break
+            used_width = config.track_width
+            if result:
+                # Width upgrade (join-style): the narrow route found the
+                # corridor; a plane link should carry the widest copper that
+                # fits (0.127 signal width on an open plane bridge is
+                # needlessly thin). Same quantization-guarded margin as the
+                # region joins; stop at the first width that no longer fits.
+                from single_ended_routing import _track_margin_for_width
+                for w in (0.2, 0.4, 0.8):
+                    if w <= used_width:
+                        continue
+                    margin = _track_margin_for_width(
+                        w, rung_cfg.track_width, rung_cfg.grid_step)
+                    wider, _ = route_plane_connection_wide(
+                        src, tgt,
+                        plane_layer_idx=anchor_layer,
+                        routing_layers=routing_layers,
+                        base_obstacles=rung_obstacles,
+                        config=rung_cfg,
+                        net_vias=net_vias,
+                        track_margin=margin,
+                        max_iterations=max_iterations,
+                        verbose=verbose)
+                    if not wider:
+                        break
+                    result, used_width = wider, w
             if not result:
                 print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
                       f"<->({bx:.2f},{by:.2f})  FAILED")
                 failed += 1
                 continue
             route_points, via_positions = result
+            route_points = _merge_collinear(route_points)
             n_segs = 0
             for k in range(len(route_points) - 1):
                 x1, y1, l1 = route_points[k]
@@ -347,7 +395,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                 if l1 != l2 or (abs(x1 - x2) < 1e-9 and abs(y1 - y2) < 1e-9):
                     continue
                 new_sexprs.append(generate_segment_sexpr(
-                    (x1, y1), (x2, y2), config.track_width, l1, net_id,
+                    (x1, y1), (x2, y2), used_width, l1, net_id,
                     net_name if v10 else None))
                 n_segs += 1
             for vx, vy in via_positions:
@@ -356,7 +404,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                     [routing_layers[0], routing_layers[-1]], net_id,
                     net_name=net_name if v10 else None))
             print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
-                  f"  OK {n_segs} seg(s), {len(via_positions)} via(s)")
+                  f"  OK {n_segs} seg(s), {len(via_positions)} via(s), "
+                  f"w={used_width:.2f}mm")
             routed += 1
             progress = True
 
