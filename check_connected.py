@@ -573,6 +573,16 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # is still NOT credited, so a real end-to-end gap stays flagged.
             if ptype in ('segment_start', 'segment_end'):
                 seg_tolerance = max((psize + seg.width) / 2 - 1e-6, tolerance)
+            elif ptype == 'via':
+                # A via barrel (psize = via diameter) physically overlaps this
+                # segment's copper whenever the centerline passes within
+                # (via_radius + track_half_width) -- KiCad counts that as
+                # connected. The old width/2 tolerance missed e.g. a stub
+                # ending 0.141mm from a 0.35 via's centre (inside the barrel,
+                # glasgow /SDA #217) and graded a connected net as split.
+                # Exact tangency is still NOT credited, matching the #285
+                # endpoint-cap rule.
+                seg_tolerance = max((psize + seg.width) / 2 - 1e-6, tolerance)
             else:
                 seg_tolerance = max(seg.width / 2, tolerance)
             if point_on_segment(px, py, seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg_tolerance):
