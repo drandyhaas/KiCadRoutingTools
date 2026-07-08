@@ -1629,22 +1629,49 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_
     return necked
 
 
-def _close_plane_soft_joints(all_new_segments, pcb_data, track_width, clearance,
-                             grid_step, via_size, via_drill, all_layers):
-    """Bridge same-net endpoint gaps in plane/restored copper (#334).
+def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
+                           all_layers, track_width, grid_step, via_size,
+                           via_drill, hole_to_hole_clearance):
+    """Run the full pre-write cleanup pipeline on plane tap copper and return the
+    resulting all_new_segments.
 
-    Plane copper never passes through the cleanup pipeline, so 10-100um same-net
-    endpoint gaps (tap snaps, piece-level restore drops) ride to the final board
-    unbridged (orangecrab ECP5_VREF). Bridges are appended to all_new_segments
-    (from_restore=True) so board == file. Called from BOTH the file-write path
-    (_write_output_and_reroute) and the dry-run/GUI path (create_plane) -- the
-    GUI uses dry_run=True and never enters the writer, so hoisting this into a
-    shared helper is what keeps the two front-ends at parity.
+    This is the copper-finalizing half of the plane write path, factored out so
+    the file-writer (_write_output_and_reroute) and the dry-run/GUI path
+    (create_plane, which never enters the writer) run the SAME steps and thus
+    emit the SAME copper -- the CLI and GUI front-ends must produce identical
+    output for identical inputs. The steps, in order:
 
-    MUST run AFTER the graze prune / dead-end sweep: those passes finalize the
-    endpoint picture, and an early call sees since-trimmed copper as extra
-    endpoints and misses the dangle.
+      1. Neck tap segments grazing foreign vias/pads near their target pads
+         (the tap router exempts source/target cells, #157).
+      2. Graze prune / re-bend / dead-end sweep: drop a redundant grazing tap or
+         re-bend a load-bearing one around the pad, then trim orphans (#224).
+      3. Close soft joints: bridge 10-100um same-net endpoint gaps left by tap
+         snaps / piece-level restore drops (#334) -- MUST be last, since it needs
+         the finalized endpoint picture (steps 1-2 trim copper an early call
+         would misread as extra endpoints).
+
+    Returns the (possibly replaced) all_new_segments list; the caller must
+    rebind its own reference to it.
     """
+    # 1. neck grazing taps (mutates all_new_segments in place)
+    _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
+
+    # 2. graze prune / nudge / dead-end sweep (returns a NEW list)
+    if all_new_segments:
+        from pcb_modification import cleanup_plane_taps_grazing
+        scope = {s['net_id'] for s in all_new_segments}
+        all_new_segments, gz_rm, gz_nudge, gz_swept = cleanup_plane_taps_grazing(
+            pcb_data, all_new_segments, scope, clearance=clearance,
+            max_shift=grid_step / 2, all_new_vias=all_new_vias,
+            hole_to_hole=hole_to_hole_clearance)
+        if gz_rm:
+            print(f"  Graze prune: removed {gz_rm} grazing tap segment(s)")
+        if gz_nudge:
+            print(f"  Graze nudge: re-bent grazing tap jog(s) on {gz_nudge} net(s)")
+        if gz_swept:
+            print(f"  Dead-end sweep: trimmed {gz_swept} orphaned tap segment(s)")
+
+    # 3. close soft joints (#334) -- last, appends bridges (from_restore=True)
     try:
         from pcb_modification import close_soft_joints
         bridge_results = []
@@ -1663,6 +1690,8 @@ def _close_plane_soft_joints(all_new_segments, pcb_data, track_width, clearance,
             print(f"  Closed {nb} soft joint(s) in plane/restored copper")
     except Exception as e:
         print(f"  (soft-joint close skipped: {e})")
+
+    return all_new_segments
 
 
 def _write_output_and_reroute(
@@ -1701,34 +1730,6 @@ def _write_output_and_reroute(
     combined_zone_sexpr = '\n'.join(all_sexprs) if all_sexprs else None
     if all_debug_lines:
         print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
-
-    # Neck tap segments that graze foreign vias/pads near their target pads (the
-    # tap router exempts source/target cells, so the obstacle keep-out can't
-    # enforce clearance at the pad). Narrowing only removes conflicts (#157).
-    _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
-
-    # Necking is floored at the fab minimum, so a tap whose centreline sits inside a
-    # foreign pad's clearance still grazes (#224). Drop a redundant grazing tap, or
-    # re-bend a load-bearing one around the pad -- connectivity-gated, all-octolinear.
-    if all_new_segments:
-        from pcb_modification import cleanup_plane_taps_grazing
-        _scope = {s['net_id'] for s in all_new_segments}
-        all_new_segments, _gz_rm, _gz_nudge, _gz_swept = cleanup_plane_taps_grazing(
-            pcb_data, all_new_segments, _scope, clearance=clearance,
-            max_shift=grid_step / 2, all_new_vias=all_new_vias,
-            hole_to_hole=hole_to_hole_clearance)
-        if _gz_rm:
-            print(f"  Graze prune: removed {_gz_rm} grazing tap segment(s)")
-        if _gz_nudge:
-            print(f"  Graze nudge: re-bent grazing tap jog(s) on {_gz_nudge} net(s)")
-        if _gz_swept:
-            print(f"  Dead-end sweep: trimmed {_gz_swept} orphaned tap segment(s)")
-
-    # Close soft joints (#334). MUST run AFTER the graze prune / dead-end sweep
-    # above -- see _close_plane_soft_joints. (The GUI/dry-run path calls the
-    # same helper directly in create_plane, since it never enters this writer.)
-    _close_plane_soft_joints(all_new_segments, pcb_data, track_width, clearance,
-                             grid_step, via_size, via_drill, all_layers)
 
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
@@ -2856,18 +2857,17 @@ def create_plane(
                 ripped_names.append(net.name if net else f"net_{rid}")
             print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
+    # Finalize plane tap copper ONCE, before the write/dry-run split, so the
+    # GUI (dry_run=True, return_results) and the CLI (writes the file) emit
+    # identical copper for identical inputs: neck grazes -> graze prune /
+    # dead-end sweep -> close soft joints (#334 + follow-up). Previously this
+    # lived inside _write_output_and_reroute and the GUI path never ran it.
+    all_new_segments = _finalize_plane_copper(
+        all_new_segments, all_new_vias, pcb_data, clearance, all_layers,
+        track_width, grid_step, via_size, via_drill, hole_to_hole_clearance)
+
     geo_results: Dict[int, Dict] = {}
     if dry_run:
-        # GUI/dry-run path: never enters _write_output_and_reroute, so run the
-        # #334 soft-joint close here to keep the returned all_new_segments (which
-        # the plane GUI applies to the live board) at parity with the file writer.
-        # NOTE: the graze-prune / dead-end sweep that the writer runs BEFORE this
-        # is still write-path-only (pre-existing), so on the GUI path this bridges
-        # the soft joints it can see without that prior trim -- tracked as a
-        # follow-up for full cleanup-pipeline parity on the plane GUI path.
-        _close_plane_soft_joints(all_new_segments, pcb_data, track_width,
-                                 clearance, grid_step, via_size, via_drill,
-                                 all_layers)
         print("\nDry run - no output file written")
     else:
         if os.environ.get('KICAD_SETTLE_DEBUG'):
