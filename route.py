@@ -507,6 +507,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Track all segment layer modifications for file output
     all_segment_modifications = []
+    all_swap_segments = []  # new copper from swap via-reuse connectors (#340)
     # Track all vias added during stub layer swapping
     all_swap_vias = []
     # Track total number of layer swaps applied
@@ -541,7 +542,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         total_layer_swaps += apply_single_ended_layer_swaps(
             pcb_data, config, net_ids,
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
-            verbose=verbose
+            verbose=verbose, all_swap_segments=all_swap_segments
         )
         # NOTE: apply_stub_layer_switch already appends each swap via to
         # pcb_data.vias itself -- re-appending all_swap_vias here put every
@@ -1431,6 +1432,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             results=results,
             all_segment_modifications=all_segment_modifications,
             all_swap_vias=all_swap_vias,
+            all_swap_segments=all_swap_segments,
             target_swap_info=[],
             single_ended_target_swap_info=single_ended_target_swap_info,
             pad_swaps=pad_swaps,

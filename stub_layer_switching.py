@@ -177,7 +177,8 @@ def needs_pad_via_for_switch(stub: StubInfo) -> bool:
 
 
 def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
-                             config: GridRouteConfig, debug: bool = True) -> Tuple[List[Via], List[Dict]]:
+                             config: GridRouteConfig, debug: bool = True,
+                             new_segments_out: Optional[List[Segment]] = None) -> Tuple[List[Via], List[Dict]]:
     """
     Switch a stub to a new layer by modifying segment layers.
 
@@ -248,18 +249,85 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
 
     # Create pad via if needed (switching from F.Cu without existing via)
     if needs_pad_via_for_switch(stub):
-        via = Via(
-            x=stub.pad_x,
-            y=stub.pad_y,
-            size=config.via_size,
-            drill=config.via_drill,
-            layers=['F.Cu', 'B.Cu'],  # Through-hole via
-            net_id=stub.net_id
-        )
-        new_vias.append(via)
-        pcb_data.vias.append(via)
+        reused = False
+        if new_segments_out is not None:
+            reused = _reuse_nearby_same_net_via(
+                pcb_data, stub, new_layer, config, segment_mods,
+                new_segments_out, debug)
+        if not reused:
+            via = Via(
+                x=stub.pad_x,
+                y=stub.pad_y,
+                size=config.via_size,
+                drill=config.via_drill,
+                layers=['F.Cu', 'B.Cu'],  # Through-hole via
+                net_id=stub.net_id
+            )
+            new_vias.append(via)
+            pcb_data.vias.append(via)
 
     return new_vias, segment_mods
+
+
+def _reuse_nearby_same_net_via(pcb_data, stub, new_layer, config, segment_mods,
+                               new_segments_out, debug=False) -> bool:
+    """Reuse an existing same-net through-via instead of drilling a pad via
+    whose hole would violate the hole-to-hole floor against it (#340).
+
+    A layer-switch pad via drilled next to the net's own plane via ships
+    a fab-rejectable overlapping-drill pair (cparti SPIm_SCK/MOSI); rejecting
+    the swap outright costs completion. When such a via exists, anchor the
+    transition on IT: short connector segments pad->via on the OLD layer (pad
+    copper to barrel) and on new_layer (barrel to the moved stub) replace the
+    new hole. Connectors are validated against foreign pads and tracks with
+    the same validators the swap paths use; on any doubt the caller falls
+    back to the normal new-via path (whose fit funnel decides). Extends
+    issue #282 barrel-covers-pad reuse to the near-miss case. Returns True
+    on reuse."""
+    h2h = 0.2  # JLC via-hole-to-hole floor (see fab_tiers / jlcpcb floors)
+    best = None
+    for ev in pcb_data.vias:
+        if ev.net_id != stub.net_id:
+            continue
+        lys = ev.layers or []
+        if lys and not ('F.Cu' in lys and 'B.Cu' in lys):
+            continue  # not a through via: may not span both layers
+        d = math.hypot(ev.x - stub.pad_x, ev.y - stub.pad_y)
+        if d < 1e-6:
+            continue  # coincident: the normal path already handles this
+        if (d < config.via_drill / 2.0 + (ev.drill or config.via_drill) / 2.0 + h2h
+                and (best is None or d < best[0])):
+            best = (d, ev)
+    if best is None:
+        return False
+    ev = best[1]
+    width = config.track_width
+    for seg in stub.segments:
+        width = seg.width
+        break
+    connectors = []
+    for layer in {stub.layer, new_layer}:
+        connectors.append(Segment(
+            start_x=stub.pad_x, start_y=stub.pad_y,
+            end_x=ev.x, end_y=ev.y,
+            width=width, layer=layer, net_id=stub.net_id))
+    for c in connectors:
+        ok_p, _ = stub_clear_of_foreign_pads([c], c.layer, stub.net_id,
+                                             pcb_data, config, set())
+        if not ok_p:
+            return False
+        ok_t, _ = stub_clear_of_foreign_tracks([c], c.layer, stub.net_id,
+                                               pcb_data, config, set())
+        if not ok_t:
+            return False
+    for c in connectors:
+        pcb_data.segments.append(c)
+        new_segments_out.append(c)
+        segment_mods.append({'added_seg': c, 'net_id': stub.net_id})
+    if debug:
+        print(f"          reused same-net via at ({ev.x:.3f},{ev.y:.3f}) "
+              f"{best[0]:.3f}mm from pad (no new hole, #340)")
+    return True
 
 
 def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_y: float,
@@ -346,8 +414,15 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
         segment_mods: List of segment modifications from apply_stub_layer_switch
         new_vias: List of vias that were added (to be removed)
     """
+    # Remove reuse-connector segments (#340) before layer restoration
+    for mod in segment_mods:
+        c = mod.get('added_seg')
+        if c is not None and c in pcb_data.segments:
+            pcb_data.segments.remove(c)
     # Restore segment layers from modification records
     for mod in segment_mods:
+        if 'added_seg' in mod:
+            continue
         for seg in pcb_data.segments:
             if (seg.net_id == mod['net_id'] and
                 abs(seg.start_x - mod['start'][0]) < SEGMENT_MATCH_TOLERANCE and

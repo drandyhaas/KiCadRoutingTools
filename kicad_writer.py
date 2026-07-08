@@ -556,6 +556,11 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
     # e.g. target swaps reassigned the stub's net).
     mod_lookup_by_coords = {}
     for mod in segment_mods:
+        # #340 reuse-connector bookkeeping (an added NEW segment, emitted via
+        # the all_swap_segments channel) rides in segment_mods for revert only;
+        # it is not a file-text layer change, so skip it here.
+        if 'start' not in mod:
+            continue
         start_key = coord_key(mod['start'][0], mod['start'][1])
         end_key = coord_key(mod['end'][0], mod['end'][1])
         # Also store reverse order since segment endpoints can be swapped

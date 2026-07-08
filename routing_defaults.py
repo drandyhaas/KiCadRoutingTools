@@ -21,6 +21,13 @@ GRID_STEP = 0.1  # mm
 # is a distinct concept; centralized so the call sites can't drift.
 DIAGONAL_MARGIN = 0.25  # mm
 
+# Allowance subtracted from mm-exact PLACEMENT validation thresholds so that
+# grid-quantized copper (endpoints rounded to the routing grid) is not
+# rejected for sub-resolution noise. This is a placement tolerance, NOT the
+# DRC grading margin (check_drc --clearance-margin): placement must demand
+# (nearly) full clearance or it ships real grazes (#339).
+PLACEMENT_QUANTIZATION_MARGIN = 0.005  # mm
+
 # Cost parameters
 VIA_COST = 50
 VIA_PROXIMITY_COST = 10

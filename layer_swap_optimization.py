@@ -27,6 +27,8 @@ from diff_pair_routing import get_diff_pair_endpoints
 from geometry_utils import point_to_segment_distance
 from connectivity import get_net_endpoints, get_multipoint_net_pads
 
+from routing_defaults import PLACEMENT_QUANTIZATION_MARGIN as _PLACEMENT_QUANTIZATION_MARGIN
+
 _DRC_CLEARANCE_MARGIN = 0.05
 
 
@@ -94,7 +96,12 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
         for sg in pcb_data.segments:
             if sg.net_id == v.net_id:
                 continue
-            need = vr + sg.width / 2.0 + clearance - margin
+            # placement validation, NOT grading: require the full clearance
+            # (minus only ~quantization noise). Borrowing the DRC grading
+            # margin here admitted a swap via 39um short of a foreign track
+            # (cynthion MEZZANINE6, #339).
+            need = (vr + sg.width / 2.0 + clearance
+                    - _PLACEMENT_QUANTIZATION_MARGIN)
             # cheap bbox reject before the exact distance
             if (v.x < min(sg.start_x, sg.end_x) - need or
                     v.x > max(sg.start_x, sg.end_x) + need or
@@ -1555,7 +1562,8 @@ def apply_single_ended_layer_swaps(
     all_segment_modifications: List,
     all_swap_vias: List,
     all_stubs_by_layer: Optional[Dict] = None,
-    verbose: bool = False
+    verbose: bool = False,
+    all_swap_segments: Optional[List] = None
 ) -> int:
     """
     Apply upfront layer swap optimization for single-ended nets.
@@ -1723,14 +1731,22 @@ def apply_single_ended_layer_swaps(
                 src_stub, tgt_layer, combined_stubs_by_layer, pcb_data, config
             )
             if valid:
-                vias, mods = apply_stub_layer_switch(pcb_data, src_stub, tgt_layer, config, debug=False)
-                all_swap_vias.extend(vias)
-                all_segment_modifications.extend(mods)
-                applied_single_swaps.add(net_name)
-                solo_switch_count += 1
-                total_layer_swaps += 1
-                print(f"  Solo source switch: {net_name} ({src_layer}->{tgt_layer})")
-                continue
+                vias, mods = apply_stub_layer_switch(pcb_data, src_stub, tgt_layer, config, debug=False,
+                                                      new_segments_out=all_swap_segments)
+                # via-fit funnel at EVERY apply site (#315/#340) -- twin of the
+                # solo target switch below.
+                if vias and not _swap_vias_fit_or_shrink(pcb_data, vias, config):
+                    revert_stub_layer_switch(pcb_data, mods, vias)
+                    if verbose:
+                        print(f"  Solo source switch REJECTED (via does not fit): {net_name}")
+                else:
+                    all_swap_vias.extend(vias)
+                    all_segment_modifications.extend(mods)
+                    applied_single_swaps.add(net_name)
+                    solo_switch_count += 1
+                    total_layer_swaps += 1
+                    print(f"  Solo source switch: {net_name} ({src_layer}->{tgt_layer})")
+                    continue
 
         # Try target -> source layer switch as fallback
         tgt_stub = get_stub_info(pcb_data, net_id, targets[0][3], targets[0][4], tgt_layer)
@@ -1740,14 +1756,25 @@ def apply_single_ended_layer_swaps(
                 tgt_stub, src_layer, combined_stubs_by_layer, pcb_data, config
             )
             if valid:
-                vias, mods = apply_stub_layer_switch(pcb_data, tgt_stub, src_layer, config, debug=False)
-                all_swap_vias.extend(vias)
-                all_segment_modifications.extend(mods)
-                applied_single_swaps.add(net_name)
-                solo_switch_count += 1
-                total_layer_swaps += 1
-                print(f"  Solo target switch: {net_name} ({tgt_layer}->{src_layer})")
-                continue
+                vias, mods = apply_stub_layer_switch(pcb_data, tgt_stub, src_layer, config, debug=False,
+                                                      new_segments_out=all_swap_segments)
+                # via-fit funnel at EVERY apply_stub_layer_switch site (#315):
+                # validate_single_swap checks stub geometry only, so this solo
+                # path shipped a swap via whose DRILL overlapped the same net's
+                # plane via by 27um (cparti SPIm_SCK/MOSI, #340). Reject-and-
+                # revert keeps the net on its original layer -- honest.
+                if vias and not _swap_vias_fit_or_shrink(pcb_data, vias, config):
+                    revert_stub_layer_switch(pcb_data, mods, vias)
+                    if verbose:
+                        print(f"  Solo target switch REJECTED (via does not fit): {net_name}")
+                else:
+                    all_swap_vias.extend(vias)
+                    all_segment_modifications.extend(mods)
+                    applied_single_swaps.add(net_name)
+                    solo_switch_count += 1
+                    total_layer_swaps += 1
+                    print(f"  Solo target switch: {net_name} ({tgt_layer}->{src_layer})")
+                    continue
 
         # Report if no swap found
         if verbose:

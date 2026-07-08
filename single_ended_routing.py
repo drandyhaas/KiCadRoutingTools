@@ -156,8 +156,16 @@ def _foreign_seg_arrays(pcb_data, layer):
     """Cached per-layer numpy arrays (net_id, x1, y1, x2, y2, half_width) for every
     routed SEGMENT on `layer`, plus every VIA folded in as a degenerate (zero-length)
     segment of half_width = via radius. Unlike pads, copper changes as nets route, so
-    the cache is keyed on the (segment, via) counts and rebuilt when they change."""
-    sig = (len(pcb_data.segments), len(pcb_data.vias))
+    the cache is keyed on the (segment, via) counts and rebuilt when they change.
+    Counts alone go stale across rip-reroute (#339: a ripped net re-adds the SAME
+    number of segments at new coordinates -- cynthion's refit judged a via against
+    MEZZANINE5's OLD track), so the tail elements' geometry joins the signature."""
+    segs, vias = pcb_data.segments, pcb_data.vias
+    tail = segs[-1] if segs else None
+    vtail = vias[-1] if vias else None
+    sig = (len(segs), len(vias),
+           (tail.start_x, tail.start_y, tail.end_x, tail.net_id) if tail is not None else None,
+           (vtail.x, vtail.y, vtail.net_id) if vtail is not None else None)
     cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
     if cache is None or cache[0] != sig:
         cache = (sig, {})
@@ -223,8 +231,10 @@ def _foreign_via_arrays(pcb_data):
     """Cached (net_id, x, y, radius) numpy arrays for every via on the board. Vias
     are treated as present on ALL layers (a through-hole conservative over-
     approximation, matching the obstacle map / _foreign_seg_arrays). Rebuilt when
-    the via count changes."""
-    sig = len(pcb_data.vias)
+    the via count OR tail via changes (count alone goes stale across rip-reroute,
+    #339)."""
+    vt = pcb_data.vias[-1] if pcb_data.vias else None
+    sig = (len(pcb_data.vias), (vt.x, vt.y, vt.net_id) if vt is not None else None)
     cache = getattr(pcb_data, '_foreign_via_arr_cache', None)
     if cache is None or cache[0] != sig:
         nids, cx, cy, rad = [], [], [], []
@@ -340,18 +350,70 @@ def _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by):
     return np.where(crossing, 0.0, d)
 
 
-def _emit_via_size(pcb_data, gx, gy, config):
+def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
+    """Re-validate a registered #189 unblock via against CURRENT copper (#339).
+
+    The registration was validated against the copper of ITS moment; a later
+    rip-reroute cascade can move foreign copper closer (cynthion: MEZZANINE5's
+    re-route landed 0.35mm from a cell registered when it was legal, and the
+    emitted 0.45 via grazed it by 39um). Try the registered size first, then
+    the fab-floor ladder's smaller vias (shrink-to-fit, same spirit as #189's
+    escalation); return the first that clears foreign copper mm-exactly, or
+    None when nothing fits (caller keeps the registered size -- honest DRC)."""
+    from fab_tiers import fab_floor_ladder
+    import routing_defaults as defaults
+    clearance = config.clearance
+    eps = defaults.PLACEMENT_QUANTIZATION_MARGIN
+    layers = [l for l in (pcb_data.board_info.copper_layers or []) if l.endswith('.Cu')]
+    ncu = len(layers) or 2
+    cands = [rec]
+    for f in fab_floor_ladder(ncu):
+        pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
+        if pair[0] < rec[0] - 1e-9 and pair not in cands:
+            cands.append(pair)
+    for vs, dr in cands:
+        need = vs / 2.0 + clearance - eps
+        ok = True
+        for layer in layers:
+            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
+                ok = False
+                break
+            if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer) < need:
+                ok = False
+                break
+        if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
+            ok = False
+        if ok:
+            return (vs, dr)
+    return None
+
+
+def _emit_via_size(pcb_data, gx, gy, config, net_id=None, x=None, y=None):
     """(size, drill) for a via the route conversion emits at cell (gx, gy). If a #189
     via-in-pad unblock placed a DRC-legal shrunk via here, return THAT size so the
     emitted via matches it -- a full config.via_size via at the same cell would graze
     the neighbouring foreign pad the shrunk via was sized to clear (issue #212).
+    With net_id + mm coords, the registered size is RE-VALIDATED against current
+    copper and shrunk to fit (#339) -- registrations go stale across rip-reroute.
     Otherwise return the configured via size."""
     sizes = getattr(pcb_data, '_unblock_via_sizes', None)
-    if sizes is not None:
-        rec = sizes.get((gx, gy))
-        if rec is not None:
-            return rec
-    return (config.via_size, config.via_drill)
+    rec = sizes.get((gx, gy)) if sizes is not None else None
+    if rec is None:
+        rec = (config.via_size, config.via_drill)
+    # Re-validate EVERY emitted via against current copper (#339): the #189
+    # unblock retry's allowed-cell window lets A* place a via on a cell whose
+    # via-blocking says no (that is the window's purpose -- reaching a boxed
+    # pad), and rip-reroute can move foreign copper toward any cell after its
+    # blocking was computed. A via that would ship grazing shrinks to the
+    # largest fab-ladder size that clears; clean vias return unchanged (the
+    # first candidate fits). If even the smallest grazes, ship rec -- honest.
+    if net_id is not None and x is not None and y is not None:
+        refit = _unblock_via_refit(pcb_data, net_id, x, y, rec, config)
+        if os.environ.get('KICAD_UNBLOCK_DEBUG'):
+            print(f"      EMIT-REFIT: cell=({gx},{gy}) {rec} -> {refit} net={net_id} at ({x},{y})")
+        if refit is not None:
+            return refit
+    return rec
 
 
 def _fab_track_floor(pcb_data) -> float:
@@ -1156,7 +1218,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             # Check if layer change is at an existing through-hole pad
             # If so, skip creating a via - the pad provides the layer transition
             if (gx1, gy1) not in through_hole_positions:
-                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config)
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                            net_id=net_id, x=x1, y=y1)
                 via = Via(
                     x=x1, y=y1,
                     size=_vsz,
@@ -1481,6 +1544,16 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
             try_default=False, fine_for_all=True,
             distant_trace_radius=0.0, disable_reuse=True)
         if tap_res.success and tap_res.via is not None:
+            # mm-exact re-check at FULL clearance vs CURRENT copper (#339): the
+            # tap's fine pass places at capped clearance, which approved a 0.45
+            # via 39um short of a fellow-ripped net's fresh track (cynthion
+            # MEZZANINE6 vs MEZZANINE5). A graze at this size falls through to
+            # the next (smaller) ladder rung, whose tap may also relocate it.
+            _tv = tap_res.via
+            if _unblock_via_refit(pcb_data, net_id, _tv['x'], _tv['y'],
+                                  (_tv['size'], _tv['drill']), config) != (_tv['size'], _tv['drill']):
+                tap_res = None
+                continue
             if (vd, dr) in escalated_pair:
                 warn_fab_escalation(f"last-resort via for net {net_id} ({vd}/{dr}mm)")
             break
@@ -2113,7 +2186,8 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
             # Check if layer change is at an existing through-hole pad
             # If so, skip creating a via - the pad provides the layer transition
             if (gx1, gy1) not in through_hole_positions:
-                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config)
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                            net_id=net_id, x=x1, y=y1)
                 via = Via(
                     x=x1, y=y1,
                     size=_vsz,
@@ -3036,7 +3110,8 @@ def _path_to_segments_vias(
                 pass
             else:
                 vx, vy = coord.to_float(gx1, gy1)  # via stays on the grid cell
-                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config)
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                            net_id=net_id, x=vx, y=vy)
                 via = Via(
                     x=vx, y=vy,
                     size=_vsz,
