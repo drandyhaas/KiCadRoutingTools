@@ -704,14 +704,16 @@ def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
         t = max(0.0, min(1.0, ((x - s.start_x) * dx + (y - s.start_y) * dy) / L2)) if L2 else 0.0
         if math.hypot(x - (s.start_x + t * dx), y - (s.start_y + t * dy)) < s.width / 2 + m2:
             return False
+    from check_drc import point_to_pad_distance
     for pads in pcb_data.pads_by_net.values():
         for p in pads:
             if p.net_id == net_id:
                 continue
             if p.drill <= 0 and plane_layer not in p.layers and '*.Cu' not in p.layers:
                 continue
-            if math.hypot(x - p.global_x, y - p.global_y) < \
-                    max(p.size_x, p.size_y) / 2 + m2:
+            # Exact outline distance: the radial max-dim/2 test over-rejects
+            # near rectangular pads and starved thin lobes of pseudo-anchors.
+            if point_to_pad_distance(x, y, p) < m2:
                 return False
     return True
 
@@ -1258,6 +1260,29 @@ def route_disconnected_regions(
             print(f"{YELLOW}retry-full{RESET} ", end="", flush=True)
             result, track_width, open_space_via = _connect(full_i, full_j)
 
+        # Budget escalation (#217 castor +3.3VA): every failing attempt above
+        # exhausted the default 200k cap without exhausting the SPACE -- at
+        # 1M the same edges route. Boost once before giving up; a join is a
+        # rare last-resort event, so the extra budget costs nothing on
+        # healthy boards.
+        if result is None and max_iterations < 1_000_000:
+            print(f"{YELLOW}budget-x5{RESET} ", end="", flush=True)
+            result, track_width, open_space_via = _try_route_between_regions(
+                full_i, full_j,
+                base_obstacles=base_obstacles,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                config=config,
+                bounds=zone_bounds,
+                net_vias=net_vias,
+                max_track_width=max_track_width,
+                min_track_width=min_track_width,
+                max_iterations=min(max_iterations * 5, 1_000_000),
+                coord=coord,
+                verbose=verbose,
+                router=plane_router
+            )
+
         # Last resort (#217 castor +3.3VA): the corridor between two regions
         # can be narrower than REPAIR_MIN_TRACK_WIDTH while still fitting the
         # run's own signal --track-width (Andy hand-bridged the failing edge
@@ -1294,7 +1319,7 @@ def route_disconnected_regions(
                 net_vias=net_vias,
                 max_track_width=config.track_width,
                 min_track_width=config.track_width,
-                max_iterations=max_iterations,
+                max_iterations=min(max_iterations * 5, 1_000_000),
                 coord=coord,
                 verbose=verbose,
                 router=plane_router
