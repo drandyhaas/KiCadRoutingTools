@@ -135,6 +135,53 @@ def _collect_cross_layer_points(
     return cross_layer_points
 
 
+def _zone_interior_cells(
+    net_id: int,
+    layer: str,
+    pcb_data: PCBData,
+    coord: GridCoord,
+    bounds_grid: Tuple[int, int, int, int],
+) -> Optional[Set[Tuple[int, int]]]:
+    """Grid cells whose centers lie inside ANY of this net's zone OUTLINES on
+    `layer` (scanline rasterization, O(rows x edges) per polygon).
+
+    The connectivity flood used to traverse every unblocked cell in the zone
+    BOUNDS -- including empty space with no copper at all -- so a plane split
+    into multiple outline islands (castor_pollux +3.3V: 3 outlines sharing
+    In2.Cu with +3.3VA) graded as ONE region and the repair never bridged it
+    (#217/#189 false 'fully connected'). Zone-layer traversal must stay
+    inside the net's own outlines; same-net tracks crossing the gaps remain
+    traversable via net_segment_cells.
+
+    Returns None when the net has no zone polygons on the layer (caller keeps
+    the legacy unrestricted flood -- e.g. zones not present in pcb_data).
+    """
+    polys = [z.polygon for z in (getattr(pcb_data, 'zones', None) or [])
+             if z.net_id == net_id and z.layer == layer
+             and getattr(z, 'polygon', None) and len(z.polygon) >= 3]
+    if not polys:
+        return None
+    min_gx, max_gx, min_gy, max_gy = bounds_grid
+    inside: Set[Tuple[int, int]] = set()
+    for poly in polys:
+        for gy in range(min_gy, max_gy + 1):
+            _, y = coord.to_float(0, gy)
+            xs = []
+            n = len(poly)
+            for i in range(n):
+                x1, y1 = poly[i]
+                x2, y2 = poly[(i + 1) % n]
+                if (y1 <= y < y2) or (y2 <= y < y1):
+                    xs.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+            xs.sort()
+            for k in range(0, len(xs) - 1, 2):
+                gx_lo, _ = coord.to_grid(xs[k], y)
+                gx_hi, _ = coord.to_grid(xs[k + 1], y)
+                for gx in range(max(gx_lo, min_gx), min(gx_hi, max_gx) + 1):
+                    inside.add((gx, gy))
+    return inside
+
+
 def _build_layer_blocked_set(
     layer: str,
     net_id: int,
@@ -317,7 +364,9 @@ def find_disconnected_zone_regions(
     # Cache the blocked set and segment cells for plane_layer to reuse later
     blocked_plane: Optional[Set[Tuple[int, int]]] = None
     net_plane_segment_cells: Optional[Set[Tuple[int, int]]] = None
+    inside_plane: Optional[Set[Tuple[int, int]]] = None
 
+    bounds_grid = (min_gx, max_gx, min_gy, max_gy)
     for layer in routing_layers:
         # Get layer-specific clearance (fall back to default zone_clearance)
         layer_clearance = zone_clearance
@@ -328,11 +377,16 @@ def find_disconnected_zone_regions(
         blocked, net_segment_cells = _build_layer_blocked_set(
             layer, net_id, pcb_data, coord, layer_clearance
         )
+        # Zone copper only exists inside this net's own outlines (#217).
+        inside_zone = (_zone_interior_cells(net_id, layer, pcb_data, coord,
+                                            bounds_grid)
+                       if layer in zone_layers else None)
 
         # Cache plane_layer data for reuse in anchor flood fill
         if layer == plane_layer:
             blocked_plane = blocked
             net_plane_segment_cells = net_segment_cells
+            inside_plane = inside_zone
 
         # Find cross-layer points on this layer
         layer_cls: List[int] = []
@@ -402,9 +456,14 @@ def find_disconnected_zone_regions(
                     if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
                         continue
                     if layer in zone_layers:
-                        # Layer has a zone: flood through unblocked cells (zone copper)
-                        # or through blocked cells if they're same-net segments
-                        if (nx, ny) in blocked:
+                        # Layer has a zone: flood through unblocked cells INSIDE
+                        # this net's own zone outlines (zone copper), or through
+                        # same-net segments anywhere. Unrestricted bounds-wide
+                        # flooding unioned separate outline islands through
+                        # copper-free space (#217 castor_pollux +3.3V).
+                        if ((nx, ny) in blocked
+                                or (inside_zone is not None
+                                    and (nx, ny) not in inside_zone)):
                             if (nx, ny) not in net_segment_cells:
                                 continue
                     else:
@@ -471,7 +530,10 @@ def find_disconnected_zone_regions(
                     continue
                 if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
                     continue
-                if (nx, ny) in blocked_plane:
+                # Same inside-own-outline gate as the cross-layer flood (#217).
+                if ((nx, ny) in blocked_plane
+                        or (inside_plane is not None
+                            and (nx, ny) not in inside_plane)):
                     if (nx, ny) not in net_plane_segment_cells:
                         continue
                 plane_visited.add((nx, ny))
