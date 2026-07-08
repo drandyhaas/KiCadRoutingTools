@@ -2118,52 +2118,14 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         except ValueError:
             return 0
 
-    gr_line_re = re.compile(
-        r'\(gr_line\s*\(start\s+([-\d.]+)\s+([-\d.]+)\)\s*'
-        r'\(end\s+([-\d.]+)\s+([-\d.]+)\)\s*'
-        r'\(stroke\s*\(width\s+([-\d.]+)\)[^()]*(?:\([^()]*\))?[^()]*\)\s*'
-        r'\(layer\s+"([^"]+)"\)\s*'
-        r'(?:\(net\s+("[^"]*"|\d+)\)\s*)?'
-        r'\(uuid\s+"([^"]+)"\)', re.DOTALL)
-    gr_arc_re = re.compile(
-        r'\(gr_arc\s*\(start\s+([-\d.]+)\s+([-\d.]+)\)\s*'
-        r'\(mid\s+([-\d.]+)\s+([-\d.]+)\)\s*'
-        r'\(end\s+([-\d.]+)\s+([-\d.]+)\)\s*'
-        r'\(stroke\s*\(width\s+([-\d.]+)\)[^()]*(?:\([^()]*\))?[^()]*\)\s*'
-        r'\(layer\s+"([^"]+)"\)\s*'
-        r'(?:\(net\s+("[^"]*"|\d+)\)\s*)?'
-        r'\(uuid\s+"([^"]+)"\)', re.DOTALL)
-    for m in gr_line_re.finditer(content):
-        layer = m.group(6)
-        w = float(m.group(5))
-        if not layer.endswith('.Cu') or w <= 0:
-            continue
-        segments.append(Segment(
-            start_x=float(m.group(1)), start_y=float(m.group(2)),
-            end_x=float(m.group(3)), end_y=float(m.group(4)),
-            width=w, layer=layer, net_id=_resolve_net(m.group(7)),
-            uuid=m.group(8), graphic=True))
-    for m in gr_arc_re.finditer(content):
-        layer = m.group(8)
-        w = float(m.group(7))
-        if not layer.endswith('.Cu') or w <= 0:
-            continue
-        nid = _resolve_net(m.group(9))
-        for (p0, p1) in _arc_to_segments(
-                (float(m.group(1)), float(m.group(2))),
-                (float(m.group(3)), float(m.group(4))),
-                (float(m.group(5)), float(m.group(6)))):
-            segments.append(Segment(
-                start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
-                width=w, layer=layer, net_id=nid,
-                uuid=m.group(10), graphic=True))
-
-    # gr_poly / gr_rect / gr_circle on copper (#337): FILLED copper areas (a
-    # hand-drawn pour, a copper keep-in). Trace the OUTLINE as graphic=True
-    # segments -- the router cannot cross the perimeter, so blocking it blocks
-    # the interior too, and a track approaching the area grazes the boundary
-    # edge (the DRC/obstacle purpose). Interior fill is not zone-modelled (no
-    # corpus board carries these yet); the outline is the effective obstacle.
+    # #337: model copper GRAPHICS (gr_line/gr_arc/gr_poly/gr_rect/gr_circle on a
+    # copper layer) as graphic=True copper. BLOCK-BASED extraction -- find each
+    # (gr_* ...) block, then pull each field from within it regardless of ORDER
+    # or extra tokens. A fixed field-order regex silently dropped a graphic with
+    # a (locked yes) token, KiCad-6/7 (tstamp ..) instead of (uuid ..), net-
+    # before-layer ordering, or extra stroke fields -- a silent miss in a
+    # "never miss real copper" pass. Lines/arcs need a real stroke (width>0);
+    # filled poly/rect/circle default the outline to the fab track width.
     def _emit_outline(pts, w, layer, nid, uuid, closed=True):
         if len(pts) < 2:
             return
@@ -2178,46 +2140,67 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         lm = re.search(r'\(layer\s+"([^"]+)"\)', blk)
         wm = re.search(r'\(width\s+([-\d.]+)\)', blk)
         nm = re.search(r'\(net\s+("[^"]*"|\d+)\)', blk)
-        um = re.search(r'\(uuid\s+"([^"]+)"\)', blk)
+        um = (re.search(r'\(uuid\s+"([^"]+)"\)', blk)
+              or re.search(r'\(tstamp\s+([-\w]+)\)', blk))
         layer = lm.group(1) if lm else None
         return (layer, float(wm.group(1)) if wm else 0.0,
                 _resolve_net(nm.group(1)) if nm else 0,
                 um.group(1) if um else '')
 
-    for tag in ('gr_poly', 'gr_rect', 'gr_circle'):
-        pos = 0
+    def _xy(blk, name):
+        m = re.search(r'\(' + name + r'\s+([-\d.]+)\s+([-\d.]+)\)', blk)
+        return (float(m.group(1)), float(m.group(2))) if m else None
+
+    for tag in ('gr_line', 'gr_arc', 'gr_poly', 'gr_rect', 'gr_circle'):
         needle = '(' + tag
+        pos = 0
         while True:
             i = content.find(needle, pos)
             if i < 0:
                 break
+            nxt = content[i + len(needle): i + len(needle) + 1]
+            if nxt and (nxt.isalnum() or nxt == '_'):
+                pos = i + len(needle)
+                continue
             j = find_matching_paren(content, i)
             blk = content[i:j]
             pos = j
             layer, w, nid, uuid = _blk_fields(blk)
             if not layer or not layer.endswith('.Cu'):
                 continue
-            if tag == 'gr_poly':
-                pts = [(float(a), float(b)) for a, b in
+            if tag == 'gr_line':
+                if w <= 0:
+                    continue
+                a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                if a and b:
+                    segments.append(Segment(
+                        start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
+                        width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+            elif tag == 'gr_arc':
+                if w <= 0:
+                    continue
+                a, mid, b = _xy(blk, 'start'), _xy(blk, 'mid'), _xy(blk, 'end')
+                if a and mid and b:
+                    for p0, p1 in _arc_to_segments(a, mid, b):
+                        segments.append(Segment(
+                            start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                            width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+            elif tag == 'gr_poly':
+                pts = [(float(x), float(y)) for x, y in
                        re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
-                _emit_outline(pts, w, layer, nid, uuid, closed=True)
+                _emit_outline(pts, w, layer, nid, uuid)
             elif tag == 'gr_rect':
-                sm = re.search(r'\(start\s+([-\d.]+)\s+([-\d.]+)\)', blk)
-                em = re.search(r'\(end\s+([-\d.]+)\s+([-\d.]+)\)', blk)
-                if sm and em:
-                    x1, y1 = float(sm.group(1)), float(sm.group(2))
-                    x2, y2 = float(em.group(1)), float(em.group(2))
-                    _emit_outline([(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
-                                  w, layer, nid, uuid, closed=True)
+                a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                if a and b:
+                    _emit_outline([(a[0], a[1]), (b[0], a[1]),
+                                   (b[0], b[1]), (a[0], b[1])], w, layer, nid, uuid)
             elif tag == 'gr_circle':
-                cm = re.search(r'\(center\s+([-\d.]+)\s+([-\d.]+)\)', blk)
-                em = re.search(r'\(end\s+([-\d.]+)\s+([-\d.]+)\)', blk)
-                if cm and em:
-                    cx, cy = float(cm.group(1)), float(cm.group(2))
-                    r = math.hypot(float(em.group(1)) - cx, float(em.group(2)) - cy)
-                    poly = [(cx + r * math.cos(k * math.pi / 8),
-                             cy + r * math.sin(k * math.pi / 8)) for k in range(16)]
-                    _emit_outline(poly, w, layer, nid, uuid, closed=True)
+                c, e = _xy(blk, 'center'), _xy(blk, 'end')
+                if c and e:
+                    r = math.hypot(e[0] - c[0], e[1] - c[1])
+                    _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
+                                    c[1] + r * math.sin(k * math.pi / 8))
+                                   for k in range(16)], w, layer, nid, uuid)
 
     return segments
 
