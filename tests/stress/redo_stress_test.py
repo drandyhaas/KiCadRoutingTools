@@ -98,15 +98,26 @@ def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None):
 
 
 def parse_manifest(path):
-    """Yield (cwd, argv) for each recorded command. cwd is None if not recorded."""
+    """Yield (cwd, argv) for each recorded command.
+
+    A `# cwd=` line sets the working directory for every following command until
+    the next `# cwd=` -- shell-faithful (a `cd` persists), NOT one-shot. run_limited.sh
+    records a `# cwd=` before each command it wraps, so normally every command
+    carries its own and the stickiness is a no-op. It matters for hand-spliced
+    steps that share the preceding command's cwd: the de-hole `cp <step> <final>`
+    + follow-up pair (#334/#345), where the `cp` consumes the `# cwd=` and the
+    follow-up command has none of its own. Resetting to None there made the
+    follow-up run in the launcher's cwd, breaking the relative-path chain
+    (FileNotFoundError on the just-cp'd board) and falsely marking the board
+    chain-broken under --remap."""
     cmds = []
-    pending_cwd = None
+    current_cwd = None
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
             if line.startswith("# cwd="):
                 # The cwd was recorded with %q quoting on the value after 'cwd='.
-                pending_cwd = " ".join(shlex.split(line[len("# cwd="):]))
+                current_cwd = " ".join(shlex.split(line[len("# cwd="):]))
                 continue
             if not line or line.startswith("#") or line in ("set -e",):
                 continue
@@ -114,8 +125,7 @@ def parse_manifest(path):
                 continue
             argv = shlex.split(line)
             if argv:
-                cmds.append((pending_cwd, argv))
-            pending_cwd = None
+                cmds.append((current_cwd, argv))
     return cmds
 
 
