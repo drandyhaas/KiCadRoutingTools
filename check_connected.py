@@ -159,6 +159,51 @@ def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: 
     return dist_sq <= tolerance * tolerance
 
 
+def _pad_bounding_radius(pad) -> float:
+    """Radius of a circle guaranteed to contain the pad's copper (half the
+    rect diagonal). Over-approximates on purpose: used only as a cheap
+    spatial prefilter before the exact shape test below."""
+    return math.hypot(pad.size_x, pad.size_y) / 2
+
+
+def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
+    """Shape-accurate test that two pads' copper physically touches/overlaps
+    (edge-to-edge gap <= tolerance).
+
+    The old sum-of-bounding-circle-radii test graded 1.5x0.7 rect pads at
+    1.0 mm pitch (real edge gap 0.3 mm) as "connected", so a castellated
+    module's spare power pads with NO copper on them at all passed the
+    connectivity check — and the multipoint router, which trusts this
+    checker's graph for its terminal grouping (#317), never routed them
+    (issue #346). Cross-sample each pad's real perimeter against the other
+    pad's exact distance function (rect/roundrect/circle/oval +
+    rect_rotation + custom polygons), same geometry check_drc grades with.
+    """
+    from check_drc import point_to_pad_distance, _pad_perimeter_points
+
+    def _degenerate(p):
+        # _EndpointStub terminals (and any pad-like without a shape/size)
+        # are points, not outlines.
+        return not getattr(p, 'shape', None) or (p.size_x <= 0 and p.size_y <= 0)
+
+    if _degenerate(pi) and _degenerate(pj):
+        return math.hypot(pi.global_x - pj.global_x,
+                          pi.global_y - pj.global_y) <= tolerance
+    if _degenerate(pi):
+        return point_to_pad_distance(pi.global_x, pi.global_y, pj) <= tolerance
+    if _degenerate(pj):
+        return point_to_pad_distance(pj.global_x, pj.global_y, pi) <= tolerance
+    # Both directions: one pad fully inside the other still hits (the inner
+    # pad's perimeter samples are inside the outer copper, distance 0).
+    for x, y in _pad_perimeter_points(pi):
+        if point_to_pad_distance(x, y, pj) <= tolerance:
+            return True
+    for x, y in _pad_perimeter_points(pj):
+        if point_to_pad_distance(x, y, pi) <= tolerance:
+            return True
+    return False
+
+
 def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: float = 0.05) -> bool:
     """True if every pad of the net touches the others through overlapping
     copper alone (no track needed).
@@ -189,11 +234,13 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
             pi, pj = pads[i], pads[j]
             if not shares_copper(pi, pj):
                 continue
-            reach = (max(pi.size_x, pi.size_y) / 2
-                     + max(pj.size_x, pj.size_y) / 2 + tolerance)
+            # Cheap bounding-circle prefilter, then exact shape overlap —
+            # the circle alone falsely joined adjacent edge pads (#346).
+            reach = _pad_bounding_radius(pi) + _pad_bounding_radius(pj) + tolerance
             dx = pi.global_x - pj.global_x
             dy = pi.global_y - pj.global_y
-            if dx * dx + dy * dy <= reach * reach:
+            if dx * dx + dy * dy <= reach * reach and \
+                    _pads_copper_touch(pi, pj, tolerance):
                 parent[find(i)] = find(j)
     return len({find(i) for i in range(len(pads))}) == 1
 
@@ -420,10 +467,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # Same-net pads whose copper physically overlaps are connected even when
     # their centres sit further apart than the tight point tolerance above —
     # e.g. a large exposed-pad EP and the thermal-via pads scattered near its
-    # corners (issue #108). Mirror the generous sum-of-half-extents overlap
-    # test from _net_pads_connected_by_overlap onto the connectivity graph.
+    # corners (issue #108). Bounding circles prune candidates; the union
+    # itself needs the exact shape-vs-shape overlap test — circle distance
+    # alone joined 1.5x0.7 rect pads a full 0.3 mm apart, hiding genuinely
+    # unrouted castellated-module pads from both the grader and the
+    # multipoint router that trusts this graph (issue #346).
     if len(pad_repr_id) > 1:
-        pad_reach = {idx: max(pads[idx].size_x, pads[idx].size_y) / 2
+        pad_reach = {idx: _pad_bounding_radius(pads[idx])
                      for idx in pad_repr_id}
         max_pad_reach = max(pad_reach.values())
         pad_center_index = SpatialIndex(cell_size=1.0)
@@ -446,7 +496,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 reach = pad_reach[idx] + pad_reach[jdx] + tolerance
                 dx = pad.global_x - other.global_x
                 dy = pad.global_y - other.global_y
-                if dx * dx + dy * dy <= reach * reach:
+                if dx * dx + dy * dy <= reach * reach and \
+                        _pads_copper_touch(pad, other, tolerance):
                     _union(pad_repr_id[idx], pad_repr_id[jdx])
 
     # A via dropped *inside* an SMD pad's copper connects that pad even when the
