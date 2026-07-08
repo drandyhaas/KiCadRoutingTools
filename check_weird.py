@@ -28,6 +28,12 @@ Categories:
   unsupported-via    a via with no same-net track copper reaching its barrel,
                      not inside a same-net pad, and not inside a same-net
                      zone polygon (a floating via).
+  orphan-island      a connected group of same-net track copper (segments,
+                     possibly with vias) that reaches NO pad of the net --
+                     dead copper stranded by a rip or a superseded route.
+                     Zone-connected copper counts as connected (the island
+                     unions with everything in its zone outline). Size = the
+                     island's total copper length.
 
 This script NEVER modifies the board (read-only; nothing is written back).
 Net 0 (unconnected) copper is skipped -- "same-net" semantics do not apply.
@@ -53,7 +59,8 @@ from connectivity import COINCIDENCE_TOL
 from pcb_modification import _point_anchored, _prune_net_cycles, _pt_seg_dist
 
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
-              'removable-segment', 'stacked-copper', 'unsupported-via']
+              'removable-segment', 'stacked-copper', 'unsupported-via',
+              'orphan-island']
 # Cost cap for the per-segment removable scan (spec: skip unless --thorough).
 MAX_SEGS_PER_NET = 500
 _CELL = 1.0  # spatial-grid cell (mm) fed to _point_anchored, as in the pruner
@@ -421,6 +428,44 @@ def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
                 size=getattr(v, 'size', None)))
 
 
+def _check_orphan_islands(net_id, name, net_segs, net_vias, net_pads,
+                          net_zones, findings):
+    """Connected components of track copper that reach no pad of the net.
+    Built on check_net_connectivity's own graph, so vias, T-junctions, cap
+    overlaps, and zone-outline membership all count as connections -- an
+    island flagged here is one the AUTHORITATIVE model calls pad-less. A
+    via-only island is left to unsupported-via."""
+    track_segs = [s for s in net_segs if not getattr(s, 'graphic', False)]
+    if not track_segs or not net_pads:
+        return
+    from geometry_utils import UnionFind
+    r = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
+                               net_zones, return_graph=True)
+    graph = r.get('graph')
+    if not graph:
+        return
+    uf = UnionFind()
+    for a, b in graph.get('edges', []):
+        uf.union(a, b)
+    pad_roots = {uf.find(rep) for rep in graph.get('pad_index_repr', {}).values()}
+    islands = defaultdict(list)  # root -> [segment, ...]
+    for i, s in enumerate(net_segs):
+        if getattr(s, 'graphic', False):
+            continue
+        islands[uf.find(2 * i)].append(s)
+    for root, segs in islands.items():
+        if root in pad_roots:
+            continue
+        total = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                    for s in segs)
+        cx = sum((s.start_x + s.end_x) / 2 for s in segs) / len(segs)
+        cy = sum((s.start_y + s.end_y) / 2 for s in segs) / len(segs)
+        findings.append(_finding(
+            'orphan-island', name, segs[0].layer, cx, cy,
+            f"{len(segs)} segment(s), {total:.2f}mm of copper connected to "
+            f"NO pad of the net", size=total))
+
+
 def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                 thorough: bool = False, quiet: bool = True,
                 tolerance: float = 0.1
@@ -472,6 +517,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                                       net_pads, findings)
         _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                        soft_pts, findings, join_tol=tolerance or 0.0)
+        _check_orphan_islands(net_id, name, net_segs, net_vias, net_pads,
+                              net_zones, findings)
         _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
                       findings)
         _check_removable(net_id, name, net_segs, net_vias, net_pads,

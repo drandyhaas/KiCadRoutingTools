@@ -162,6 +162,23 @@ def main():
     results.append(("default 0.1mm tolerance hides the 0.05mm soft joint",
                     len([x for x in f_tol if x['category'] == 'soft-joint']) == 0))
 
+    # Orphan island: two joined segments + via, nowhere near any pad of the
+    # net (pads at 0/10, island at 50) -> flagged with its total length; a
+    # sub-tolerance island is hidden by the default 0.1mm filter.
+    pcb = _pcb([_seg(0, 0, 10, 0),
+                _seg(50, 5, 52, 5), _seg(52, 5, 52, 7, layer='B.Cu')],
+               vias=[_via(52, 5)],
+               pads=[_pad(0, 0, num='1'), _pad(10, 0, num='2', ref='U2')])
+    f, _ = check_weird(pcb)
+    isl = [x for x in f if x['category'] == 'orphan-island']
+    results.append(("orphan pad-less island flagged",
+                    len(isl) == 1 and '4.00mm' in isl[0]['detail']))
+    pcb2 = _pcb([_seg(0, 0, 10, 0), _seg(50, 5, 50.05, 5)],
+                pads=[_pad(0, 0, num='1'), _pad(10, 0, num='2', ref='U2')])
+    f2, _ = check_weird(pcb2)
+    results.append(("sub-tolerance orphan island hidden by default",
+                    not [x for x in f2 if x['category'] == 'orphan-island']))
+
     passed = 0
     for name, ok in results:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
