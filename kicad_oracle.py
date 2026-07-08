@@ -166,6 +166,136 @@ def _cluster_points(pcb_data, net_id, x, y, layer, comps, tol=0.06):
             or ([(x, y, layer)] if layer else [(x, y)])), root
 
 
+def _trace_real_island(start, net_id, layer, pcb_data, zone_polys, margin,
+                       step=0.25, max_cells=40000):
+    """BFS over provably-REAL fill from the ratsnest point: cells inside one
+    zone outline whose `margin` disc is clear of all foreign copper (exact
+    geometry, spatially bucketed). This maps the actual island KiCad saw,
+    so seeds can come from anywhere on it -- not just the one reported
+    point, which often sits at the island's edge."""
+    from collections import deque
+    from check_drc import point_to_pad_distance
+    from check_connected import point_in_polygon
+
+    buckets = {}
+
+    def _add_span(x1, y1, x2, y2, reach, obj):
+        for bx in range(int(min(x1, x2) - reach) - 1,
+                        int(max(x1, x2) + reach) + 2):
+            for by in range(int(min(y1, y2) - reach) - 1,
+                            int(max(y1, y2) + reach) + 2):
+                buckets.setdefault((bx, by), []).append(obj)
+
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
+            _add_span(v.x, v.y, v.x, v.y, v.size / 2 + margin,
+                      ('c', v.x, v.y, v.size / 2))
+    for s in pcb_data.segments:
+        if s.net_id != net_id and s.layer == layer:
+            _add_span(s.start_x, s.start_y, s.end_x, s.end_y,
+                      s.width / 2 + margin, ('s', s))
+    for pads in pcb_data.pads_by_net.values():
+        for p in pads:
+            if p.net_id == net_id:
+                continue
+            if p.drill <= 0 and layer not in p.layers \
+                    and '*.Cu' not in p.layers:
+                continue
+            r = max(p.size_x, p.size_y) / 2
+            _add_span(p.global_x, p.global_y, p.global_x, p.global_y,
+                      r + margin, ('p', p))
+
+    def clear(x, y):
+        probes = ((x, y), (x + margin, y), (x - margin, y),
+                  (x, y + margin), (x, y - margin))
+        if not any(all(point_in_polygon(px, py, poly) for px, py in probes)
+                   for poly in zone_polys):
+            return False
+        for obj in buckets.get((int(x), int(y)), ()):
+            if obj[0] == 'c':
+                _, cx, cy, r = obj
+                if math.hypot(x - cx, y - cy) < r + margin:
+                    return False
+            elif obj[0] == 's':
+                s = obj[1]
+                dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+                L2 = dx * dx + dy * dy
+                t = max(0.0, min(1.0, ((x - s.start_x) * dx +
+                                       (y - s.start_y) * dy) / L2)) if L2 else 0.0
+                if math.hypot(x - (s.start_x + t * dx),
+                              y - (s.start_y + t * dy)) < s.width / 2 + margin:
+                    return False
+            else:
+                if point_to_pad_distance(x, y, obj[1]) < margin:
+                    return False
+        return True
+
+    # The ratsnest anchor often sits at the island EDGE and fails the
+    # conservative disc test; spiral to the nearest clear cell within ~1mm.
+    g0 = (round(start[0] / step), round(start[1] / step))
+    seed = None
+    for rr in range(0, 5):
+        for dgx in range(-rr, rr + 1):
+            for dgy in range(-rr, rr + 1):
+                if max(abs(dgx), abs(dgy)) != rr:
+                    continue
+                gx, gy = g0[0] + dgx, g0[1] + dgy
+                if clear(gx * step, gy * step):
+                    seed = (gx, gy)
+                    break
+            if seed:
+                break
+        if seed:
+            break
+    if seed is None:
+        return set()
+    cells = {seed}
+    q = deque([seed])
+    while q and len(cells) < max_cells:
+        gx, gy = q.popleft()
+        for dgx, dgy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            n = (gx + dgx, gy + dgy)
+            if n in cells:
+                continue
+            if clear(n[0] * step, n[1] * step):
+                cells.add(n)
+                q.append(n)
+    return cells
+
+
+def _island_seed_points(cells, step, pcb_data, net_id, layer,
+                        routing_layers, start, max_cell_pts=24):
+    """Seeds across the traced island: every existing via and THT pad on it
+    (the best join points -- they already bond the fill), SMD pads and track
+    ends on the zone layer, a subsample of the fill itself, and the reported
+    point. Multi-source A* then attaches wherever is cheapest."""
+    def inside(x, y):
+        return (round(x / step), round(y / step)) in cells
+    pts = []
+    for v in pcb_data.vias:
+        if v.net_id == net_id and inside(v.x, v.y):
+            pts.append((v.x, v.y))  # via: all layers
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        if not inside(p.global_x, p.global_y):
+            continue
+        if p.drill > 0 or '*.Cu' in p.layers:
+            pts.append((p.global_x, p.global_y, routing_layers[0]))
+            pts.append((p.global_x, p.global_y, routing_layers[-1]))
+        elif layer in p.layers:
+            pts.append((p.global_x, p.global_y, layer))
+    for s in pcb_data.segments:
+        if s.net_id == net_id and s.layer == layer \
+                and inside(s.start_x, s.start_y):
+            pts.append((s.start_x, s.start_y, layer))
+    cell_pts = [(gx * step, gy * step, layer) for gx, gy in cells]
+    if len(cell_pts) > max_cell_pts:
+        stride = len(cell_pts) // max_cell_pts + 1
+        cell_pts = cell_pts[::stride]
+    pts.extend(cell_pts)
+    pts.append((start[0], start[1], layer))
+    return pts
+
+
 def _merge_collinear(route_points):
     """Collapse same-layer collinear runs of raw grid steps into single
     long segments, matching how other tracks are written."""
@@ -292,6 +422,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                 hole_to_hole_clearance=hole_to_hole_clearance)
             net_vias = [(v.x, v.y) for v in pcb_data.vias
                         if v.net_id == net_id]
+            island_fallback = False
             comps = _net_track_components(pcb_data, net_id)
             src, root_a = _cluster_points(pcb_data, net_id, ax, ay, al, comps)
             tgt, root_b = _cluster_points(pcb_data, net_id, bx, by, bl, comps)
@@ -309,6 +440,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                 # the merged cluster still floated). Pads are the fallback
                 # when a net has no track copper, on their outer layers only
                 # (remove_unused_layers can strip inner PTH annuli).
+                island_fallback = True
                 tgt = _largest_track_component_points(pcb_data, net_id)
                 if not tgt:
                     for p in pcb_data.pads_by_net.get(net_id, []):
@@ -321,6 +453,20 @@ def oracle_reconnect(board_file: str, net_names, config,
                 if not tgt:
                     failed += 1
                     continue
+                if al:
+                    zone_polys = [z.polygon for z in
+                                  (getattr(pcb_data, 'zones', []) or [])
+                                  if z.net_id == net_id
+                                  and getattr(z, 'polygon', None)]
+                    if zone_polys:
+                        _margin = max(config.clearance, 0.15)
+                        _cells = _trace_real_island(
+                            (ax, ay), net_id, al, pcb_data, zone_polys,
+                            _margin)
+                        if _cells:
+                            src = _island_seed_points(
+                                _cells, 0.25, pcb_data, net_id, al,
+                                routing_layers, (ax, ay))
             anchor_layer = layer_map.get(al or bl or routing_layers[0], 0)
             result = None
             used_via_size, used_via_drill = config.via_size, config.via_drill
