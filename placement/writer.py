@@ -126,7 +126,8 @@ def write_placed_output(input_file: str, output_file: str,
         elements = []
         if via_moves:
             content, _ = _remove_vias_at_positions(
-                content, [(m[0], m[1]) for m in via_moves])
+                content, [(m[0], m[1]) for m in via_moves],
+                net_ids=[m[2]['net_id'] for m in via_moves])
             for m in via_moves:
                 v = m[2]
                 nm = n2n.get(v['net_id']) if n2n else None

@@ -375,12 +375,19 @@ def _pt_seg_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: f
 
 
 def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]],
-                              tol: float = 2e-3) -> Tuple[str, int]:
+                              tol: float = 2e-3,
+                              net_ids: Optional[List[int]] = None) -> Tuple[str, int]:
     """Remove `(via ...)` elements whose `(at x y)` matches any of `positions`.
 
     Used to drop plane stitching vias that would short against restored signal
     copper (issue #88). Matching is positional with a small tolerance because
     vias are written with fixed 6-decimal precision.
+
+    net_ids (parallel to positions, #313): when given, a via is dropped only if
+    its net ALSO matches -- so a via-nudge rewrite that re-emits ONE net's moved
+    via can't collaterally delete a DIFFERENT net's via that happens to sit
+    within `tol` of the old position (net-agnostic positional removal was a
+    silent +open-net path).
     """
     if not positions:
         return content, 0
@@ -400,11 +407,15 @@ def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]]
                 open_parens += lines[i].count('(') - lines[i].count(')')
             element_text = '\n'.join(element_lines)
             m = re.search(r'\(at\s+(-?[\d.]+)\s+(-?[\d.]+)', element_text)
+            nm = re.search(r'\(net\s+(\d+)', element_text)
+            v_net = int(nm.group(1)) if nm else None
             drop = False
             if m:
                 vx, vy = float(m.group(1)), float(m.group(2))
-                for px, py in positions:
+                for k, (px, py) in enumerate(positions):
                     if abs(vx - px) < tol and abs(vy - py) < tol:
+                        if net_ids is not None and v_net != net_ids[k]:
+                            continue  # right spot, wrong net: leave it
                         drop = True
                         break
             if drop:

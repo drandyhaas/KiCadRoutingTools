@@ -875,6 +875,20 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             'via_moves': via_moves, 'new_segments': new_segs}
 
 
+def _point_in_poly(px, py, poly) -> bool:
+    """Ray-cast point-in-polygon for zone containment (#313 pour-tie reconnect)."""
+    n = len(poly)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]; xj, yj = poly[j]
+        if ((yi > py) != (yj > py)) and \
+           (px < (xj - xi) * (py - yi) / ((yj - yi) or 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
 def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                               max_shift: float = 0.6):
     """Last resort for caps still grazing at the displacement cap (#313): the
@@ -1004,22 +1018,45 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             # the copper layer of a same-net pad the via sits inside
             # (via-in-pad -- the pad connection must follow the via).
             conn_layers = {}
+            # #313: copper terminating within the VIA BODY was electrically
+            # joined through the via and needs a connector on its layer. The old
+            # 1um match missed copper offset by grid quantization or a prior
+            # #280 via-nudge; the via body radius is the correct connectivity
+            # tolerance (a track end buried in the via is connected).
+            tol = max(1e-3, v.size / 2.0)
             for s in pcb_data.segments:
                 if s.net_id != v.net_id:
                     continue
-                if (math.hypot(s.start_x - v.x, s.start_y - v.y) < 1e-3
-                        or math.hypot(s.end_x - v.x, s.end_y - v.y) < 1e-3):
+                if (math.hypot(s.start_x - v.x, s.start_y - v.y) < tol
+                        or math.hypot(s.end_x - v.x, s.end_y - v.y) < tol):
                     w = conn_layers.get(s.layer)
                     conn_layers[s.layer] = min(w, s.width) if w else s.width
+            # via-in-pad: rotation/shape-aware containment (the axis-aligned
+            # size_x/size_y bbox mis-classified rotated/oval/custom pads).
+            from check_drc import point_to_pad_distance
             for p in pcb_data.pads_by_net.get(v.net_id, []):
-                hw, hh = p.size_x / 2.0, p.size_y / 2.0
-                if (p.global_x - hw <= v.x <= p.global_x + hw and
-                        p.global_y - hh <= v.y <= p.global_y + hh):
-                    pl = next((l for l in (p.layers or []) if l.endswith('.Cu')
-                               and not l.startswith('*')), None)
-                    if pl and pl not in conn_layers:
-                        fallback = min(conn_layers.values()) if conn_layers                             else defaults.TRACK_WIDTH
+                if point_to_pad_distance(v.x, v.y, p) > 1e-6:
+                    continue  # via not inside this pad's copper
+                fallback = (min(conn_layers.values()) if conn_layers
+                            else defaults.TRACK_WIDTH)
+                pad_cu = [l for l in (p.layers or [])
+                          if l.endswith('.Cu') and not l.startswith('*')]
+                if not pad_cu and any(l.endswith('.Cu') for l in (p.layers or [])):
+                    # THT *.Cu pad: no concrete side layer -- the pad barrel ties
+                    # every layer, so reconnect on the via's own span layers
+                    # (previously this pad got NO connector at all).
+                    pad_cu = [l for l in (v.layers or []) if l.endswith('.Cu')] or ['F.Cu']
+                for pl in pad_cu:
+                    if pl not in conn_layers:
                         conn_layers[pl] = fallback
+            # zone/pour ties: a via stitching a same-net pour needs a connector
+            # on that layer or the pour tie is silently dropped by the move.
+            for z in (getattr(pcb_data, 'zones', []) or []):
+                if z.net_id != v.net_id or not getattr(z, 'polygon', None):
+                    continue
+                if _point_in_poly(v.x, v.y, z.polygon) and z.layer not in conn_layers:
+                    conn_layers[z.layer] = (min(conn_layers.values()) if conn_layers
+                                            else defaults.TRACK_WIDTH)
             found = None
             r = 0.05
             while found is None and r <= max_shift + 1e-9:
